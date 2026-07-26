@@ -23,17 +23,17 @@ Derived from PRD roadmap (M0–M4 = MVP; M5/M6 post-MVP). Order is strict: don't
 - [x] **T-08** Synchronized capture: cameras + robot state + commanded/executed actions; timestamp tolerance check (FR-01) — *hw: verified with mock sources only*
 - [x] **T-09** Replay + visualization: episode report from stored data (FR-08)
 - [x] **T-10** Teleop workflow + camera/kinematics calibration, versioned — *hw: storage/spec + `docs/teleop.md`; real teleop rig pending OD-07*
-- [x] **T-11** Automatic dataset validation gates; record D0 + D1 — *hw: gates done; D0/D1 recorded synthetically (`scripts/record_mock_dataset.py`), real teleop sets pending*
+- [x] **T-11** Automatic dataset validation gates; record D0 + D1 — *hw: gates done; D0/D1 recorded synthetically (`scripts/record_mock_dataset.py`); all gates also PASS on real G1 data converted from nvidia/GR00T-N1.7-AppleToPlate (`scripts/convert_lerobot_g1.py`); real teleop sets pending*
 
 **Exit:** reproducible synchronized recording + replay — met with mock episodes; real teleop episodes pending hardware.
 
 ## M2 · Action-Only Baseline (3–5 weeks)
 
 - [x] **T-12** State encoder (2–4 layer MLP, handles missing sensor fields) + action decoder (chunked, 8–32 steps) (FR-02, FR-04)
-- [x] **T-13** Action-only policy on open backbone; overfit D1 successfully — *gate passed on synthetic D1: loss → 0.09 % of initial (`scripts/overfit_d1.py`)*
+- [x] **T-13** Action-only policy on open backbone; overfit D1 successfully — *gate passed on synthetic D1: loss → 0.09 % of initial (`scripts/overfit_d1.py`); passed again on real D1-scale data (10 GR00T G1 apple-to-plate episodes, `--dataset datasets/gr00t-apple`): loss → 0.01 % of initial, E1 holdout mse 1.8e-5 / mae 0.0028*
 - [x] **T-14** Offline eval E1: action prediction on holdout episodes, metrics dashboard
 
-**Exit:** overfit proof — pipeline and action space are learnable. ✅ (synthetic D1)
+**Exit:** overfit proof — pipeline and action space are learnable. ✅ (synthetic D1 + real G1 data)
 
 ## M3 · World-Action Prototype (6–10 weeks)
 

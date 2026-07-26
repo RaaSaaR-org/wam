@@ -67,3 +67,12 @@ Decisions are made — order the G1 EDU4 (+ VR headset) and run robot bring-up (
 soon as it arrives. First code-touching step: `DdsG1Transport`. Until hardware arrives,
 real-data validation of encoders/decoders can run on public LeRobot datasets
 (video + joint states) — no robot required.
+
+**Done (2026-07-26):** `scripts/convert_lerobot_g1.py` converts LeRobot-v2.1 G1 episodes
+(nvidia/GR00T-N1.7-AppleToPlate, CC-BY-4.0) into the WAM episode format: 43-dim G1 state →
+15-joint canonical space, Dex3 7-DoF hands → grasp-synergy gripper scalar, BC relabeling
+of executed states into bounded joint-delta chunks, IMU flagged invalid (exercises the
+FR-02 missing-group path on real data). 10 converted episodes pass all T-11 validation
+gates, and the T-13 overfit gate passes on them (`scripts/overfit_d1.py --dataset
+datasets/gr00t-apple`): action loss → 0.01 % of initial, E1 holdout mse 1.8e-5.
+The state encoder + action head demonstrably learn real robot data end-to-end.

@@ -223,6 +223,7 @@ class TinyVideoBackbone(nn.Module):
                 f"video must be [B, F, H, W, 3] or [F, H, W, 3] with (F, H, W, C)={expected}, "
                 f"got shape {tuple(frames.shape)}"
             )
+        frames = frames.to(self.modality.device)
         if frames.dtype == torch.uint8:
             return frames.float() / 255.0
         return frames.float()

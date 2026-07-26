@@ -282,6 +282,23 @@ class TestActionOnlyModel:
         assert chunk.targets.shape == (NUM_STEPS, TARGET_DIM)
         assert chunk.validate(SPEC) == []
 
+    @pytest.mark.skipif(
+        not torch.backends.mps.is_available() and not torch.cuda.is_available(),
+        reason="needs a non-CPU device",
+    )
+    def test_predict_from_numpy_obs_on_accelerator(self) -> None:
+        device = "mps" if torch.backends.mps.is_available() else "cuda"
+        torch.manual_seed(0)
+        model = ActionOnlyModel(action_only_config()).to(device)
+        rng = np.random.default_rng(3)
+        obs = Observation(
+            images={"front": rng.integers(0, 256, (IMAGE_HW, IMAGE_HW, 3), dtype=np.uint8)},
+            state=make_state(rng, ts=0),
+            instruction="pick",
+        )
+        chunk = model.predict(obs)
+        assert chunk.targets.shape == (NUM_STEPS, TARGET_DIM)
+
     def test_dim_mismatch_rejected(self) -> None:
         with pytest.raises(ValueError, match="state_embedding_dim"):
             action_only_config(
@@ -400,7 +417,8 @@ class TestJointWorldActionModel:
         torch.manual_seed(0)
         model = JointWorldActionModel(joint_config())
         out = model.co_denoise(
-            make_batch(batch_size=2), torch.tensor([0.3, 0.6]),
+            make_batch(batch_size=2),
+            torch.tensor([0.3, 0.6]),
             generator=torch.Generator().manual_seed(0),
         )
         assert not out["action_velocity_target"].requires_grad
@@ -413,14 +431,16 @@ class TestJointWorldActionModel:
         enc_grads = [p.grad for p in trainer.model.action_encoder.parameters()]
         assert all(g is None or torch.all(g == 0) for g in enc_grads)
         vel_norm = sum(
-            float(p.grad.norm()) for p in trainer.model.velocity_head.parameters()
+            float(p.grad.norm())
+            for p in trainer.model.velocity_head.parameters()
             if p.grad is not None
         )
         assert vel_norm > 0.0
         trainer.model.zero_grad(set_to_none=True)
         losses["action_recon"].backward()
         enc_norm = sum(
-            float(p.grad.norm()) for p in trainer.model.action_encoder.parameters()
+            float(p.grad.norm())
+            for p in trainer.model.action_encoder.parameters()
             if p.grad is not None
         )
         assert enc_norm > 0.0  # reconstruction anchor reaches the encoder

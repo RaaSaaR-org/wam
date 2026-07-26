@@ -196,9 +196,11 @@ def record_d1(
     return episode_ids
 
 
-def build_training_config(spec: CanonicalSpaceSpec, args: argparse.Namespace) -> ActionOnlyConfig:
+def build_training_config(
+    spec: CanonicalSpaceSpec, args: argparse.Namespace, *, camera: str = "front"
+) -> ActionOnlyConfig:
     """Tiny action-only config matched to the recorded D1 (dims from the canonical spec)."""
-    hw = (args.image_hw, args.image_hw)
+    hw = args.image_hw if isinstance(args.image_hw, tuple) else (args.image_hw, args.image_hw)
     state = StateMLPConfig(
         embedding_dim=32,
         hidden_dims=(64, 64),
@@ -234,7 +236,7 @@ def build_training_config(spec: CanonicalSpaceSpec, args: argparse.Namespace) ->
         steps=args.steps,
         loss="l2",
         weights=ActionLossWeights(action=1.0, gripper=0.5, smoothness=0.0, limit=0.0),
-        camera="front",
+        camera=camera,
     )
 
 
@@ -273,6 +275,13 @@ def build_eval_pairs(
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="existing episode dataset root (e.g. from scripts/convert_lerobot_g1.py): "
+        "skip recording, derive spec/camera/dt/image size from the episodes themselves",
+    )
     parser.add_argument("--out", type=Path, default=_REPO_ROOT / "datasets" / "mock-d1")
     parser.add_argument("--run-dir", type=Path, default=_REPO_ROOT / "runs")
     parser.add_argument("--run-id", type=str, default=None, help="default: d1-overfit-seed<seed>")
@@ -301,35 +310,56 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    tolerance_ns = round(args.sync_tolerance_ms * 1e6)
+    camera = "front"
+
+    # 1. Record synthetic D1 — or point at an existing (e.g. converted real) dataset --------
+    if args.dataset is not None:
+        episode_dirs = list_episodes(args.dataset)
+        if len(episode_dirs) < 2:
+            raise SystemExit(f"need >= 2 episodes under {args.dataset}")
+        args.out = args.dataset
+        episode_ids = [d.name for d in episode_dirs]
+        args.episodes = len(episode_ids)
+        first = EpisodeReader(episode_dirs[0])
+        spec = first.manifest.spec
+        camera = next(iter(first.manifest.cameras))
+        chunk, _prefix, _ts = next(iter(first.read_actions()))
+        args.dt_s = float(chunk.dt_s)
+        args.chunk_steps = int(chunk.num_steps)
+        frame0 = first.read_frames(camera)[0]
+        args.image_hw = (int(frame0.shape[0]), int(frame0.shape[1]))
+        print(
+            f"existing dataset {args.dataset}: {args.episodes} episodes, camera={camera!r}, "
+            f"dt_s={args.dt_s:.4f}, chunk_steps={args.chunk_steps}, image_hw={args.image_hw}"
+        )
     if args.episodes < 2 or not (1 <= args.holdout <= args.episodes - 1):
         raise SystemExit("need --episodes >= 2 and 1 <= --holdout <= episodes-1")
-
-    robot_cfg = load_config(args.robot_config)
-    safety_cfg = SafetyConfig.model_validate(load_config(args.safety_config))
-    robot_section = robot_cfg["robot"]
-    spec = CanonicalSpaceSpec(**robot_section["canonical_space"])
-    limits: dict[str, Any] = robot_section.get("limits", {})
-    args.dt_s = float(robot_section.get("control", {}).get("dt_s", 0.05))
-    tolerance_ns = round(args.sync_tolerance_ms * 1e6)
-    run_id = args.run_id or f"d1-overfit-seed{args.seed}"
+    run_id = args.run_id or f"d1{'-real' if args.dataset else ''}-overfit-seed{args.seed}"
     run_dir = args.run_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Record synthetic D1 ---------------------------------------------------------------
-    episode_ids = record_d1(
-        args.out,
-        spec,
-        limits,
-        safety_cfg,
-        episodes=args.episodes,
-        iterations=args.iterations,
-        prefix_steps=args.prefix_steps,
-        chunk_steps=args.chunk_steps,
-        dt_s=args.dt_s,
-        image_hw=args.image_hw,
-        seed=args.seed,
-        sync_tolerance_ns=tolerance_ns,
-    )
+    if args.dataset is None:
+        robot_cfg = load_config(args.robot_config)
+        safety_cfg = SafetyConfig.model_validate(load_config(args.safety_config))
+        robot_section = robot_cfg["robot"]
+        spec = CanonicalSpaceSpec(**robot_section["canonical_space"])
+        limits: dict[str, Any] = robot_section.get("limits", {})
+        args.dt_s = float(robot_section.get("control", {}).get("dt_s", 0.05))
+        episode_ids = record_d1(
+            args.out,
+            spec,
+            limits,
+            safety_cfg,
+            episodes=args.episodes,
+            iterations=args.iterations,
+            prefix_steps=args.prefix_steps,
+            chunk_steps=args.chunk_steps,
+            dt_s=args.dt_s,
+            image_hw=args.image_hw,
+            seed=args.seed,
+            sync_tolerance_ns=tolerance_ns,
+        )
 
     # 2. Validation gates (T-11) -----------------------------------------------------------
     thresholds = ValidationThresholds(sync_tolerance_ns=tolerance_ns, min_episodes=args.episodes)
@@ -346,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     train_ids, holdout_ids = holdout_split(episode_ids, args.holdout / args.episodes, args.seed)
     train_dirs = [args.out / eid for eid in train_ids]
     holdout_dirs = [args.out / eid for eid in holdout_ids]
-    config = build_training_config(spec, args)
+    config = build_training_config(spec, args, camera=camera)
     dataset = EpisodeDataset(
         train_dirs,
         camera=config.camera,
