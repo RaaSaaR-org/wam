@@ -1,8 +1,14 @@
 """ZeroGPU Space: Cosmos3-Nano frozen-feature probe on real GR00T-G1 data (T-24).
 
-One tab, one deployed implementation — `cosmos_probe.py` is `scripts/hf_job_cosmos3_probe.py`
-deployed verbatim (which itself reuses `probe.py` = the Wan probe's windows/labels/ridge
-machinery, so the two backbones are scored by the same code on the same data).
+Two tabs, one deployed implementation each — `cosmos_probe.py` is
+`scripts/hf_job_cosmos3_probe.py` deployed verbatim (which itself reuses `probe.py` = the
+Wan probe's windows/labels/ridge machinery, so the two backbones are scored by the same
+code on the same data):
+
+- **readout probes** — frozen MoT features per layer, ridge-regressed onto real action
+  chunks (the T-24 bake-off run).
+- **generate future** — sample what the Cosmos3 prior imagines from a real episode's start
+  frame + instruction; the side-by-side counterpart of the Wan Space's generate tab.
 
 Same shape as the Wan Space: downloads (model + episodes) and the ridge analysis run on
 CPU outside `@spaces.GPU`; only VAE encodes + the 36-layer MoT forwards spend GPU quota.
@@ -30,6 +36,10 @@ from huggingface_hub import snapshot_download
 MODEL_ID = os.environ.get("MODEL_ID", "nvidia/Cosmos3-Nano")
 DATA_REPO = os.environ.get("DATA_REPO", "nvidia/GR00T-N1.7-AppleToPlate")
 GPU_DURATION = int(os.environ.get("GPU_DURATION", "360"))
+GEN_GPU_DURATION = int(os.environ.get("GEN_GPU_DURATION", "420"))
+DEFAULT_GEN_PROMPT = (
+    "the humanoid robot reaches for the apple, picks it up and places it on the plate"
+)
 # The probe needs transformer/vae/text_tokenizer/scheduler only — not the reasoner's
 # vision encoder, the sound tokenizer, or the model-card demo assets.
 IGNORE = [
@@ -96,6 +106,24 @@ def probe_on_gpu(
     return buffer.getvalue(), pooled, report
 
 
+@spaces.GPU(duration=GEN_GPU_DURATION)
+def generate_on_gpu(args: Any, image: Any) -> tuple[str, Any]:
+    """Sample a future clip with Cosmos3OmniPipeline; returns (log, report)."""
+    import cosmos_probe
+
+    buffer = io.StringIO()
+    started = time.perf_counter()
+    report = cosmos_probe.smoke.Report()
+    try:
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            cosmos_probe.generate_future(args, image, report)
+    except Exception:  # noqa: BLE001 - a crashed run must still surface its log in the UI
+        buffer.write("\n" + traceback.format_exc())
+        report.check("generate.crashed", False, "see log")
+    buffer.write(f"\ngpu wall: {time.perf_counter() - started:.1f}s")
+    return buffer.getvalue(), report
+
+
 def run_probe(episodes: int, windows_per_ep: int, frames: int, height: int, width: int,
               chunk_steps: int):  # fmt: skip
     """Probe tab: data + windows on CPU, features on GPU, ridge analysis on CPU."""
@@ -155,6 +183,57 @@ def run_probe(episodes: int, windows_per_ep: int, frames: int, height: int, widt
         yield "\n".join(log), {"ok": False, "error": "probe run failed"}
 
 
+def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: int,
+                 height: int, width: int, guidance: float, seed: int):  # fmt: skip
+    """Generate tab: start frame on CPU, diffusion sampling on GPU, mp4 back to the UI."""
+    import cosmos_probe
+
+    log: list[str] = [f"host: {json.dumps(host_info())}", f"model: {MODEL_ID}"]
+    yield "\n".join(log), None, None
+
+    try:
+        log.append("\ndownloading weights + start episode (no GPU quota consumed)…")
+        yield "\n".join(log), None, None
+        source = snapshot_download(MODEL_ID, ignore_patterns=IGNORE)
+        data_dir = download_episodes([int(episode)])
+
+        out = f"/tmp/cosmos3_future_ep{int(episode)}_f{int(frame)}_seed{int(seed)}.mp4"
+        argv = [
+            "--data-dir", data_dir,
+            "--source", source,
+            "--device", "cuda",
+            "--device-map", "cuda",
+            "--generate",
+            "--gen-episode", str(int(episode)),
+            "--gen-frame", str(int(frame)),
+            "--gen-num-frames", str(int(num_frames)),
+            "--gen-steps", str(int(steps)),
+            "--gen-height", str(int(height)),
+            "--gen-width", str(int(width)),
+            "--gen-guidance", str(float(guidance)),
+            "--gen-seed", str(int(seed)),
+            "--gen-out", out,
+        ]  # fmt: skip
+        if prompt.strip():
+            argv += ["--gen-prompt", prompt.strip()]
+        args = cosmos_probe.parse_args(argv)
+        image = cosmos_probe.wanprobe.load_gen_frame(args)
+        log.append(f"start frame: episode {episode} frame {frame}, {image.shape}")
+        log.append(f"\nrequesting GPU (duration cap {GEN_GPU_DURATION}s)…")
+        yield "\n".join(log), None, None
+
+        gpu_log, report = generate_on_gpu(args, image)
+        log.append(gpu_log)
+        payload = {"ok": not report.failed, "checks": report.checks, "info": report.info}
+        video = out if Path(out).is_file() else None
+        verdict = "DONE" if payload["ok"] and video else "FAILED"
+        log.append(f"\n=== {verdict} ===")
+        yield "\n".join(log), video, payload
+    except Exception:  # noqa: BLE001
+        log.append(traceback.format_exc())
+        yield "\n".join(log), None, {"ok": False, "error": "generation failed"}
+
+
 with gr.Blocks(title="WAM · Cosmos3 readout probes on ZeroGPU") as demo:
     gr.Markdown(
         f"""# WAM — Cosmos3-Nano readout probes on ZeroGPU (T-24)
@@ -167,23 +246,54 @@ state-only floor that Wan's could not. First run downloads ~32 GB before any GPU
 requested.
 """
     )
-    with gr.Row():
-        p_episodes = gr.Number(value=12, label="episodes", precision=0)
-        p_windows = gr.Number(value=8, label="windows / episode", precision=0)
-        p_frames = gr.Number(value=5, label="context frames", precision=0)
-    with gr.Row():
-        p_height = gr.Number(value=192, label="height", precision=0)
-        p_width = gr.Number(value=256, label="width", precision=0)
-        p_chunk = gr.Number(value=16, label="chunk steps (label)", precision=0)
-    probe_btn = gr.Button("Run readout probes", variant="primary")
-    probe_log = gr.Textbox(label="log", lines=28, max_lines=28, show_copy_button=True)
-    probe_report = gr.JSON(label="report")
-    probe_btn.click(
-        run_probe,
-        [p_episodes, p_windows, p_frames, p_height, p_width, p_chunk],
-        [probe_log, probe_report],
-        api_name="run_probe",
-    )
+    with gr.Tab("readout probes (real data)"):
+        with gr.Row():
+            p_episodes = gr.Number(value=12, label="episodes", precision=0)
+            p_windows = gr.Number(value=8, label="windows / episode", precision=0)
+            p_frames = gr.Number(value=5, label="context frames", precision=0)
+        with gr.Row():
+            p_height = gr.Number(value=192, label="height", precision=0)
+            p_width = gr.Number(value=256, label="width", precision=0)
+            p_chunk = gr.Number(value=16, label="chunk steps (label)", precision=0)
+        probe_btn = gr.Button("Run readout probes", variant="primary")
+        probe_log = gr.Textbox(label="log", lines=28, max_lines=28, show_copy_button=True)
+        probe_report = gr.JSON(label="report")
+        probe_btn.click(
+            run_probe,
+            [p_episodes, p_windows, p_frames, p_height, p_width, p_chunk],
+            [probe_log, probe_report],
+            api_name="run_probe",
+        )
+
+    with gr.Tab("generate future"):
+        gr.Markdown(
+            "Sample what the Cosmos3 prior *imagines*: diffusion video from a real "
+            "episode's start frame + an instruction. The side-by-side counterpart of the "
+            "Wan Space's generate tab — same start frame, same positive prompt, each "
+            "backbone with its own recommended negative prompt/guidance. One clip per "
+            "GPU call."
+        )
+        g_prompt = gr.Textbox(value=DEFAULT_GEN_PROMPT, label="prompt")
+        with gr.Row():
+            g_episode = gr.Number(value=0, label="episode", precision=0)
+            g_frame = gr.Number(value=0, label="start frame", precision=0)
+            g_seed = gr.Number(value=0, label="seed", precision=0)
+        with gr.Row():
+            g_frames = gr.Number(value=49, label="frames ((F-1)%4==0)", precision=0)
+            g_steps = gr.Number(value=35, label="steps", precision=0)
+            g_height = gr.Number(value=480, label="height", precision=0)
+            g_width = gr.Number(value=640, label="width", precision=0)
+            g_guidance = gr.Number(value=6.0, label="guidance")
+        gen_btn = gr.Button("Generate future video", variant="primary")
+        gen_video = gr.Video(label="generated future")
+        gen_log = gr.Textbox(label="log", lines=16, max_lines=28, show_copy_button=True)
+        gen_report = gr.JSON(label="report")
+        gen_btn.click(
+            run_generate,
+            [g_prompt, g_episode, g_frame, g_frames, g_steps, g_height, g_width, g_guidance, g_seed],
+            [gen_log, gen_video, gen_report],
+            api_name="run_generate",
+        )
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent))
