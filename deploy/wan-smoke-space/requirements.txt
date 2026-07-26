@@ -1,7 +1,8 @@
 # torch pin: ZeroGPU supports 2.8.0 .. 2.11.0 (docs/hub/spaces-zerogpu).
 torch==2.8.0
 spaces
-gradio>=5
+# gradio is NOT listed here on purpose: the Space installs the version pinned by
+# `sdk_version` in README.md, and a requirements entry fights that.
 diffusers>=0.35.0
 transformers>=4.51.0
 accelerate

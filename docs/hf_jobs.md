@@ -105,9 +105,11 @@ Source in `deploy/wan-smoke-space/`; `scripts/hf_job_wan_smoke.py` is uploaded v
 Space's `smoke.py`, and `wam` is installed from the public GitHub repo — so **push before you
 deploy**, or the Space runs an older adapter. Two constraints shape the app:
 
-- A Space has ~16 GB host RAM against a ~34 GB checkpoint (the transformer ships fp32), so the
-  model loads with `--device-map cuda` and accelerate streams shards straight to the GPU.
-  Without it, `.to("cuda")` after a full CPU materialization OOMs the container.
+- The checkpoint is ~34 GB (the transformer ships fp32) against a documented 16 GB Space RAM
+  default, so the model loads with `--device-map cuda` and accelerate streams shards straight
+  to the GPU. A measured ZeroGPU host is much larger than that default — 104 GB and 192 cores,
+  1.9 TB free disk, weights downloaded in 26 s — so treat this as insurance, not a hard
+  requirement. Load time was 7.4 s.
 - ZeroGPU only exposes a real GPU inside `@spaces.GPU` and reclaims it on return, so load and
   forward pass share one call (`GPU_DURATION`, default 240 s). The weight *download* happens
   outside the decorator and costs no quota.

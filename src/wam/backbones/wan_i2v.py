@@ -99,8 +99,9 @@ class WanI2VAdapter:
         self.max_text_tokens = int(max_text_tokens)
         self.allow_download = bool(allow_download)
         # accelerate device_map: stream shards straight to the target device instead of
-        # materializing the whole model in host RAM first. Needed wherever host RAM is
-        # smaller than the checkpoint (a 16 GB ZeroGPU Space vs. a 34 GB Wan repo).
+        # materializing the whole model in host RAM first. Required wherever host RAM is
+        # smaller than the checkpoint (a stock 16 GB Space vs. a 34 GB Wan repo); worth it
+        # anyway — it loads the 5B in 7.4 s where a CPU round-trip needs tens of seconds.
         self.device_map = device_map
         self._loaded = False
         self._transformer: Any = None
@@ -270,6 +271,16 @@ class WanI2VAdapter:
         if downsample:
             self._vae_temporal = 2 ** int(sum(bool(d) for d in downsample))
             self._vae_spatial = 2 ** len(downsample)
+        # Wan 2.2 VAEs pixel-shuffle by `patch_size` on top of the downsample stack, so the
+        # stride above (8) understates the real 16x compression. Those configs state the
+        # factors outright — trust them; Wan 2.1 configs have neither field and derive fine.
+        for attr, field in (
+            ("_vae_spatial", "scale_factor_spatial"),
+            ("_vae_temporal", "scale_factor_temporal"),
+        ):
+            value = getattr(vae_cfg, field, None)
+            if value:
+                setattr(self, attr, int(value))
 
         for module in (transformer, vae, text_encoder, image_encoder):
             if module is None:

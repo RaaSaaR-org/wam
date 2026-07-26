@@ -6,9 +6,11 @@ one implementation of the checks.
 
 Two constraints shape the design:
 
-- A Space has ~16 GB host RAM but the Wan repo is ~34 GB (fp32 transformer). The model is
-  therefore loaded with `--device-map cuda`, which streams shards straight to the GPU instead
-  of materializing them in RAM first.
+- The Wan repo is ~34 GB (the transformer ships fp32) against a documented 16 GB Space RAM
+  default, so the model loads with `--device-map cuda` and accelerate streams shards straight
+  to the GPU. Measured, a ZeroGPU host is far bigger than the default (see the `host` line in
+  the log — 104 GB cgroup limit, 192 cores), so this is insurance rather than a hard
+  requirement; it also cuts load to ~7 s.
 - ZeroGPU only exposes a real GPU *inside* `@spaces.GPU`, and releases it on return. Loading
   must happen in the same call as the forward pass; the weights cannot survive between calls.
   Model download runs outside the decorator, so it costs no GPU quota.

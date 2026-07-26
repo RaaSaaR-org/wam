@@ -4,6 +4,7 @@ emoji: 🤖
 colorFrom: gray
 colorTo: red
 sdk: gradio
+sdk_version: 5.50.0
 app_file: app.py
 pinned: false
 short_description: Verify the WAM Wan backbone adapter on a real GPU
@@ -26,8 +27,10 @@ load → derived geometry → `condition_video` → `condition_text` → `condit
 
 ## Why it is built this way
 
-- **~16 GB host RAM vs. a ~34 GB checkpoint.** The model loads with `--device-map cuda`, so
-  accelerate streams shards straight to the GPU rather than materializing them in RAM.
+- **A ~34 GB checkpoint.** The model loads with `--device-map cuda`, so accelerate streams
+  shards straight to the GPU rather than materializing them in host RAM — required against the
+  documented 16 GB Space default, and ~7 s to load either way. (Measured, a ZeroGPU host is
+  much larger: 104 GB, 192 cores. The `host` line in the log records what you actually got.)
 - **ZeroGPU only exposes a GPU inside `@spaces.GPU`** and reclaims it on return, so loading
   and the forward pass share one call. The download runs outside the decorator and costs no
   GPU quota.

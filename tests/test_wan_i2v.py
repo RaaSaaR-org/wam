@@ -177,6 +177,24 @@ def test_attach_derives_geometry_from_configs():
     assert (geometry["vae_temporal_stride"], geometry["vae_spatial_stride"]) == (4, 8)
 
 
+def test_explicit_scale_factors_win_over_the_downsample_derivation():
+    """Regression: a real Wan2.2-TI2V-5B run produced H/16 latents where we predicted H/8.
+
+    Its VAE pixel-shuffles by patch_size on top of three downsample stages, so
+    2**len(temperal_downsample) understates the compression. Those configs carry
+    scale_factor_spatial/temporal; Wan2.1 configs carry neither and must still derive.
+    """
+    vae = _StubVAE()
+    vae.config["scale_factor_spatial"] = 16
+    vae.config["scale_factor_temporal"] = 4
+    adapter = WanI2VAdapter(dtype="float32")
+    adapter.attach(transformer=_StubTransformer(), vae=vae)
+    geometry = adapter.describe()
+    assert (geometry["vae_spatial_stride"], geometry["vae_temporal_stride"]) == (16, 4)
+    # Token count follows the stride, so it has to move with it.
+    assert adapter.expected_token_count(5, 256, 448) == 2 * (256 // 16 // 2) * (448 // 16 // 2)
+
+
 def test_device_map_is_recorded_and_suppresses_the_second_placement():
     """With device_map, accelerate has already placed every shard — attach must not re-move.
 
