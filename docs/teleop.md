@@ -1,14 +1,15 @@
 # Teleop + Calibration Workflow (T-10)
 
-Status: the teleoperation system is **OD-07 (open)**. This page fixes the workflow contract
-that any candidate must satisfy; it does not pick the device.
+Status: **OD-07 decided (2026-07-26): VR teleop** for the Unitree G1 EDU4 + Dex3-1 hands,
+via Unitree's `xr_teleoperate` stack (headset model — Vision Pro vs. Quest 3 — picked at
+purchase). This page fixes the workflow contract the rig must satisfy.
 
-## Candidate systems (OD-07)
+## Decided system (OD-07)
 
-- **Leader–follower arm** (kinematically similar leader, e.g. scaled twin): lowest latency,
-  direct joint mapping into the canonical space — preferred for the D0/D1 sets.
-- **VR controller / hand tracking**: EE-delta streams + IK; more setup, needed later for
-  bimanual work.
+- **VR controller / hand tracking**: EE-delta streams + IK into the canonical space; hand
+  tracking drives the Dex3 grasp synergy. Fits the bimanual G1 from day one.
+- (Alternative kept for reference: a leader–follower arm has lower latency but does not map
+  onto a humanoid torso + two arms.)
 
 Either way the device must deliver operator commands at >= 20 Hz, map into the canonical
 action space (`ActionMode.JOINT_DELTA` baseline, OD-02), and expose a deadman switch. The

@@ -1,5 +1,9 @@
 # WAM robot config — Unitree G1 upper body (waist + both arms + grippers, PRD §6).
 #
+# Platform decided 2026-07-26 (OD-01): G1 EDU4 with Dex3-1 three-finger hands. The
+# canonical gripper channel stays scalar per hand ([left, right] in [0, 1]); the G1
+# adapter maps it to a Dex3 grasp synergy. Per-finger control is post-MVP.
+#
 # The canonical space MUST match wam.robot.g1.G1_SPEC exactly (same joint names in the
 # same order, gripper_dims=2) — a coordination test in tests/test_versioning.py enforces
 # this. gripper_dims=2: [left, right], each normalized to [0, 1].

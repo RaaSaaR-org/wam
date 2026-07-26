@@ -13,7 +13,7 @@ Derived from PRD roadmap (M0–M4 = MVP; M5/M6 post-MVP). Order is strict: don't
 - [x] **T-03** Mock robot adapter + dummy policy → end-to-end loop runs without hardware (`scripts/run_mock_loop.py`)
 - [x] **T-04** Safety layer v0: joint/velocity/accel/workspace limits, NaN/Inf rejection, timeout → hold/stop, every intervention logged (FR-07, §11.2)
 - [x] **T-05** Config + experiment versioning: config hash, software commit, adapter version in every log record (FR-10)
-- [ ] **T-06** Resolve open decisions OD-01/02/03/07 (platform+gripper, action space, cameras, teleop) — *user/business decision; code supports joint-delta (primary) + EE-delta*
+- [x] **T-06** Resolve open decisions OD-01/02/03/07 — *decided 2026-07-26: Unitree G1 EDU4 + Dex3-1 hands; joint-delta; standard EDU4 sensor set; VR teleop (see table below)*
 
 **Exit:** interfaces + canonical schema approved, dummy policy loop with E-stop + logging works.
 
@@ -59,15 +59,15 @@ Derived from PRD roadmap (M0–M4 = MVP; M5/M6 post-MVP). Order is strict: don't
 - M5: FLUX 3 Dev integration (backbone swap, license check, benchmark vs. fallback — AC-05)
 - M6: generalization, video-only data, cross-embodiment, multiple future hypotheses (FR-11/12)
 
-## Open decisions (PRD §16)
+## Open decisions (PRD §16) — resolved 2026-07-26
 
-| ID | Decision | Blocks |
+| ID | Decision | Status |
 |----|----------|--------|
-| OD-01 | Platform + gripper/hand | M1 |
-| OD-02 | Action space: joint delta vs. EE delta | M2 |
-| OD-03 | Camera setup, resolution, framerate | data recording |
-| OD-04 | Open fallback backbone + license | M3 |
-| OD-05 | Training hardware + budget | after M2 overfit gate |
-| OD-06 | FLUX 3 access, weights, fine-tuning rights | M5 |
-| OD-07 | Teleoperation system | M1 |
-| OD-08 | Which safety functions the vendor controller covers | real-robot tests |
+| OD-01 | Platform + gripper/hand | ✅ **Unitree G1 EDU4 + Dex3-1 three-finger hands.** MVP maps the canonical scalar gripper channel `[left, right]` to a grasp synergy in the G1 adapter; per-finger control is post-MVP |
+| OD-02 | Action space | ✅ joint-delta primary, EE-delta supported in schema/safety |
+| OD-03 | Cameras | ✅ standard G1 EDU4 sensor set (head RealSense D435i, RGB for WAM; depth/LiDAR unused in MVP) |
+| OD-04 | Open fallback backbone + license | ✅ Wan2.2-TI2V-5B (Apache 2.0), verified on real weights (`docs/hf_jobs.md`) |
+| OD-05 | Training hardware + budget | ✅ free tier now (Mac MPS + ZeroGPU); own RTX 5090 + H200 cluster available later for T-16 real-data training |
+| OD-06 | FLUX 3 access, weights, fine-tuning rights | ⏳ deferred to M5 (post-MVP), nothing blocks on it |
+| OD-07 | Teleoperation system | ✅ VR teleop (Unitree `xr_teleoperate` path; headset model — Vision Pro vs. Quest 3 — still to pick at purchase time) |
+| OD-08 | Vendor controller safety coverage | ⏳ verify during G1 bring-up (which functions Unitree's controller covers vs. WAM safety layer) |

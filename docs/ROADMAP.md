@@ -4,16 +4,16 @@ Status 2026-07-26: M0–M4 code-complete and verified on mock/sim (465 tests, ac
 in `runs/acceptance/`). Everything below is decisions, hardware, and real data — in order.
 Details per task: `TASKS.md`. PRD §16 (internal document, outside this repository).
 
-## 1. Decisions (blockers)
+## 1. Decisions — resolved 2026-07-26
 
-| Decision | What to decide | Unblocks |
-|----------|----------------|----------|
-| OD-01 | Platform + gripper: confirm G1, which hand/gripper | robot bring-up |
-| OD-03 | Cameras: which, resolution, framerate | perception, data recording |
-| OD-07 | Teleop system: leader-follower vs. VR | data recording |
-| OD-04 | *Answered:* Wan2.1/2.2 are Apache 2.0; start on `Wan2.2-TI2V-5B` (`docs/hf_jobs.md`) | M3 training |
-| OD-05 | Training GPU + budget — **ZeroGPU** is free on PRO for the T-15 check, **HF Jobs** ($0.80–5/h, pre-paid credits) for T-16 training | M3 training |
-| OD-02 | *De-facto done:* joint-delta primary, EE-delta supported in schema/safety | — |
+| Decision | Outcome | Unblocks |
+|----------|---------|----------|
+| OD-01 | **Unitree G1 EDU4 + Dex3-1 hands**; scalar gripper channel → grasp synergy in the adapter (per-finger post-MVP) | robot bring-up (order the robot) |
+| OD-03 | **Standard G1 EDU4 sensor set** — head RealSense D435i, RGB stream for WAM; depth/LiDAR unused in MVP | perception, data recording |
+| OD-07 | **VR teleop** (Unitree `xr_teleoperate`; headset model picked at purchase) | data recording |
+| OD-04 | Wan2.1/2.2 are Apache 2.0; start on `Wan2.2-TI2V-5B` (`docs/hf_jobs.md`) | M3 training |
+| OD-05 | **Free tier now** (Mac MPS + ZeroGPU); own RTX 5090 + H200 cluster later for T-16 | M3 training |
+| OD-02 | joint-delta primary, EE-delta supported in schema/safety | — |
 
 ## 2. Robot bring-up
 
@@ -27,10 +27,12 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 
 ## 3. Perception + teleop
 
-- Real `FrameSource` implementations (`src/wam/data/capture.py` protocol) for the chosen cameras.
+- Real `FrameSource` implementation (`src/wam/data/capture.py` protocol) for the G1's head
+  RealSense D435i (RGB; pyrealsense2).
 - Calibrate: intrinsics/extrinsics → `CalibrationSet` (`configs/calibration/`).
 - Verify timestamp sync against the 20 ms gate (`SyncRecorder`).
-- Build the teleop rig, wire into `SyncRecorder` — workflow: `docs/teleop.md`.
+- VR teleop rig (Unitree `xr_teleoperate` → canonical actions), wire into `SyncRecorder` —
+  workflow: `docs/teleop.md`.
 
 ## 4. Real data (M1 gates)
 
@@ -61,5 +63,7 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 
 ## Parallelizable start
 
-Decide OD-01/03/07, order teleop hardware, and run robot bring-up (step 2) in parallel.
-First code-touching step: `DdsG1Transport`.
+Decisions are made — order the G1 EDU4 (+ VR headset) and run robot bring-up (step 2) as
+soon as it arrives. First code-touching step: `DdsG1Transport`. Until hardware arrives,
+real-data validation of encoders/decoders can run on public LeRobot datasets
+(video + joint states) — no robot required.
