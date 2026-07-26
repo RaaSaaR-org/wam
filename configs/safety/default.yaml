@@ -1,0 +1,38 @@
+# WAM safety layer defaults (T-04, FR-07, PRD §11.2).
+#
+# Flat mapping: field names MUST match wam.safety.config.SafetyConfig —
+# SafetyConfig.from_yaml(path) validates this file directly (the extra
+# wam_config_version key is for wam.interfaces.versioning.load_config).
+# All limits in DENORMALIZED canonical units (rad, rad/s, rad/s^2, m, m/s;
+# gripper in [0, 1]).
+#
+# Per-joint tuples are in canonical joint order for the 6-joint MOCK space
+# (configs/robot/mock.yaml) and are deliberately TIGHTER than the robot
+# limits (safety margin). Real robots need their own safety config whose
+# joint order matches their CanonicalSpaceSpec.joint_names.
+wam_config_version: "0.1.0"
+version: "0.1.0"
+
+# Per-joint position limits [rad].
+q_min: [-3.0, -3.0, -3.0, -3.0, -3.0, -3.0]
+q_max: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+# Per-joint max |velocity| [rad/s] and |acceleration| [rad/s^2].
+dq_max: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5]
+ddq_max: [4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
+
+# End-effector workspace AABB [m] in CanonicalSpaceSpec.ee_frame.
+workspace_min: [0.10, -0.60, 0.60]
+workspace_max: [0.80, 0.60, 1.40]
+# Max EE translation speed [m/s] and max per-step EE translation [m].
+ee_max_lin_vel_m_s: 0.5
+ee_max_step_m: 0.05
+
+# Max gripper command change rate [1/s] (gripper unit is [0, 1]).
+gripper_rate_max: 2.0
+
+# Watchdog: no fresh chunk within this window -> timeout_policy applies.
+chunk_timeout_s: 0.5
+# 'hold' (freeze pose) | 'stop' (estop).
+timeout_policy: hold
+# dt for synthesized HOLD chunks when the incoming dt is unusable.
+hold_dt_s: 0.1
