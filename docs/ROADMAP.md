@@ -45,9 +45,11 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 - `WanI2VAdapter` (`src/wam/backbones/wan_i2v.py`) is **verified on real Wan2.2-TI2V-5B
   weights** (ZeroGPU, 13/13 checks, `docs/hf_jobs.md`); rerun with
   `scripts/deploy_wan_space.py` (free) or `scripts/launch_wan_smoke_job.py` (HF Jobs).
-- Readout blocks are **measured** (2026-07-26, `--ablate` on ZeroGPU, 18/18 checks): (20, 29)
-  beat the (15, 22) heuristic on motion/instruction/state sensitivity —
-  `configs/model/wan22_ti2v_5b.yaml`, details in `docs/hf_jobs.md`.
+- Readout blocks are **label-validated** (2026-07-26, ridge probes on real GR00T action
+  chunks, ZeroGPU, 8/8 checks): early blocks (2, 10) beat both the label-free ablation pick
+  (20, 29) and the (15, 22) heuristic — `configs/model/wan22_ti2v_5b.yaml`, details in
+  `docs/hf_jobs.md`. Caveat: no frozen video features beat a state-only ridge yet, so the
+  action value must come from fine-tuning.
   Next: LoRA fine-tune — that one needs Jobs, ZeroGPU cannot hold a training run.
 - **D2** MVP set (10–30 h) → joint video/action training (`wam.training.joint`).
 - Ablation world-action vs. action-only on real data → AC-07 verdict.

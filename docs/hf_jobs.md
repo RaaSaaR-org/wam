@@ -157,14 +157,39 @@ Result on `Wan2.2-TI2V-5B` (30 blocks):
 
 Three readings: every conditioning path is alive (each probe moves features somewhere);
 instruction/state integration *jumps* at blocks 20–24 and again in the final block; the depth
-heuristic default (15, 22) sits below both. Measured pick **(20, 29)**, recorded in
-`configs/model/wan22_ti2v_5b.yaml`. This is a label-free proxy — confirm with linear probes
-on real D2 action labels before freezing the T-16 recipe.
+heuristic default (15, 22) sits below both. Measured pick was **(20, 29)** — but this is a
+label-free proxy, and the label-validated probes below overturned it.
+
+## Label-validated readout probes (2026-07-26)
+
+`scripts/hf_job_wan_probe.py` (Space tab "readout probes", endpoint `/run_probe`) closes the
+loop the ablation left open: 96 windows (12 GR00T-AppleToPlate episodes × 8 windows, 5 frames
+at 192×256), one frozen DiT forward each, per-block token-pooled features, ridge regression
+onto the next 16-step canonical action chunk. Honest evaluation: episode-level split
+(train 0–6 / val 7–8 / test 9–11), alpha chosen on val only, joints and gripper scored
+separately (their label scales differ by ~50×). 8/8 checks, 73 s wall on ZeroGPU.
+Full table: `runs/wan_probe/2026-07-26-zerogpu-5b.json`.
+
+| features | joints test R² | gripper test R² |
+|---|---|---|
+| **suggested (2, 10)** — top-2 by val R² | **0.365** | **0.698** |
+| heuristic (15, 22) | 0.341 | 0.629 |
+| ablation pick (20, 29) | 0.335 | 0.522 |
+| state-only ridge (raw q/dq/gripper, 32-dim) | 0.456 | 0.881 |
+
+Two findings. First, the label-free sensitivity ranking does **not** predict action
+readability: with real labels, *early* blocks (2, 10) win, and (20, 29) is the worst of the
+three pairs — `configs/model/wan22_ti2v_5b.yaml` now records (2, 10). Second, and more
+important: **no frozen video features beat the trivial state-only baseline.** A 32-dim raw
+state vector out-predicts 6144-dim frozen Wan features on both label groups. The frozen
+prior alone does not linearly encode next-chunk actions — the action value has to come from
+fine-tuning (LoRA, T-16), which can also re-rank the blocks on adapted features.
 
 ## Next steps after a green smoke run
 
-1. ~~Record which blocks give the most action-predictive features~~ — done, see the readout
-   ablation above: (20, 29) for the 5B, in `configs/model/wan22_ti2v_5b.yaml`.
+1. ~~Record which blocks give the most action-predictive features~~ — done twice: label-free
+   ablation said (20, 29), label-validated probes overturned it → (2, 10) in
+   `configs/model/wan22_ti2v_5b.yaml`, provisional until LoRA.
 2. T-16 on the same infrastructure: LoRA on the DiT + the state projection, checkpoints to a
    storage bucket volume (`-v hf://buckets/<user>/<bucket>:/outputs`), `--timeout 4h`.
 3. Compare against the `tiny` backbone on D1 (the T-18 ablation harness) — that is the real

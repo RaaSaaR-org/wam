@@ -1,15 +1,17 @@
 # WAM backbone config — Wan2.2-TI2V-5B through WanI2VAdapter (OD-04; kwargs for
 # wam.backbones.registry.get_backbone("wan_i2v", **backbone)).
 #
-# feature_blocks is MEASURED, not the (15, 22) depth heuristic: the 2026-07-26 ZeroGPU
-# readout ablation (docs/hf_jobs.md, runs/wan_ablation/) ranked blocks 20 and 29 highest
-# for combined motion/instruction/state sensitivity. Label-free proxy ranking — confirm
-# with linear probes on real D2 action labels before freezing T-16.
+# feature_blocks is MEASURED on real action labels: the 2026-07-26 ZeroGPU readout probes
+# (docs/hf_jobs.md, runs/wan_probe/) ridge-regressed per-block features onto GR00T-G1
+# action chunks with an episode-level split. Early blocks (2, 10) beat both the label-free
+# ablation pick (20, 29) and the (15, 22) depth heuristic on joints AND gripper test R².
+# Caveat: no frozen video features beat a state-only ridge yet — the pick is provisional
+# until LoRA fine-tuning (T-16) re-ranks the blocks on adapted features.
 wam_config_version: "0.1.0"
 
 backbone:
   model_id: Wan-AI/Wan2.2-TI2V-5B-Diffusers
-  feature_blocks: [20, 29]
+  feature_blocks: [2, 10]
   dtype: bfloat16
   timestep: 0
   max_text_tokens: 512
