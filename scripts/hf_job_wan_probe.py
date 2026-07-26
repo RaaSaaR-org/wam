@@ -481,9 +481,15 @@ def load_gen_frame(args: argparse.Namespace) -> np.ndarray:
         ok, bgr = cap.read()
     finally:
         cap.release()
-    if not ok:
-        raise ValueError(f"cannot read frame {args.gen_frame} from {video}")
-    return np.ascontiguousarray(bgr[:, :, ::-1])
+    if ok:
+        return np.ascontiguousarray(bgr[:, :, ::-1])
+    # cv2's FFmpeg build may lack the codec (GR00T ships AV1) — imageio fallback.
+    import imageio.v3 as iio
+
+    for i, rgb in enumerate(iio.imiter(str(video), plugin="FFMPEG")):
+        if i == args.gen_frame:
+            return np.ascontiguousarray(np.asarray(rgb))
+    raise ValueError(f"cannot read frame {args.gen_frame} from {video}")
 
 
 def generate_future(

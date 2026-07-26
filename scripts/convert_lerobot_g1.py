@@ -132,7 +132,11 @@ def read_source_episode(parquet_path: Path) -> dict[str, np.ndarray]:
 
 
 def read_video_frames(video_path: Path, resize_hw: tuple[int, int]) -> np.ndarray:
-    """Decode an mp4 to uint8 RGB [n, H, W, 3], resized to ``resize_hw`` (INTER_AREA)."""
+    """Decode an mp4 to uint8 RGB [n, H, W, 3], resized to ``resize_hw`` (INTER_AREA).
+
+    cv2 first; if its FFmpeg build lacks the codec (GR00T ships **AV1**, which the pip
+    ``opencv-python-headless`` wheel cannot decode), fall back to imageio's bundled ffmpeg.
+    """
     import cv2
 
     cap = cv2.VideoCapture(str(video_path))
@@ -151,8 +155,28 @@ def read_video_frames(video_path: Path, resize_hw: tuple[int, int]) -> np.ndarra
     finally:
         cap.release()
     if not frames:
+        frames = _read_video_frames_imageio(video_path, resize_hw)
+    if not frames:
         raise ValueError(f"no frames decoded from {video_path}")
     return np.stack(frames)
+
+
+def _read_video_frames_imageio(video_path: Path, resize_hw: tuple[int, int]) -> list[np.ndarray]:
+    """Codec fallback via imageio-ffmpeg (RGB already); empty if imageio is unavailable."""
+    try:
+        import imageio.v3 as iio
+    except ImportError:
+        return []
+    import cv2
+
+    h, w = resize_hw
+    frames: list[np.ndarray] = []
+    for rgb in iio.imiter(str(video_path), plugin="FFMPEG"):
+        rgb = np.asarray(rgb)
+        if rgb.shape[:2] != (h, w):
+            rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_AREA)
+        frames.append(np.ascontiguousarray(rgb))
+    return frames
 
 
 def load_instructions(source: Path) -> dict[int, str]:
