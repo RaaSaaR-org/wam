@@ -1,0 +1,30 @@
+[project]
+name = "wam"
+version = "0.0.1"
+description = "Modular World Action Model — joint video/action prediction for humanoid manipulation"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pydantic>=2",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+train = ["torch", "einops", "safetensors"]
+data = ["pyarrow", "opencv-python", "av"]
+serve = ["websockets>=12"]
+# Wan backbone (T-15/OD-04): diffusers-backed VAE + umT5 + DiT. GPU only in practice.
+wan = ["torch", "diffusers>=0.35", "transformers>=4.51", "accelerate", "sentencepiece", "ftfy"]
+# Launching GPU work on HF Jobs (docs/hf_jobs.md).
+jobs = ["huggingface_hub>=0.34"]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wam"]
+
+[tool.ruff]
+line-length = 100

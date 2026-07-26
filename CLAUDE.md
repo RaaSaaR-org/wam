@@ -1,0 +1,35 @@
+# CLAUDE.md — WAM (World Action Model)
+
+Modular World-Action-System: predicts short visual futures **and** robot actions jointly. MVP = safe, repeatable pick-and-place on Unitree G1 (or compatible). Full spec: internal PRD (v0.1, 2026-07-25), kept outside this repository.
+
+## Core decisions (from PRD)
+
+- **No foundation pretraining.** Adopt a video backbone (FLUX 3 Dev preferred, open I2V model as fallback), add robotics adapters, fine-tune on own demonstrations.
+- **Backbone is swappable.** All backbones implement the same adapter interface (FR-09). Never hard-wire FLUX 3.
+- **Safety is deterministic.** The learned model never outputs motor currents. Every action passes the Safety Layer (limits, collision, watchdog) before the low-level controller (FR-07).
+- **Closed loop.** Short action chunks (0.5–2.0 s), execute a prefix, re-observe, re-plan (FR-05).
+- **Canonical schema.** Training and policy use a canonical state/action space; robot-specific mapping lives only in the Robot Adapter (FR-06).
+- **Data quality gates.** Timestamp sync, calibration and dataset validation are release gates, not nice-to-haves.
+
+## Layout
+
+```
+src/wam/
+  interfaces/   versioned core contracts (schema, protocols) — change with care
+  backbones/    FLUX 3 + open fallback behind one adapter interface
+  encoders/     state encoder (trainable), action encoder (training only), frozen text/VAE wrappers
+  decoders/     action decoder → normalized joint deltas / EE deltas + gripper
+  safety/       deterministic limits, projection, watchdog — no ML in here
+  robot/        HAL: canonical schema ↔ robot API (g1, mock)
+  data/         episode format (PRD Anhang A), recording, replay, validation
+  training/     losses (video/action/alignment), trainers
+  runtime/      closed-loop executor, inference server
+  evaluation/   E0 unit → E1 replay → E2 sim → E3 real robot → E4 generalization
+configs/        versioned robot/model/training configs
+```
+
+## Conventions
+
+- Python, PyTorch. Tasks live in `TASKS.md` (milestones M0–M4 map to the PRD roadmap).
+- Every rollout must be traceable to checkpoint + dataset snapshot + config hash (AC-04).
+- Milestone order is strict: overfit a small task first (D1), only then scale (P6).

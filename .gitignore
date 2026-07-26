@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ML artifacts — never commit weights, checkpoints or run output
+checkpoints/
+runs/
+outputs/
+wandb/
+mlruns/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.gguf
+wan_smoke_report.json
+
+# Data: only the small synthetic fixtures are tracked (regenerate with
+# scripts/record_mock_dataset.py). Real recordings never go into git.
+data/raw/
+data/episodes/
+datasets/*
+!datasets/mock-d0/
+!datasets/mock-d1/
+
+# Internal documents (PRD etc.) — this repository is public
+idea/
+
+# Secrets / credentials (HF tokens, robot access)
+.env
+.env.*
+!.env.example
+*.secrets
+*.pem
+.hf_token
+
+# OS / editor (.idea = JetBrains, not the idea/ docs folder above)
+.DS_Store
+.idea/
+.vscode/
