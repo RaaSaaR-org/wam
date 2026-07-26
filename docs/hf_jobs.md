@@ -249,7 +249,9 @@ bulky rig, no rod artifact, apple lands on the plate
 (`cosmos3_futures/faithful_video_conditioned.mp4`). Pattern: more real context (frame →
 motion) means less hallucination; but the G1 arm never enters the ego view, so no
 conditioning can supply it — the LoRA (T-16) stays necessary, and Cosmos3's native
-multi-frame conditioning is worth remembering for the FR-05 closed loop.
+multi-frame conditioning is worth remembering for the FR-05 closed loop. Presentation
+cut: `runs/presentation/wam_06_futures_videoconditioned{,_en}.mp4` (18 s, rebuild via
+`runs/presentation/build/make_videocond_video.py`).
 
 ## Next steps after a green smoke run
 
