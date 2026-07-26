@@ -113,6 +113,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     gen.add_argument("--gen-prompt", default=None, help="default: the probe instruction")
     gen.add_argument("--gen-episode", type=int, default=0, help="episode for the start frame")
     gen.add_argument("--gen-frame", type=int, default=0, help="frame index for the start frame")
+    gen.add_argument(
+        "--gen-cond-frames",
+        type=int,
+        default=1,
+        help="real frames ending at --gen-frame used as conditioning; 1 = image mode, "
+        "4k+1 (e.g. 9) = Video2World mode (Wan2.2-TI2V has no such mode)",
+    )
     gen.add_argument("--gen-num-frames", type=int, default=49, help="(F-1) %% 4 == 0")
     gen.add_argument("--gen-steps", type=int, default=35, help="denoising steps")
     gen.add_argument("--gen-height", type=int, default=480)
@@ -304,6 +311,38 @@ def extract_features(
 # ---- generation (--generate): what does the Cosmos3 prior imagine? -----------------------
 
 
+def load_gen_clip(args: argparse.Namespace) -> np.ndarray:
+    """RGB clip of --gen-cond-frames real frames ending at --gen-frame ([N, H, W, 3]).
+
+    The Video2World conditioning context: the model sees the real motion leading up to
+    the reference frame instead of that frame alone. Decoded via imageio (GR00T ships
+    AV1, which cv2's bundled FFmpeg may lack).
+    """
+    import imageio.v3 as iio
+
+    first = args.gen_frame - args.gen_cond_frames + 1
+    if first < 0:
+        raise ValueError(
+            f"--gen-frame {args.gen_frame} has no {args.gen_cond_frames}-frame history"
+        )
+    video = (
+        Path(args.data_dir)
+        / "videos"
+        / "chunk-000"
+        / "observation.images.ego_view"
+        / f"episode_{args.gen_episode:06d}.mp4"
+    )
+    frames: list[np.ndarray] = []
+    for i, rgb in enumerate(iio.imiter(str(video), plugin="FFMPEG")):
+        if i > args.gen_frame:
+            break
+        if i >= first:
+            frames.append(np.asarray(rgb))
+    if len(frames) != args.gen_cond_frames:
+        raise ValueError(f"read {len(frames)} frames from {video}, wanted {args.gen_cond_frames}")
+    return np.stack(frames)
+
+
 def generate_future(
     args: argparse.Namespace, image_rgb: np.ndarray, report: smoke.Report
 ) -> dict[str, Any]:
@@ -319,6 +358,8 @@ def generate_future(
 
     if (args.gen_num_frames - 1) % 4:
         raise ValueError(f"--gen-num-frames must satisfy (F-1) % 4 == 0, got {args.gen_num_frames}")
+    if (args.gen_cond_frames - 1) % 4:
+        raise ValueError(f"--gen-cond-frames must satisfy (N-1) % 4 == 0, got {args.gen_cond_frames}")
     if args.gen_height % 32 or args.gen_width % 32:
         raise ValueError("--gen-height/--gen-width must be multiples of 32")
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -334,12 +375,22 @@ def generate_future(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
-    start = Image.fromarray(image_rgb).resize((args.gen_width, args.gen_height), Image.LANCZOS)
+    size = (args.gen_width, args.gen_height)
+    if image_rgb.ndim == 4:  # Video2World: real clip ending at --gen-frame conditions the run
+        clip = [Image.fromarray(f).resize(size, Image.LANCZOS) for f in image_rgb]
+        cond = {
+            "video": clip,
+            "condition_frame_indexes_vision": tuple(range((len(clip) - 1) // 4 + 1)),
+        }
+        start = clip[-1]
+    else:
+        start = Image.fromarray(image_rgb).resize(size, Image.LANCZOS)
+        cond = {"image": start}
     t0 = time.perf_counter()
     result = pipe(
         prompt=prompt,
         negative_prompt=COSMOS_NEGATIVE,
-        image=start,
+        **cond,
         num_frames=args.gen_num_frames,
         height=args.gen_height,
         width=args.gen_width,
@@ -361,6 +412,8 @@ def generate_future(
         "negative_prompt": "cosmos recommended quality prompt",
         "episode": args.gen_episode,
         "start_frame": args.gen_frame,
+        "conditioning": "video" if image_rgb.ndim == 4 else "image",
+        "cond_frames": args.gen_cond_frames,
         "num_frames": args.gen_num_frames,
         "steps": args.gen_steps,
         "guidance_scale": args.gen_guidance,

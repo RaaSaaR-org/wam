@@ -184,8 +184,9 @@ def run_probe(episodes: int, windows_per_ep: int, frames: int, height: int, widt
 
 
 def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: int,
-                 height: int, width: int, guidance: float, seed: int):  # fmt: skip
-    """Generate tab: start frame on CPU, diffusion sampling on GPU, mp4 back to the UI."""
+                 height: int, width: int, guidance: float, seed: int,
+                 cond_frames: int = 1):  # fmt: skip
+    """Generate tab: start frame/clip on CPU, diffusion sampling on GPU, mp4 back to the UI."""
     import cosmos_probe
 
     log: list[str] = [f"host: {json.dumps(host_info())}", f"model: {MODEL_ID}"]
@@ -199,6 +200,7 @@ def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: 
 
         out = f"/tmp/cosmos3_future_ep{int(episode)}_f{int(frame)}_seed{int(seed)}.mp4"
         argv = [
+            "--gen-cond-frames", str(int(cond_frames)),
             "--data-dir", data_dir,
             "--source", source,
             "--device", "cuda",
@@ -217,8 +219,11 @@ def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: 
         if prompt.strip():
             argv += ["--gen-prompt", prompt.strip()]
         args = cosmos_probe.parse_args(argv)
-        image = cosmos_probe.wanprobe.load_gen_frame(args)
-        log.append(f"start frame: episode {episode} frame {frame}, {image.shape}")
+        if int(cond_frames) > 1:  # Video2World: real clip ending at `frame` as context
+            image = cosmos_probe.load_gen_clip(args)
+        else:
+            image = cosmos_probe.wanprobe.load_gen_frame(args)
+        log.append(f"conditioning: episode {episode} frame {frame}, {image.shape}")
         log.append(f"\nrequesting GPU (duration cap {GEN_GPU_DURATION}s)…")
         yield "\n".join(log), None, None
 
@@ -284,13 +289,15 @@ requested.
             g_height = gr.Number(value=480, label="height", precision=0)
             g_width = gr.Number(value=640, label="width", precision=0)
             g_guidance = gr.Number(value=6.0, label="guidance")
+            g_cond = gr.Number(value=1, label="cond frames (1=image, 4k+1=video)", precision=0)
         gen_btn = gr.Button("Generate future video", variant="primary")
         gen_video = gr.Video(label="generated future")
         gen_log = gr.Textbox(label="log", lines=16, max_lines=28, show_copy_button=True)
         gen_report = gr.JSON(label="report")
         gen_btn.click(
             run_generate,
-            [g_prompt, g_episode, g_frame, g_frames, g_steps, g_height, g_width, g_guidance, g_seed],
+            [g_prompt, g_episode, g_frame, g_frames, g_steps, g_height, g_width, g_guidance,
+             g_seed, g_cond],
             [gen_log, gen_video, gen_report],
             api_name="run_generate",
         )
