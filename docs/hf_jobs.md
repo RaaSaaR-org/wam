@@ -138,10 +138,33 @@ Two things this caught that stub tests could not — see the git history for bot
 VAE compresses 16x, not the 8x derived from `temperal_downsample`; and a Space rebuild silently
 reused a pip-cached `wam` wheel, so the first "fixed" deploy still ran the old adapter.
 
+## Readout ablation (2026-07-26)
+
+`--ablate` (the Space's "ablate readout blocks" checkbox) probes **every** DiT block in the
+same load: four forwards — base, frame order reversed, different instruction, different robot
+state — and per block the relative L2 distance to the base features. One ZeroGPU call covers
+the 13 smoke checks plus the ablation (18/18 passed, 9.3 s GPU wall, ablation itself 0.7 s).
+Full table: `runs/wan_ablation/2026-07-26-zerogpu-5b.json`.
+
+Result on `Wan2.2-TI2V-5B` (30 blocks):
+
+| blocks | motion | instruction | state | combined score |
+|---|---|---|---|---|
+| 0–19 | 0.28–0.39 | 0.02–0.05 | 0.010–0.020 | 0.02–0.26 |
+| **20–24** | 0.26–0.37 | **0.07–0.11** | **0.025–0.030** | 0.34–0.58 |
+| 25–28 | 0.32–0.43 | 0.03–0.04 | 0.022–0.025 | 0.20–0.38 |
+| **29** | **0.56** | 0.09 | **0.057** | **0.93** |
+
+Three readings: every conditioning path is alive (each probe moves features somewhere);
+instruction/state integration *jumps* at blocks 20–24 and again in the final block; the depth
+heuristic default (15, 22) sits below both. Measured pick **(20, 29)**, recorded in
+`configs/model/wan22_ti2v_5b.yaml`. This is a label-free proxy — confirm with linear probes
+on real D2 action labels before freezing the T-16 recipe.
+
 ## Next steps after a green smoke run
 
-1. Record which blocks give the most action-predictive features (ablate 2-3 pairs — the same
-   job with `--blocks`).
+1. ~~Record which blocks give the most action-predictive features~~ — done, see the readout
+   ablation above: (20, 29) for the 5B, in `configs/model/wan22_ti2v_5b.yaml`.
 2. T-16 on the same infrastructure: LoRA on the DiT + the state projection, checkpoints to a
    storage bucket volume (`-v hf://buckets/<user>/<bucket>:/outputs`), `--timeout 4h`.
 3. Compare against the `tiny` backbone on D1 (the T-18 ablation harness) — that is the real

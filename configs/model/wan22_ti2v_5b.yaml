@@ -1,0 +1,15 @@
+# WAM backbone config — Wan2.2-TI2V-5B through WanI2VAdapter (OD-04; kwargs for
+# wam.backbones.registry.get_backbone("wan_i2v", **backbone)).
+#
+# feature_blocks is MEASURED, not the (15, 22) depth heuristic: the 2026-07-26 ZeroGPU
+# readout ablation (docs/hf_jobs.md, runs/wan_ablation/) ranked blocks 20 and 29 highest
+# for combined motion/instruction/state sensitivity. Label-free proxy ranking — confirm
+# with linear probes on real D2 action labels before freezing T-16.
+wam_config_version: "0.1.0"
+
+backbone:
+  model_id: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+  feature_blocks: [20, 29]
+  dtype: bfloat16
+  timestep: 0
+  max_text_tokens: 512
