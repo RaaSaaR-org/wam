@@ -221,6 +221,16 @@ action value must come from fine-tuning, and Wan stays primary (Apache 2.0, 5B v
 cheaper to LoRA and to serve). Cosmos3 remains the fallback candidate if the Wan LoRA
 underdelivers; the probe harness reruns against any diffusers-native backbone.
 
+**Qualitative side-by-side (2026-07-26):** the Cosmos3 script also has a `--generate` mode
+(mirror of the Wan probe's, "generate future" tab on the same Space) that sampled the two
+`wan_futures/` prompts from the identical start frame (49 frames 640×480, 35 steps, ~46 s
+sampling, peak 35.6 GB with tiled VAE decode) → `runs/presentation/cosmos3_futures/`,
+mirrored to `huhn511/wam-presentation`. Both clips follow their instruction (apple lands on
+the plate / plate pushed left, apple stays) with plausible physics — but Cosmos3 invents a
+generic white manipulator instead of the G1, the same embodiment gap Wan shows. Consistent
+with the probe verdict: the priors bring physics and instruction-following; the embodiment
+must come from LoRA fine-tuning (T-16).
+
 ## Next steps after a green smoke run
 
 1. ~~Record which blocks give the most action-predictive features~~ — done twice: label-free
