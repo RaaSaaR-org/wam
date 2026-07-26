@@ -31,9 +31,9 @@ Derived from PRD roadmap (M0–M4 = MVP; M5/M6 post-MVP). Order is strict: don't
 
 - [x] **T-12** State encoder (2–4 layer MLP, handles missing sensor fields) + action decoder (chunked, 8–32 steps) (FR-02, FR-04)
 - [x] **T-13** Action-only policy on open backbone; overfit D1 successfully — *gate passed on synthetic D1: loss → 0.09 % of initial (`scripts/overfit_d1.py`); passed again on real D1-scale data (10 GR00T G1 apple-to-plate episodes, `--dataset datasets/gr00t-apple`): loss → 0.01 % of initial, E1 holdout mse 1.8e-5 / mae 0.0028*
-- [x] **T-14** Offline eval E1: action prediction on holdout episodes, metrics dashboard
+- [x] **T-14** Offline eval E1: action prediction on holdout episodes, metrics dashboard — *first generalization result (2026-07-26): trained on 362 real GR00T episodes, evaluated on 40 unseen: E1 mse 1.10e-5 vs zero-delta baseline 1.63e-5 (−32 %), cosine(pred, truth) 0.60, moving-step error −39 % (`runs/d1-full-gen-seed0`)*
 
-**Exit:** overfit proof — pipeline and action space are learnable. ✅ (synthetic D1 + real G1 data)
+**Exit:** overfit proof — pipeline and action space are learnable. ✅ (synthetic D1 + real G1 data; generalizes to unseen episodes)
 
 ## M3 · World-Action Prototype (6–10 weeks)
 

@@ -76,3 +76,11 @@ FR-02 missing-group path on real data). 10 converted episodes pass all T-11 vali
 gates, and the T-13 overfit gate passes on them (`scripts/overfit_d1.py --dataset
 datasets/gr00t-apple`): action loss → 0.01 % of initial, E1 holdout mse 1.8e-5.
 The state encoder + action head demonstrably learn real robot data end-to-end.
+
+**Generalization (2026-07-26, `runs/d1-full-gen-seed0`):** trained on the full converted
+dataset (402 episodes, 362 train / 40 holdout, tiny backbone, 6000 steps on MPS). On the
+40 unseen episodes: E1 mse 1.10e-5 vs. 1.63e-5 for the zero-delta baseline (−32 %),
+cosine(predicted, true motion) 0.60; on moving steps (71 % of data) the error is −39 %
+vs. baseline, while still phases pick up small jitter (~0.002 rad/step RMS). The
+action-only policy learns the task, not just the episodes — next quality jump expected
+from the real Wan backbone (LoRA, 5090/H200).
