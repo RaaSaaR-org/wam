@@ -230,15 +230,26 @@ the plate / plate pushed left, apple stays) with plausible physics — but Cosmo
 generic white manipulator instead of the G1, the same embodiment gap Wan shows. Consistent
 with the probe verdict: the priors bring physics and instruction-following; the embodiment
 must come from LoRA fine-tuning (T-16). Presentation cut: `runs/presentation/
-wam_futures_sidebyside{,_en}.mp4` (21 s, both futures side by side, rebuild via
+wam_04_futures_sidebyside{,_en}.mp4` (21 s, both futures side by side, rebuild via
 `runs/presentation/build/make_futures_video.py`). A follow-up conditioned on a
 hand-visible start frame (episode 0, frame 150 — Dex3 hand at the apple;
 `faithful_hand_visible.mp4` in both futures dirs) confirms the mechanism: both priors
 keep the visible black hand through the grasp but invent the never-seen arm behind it
 (Wan a green-white tube, Cosmos3 a bulky black-silver mechanism + rod artifact) —
 visible embodiment is preserved, unseen embodiment is hallucinated, LoRA still needed.
-Presentation cut: `runs/presentation/wam_futures_handvisible{,_en}.mp4` (18 s, rebuild
-via `runs/presentation/build/make_handvisible_video.py`).
+Presentation cut: `runs/presentation/wam_05_futures_handvisible{,_en}.mp4` (18 s, rebuild
+via `runs/presentation/build/make_handvisible_video.py`). A second follow-up swaps the
+single conditioning frame for **video context**: `Cosmos3OmniPipeline` supports
+Video2World natively (clean leading latent frames), exposed as `--gen-cond-frames` /
+"cond frames" on the Space's generate tab; Wan2.2-TI2V-5B has no such mode (image +
+optional last-image only) — a genuine capability edge for the fallback. Conditioned on
+the 9 real frames ending at frame 150 (same prompt/seed, 48 s sampling, peak 35.6 GB),
+Cosmos3's invented arm shrinks to a slim dark limb behind the correct black hand — no
+bulky rig, no rod artifact, apple lands on the plate
+(`cosmos3_futures/faithful_video_conditioned.mp4`). Pattern: more real context (frame →
+motion) means less hallucination; but the G1 arm never enters the ego view, so no
+conditioning can supply it — the LoRA (T-16) stays necessary, and Cosmos3's native
+multi-frame conditioning is worth remembering for the FR-05 closed loop.
 
 ## Next steps after a green smoke run
 
