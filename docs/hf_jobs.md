@@ -242,18 +242,19 @@ via `runs/presentation/build/make_handvisible_video.py`). A second follow-up swa
 single conditioning frame for **video context**: `Cosmos3OmniPipeline` supports
 Video2World natively (clean leading latent frames), exposed as `--gen-cond-frames` /
 "cond frames" on the Space's generate tab; Wan2.2-TI2V-5B has no such mode (image +
-optional last-image only) — a genuine capability edge for the fallback. A first try
-conditioned on the 9 frames 142–150 turned out nearly static (mean abs pixel diff
-2.5/255 over 0.3 s — the motion window matters); the kept run uses the 33 real frames
-118–150 (1.1 s of approach motion), 81 output frames = 33 real + 48 predicted (same
-prompt/seed, 80 s sampling, peak 36.0 GB). Result: the black hand stays correct through
-the grasp, no rod artifact, the apple lands on the plate — but once the never-seen arm
+optional last-image only) — a genuine capability edge for the fallback. First tries
+conditioned on 9 frames (142–150, nearly static: mean abs pixel diff 2.5/255) and 33
+frames (118–150, 1.1 s) were too short — the motion window matters; the kept run uses
+the 97 real frames 54–150 (3.2 s: the hand entering + the whole approach), 169 output
+frames = 97 real + 72 predicted (same prompt/seed, 175 s sampling, peak 36.9 GB — the
+Space's 420 s GPU cap leaves room). Result: the black hand stays correct through the
+grasp, no rod artifact, the apple lands on the plate — but once the never-seen arm
 must enter the frame, Cosmos3 still invents a white manipulator with cables
 (`cosmos3_futures/faithful_video_conditioned.mp4`). Pattern: more real context buys a
 longer faithful prediction, but the G1 arm never enters the ego view, so no
 conditioning can supply it — the LoRA (T-16) stays necessary, and Cosmos3's native
 multi-frame conditioning is worth remembering for the FR-05 closed loop. Presentation
-cut: `runs/presentation/wam_06_futures_videoconditioned{,_en}.mp4` (18 s, rebuild via
+cut: `runs/presentation/wam_06_futures_videoconditioned{,_en}.mp4` (22 s, rebuild via
 `runs/presentation/build/make_videocond_video.py`).
 
 ## Next steps after a green smoke run
