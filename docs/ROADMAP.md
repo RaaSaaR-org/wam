@@ -40,10 +40,10 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 
 ## 5. Training (M3)
 
-- `WanI2VAdapter` (`src/wam/backbones/wan_i2v.py`) loads real Wan weights via diffusers and
-  hooks the DiT residual stream; verify on a GPU with `scripts/deploy_wan_space.py` (free
-  ZeroGPU) or `scripts/launch_wan_smoke_job.py` (HF Jobs) — `docs/hf_jobs.md` — then LoRA
-  fine-tune.
+- `WanI2VAdapter` (`src/wam/backbones/wan_i2v.py`) is **verified on real Wan2.2-TI2V-5B
+  weights** (ZeroGPU, 13/13 checks, `docs/hf_jobs.md`); rerun with
+  `scripts/deploy_wan_space.py` (free) or `scripts/launch_wan_smoke_job.py` (HF Jobs).
+  Next: LoRA fine-tune — that one needs Jobs, ZeroGPU cannot hold a training run.
 - **D2** MVP set (10–30 h) → joint video/action training (`wam.training.joint`).
 - Ablation world-action vs. action-only on real data → AC-07 verdict.
 

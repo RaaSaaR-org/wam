@@ -117,6 +117,27 @@ deploy**, or the Space runs an older adapter. Two constraints shape the app:
 Quota is 40 min/day on PRO, 2× if a call requests `size="xlarge"` (96 GB). Beyond the daily
 quota it bills pre-paid credits at $1 per 10 min — the same balance Jobs needs.
 
+## Verified run (2026-07-26)
+
+`Wan2.2-TI2V-5B-Diffusers` on a ZeroGPU RTX PRO 6000 Blackwell (MIG 2g.48gb, 51 GB):
+**13/13 checks passed**.
+
+| | |
+|---|---|
+| derived geometry | 30 blocks, inner dim 3072, 48 latent ch, text dim 4096, no CLIP tower |
+| readout blocks | 15 / 22 (auto, mid+late depth) |
+| latents (5x256x448) | `[1, 48, 2, 16, 28]` |
+| features | `[1, 224, 3072]`, finite, std 0.71, bit-identical across two forwards |
+| load / VAE encode / DiT forward | 7.1 s / 0.37 s / 0.08 s |
+| peak VRAM | 24.3 GB (26.3 GB reserved) |
+
+The 12 ms/token-block forward is what matters for FR-05: the DiT pass is nowhere near the
+2 Hz policy-rate budget, so the closed loop is limited by chunk length, not the backbone.
+
+Two things this caught that stub tests could not — see the git history for both: the Wan 2.2
+VAE compresses 16x, not the 8x derived from `temperal_downsample`; and a Space rebuild silently
+reused a pip-cached `wam` wheel, so the first "fixed" deploy still ran the old adapter.
+
 ## Next steps after a green smoke run
 
 1. Record which blocks give the most action-predictive features (ablate 2-3 pairs — the same
