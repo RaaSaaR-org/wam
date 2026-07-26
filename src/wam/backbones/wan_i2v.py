@@ -77,6 +77,7 @@ class WanI2VAdapter:
         timestep: int = 0,
         max_text_tokens: int = DEFAULT_MAX_TEXT_TOKENS,
         allow_download: bool = False,
+        device_map: str | None = None,
     ) -> None:
         blocks: tuple[int, ...] | None = None
         if feature_blocks is not None:
@@ -97,6 +98,10 @@ class WanI2VAdapter:
         self.timestep = int(timestep)
         self.max_text_tokens = int(max_text_tokens)
         self.allow_download = bool(allow_download)
+        # accelerate device_map: stream shards straight to the target device instead of
+        # materializing the whole model in host RAM first. Needed wherever host RAM is
+        # smaller than the checkpoint (a 16 GB ZeroGPU Space vs. a 34 GB Wan repo).
+        self.device_map = device_map
         self._loaded = False
         self._transformer: Any = None
         self._vae: Any = None
@@ -153,6 +158,7 @@ class WanI2VAdapter:
             "vae_temporal_stride": self._vae_temporal,
             "dtype": self.dtype,
             "device": self.device,
+            "device_map": self.device_map,
             "timestep": self.timestep,
         }
 
@@ -175,16 +181,19 @@ class WanI2VAdapter:
             raise RuntimeError(f"{_WEIGHTS_MISSING_MSG} ({err})") from err
 
         torch_dtype = self._model_dtype()
-        common = {"local_files_only": not self.allow_download}
+        common: dict[str, Any] = {"local_files_only": not self.allow_download}
+        weights = dict(common)
+        if self.device_map:  # shards go straight to the device; host RAM stays flat
+            weights["device_map"] = self.device_map
         # VAE stays fp32 (diffusers guidance: better encode/decode quality).
         vae = AutoencoderKLWan.from_pretrained(
-            source, subfolder="vae", torch_dtype=torch.float32, **common
+            source, subfolder="vae", torch_dtype=torch.float32, **weights
         )
         transformer = WanTransformer3DModel.from_pretrained(
-            source, subfolder="transformer", torch_dtype=torch_dtype, **common
+            source, subfolder="transformer", torch_dtype=torch_dtype, **weights
         )
         text_encoder = UMT5EncoderModel.from_pretrained(
-            source, subfolder="text_encoder", torch_dtype=torch_dtype, **common
+            source, subfolder="text_encoder", torch_dtype=torch_dtype, **weights
         )
         tokenizer = AutoTokenizer.from_pretrained(source, subfolder="tokenizer", **common)
         image_encoder = image_processor = None
@@ -192,7 +201,7 @@ class WanI2VAdapter:
             from transformers import CLIPImageProcessor, CLIPVisionModel
 
             image_encoder = CLIPVisionModel.from_pretrained(
-                source, subfolder="image_encoder", torch_dtype=torch.float32, **common
+                source, subfolder="image_encoder", torch_dtype=torch.float32, **weights
             )
             image_processor = CLIPImageProcessor.from_pretrained(
                 source, subfolder="image_processor", **common
@@ -204,6 +213,8 @@ class WanI2VAdapter:
             tokenizer=tokenizer,
             image_encoder=image_encoder,
             image_processor=image_processor,
+            # device_map already placed every shard — a second .to() would defeat the point.
+            move_to_device=not self.device_map,
         )
 
     def attach(

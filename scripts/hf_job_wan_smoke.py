@@ -51,6 +51,10 @@ import torch
 DEFAULT_MODEL_ID = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 DEFAULT_INSTRUCTION = "pick up the red cube and place it in the bin"
 
+# Last report payload, so an in-process caller (the ZeroGPU Space in
+# deploy/wan-smoke-space/) can read the result without parsing stdout. CLI runs ignore it.
+LAST_REPORT: dict[str, Any] = {}
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
@@ -62,6 +66,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     src.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     src.add_argument("--blocks", default="", help="comma-separated readout blocks (default auto)")
     src.add_argument("--timestep", type=int, default=0)
+    src.add_argument(
+        "--device-map",
+        default=None,
+        help="accelerate device_map (e.g. 'cuda'): stream shards to the GPU instead of "
+        "materializing the model in host RAM — required where RAM < checkpoint size",
+    )
     src.add_argument(
         "--offload-text",
         action="store_true",
@@ -192,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         dtype=args.dtype,
         timestep=args.timestep,
         allow_download=args.download,
+        device_map=args.device_map,
     )
 
     t0 = time.perf_counter()
@@ -288,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(timings, indent=2), flush=True)
 
     payload = {"ok": not report.failed, "checks": report.checks, "info": report.info}
+    LAST_REPORT.clear()
+    LAST_REPORT.update(payload)
     serialized = json.dumps(payload, indent=2, default=str)
     print(f"\n===== REPORT =====\n{serialized}", flush=True)  # the log is the durable artifact
     try:

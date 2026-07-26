@@ -177,6 +177,27 @@ def test_attach_derives_geometry_from_configs():
     assert (geometry["vae_temporal_stride"], geometry["vae_spatial_stride"]) == (4, 8)
 
 
+def test_device_map_is_recorded_and_suppresses_the_second_placement():
+    """With device_map, accelerate has already placed every shard — attach must not re-move.
+
+    Loading a 34 GB repo inside a 16 GB-RAM ZeroGPU Space depends on this path
+    (deploy/wan-smoke-space/); the placement itself is exercised only on a real GPU.
+    """
+    adapter = WanI2VAdapter(dtype="float32", device_map="cuda")
+    assert adapter.describe()["device_map"] == "cuda"
+    assert WanI2VAdapter(dtype="float32").describe()["device_map"] is None
+
+    moved: list[str] = []
+
+    class _RecordingVAE(_StubVAE):
+        def to(self, device):
+            moved.append(str(device))
+            return self
+
+    adapter.attach(transformer=_StubTransformer(), vae=_RecordingVAE(), move_to_device=False)
+    assert moved == []
+
+
 def test_feature_blocks_out_of_range_for_shallow_model():
     adapter = WanI2VAdapter(feature_blocks=(30,), dtype="float32")
     with pytest.raises(ValueError, match="out of range for a 8-block DiT"):
