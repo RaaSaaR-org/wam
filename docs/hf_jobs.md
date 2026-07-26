@@ -231,7 +231,12 @@ generic white manipulator instead of the G1, the same embodiment gap Wan shows. 
 with the probe verdict: the priors bring physics and instruction-following; the embodiment
 must come from LoRA fine-tuning (T-16). Presentation cut: `runs/presentation/
 wam_futures_sidebyside{,_en}.mp4` (21 s, both futures side by side, rebuild via
-`runs/presentation/build/make_futures_video.py`).
+`runs/presentation/build/make_futures_video.py`). A follow-up conditioned on a
+hand-visible start frame (episode 0, frame 150 — Dex3 hand at the apple;
+`faithful_hand_visible.mp4` in both futures dirs) confirms the mechanism: both priors
+keep the visible black hand through the grasp but invent the never-seen arm behind it
+(Wan a green-white tube, Cosmos3 a bulky black-silver mechanism + rod artifact) —
+visible embodiment is preserved, unseen embodiment is hallucinated, LoRA still needed.
 
 ## Next steps after a green smoke run
 
