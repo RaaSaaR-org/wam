@@ -237,6 +237,8 @@ hand-visible start frame (episode 0, frame 150 — Dex3 hand at the apple;
 keep the visible black hand through the grasp but invent the never-seen arm behind it
 (Wan a green-white tube, Cosmos3 a bulky black-silver mechanism + rod artifact) —
 visible embodiment is preserved, unseen embodiment is hallucinated, LoRA still needed.
+Presentation cut: `runs/presentation/wam_futures_handvisible{,_en}.mp4` (18 s, rebuild
+via `runs/presentation/build/make_handvisible_video.py`).
 
 ## Next steps after a green smoke run
 
