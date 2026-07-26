@@ -229,7 +229,9 @@ mirrored to `huhn511/wam-presentation`. Both clips follow their instruction (app
 the plate / plate pushed left, apple stays) with plausible physics — but Cosmos3 invents a
 generic white manipulator instead of the G1, the same embodiment gap Wan shows. Consistent
 with the probe verdict: the priors bring physics and instruction-following; the embodiment
-must come from LoRA fine-tuning (T-16).
+must come from LoRA fine-tuning (T-16). Presentation cut: `runs/presentation/
+wam_futures_sidebyside{,_en}.mp4` (21 s, both futures side by side, rebuild via
+`runs/presentation/build/make_futures_video.py`).
 
 ## Next steps after a green smoke run
 
