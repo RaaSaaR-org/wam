@@ -1,6 +1,6 @@
 # Roadmap to real usage
 
-Status 2026-07-26: M0–M4 code-complete and verified on mock/sim (464 tests, acceptance report
+Status 2026-07-26: M0–M4 code-complete and verified on mock/sim (465 tests, acceptance report
 in `runs/acceptance/`). Everything below is decisions, hardware, and real data — in order.
 Details per task: `TASKS.md`. PRD §16 (internal document, outside this repository).
 
@@ -12,7 +12,7 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 | OD-03 | Cameras: which, resolution, framerate | perception, data recording |
 | OD-07 | Teleop system: leader-follower vs. VR | data recording |
 | OD-04 | *Answered:* Wan2.1/2.2 are Apache 2.0; start on `Wan2.2-TI2V-5B` (`docs/hf_jobs.md`) | M3 training |
-| OD-05 | Training GPU + budget — **HF Jobs** is the no-commitment option ($0.80–5/h) | M3 training |
+| OD-05 | Training GPU + budget — **ZeroGPU** is free on PRO for the T-15 check, **HF Jobs** ($0.80–5/h, pre-paid credits) for T-16 training | M3 training |
 | OD-02 | *De-facto done:* joint-delta primary, EE-delta supported in schema/safety | — |
 
 ## 2. Robot bring-up
@@ -41,8 +41,9 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 ## 5. Training (M3)
 
 - `WanI2VAdapter` (`src/wam/backbones/wan_i2v.py`) loads real Wan weights via diffusers and
-  hooks the DiT residual stream; verify on a GPU with
-  `python scripts/launch_wan_smoke_job.py` (HF Jobs — `docs/hf_jobs.md`), then LoRA fine-tune.
+  hooks the DiT residual stream; verify on a GPU with `scripts/deploy_wan_space.py` (free
+  ZeroGPU) or `scripts/launch_wan_smoke_job.py` (HF Jobs) — `docs/hf_jobs.md` — then LoRA
+  fine-tune.
 - **D2** MVP set (10–30 h) → joint video/action training (`wam.training.joint`).
 - Ablation world-action vs. action-only on real data → AC-07 verdict.
 

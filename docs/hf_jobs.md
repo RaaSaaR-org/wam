@@ -1,8 +1,20 @@
-# HF Jobs runbook — GPU for the Wan backbone (OD-04/OD-05)
+# Rented GPU for the Wan backbone (OD-04/OD-05)
 
-Pay-per-second GPU on Hugging Face infrastructure: our own Docker/UV script, the Wan weights
-mounted straight from the Hub, no cluster to manage. This is how M3 work (T-15/T-16) gets a GPU
-before there is a training box.
+Two ways to get a GPU on Hugging Face infrastructure before there is a training box. Both run
+the same checks — `scripts/hf_job_wan_smoke.py` is the single implementation.
+
+| | HF Jobs | ZeroGPU Space |
+|---|---|---|
+| cost | $0.80–5.00/h, per second | **free** with PRO (40 min/day) |
+| needs | pre-paid credit balance | PRO subscription |
+| hardware | any flavor up to 8x H200 | RTX Pro 6000, 48 GB (`large`) |
+| session | up to days | one `@spaces.GPU` call |
+| good for | T-16 LoRA training, long runs | T-15 smoke test |
+| launch | `scripts/launch_wan_smoke_job.py` | `scripts/deploy_wan_space.py` |
+
+**PRO alone does not fund Jobs.** The $2/month included with PRO is Inference Providers
+credit; Jobs bills per minute against a separate pre-paid balance and returns
+`402 Payment Required` when it is empty. ZeroGPU is the one that is genuinely included.
 
 ## Why not Inference Providers
 
@@ -81,6 +93,27 @@ Height and width must be multiples of `vae_spatial_stride * patch_size` — 32 p
 (16x2), 16 px for the 14B (8x2). Token count is
 `S = F' * (H/s/p) * (W/s/p)` with `F' = 1 + (F-1)//temporal_stride`; the adapter exposes it as
 `expected_token_count()` and the smoke test asserts against it.
+
+## ZeroGPU Space (free path)
+
+```bash
+python scripts/deploy_wan_space.py --dry-run
+python scripts/deploy_wan_space.py            # creates a private <user>/wam-wan-smoke
+```
+
+Source in `deploy/wan-smoke-space/`; `scripts/hf_job_wan_smoke.py` is uploaded verbatim as the
+Space's `smoke.py`, and `wam` is installed from the public GitHub repo — so **push before you
+deploy**, or the Space runs an older adapter. Two constraints shape the app:
+
+- A Space has ~16 GB host RAM against a ~34 GB checkpoint (the transformer ships fp32), so the
+  model loads with `--device-map cuda` and accelerate streams shards straight to the GPU.
+  Without it, `.to("cuda")` after a full CPU materialization OOMs the container.
+- ZeroGPU only exposes a real GPU inside `@spaces.GPU` and reclaims it on return, so load and
+  forward pass share one call (`GPU_DURATION`, default 240 s). The weight *download* happens
+  outside the decorator and costs no quota.
+
+Quota is 40 min/day on PRO, 2× if a call requests `size="xlarge"` (96 GB). Beyond the daily
+quota it bills pre-paid credits at $1 per 10 min — the same balance Jobs needs.
 
 ## Next steps after a green smoke run
 

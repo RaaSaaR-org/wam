@@ -2,7 +2,7 @@
 
 Derived from PRD roadmap (M0–M4 = MVP; M5/M6 post-MVP). Order is strict: don't start a milestone before the previous exit criterion is met.
 
-> **Build status (2026-07-26):** M0–M4 code-complete and tested (464 tests green, mock/sim only).
+> **Build status (2026-07-26):** M0–M4 code-complete and tested (465 tests green, mock/sim only).
 > Everything marked *hw* still needs real hardware, real teleop data (D1/D2), or an open decision.
 > Ordered path to real usage: `docs/ROADMAP.md`.
 
@@ -37,7 +37,7 @@ Derived from PRD roadmap (M0–M4 = MVP; M5/M6 post-MVP). Order is strict: don't
 
 ## M3 · World-Action Prototype (6–10 weeks)
 
-- [x] **T-15** Backbone adapters behind one interface: `tiny` (functional), `wan_i2v` (real diffusers integration: VAE + umT5 + DiT residual-stream hooks, Wan2.1-I2V-14B and Wan2.2-TI2V-5B layouts), `flux3` stub (OD-06) — *gpu: verified against stubs offline; run `scripts/launch_wan_smoke_job.py` (HF Jobs, `docs/hf_jobs.md`) for the real-weights check*
+- [x] **T-15** Backbone adapters behind one interface: `tiny` (functional), `wan_i2v` (real diffusers integration: VAE + umT5 + DiT residual-stream hooks, Wan2.1-I2V-14B and Wan2.2-TI2V-5B layouts), `flux3` stub (OD-06) — *gpu: verified against stubs offline; real-weights check runs on a free ZeroGPU Space (`scripts/deploy_wan_space.py`) or HF Jobs (`scripts/launch_wan_smoke_job.py`) — `docs/hf_jobs.md`*
 - [x] **T-16** Action encoder + joint video/action flow-matching training; frozen parts registry, selective blocks (FR-03, §10.3) — *trained only on synthetic data so far*
 - [x] **T-17** Loss monitoring (video/action/alignment/smoothness/limit penalty) + gradient checks, divergence detection (R-07)
 - [x] **T-18** Ablation harness: world-action vs. action-only (AC-07) — *hw: verdict needs real D2 data*

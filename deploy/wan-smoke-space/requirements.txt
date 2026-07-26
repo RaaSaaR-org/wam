@@ -1,0 +1,16 @@
+# torch pin: ZeroGPU supports 2.8.0 .. 2.11.0 (docs/hub/spaces-zerogpu).
+torch==2.8.0
+spaces
+gradio>=5
+diffusers>=0.35.0
+transformers>=4.51.0
+accelerate
+safetensors
+sentencepiece
+protobuf
+ftfy
+numpy
+pydantic>=2
+pyyaml
+# The adapter under test, straight from the public repo — no vendored copy to drift.
+wam @ git+https://github.com/RaaSaaR-org/wam@main
