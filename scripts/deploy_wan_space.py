@@ -15,6 +15,8 @@ Requires `pip install 'huggingface_hub>=0.34'` and `hf auth login`.
 from __future__ import annotations
 
 import argparse
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,6 +42,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def pinned_requirements() -> tuple[str, str]:
+    """requirements.txt with `wam @ git+...@main` repointed at the exact HEAD commit.
+
+    A branch ref is not part of pip's cache key, so a Space rebuild happily reuses the wheel
+    it built from an older `main` — a fix can look deployed while the Space still runs the
+    previous adapter. The SHA changes the key, and it records exactly which commit was
+    tested (AC-04).
+    """
+    sha = git("rev-parse", "HEAD")
+    if not git("branch", "-r", "--contains", sha):
+        raise SystemExit(f"commit {sha[:8]} is not on any remote branch — push before deploying")
+    text = (SPACE_DIR / "requirements.txt").read_text()
+    pinned, count = re.subn(r"(wam @ git\+\S+?)@\S+", rf"\1@{sha}", text)
+    if count != 1:
+        raise SystemExit(f"expected exactly one pinnable wam requirement, found {count}")
+    return pinned, sha
+
+
 def payload() -> list[tuple[Path, str]]:
     """(local file, path in the Space). The smoke script is renamed, never edited."""
     files = [(path, path.name) for path in sorted(SPACE_DIR.iterdir()) if path.is_file()]
@@ -54,7 +80,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"missing source files: {missing}", file=sys.stderr)
         return 2
 
+    requirements, sha = pinned_requirements()
     print(f"hardware={args.hardware}  visibility={'public' if args.public else 'private'}")
+    print(f"wam pinned to {sha}")
     for src, dst in files:
         print(f"  {src.relative_to(REPO_ROOT)} -> {dst}  ({src.stat().st_size / 1024:.1f} KB)")
 
@@ -91,9 +119,13 @@ def main(argv: list[str] | None = None) -> int:
         space_id,
         repo_type="space",
         operations=[
-            CommitOperationAdd(path_in_repo=dst, path_or_fileobj=str(src)) for src, dst in files
+            CommitOperationAdd(
+                path_in_repo=dst,
+                path_or_fileobj=(requirements.encode() if dst == "requirements.txt" else str(src)),
+            )
+            for src, dst in files
         ],
-        commit_message="deploy WAM Wan backbone smoke test",
+        commit_message=f"deploy WAM Wan backbone smoke test @ {sha[:8]}",
     )
     url = f"https://huggingface.co/spaces/{space_id}"
     print(f"\nspace: {url}")
