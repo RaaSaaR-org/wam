@@ -1,0 +1,54 @@
+# WAM calibration snapshot — EXAMPLE (T-10). Loads via wam.data.CalibrationSet.from_yaml.
+#
+# One file per calibration session; never edit in place — write a new dated file and
+# reference its CalibrationSet.config_hash() in EpisodeWriter extra + run logs (FR-10).
+# Camera names must match the episode camera names; joint names must match
+# CanonicalSpaceSpec.joint_names of the robot config (here: configs/robot/g1.yaml).
+# Units: meters, radians; quaternions w,x,y,z. Values below are PLACEHOLDERS.
+wam_config_version: "0.1.0"
+calibration_version: "0.1.0"
+
+robot: g1
+calibrated_at: "2026-07-26"
+method: "charuco+hand-eye (example placeholder, not a real calibration)"
+
+intrinsics:
+  front:
+    width: 1280
+    height: 720
+    fx: 910.5
+    fy: 909.8
+    cx: 640.2
+    cy: 358.7
+    distortion_model: radtan
+    distortion: [0.012, -0.031, 0.0002, -0.0001, 0.0]
+  wrist:
+    width: 640
+    height: 480
+    fx: 615.3
+    fy: 615.9
+    cx: 320.4
+    cy: 239.1
+    distortion_model: none
+    distortion: []
+
+extrinsics:
+  front:
+    parent_frame: base
+    translation_m: [0.45, 0.0, 1.20]
+    rotation_wxyz: [0.9238795, 0.0, 0.3826834, 0.0] # 45 deg pitch down
+  wrist:
+    parent_frame: right_wrist_yaw
+    translation_m: [0.03, 0.0, 0.05]
+    rotation_wxyz: [1.0, 0.0, 0.0, 0.0]
+
+# Kinematic zero-offsets (added to raw joint readings by the robot adapter).
+# Keys must match CanonicalSpaceSpec.joint_names of configs/robot/g1.yaml (== G1_SPEC).
+joint_offsets_rad:
+  right_shoulder_pitch: 0.0021
+  right_shoulder_roll: -0.0008
+  right_elbow: 0.0044
+
+extra:
+  reprojection_error_px: 0.42
+  board: "charuco 7x5, 30 mm squares"

@@ -1,0 +1,80 @@
+{
+  "cameras": {
+    "front": {
+      "codec": "libx264",
+      "file": "front.mp4",
+      "fps": 5.0,
+      "height": 64,
+      "num_frames": 25,
+      "width": 64
+    },
+    "wrist": {
+      "codec": "libx264",
+      "file": "wrist.mp4",
+      "fps": 5.0,
+      "height": 64,
+      "num_frames": 25,
+      "width": 64
+    }
+  },
+  "checksums": {
+    "actions.parquet": "859c1ef31caadff5a87ea1a8f5e707631e851ffe87218113291390b099e23530",
+    "front.mp4": "2da71262948d28f203e5ce22df61cc0fd7f18f6faaaefee2de19f86eac47f7e1",
+    "front_timestamps.parquet": "ddf5aeb5208b213f0e73f480e7c3e515970c9108fe826b2e83034a200103e4f9",
+    "states.parquet": "daa9c4a2e7bcec0a8883bb09d9ffe0f04038a6383fd71a4bbc8228e8b3103b6a",
+    "wrist.mp4": "4527d106fdea5c536fe0c035b63c99c9d5f901796b990639104022920059e22e",
+    "wrist_timestamps.parquet": "98493825b8662ccb38e384f285fc0bed2242afd12182840b0289a61eaacbd6a5"
+  },
+  "episode_id": "d1-0000",
+  "extra": {
+    "d_phase": "D1",
+    "policy": {
+      "amplitude_rad": 0.14554425309821814,
+      "dt_s": 0.05,
+      "gripper_period_s": 4.081947047872389,
+      "name": "DummyPolicy",
+      "period_s": 1.9777013992694186,
+      "steps": 8
+    },
+    "seed": 0
+  },
+  "format_version": "0.1.0",
+  "instruction": "Greife die rote Tasse.",
+  "max_sync_error_ns": 2000000,
+  "normalization": null,
+  "schema_version": "0.1.0",
+  "spec": {
+    "ee_frame": "base",
+    "ee_rotation_convention": "quat_wxyz",
+    "gripper_dims": 1,
+    "joint_names": [
+      "joint_0",
+      "joint_1",
+      "joint_2",
+      "joint_3",
+      "joint_4",
+      "joint_5"
+    ],
+    "schema_version": "0.1.0"
+  },
+  "t0_ns": 0,
+  "t1_ns": 4802000000,
+  "tables": {
+    "actions": {
+      "file": "actions.parquet",
+      "num_rows": 200
+    },
+    "front_timestamps": {
+      "file": "front_timestamps.parquet",
+      "num_rows": 25
+    },
+    "states": {
+      "file": "states.parquet",
+      "num_rows": 25
+    },
+    "wrist_timestamps": {
+      "file": "wrist_timestamps.parquet",
+      "num_rows": 25
+    }
+  }
+}

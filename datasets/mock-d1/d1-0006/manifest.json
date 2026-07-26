@@ -1,0 +1,80 @@
+{
+  "cameras": {
+    "front": {
+      "codec": "libx264",
+      "file": "front.mp4",
+      "fps": 5.0,
+      "height": 64,
+      "num_frames": 25,
+      "width": 64
+    },
+    "wrist": {
+      "codec": "libx264",
+      "file": "wrist.mp4",
+      "fps": 5.0,
+      "height": 64,
+      "num_frames": 25,
+      "width": 64
+    }
+  },
+  "checksums": {
+    "actions.parquet": "0d6bc83b03065a4f34e9f81d113916c522147ba2727bd825c71529eca82218ba",
+    "front.mp4": "e01416e4d13c4f5a15ec4f6931dc838c9793b2ecde2b797fa14d5b2744f16cce",
+    "front_timestamps.parquet": "ddf5aeb5208b213f0e73f480e7c3e515970c9108fe826b2e83034a200103e4f9",
+    "states.parquet": "eefd6d45af3196b52ac5f952ae069fcc5508bc8e8bd0b6c0e3c5999fe9c2bad8",
+    "wrist.mp4": "fa0de06c3a164de45f1158997fe70dd7b91e5f334faa8505e0fa143b0adbfc19",
+    "wrist_timestamps.parquet": "98493825b8662ccb38e384f285fc0bed2242afd12182840b0289a61eaacbd6a5"
+  },
+  "episode_id": "d1-0006",
+  "extra": {
+    "d_phase": "D1",
+    "policy": {
+      "amplitude_rad": 0.13072465272079148,
+      "dt_s": 0.05,
+      "gripper_period_s": 4.738134479590757,
+      "name": "DummyPolicy",
+      "period_s": 2.080579217738674,
+      "steps": 8
+    },
+    "seed": 6
+  },
+  "format_version": "0.1.0",
+  "instruction": "Greife den blauen W\u00fcrfel.",
+  "max_sync_error_ns": 2000000,
+  "normalization": null,
+  "schema_version": "0.1.0",
+  "spec": {
+    "ee_frame": "base",
+    "ee_rotation_convention": "quat_wxyz",
+    "gripper_dims": 1,
+    "joint_names": [
+      "joint_0",
+      "joint_1",
+      "joint_2",
+      "joint_3",
+      "joint_4",
+      "joint_5"
+    ],
+    "schema_version": "0.1.0"
+  },
+  "t0_ns": 0,
+  "t1_ns": 4802000000,
+  "tables": {
+    "actions": {
+      "file": "actions.parquet",
+      "num_rows": 200
+    },
+    "front_timestamps": {
+      "file": "front_timestamps.parquet",
+      "num_rows": 25
+    },
+    "states": {
+      "file": "states.parquet",
+      "num_rows": 25
+    },
+    "wrist_timestamps": {
+      "file": "wrist_timestamps.parquet",
+      "num_rows": 25
+    }
+  }
+}

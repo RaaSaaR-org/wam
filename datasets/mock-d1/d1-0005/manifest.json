@@ -1,0 +1,80 @@
+{
+  "cameras": {
+    "front": {
+      "codec": "libx264",
+      "file": "front.mp4",
+      "fps": 5.0,
+      "height": 64,
+      "num_frames": 25,
+      "width": 64
+    },
+    "wrist": {
+      "codec": "libx264",
+      "file": "wrist.mp4",
+      "fps": 5.0,
+      "height": 64,
+      "num_frames": 25,
+      "width": 64
+    }
+  },
+  "checksums": {
+    "actions.parquet": "d527aa65f2318eccddec4bc9e4fbd5f1754bca54c7cc6363d7063bbf5ba7c71c",
+    "front.mp4": "50199005cc396d4ee7123eb2abc527a0e2c902f0bca448db3c5ffd033da36c8a",
+    "front_timestamps.parquet": "ddf5aeb5208b213f0e73f480e7c3e515970c9108fe826b2e83034a200103e4f9",
+    "states.parquet": "01ffa788799172ec0c5b16f443ff4205e5ff59e9488b2a252d00d8a74072dac1",
+    "wrist.mp4": "d299d86519ede457cdfe424423b5bd0dd01e0517ed100e8b9d9c33a59b603c59",
+    "wrist_timestamps.parquet": "98493825b8662ccb38e384f285fc0bed2242afd12182840b0289a61eaacbd6a5"
+  },
+  "episode_id": "d1-0005",
+  "extra": {
+    "d_phase": "D1",
+    "policy": {
+      "amplitude_rad": 0.17075043856180702,
+      "dt_s": 0.05,
+      "gripper_period_s": 5.030651122084284,
+      "name": "DummyPolicy",
+      "period_s": 2.7311171056310912,
+      "steps": 8
+    },
+    "seed": 5
+  },
+  "format_version": "0.1.0",
+  "instruction": "Stelle die Tasse auf die Markierung.",
+  "max_sync_error_ns": 2000000,
+  "normalization": null,
+  "schema_version": "0.1.0",
+  "spec": {
+    "ee_frame": "base",
+    "ee_rotation_convention": "quat_wxyz",
+    "gripper_dims": 1,
+    "joint_names": [
+      "joint_0",
+      "joint_1",
+      "joint_2",
+      "joint_3",
+      "joint_4",
+      "joint_5"
+    ],
+    "schema_version": "0.1.0"
+  },
+  "t0_ns": 0,
+  "t1_ns": 4802000000,
+  "tables": {
+    "actions": {
+      "file": "actions.parquet",
+      "num_rows": 200
+    },
+    "front_timestamps": {
+      "file": "front_timestamps.parquet",
+      "num_rows": 25
+    },
+    "states": {
+      "file": "states.parquet",
+      "num_rows": 25
+    },
+    "wrist_timestamps": {
+      "file": "wrist_timestamps.parquet",
+      "num_rows": 25
+    }
+  }
+}
