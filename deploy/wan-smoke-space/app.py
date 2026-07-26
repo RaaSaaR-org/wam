@@ -85,7 +85,7 @@ def run_on_gpu(source: str, argv: list[str]) -> tuple[str, dict[str, Any], str]:
     return buffer.getvalue(), report, gpu
 
 
-def run(frames: int, height: int, width: int, blocks: str, instruction: str):
+def run(frames: int, height: int, width: int, blocks: str, instruction: str, ablate: bool):
     """Download on CPU (free), then hand off to the GPU. Yields progress into the UI."""
     log: list[str] = [f"host: {json.dumps(host_info())}", f"model: {MODEL_ID}"]
     yield "\n".join(log), None
@@ -111,6 +111,8 @@ def run(frames: int, height: int, width: int, blocks: str, instruction: str):
     ]  # fmt: skip
     if blocks.strip():
         argv += ["--blocks", blocks.strip()]
+    if ablate:
+        argv += ["--ablate"]
 
     try:
         output, report, gpu = run_on_gpu(source, argv)
@@ -144,10 +146,15 @@ First run downloads ~34 GB before the GPU is requested — expect several minute
         width = gr.Number(value=448, label="width", precision=0)
     blocks = gr.Textbox(value="", label="readout blocks (blank = auto, mid/late depth)")
     instruction = gr.Textbox(value=DEFAULT_INSTRUCTION, label="instruction")
+    ablate = gr.Checkbox(
+        value=False,
+        label="ablate readout blocks (probe every DiT block for motion/instruction/state "
+        "sensitivity — 4 extra forwards, same load)",
+    )
     button = gr.Button("Run smoke test", variant="primary")
     log = gr.Textbox(label="log", lines=28, max_lines=28, show_copy_button=True)
     report = gr.JSON(label="report")
-    button.click(run, [frames, height, width, blocks, instruction], [log, report])
+    button.click(run, [frames, height, width, blocks, instruction, ablate], [log, report])
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent))

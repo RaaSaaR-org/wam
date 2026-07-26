@@ -424,9 +424,27 @@ class WanI2VAdapter:
         (the protocol signature is fixed — FR-09). Gradients follow the caller's autograd
         context; wrap in ``torch.no_grad()`` for pure inference.
         """
+        import torch
+
+        per_block = self.features_by_block(video_ctx, text_ctx, state_ctx)
+        return torch.stack([per_block[i] for i in self.feature_blocks], dim=0).mean(dim=0)
+
+    def features_by_block(
+        self, video_ctx: Any, text_ctx: Any, state_ctx: Any, blocks: tuple[int, ...] | None = None
+    ) -> dict[int, Any]:
+        """One DiT forward hooked on ``blocks`` (default ``feature_blocks``) -> {index: [B, S, D]}.
+
+        The per-block variant exists for readout ablations — which depth carries the most
+        conditioning signal; :meth:`features` is the protocol method and averages its blocks.
+        """
         self._require_loaded()
         import torch
 
+        selected = tuple(int(b) for b in (self.feature_blocks if blocks is None else blocks))
+        if not selected or any(b < 0 or b >= self._num_layers for b in selected):
+            raise ValueError(
+                f"blocks must be non-empty indices in [0, {self._num_layers}), got {selected!r}"
+            )
         latents = video_ctx["latents"] if isinstance(video_ctx, dict) else video_ctx
         image_embeds = video_ctx.get("image_embeds") if isinstance(video_ctx, dict) else None
         hidden_states = self._build_hidden_states(latents)
@@ -446,9 +464,11 @@ class WanI2VAdapter:
 
         captured: dict[int, Any] = {}
         handles = []
-        blocks = self._transformer.blocks
-        for index in self.feature_blocks:
-            handles.append(blocks[index].register_forward_hook(self._make_hook(captured, index)))
+        transformer_blocks = self._transformer.blocks
+        for index in set(selected):
+            handles.append(
+                transformer_blocks[index].register_forward_hook(self._make_hook(captured, index))
+            )
         try:
             self._transformer(
                 hidden_states=hidden_states,
@@ -461,16 +481,16 @@ class WanI2VAdapter:
             for handle in handles:
                 handle.remove()
 
-        missing = [i for i in self.feature_blocks if i not in captured]
+        missing = [i for i in selected if i not in captured]
         if missing:
             raise RuntimeError(f"no activation captured for blocks {missing}")
-        stacked = torch.stack([captured[i] for i in self.feature_blocks], dim=0)
-        if stacked.shape[-1] != self._feature_dim:
-            raise RuntimeError(
-                f"hooked activations have last dim {stacked.shape[-1]}, expected "
-                f"{self._feature_dim} — block output is not the residual stream"
-            )
-        return stacked.mean(dim=0)
+        for index, activation in captured.items():
+            if activation.shape[-1] != self._feature_dim:
+                raise RuntimeError(
+                    f"block {index} activation has last dim {activation.shape[-1]}, expected "
+                    f"{self._feature_dim} — block output is not the residual stream"
+                )
+        return captured
 
     @staticmethod
     def _make_hook(sink: dict[int, Any], index: int) -> Any:

@@ -90,6 +90,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     out.add_argument("--out", default="wan_smoke_report.json")
     out.add_argument("--action-steps", type=int, default=16)
     out.add_argument("--target-dim", type=int, default=7, help="canonical action target dim")
+    out.add_argument(
+        "--ablate",
+        action="store_true",
+        help="after the checks, probe EVERY DiT block for motion/instruction/state "
+        "sensitivity (4 extra forwards, one load) and rank readout candidates",
+    )
     return p.parse_args(argv)
 
 
@@ -145,33 +151,138 @@ def load_frames(args: argparse.Namespace, report: Report) -> np.ndarray:
     return resized[None]  # [1, F, H, W, 3]
 
 
+def synthetic_state(fill_q: float = 0.0, fill_dq: float = 0.0) -> Any:
+    """A canonical RobotState with constant joint values — the smoke/ablation probe input."""
+    from wam.interfaces.schema import IMUState, RobotState, ValidityMask
+
+    num_joints = 7
+    return RobotState(
+        timestamp_ns=0,
+        q=np.full(num_joints, fill_q, dtype=np.float32),
+        dq=np.full(num_joints, fill_dq, dtype=np.float32),
+        imu=IMUState(
+            orientation_wxyz=np.array([1, 0, 0, 0], dtype=np.float32),
+            angular_velocity=np.zeros(3, dtype=np.float32),
+            linear_acceleration=np.zeros(3, dtype=np.float32),
+        ),
+        gripper_state=np.zeros(1, dtype=np.float32),
+        validity=ValidityMask(),
+    )
+
+
 def state_embedding(args: argparse.Namespace, report: Report) -> torch.Tensor:
     """Real StateMLP embedding from the episode's first state, else from a synthetic state."""
     from wam.encoders.state_mlp import StateMLP, StateMLPConfig
-    from wam.interfaces.schema import IMUState, RobotState, ValidityMask
 
     if args.episode:
         from wam.data.episode import EpisodeReader
 
         state = EpisodeReader(args.episode).read_states()[0]
     else:
-        num_joints = 7
-        state = RobotState(
-            timestamp_ns=0,
-            q=np.zeros(num_joints, dtype=np.float32),
-            dq=np.zeros(num_joints, dtype=np.float32),
-            imu=IMUState(
-                orientation_wxyz=np.array([1, 0, 0, 0], dtype=np.float32),
-                angular_velocity=np.zeros(3, dtype=np.float32),
-                linear_acceleration=np.zeros(3, dtype=np.float32),
-            ),
-            gripper_state=np.zeros(1, dtype=np.float32),
-            validity=ValidityMask(),
-        )
+        state = synthetic_state()
     torch.manual_seed(0)
     encoder = StateMLP(StateMLPConfig(embedding_dim=32, num_joints=len(state.q)))
     report.info["state_dim"] = len(state.q)
     return encoder.encode(state)
+
+
+ABLATE_INSTRUCTION = "push the blue block slowly to the left edge of the table"
+
+
+def relative_distance(a: torch.Tensor, b: torch.Tensor) -> float:
+    """||a - b|| / max(||a||, ||b||) — scale-free across blocks with different norms."""
+    return float((a - b).norm()) / max(float(a.norm()), float(b.norm()), 1e-6)
+
+
+def ablation_ranking(
+    base: dict[int, torch.Tensor], probes: dict[str, dict[int, torch.Tensor]]
+) -> tuple[dict[int, dict[str, float]], dict[int, float]]:
+    """Per-block probe distances + a combined score (each probe min-max normalized, averaged)."""
+    blocks = sorted(base)
+    per_block = {
+        b: {name: relative_distance(base[b], variant[b]) for name, variant in probes.items()}
+        for b in blocks
+    }
+    scores = dict.fromkeys(blocks, 0.0)
+    for name in probes:
+        column = {b: per_block[b][name] for b in blocks}
+        lo, hi = min(column.values()), max(column.values())
+        span = (hi - lo) or 1.0
+        for b in blocks:
+            scores[b] += (column[b] - lo) / span / len(probes)
+    return per_block, scores
+
+
+def run_ablation(adapter: Any, args: argparse.Namespace, report: Report) -> None:
+    """Label-free readout ablation (docs/hf_jobs.md "next steps" #1).
+
+    Which residual-stream depth reacts most to the three inputs the action head must read —
+    scene motion, the instruction, the robot state? Per block: relative distance between a
+    base forward and one with exactly that input changed. One load, four forwards. This is a
+    proxy ranking; the final verdict needs linear probes on real D2 action labels.
+    """
+    from wam.encoders.state_mlp import StateMLP, StateMLPConfig
+
+    started = time.perf_counter()
+    geometry = adapter.describe()
+    blocks = tuple(range(geometry["num_layers"]))
+
+    frames = synthetic_frames(args.frames, args.height, args.width)[None]
+    video_base = adapter.condition_video(frames)
+    video_motion = adapter.condition_video(frames[:, ::-1])  # same frames, reversed trajectory
+    text_base = adapter.condition_text(args.instruction)
+    text_alt = adapter.condition_text(ABLATE_INSTRUCTION)
+    torch.manual_seed(0)
+    encoder = StateMLP(StateMLPConfig(embedding_dim=32, num_joints=7))
+    state_base = adapter.condition_state(encoder.encode(synthetic_state()))
+    state_alt = adapter.condition_state(encoder.encode(synthetic_state(fill_q=0.5, fill_dq=0.3)))
+
+    def forward(video_ctx: Any, text_ctx: Any, state_ctx: Any) -> dict[int, torch.Tensor]:
+        with torch.no_grad():
+            captured = adapter.features_by_block(video_ctx, text_ctx, state_ctx, blocks=blocks)
+        return {b: t.float().cpu() for b, t in captured.items()}
+
+    base = forward(video_base, text_base, state_base)
+    probes = {
+        "motion": forward(video_motion, text_base, state_base),
+        "instruction": forward(video_base, text_alt, state_base),
+        "state": forward(video_base, text_base, state_alt),
+    }
+    per_block, scores = ablation_ranking(base, probes)
+
+    report.check("ablation.captured_all_blocks", len(base) == len(blocks), f"{len(base)} blocks")
+    values = [row[name] for row in per_block.values() for name in probes]
+    report.check("ablation.finite", bool(np.isfinite(values).all()), f"{len(values)} distances")
+    for name in probes:  # a probe nobody reacts to means that conditioning path is dead
+        peak = max(per_block[b][name] for b in blocks)
+        report.check(f"ablation.{name}_moves_features", peak > 1e-6, f"peak distance {peak:.4f}")
+
+    ranked = sorted(blocks, key=lambda b: scores[b], reverse=True)
+    suggested = sorted(ranked[:2])
+    default = tuple(geometry["feature_blocks"])
+    print("\nblock  motion  instruct  state   score")
+    for b in blocks:
+        row = per_block[b]
+        marker = "  <- suggested" if b in suggested else ("  <- default" if b in default else "")
+        print(
+            f"{b:5d}  {row['motion']:.4f}  {row['instruction']:.4f}  "
+            f"{row['state']:.4f}  {scores[b]:.3f}{marker}",
+            flush=True,
+        )
+    report.info["ablation"] = {
+        "metric": "relative L2 distance to the base forward, per residual-stream block",
+        "probes": {
+            "motion": "frame order reversed",
+            "instruction": f"{args.instruction!r} -> {ABLATE_INSTRUCTION!r}",
+            "state": "StateMLP embedding of q=0.5/dq=0.3 instead of zeros",
+        },
+        "per_block": {str(b): per_block[b] for b in blocks},
+        "scores": {str(b): round(scores[b], 4) for b in blocks},
+        "suggested_blocks": list(suggested),
+        "default_blocks": list(default),
+        "default_scores": {str(b): round(scores[b], 4) for b in default},
+        "wall_s": round(time.perf_counter() - started, 2),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -297,6 +408,9 @@ def main(argv: list[str] | None = None) -> int:
         timings["reserved_vram_gb"] = torch.cuda.max_memory_reserved() / 1e9
     report.info["timings"] = timings
     print(json.dumps(timings, indent=2), flush=True)
+
+    if args.ablate and not report.failed:
+        run_ablation(adapter, args, report)
 
     payload = {"ok": not report.failed, "checks": report.checks, "info": report.info}
     LAST_REPORT.clear()

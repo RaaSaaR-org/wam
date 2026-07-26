@@ -8,6 +8,10 @@ The real weights are validated on GPU by ``scripts/hf_job_wan_smoke.py`` (see do
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -358,6 +362,82 @@ def test_offload_moves_components_and_conditioning_still_works():
     assert tuple(adapter.condition_text("task").shape) == (1, 8, TEXT_DIM)
     with pytest.raises(ValueError, match="unknown component"):
         adapter.offload("nope")
+
+
+def test_features_by_block_covers_all_blocks_and_features_averages_them():
+    adapter = make_adapter()
+    ctx = adapter.condition_video(make_video())
+    text = adapter.condition_text("task")
+    per_block = adapter.features_by_block(ctx, text, None, blocks=tuple(range(NUM_LAYERS)))
+    assert sorted(per_block) == list(range(NUM_LAYERS))
+    tokens = adapter.expected_token_count(5, 32, 48)
+    assert all(tuple(t.shape) == (1, tokens, INNER_DIM) for t in per_block.values())
+    averaged = torch.stack([per_block[i] for i in adapter.feature_blocks], dim=0).mean(dim=0)
+    assert torch.allclose(adapter.features(ctx, text, None), averaged)
+    with pytest.raises(ValueError, match="blocks must be non-empty"):
+        adapter.features_by_block(ctx, text, None, blocks=(NUM_LAYERS,))
+    hooks = [len(b._forward_hooks) for b in adapter._transformer.blocks]
+    assert hooks == [0] * NUM_LAYERS  # no leaked handles, also not on the error path
+
+
+# ---- readout ablation (scripts/hf_job_wan_smoke.py --ablate) -------------------------------
+
+
+def _load_smoke_cli():
+    spec = importlib.util.spec_from_file_location(
+        "wan_smoke_cli",
+        Path(__file__).resolve().parent.parent / "scripts" / "hf_job_wan_smoke.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class _ContentTokenizer(_StubTokenizer):
+    """The base stub ignores prompt text; the ablation's instruction probe needs it not to."""
+
+    def __call__(self, prompts, **kwargs):
+        batch = super().__call__(prompts, **kwargs)
+        offset = sum(map(ord, "".join(prompts))) % 61
+        batch["input_ids"] = (batch["input_ids"] + offset) % 64
+        return batch
+
+
+def test_ablation_ranking_normalizes_each_probe_column():
+    smoke = _load_smoke_cli()
+    base = {0: torch.ones(1, 4), 1: torch.ones(1, 4)}
+    probes = {"motion": {0: torch.full((1, 4), 2.0), 1: torch.ones(1, 4)}}
+    per_block, scores = smoke.ablation_ranking(base, probes)
+    assert per_block[1]["motion"] == 0.0
+    assert per_block[0]["motion"] == pytest.approx(0.5)  # ||1||*2 / max(2, 4)
+    assert (scores[0], scores[1]) == (1.0, 0.0)
+
+
+def test_run_ablation_probes_every_block_and_suggests_a_pair():
+    smoke = _load_smoke_cli()
+    adapter = make_adapter()
+    adapter._tokenizer = _ContentTokenizer()
+    args = argparse.Namespace(frames=5, height=32, width=48, instruction="pick up the red cube")
+    report = smoke.Report()
+    smoke.run_ablation(adapter, args, report)
+    assert report.failed == []  # includes: every probe moved features somewhere
+    ablation = report.info["ablation"]
+    assert len(ablation["per_block"]) == NUM_LAYERS
+    assert len(ablation["suggested_blocks"]) == 2
+    assert ablation["default_blocks"] == [4, 6]
+    hooks = [len(b._forward_hooks) for b in adapter._transformer.blocks]
+    assert hooks == [0] * NUM_LAYERS
+
+
+def test_run_ablation_flags_a_dead_conditioning_path():
+    """With the content-blind stub tokenizer, the instruction probe cannot move features."""
+    smoke = _load_smoke_cli()
+    adapter = make_adapter()
+    args = argparse.Namespace(frames=5, height=32, width=48, instruction="pick up the red cube")
+    report = smoke.Report()
+    smoke.run_ablation(adapter, args, report)
+    assert report.failed == ["ablation.instruction_moves_features"]
 
 
 def test_action_head_consumes_the_features():
