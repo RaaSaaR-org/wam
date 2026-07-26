@@ -1,0 +1,22 @@
+# torch pin: ZeroGPU supports 2.8.0 .. 2.11.0 (docs/hub/spaces-zerogpu).
+torch==2.8.0
+spaces
+# gradio is NOT listed here on purpose: the Space installs the version pinned by
+# `sdk_version` in README.md, and a requirements entry fights that.
+# Exact pin: cosmos_probe.py drives Cosmos3OmniPipeline's private packing helpers
+# (_prepare_text_segment / _prepare_vision_segment), which are not covered by the
+# public-API stability promise.
+diffusers==0.39.0
+transformers>=4.51.0
+accelerate
+safetensors
+numpy
+pydantic>=2
+pyyaml
+# probe.py window building: real GR00T episodes (parquet + AV1 mp4).
+pyarrow
+opencv-python-headless
+imageio
+imageio-ffmpeg
+# The canonical conversion + schema under test, straight from the public repo.
+wam @ git+https://github.com/RaaSaaR-org/wam@main
