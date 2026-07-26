@@ -251,11 +251,28 @@ Space's 420 s GPU cap leaves room). Result: the black hand stays correct through
 grasp, no rod artifact, the apple lands on the plate — but once the never-seen arm
 must enter the frame, Cosmos3 still invents a white manipulator with cables
 (`cosmos3_futures/faithful_video_conditioned.mp4`). Pattern: more real context buys a
-longer faithful prediction, but the G1 arm never enters the ego view, so no
-conditioning can supply it — the LoRA (T-16) stays necessary, and Cosmos3's native
-multi-frame conditioning is worth remembering for the FR-05 closed loop. Presentation
-cut: `runs/presentation/wam_06_futures_videoconditioned{,_en}.mp4` (22 s, rebuild via
-`runs/presentation/build/make_videocond_video.py`).
+longer faithful prediction; invention is confined to what the context has not shown.
+Presentation cut: `runs/presentation/wam_06_futures_videoconditioned{,_en}.mp4` (22 s,
+rebuild via `runs/presentation/build/make_videocond_video.py`).
+
+The third follow-up runs the whole task as **closed-loop chunks** (the FR-05 pattern
+against fixed footage): 5 Video2World runs, each conditioned on the 97 real frames
+ending at an anchor (150/210/270/330/390), each predicting 48 frames (2 s, the PRD
+chunk length; 145-frame canvas, ~165 s sampling per chunk, one ZeroGPU queue timeout
+retried). Conditioning verified at VAE-roundtrip level (1.3–2.0/255) on every chunk.
+Stitched (`cosmos3_futures/chunks/stitched_fulltask.mp4`, predicted 24 fps segments
+resampled to 30 fps) this covers the full 15-s task time-aligned with the real episode
+(`stitched_vs_real.mp4` is the side-by-side). Findings: (1) it corrects an earlier
+claim — the G1 arm *does* enter the ego view from ~frame 200 on, and every context
+window that contains it yields the true embodiment (silver arm, Dex3 hand, grasp,
+place, retreat all plausible); only chunk 1, whose context predates the arm, still
+invents a white manipulator. (2) Re-anchor seams show drift of 14–39/255 — e.g. chunk 1
+slides the apple instead of lifting it — and the next anchor pulls the prediction back:
+predict, re-observe, re-anchor is exactly what the runtime loop will do. (3) Generated
+re-creations of recorded demos are diagnosis/presentation material, not training data —
+the LoRA (T-16) on real demos stays the way to close the fresh-start embodiment gap.
+Presentation cut: `runs/presentation/wam_07_fulltask_chunked{,_en}.mp4` (30 s, rebuild
+via `runs/presentation/build/make_chunked_video.py`).
 
 ## Next steps after a green smoke run
 
