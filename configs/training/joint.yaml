@@ -1,0 +1,65 @@
+# WAM training config — joint video/action flow-matching (T-16, M3, PRD §10.3 step 4).
+#
+# The `training` section maps 1:1 onto wam.training.joint.JointTrainingConfig
+# (JointTrainingConfig.from_yaml(path)). Video and action latents share one rectified-flow
+# timestep (co-denoising); text/VAE-equivalent parts of the backbone are frozen.
+# Loss weights are the R-07 tuning surface (video loss must not dominate action learning).
+wam_config_version: "0.1.0"
+
+training:
+  seed: 0
+  device: cpu
+  lr: 0.003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  batch_size: 16
+  steps: 200
+  camera: front
+  limit_margin: 0.95
+
+  weights: # PRD §10.4 loss inventory
+    video: 1.0
+    action_flow: 1.0
+    action_recon: 1.0 # encoder anchor (flow targets are detached from the encoder)
+    action_reg: 1.0
+    gripper: 0.5
+    alignment: 0.1
+    smoothness: 0.01
+    limit: 0.001
+
+  state: # StateMLPConfig (FR-02)
+    embedding_dim: 32
+    hidden_dims: [64, 64]
+    num_joints: 6
+    gripper_dims: 1
+    use_layernorm: true
+    activation: gelu
+
+  backbone: # TinyBackboneConfig flow pathway (FR-03/FR-09)
+    feature_dim: 64
+    patch_size: 8
+    depth: 2
+    num_heads: 4
+    num_frames: 4
+    image_hw: [64, 64] # MockRobot render size; datasets/mock-d1 manifests record 64x64
+    text_vocab: 256
+    max_text_tokens: 16
+    state_embedding_dim: 32
+
+  action_encoder: # ActionChunkEncoderConfig (training only, PRD 9.5)
+    latent_dim: 32
+    hidden_dims: [64]
+    target_dim: 6
+    gripper_dims: 1
+    max_steps: 32
+
+  head: # ActionHeadConfig decoder on shared features (FR-04)
+    feature_dim: 64
+    num_steps: 8
+    target_dim: 6
+    gripper_dims: 1
+    mode: joint_delta
+    dt_s: 0.05
+    hidden_dims: [64]
+
+  velocity_hidden_dims: [64] # ActionVelocityHead MLP widths

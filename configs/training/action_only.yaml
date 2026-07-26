@@ -1,0 +1,55 @@
+# WAM training config — action-only baseline (T-13, M2 overfit gate, PRD §10.3 step 3).
+#
+# The `training` section maps 1:1 onto wam.training.action_only.ActionOnlyConfig
+# (ActionOnlyConfig.from_yaml(path)). Dims are tiny by default: 6-joint mock canonical
+# space (configs/robot/mock.yaml), 64x64 frames (MockRobot's render size — every shipped
+# episode producer records 64x64), TinyVideoBackbone. Targets/gripper are physical
+# canonical units (identity normalization, MVP); hard limits stay in the safety layer
+# (FR-07).
+wam_config_version: "0.1.0"
+
+training:
+  seed: 0
+  device: cpu
+  lr: 0.003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  batch_size: 16
+  steps: 300
+  loss: l2 # l1 | l2 regression on chunk targets (PRD §10.4 action loss)
+  camera: front
+  limit_margin: 0.95 # soft hinge inside the tanh bound; hard limits live in wam.safety
+
+  weights:
+    action: 1.0
+    gripper: 0.5
+    smoothness: 0.01
+    limit: 0.001
+
+  state: # StateMLPConfig (FR-02, PRD 9.4)
+    embedding_dim: 32
+    hidden_dims: [64, 64]
+    num_joints: 6
+    gripper_dims: 1
+    use_layernorm: true
+    activation: gelu
+
+  backbone: # TinyBackboneConfig (FR-09; swap for wan_i2v/flux3 post-OD-04/OD-06)
+    feature_dim: 64
+    patch_size: 8
+    depth: 2
+    num_heads: 4
+    num_frames: 4
+    image_hw: [64, 64] # MockRobot render size; datasets/mock-d1 manifests record 64x64
+    text_vocab: 256
+    max_text_tokens: 16
+    state_embedding_dim: 32
+
+  head: # ActionHeadConfig (FR-04); target_dim == num_joints for JOINT_DELTA
+    feature_dim: 64
+    num_steps: 8
+    target_dim: 6
+    gripper_dims: 1
+    mode: joint_delta
+    dt_s: 0.05
+    hidden_dims: [64]
