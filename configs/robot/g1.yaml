@@ -1,0 +1,52 @@
+# WAM robot config — Unitree G1 upper body (waist + both arms + grippers, PRD §6).
+#
+# The canonical space MUST match wam.robot.g1.G1_SPEC exactly (same joint names in the
+# same order, gripper_dims=2) — a coordination test in tests/test_versioning.py enforces
+# this. gripper_dims=2: [left, right], each normalized to [0, 1].
+#
+# PLACEHOLDER LIMITS: joint ranges approximated from public Unitree G1
+# documentation (29-DoF variant). They MUST be verified against the
+# vendor datasheet and the on-robot controller before any real-robot use
+# (OD-08). dq_max/ddq_max are deliberately conservative MVP caps, far below
+# hardware capability (PRD §11.2: low speeds, operator supervision).
+wam_config_version: "0.1.0"
+
+robot:
+  name: g1
+  adapter: wam.robot.g1
+
+  canonical_space:
+    schema_version: "0.1.0"
+    joint_names:
+      - waist_yaw
+      - left_shoulder_pitch
+      - left_shoulder_roll
+      - left_shoulder_yaw
+      - left_elbow
+      - left_wrist_roll
+      - left_wrist_pitch
+      - left_wrist_yaw
+      - right_shoulder_pitch
+      - right_shoulder_roll
+      - right_shoulder_yaw
+      - right_elbow
+      - right_wrist_roll
+      - right_wrist_pitch
+      - right_wrist_yaw
+    gripper_dims: 2
+    ee_frame: base
+    ee_rotation_convention: quat_wxyz
+
+  # Limits in canonical units: rad, rad/s, rad/s^2; gripper normalized [0, 1].
+  # Order: waist_yaw, left arm proximal->distal, right arm proximal->distal.
+  # Left/right shoulder-roll ranges are mirrored placeholders.
+  limits:
+    q_min: [-2.62, -3.09, -1.59, -2.62, -1.05, -1.97, -1.61, -1.61, -3.09, -2.25, -2.62, -1.05, -1.97, -1.61, -1.61]
+    q_max: [2.62, 2.67, 2.25, 2.62, 2.09, 1.97, 1.61, 1.61, 2.67, 1.59, 2.62, 2.09, 1.97, 1.61, 1.61]
+    dq_max: [1.5, 1.5, 1.5, 1.5, 1.5, 2.0, 2.0, 2.0, 1.5, 1.5, 1.5, 1.5, 2.0, 2.0, 2.0]
+    ddq_max: [4.0, 4.0, 4.0, 4.0, 4.0, 6.0, 6.0, 6.0, 4.0, 4.0, 4.0, 4.0, 6.0, 6.0, 6.0]
+    gripper_min: [0.0, 0.0]
+    gripper_max: [1.0, 1.0]
+
+  control:
+    dt_s: 0.02 # 50 Hz command interpolation target; vendor loop runs faster

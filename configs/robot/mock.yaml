@@ -1,0 +1,32 @@
+# WAM robot config — mock adapter (T-03 tests, no hardware).
+# Small canonical space; limits are intentionally simple round numbers.
+wam_config_version: "0.1.0"
+
+robot:
+  name: mock
+  adapter: wam.robot.mock
+
+  canonical_space:
+    schema_version: "0.1.0"
+    joint_names:
+      - joint_0
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+    gripper_dims: 1
+    ee_frame: base
+    ee_rotation_convention: quat_wxyz
+
+  # Limits in canonical units: rad, rad/s, rad/s^2; gripper normalized [0, 1].
+  limits:
+    q_min: [-3.14, -3.14, -3.14, -3.14, -3.14, -3.14]
+    q_max: [3.14, 3.14, 3.14, 3.14, 3.14, 3.14]
+    dq_max: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+    ddq_max: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+    gripper_min: [0.0]
+    gripper_max: [1.0]
+
+  control:
+    dt_s: 0.05 # 20 Hz low-level target rate for mock execution
