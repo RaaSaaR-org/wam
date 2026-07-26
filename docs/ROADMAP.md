@@ -51,12 +51,12 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
   `docs/hf_jobs.md`. Caveat: no frozen video features beat a state-only ridge yet, so the
   action value must come from fine-tuning.
   Next: LoRA fine-tune — that one needs Jobs, ZeroGPU cannot hold a training run.
-- **Backbone bake-off (T-24):** before spending GPU budget on the Wan LoRA, probe
-  `nvidia/Cosmos3-Nano` (16B MoT, robotics-pretrained with actions, OpenMDW-1.1; its VAE is
-  the Wan2.2 VAE) with the *same* frozen-feature ridge suite
-  (`scripts/hf_job_cosmos3_probe.py`, ZeroGPU via `scripts/deploy_cosmos3_space.py`). If its
-  frozen features beat the state-only ridge — which Wan's could not — Cosmos3 becomes the
-  primary backbone candidate for the LoRA fine-tune.
+- **Backbone bake-off (T-24) — decided 2026-07-26:** probed `nvidia/Cosmos3-Nano` (16B MoT,
+  robotics-pretrained with actions; its VAE is the Wan2.2 VAE) with the *same*
+  frozen-feature ridge suite (`scripts/hf_job_cosmos3_probe.py`, ZeroGPU, 9/9 checks).
+  Frozen Cosmos3 features do **not** beat the state-only ridge either (joints test R²
+  0.359 vs. 0.456; gripper 0.708 vs. 0.881) → **stay on Wan** for the T-16 LoRA.
+  Details: `docs/hf_jobs.md`, run: `runs/cosmos3_probe/`.
 - **D2** MVP set (10–30 h) → joint video/action training (`wam.training.joint`).
 - Ablation world-action vs. action-only on real data → **first AC-07 verdict recorded**
   (2026-07-26, `scripts/run_ablation.py`, tiny backbone, 402 GR00T episodes, identical

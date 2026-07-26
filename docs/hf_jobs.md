@@ -185,6 +185,42 @@ state vector out-predicts 6144-dim frozen Wan features on both label groups. The
 prior alone does not linearly encode next-chunk actions — the action value has to come from
 fine-tuning (LoRA, T-16), which can also re-rank the blocks on adapted features.
 
+## Backbone bake-off: Cosmos3-Nano probe (T-24, 2026-07-26)
+
+`nvidia/Cosmos3-Nano` (16B MoT: 8B AR reasoner + 8B diffusion generator, robotics-pretrained
+*with* action data, OpenMDW-1.1) is diffusers-native since 0.37 — and its VAE **is** the
+Wan2.2 VAE (`AutoencoderKLWan`, same 48-ch / 16×spatial / 4×temporal geometry). That made an
+apples-to-apples probe cheap: `scripts/hf_job_cosmos3_probe.py` imports the Wan probe's
+window building, labels, episode split and ridge code unchanged and only swaps the feature
+extractor — windows packed as all-clean conditioning frames (zero noisy tokens, no timestep
+embeds) behind the pipeline-tokenized instruction, one forward through the generator tower,
+hooks pool the gen-pathway residual stream of all 36 MoT layers.
+
+Deploy: `scripts/deploy_cosmos3_space.py` (private ZeroGPU Space, `diffusers==0.39.0` exact
+pin — the probe drives private packing helpers). Run 2026-07-26: **9/9 checks**, 96 windows,
+features `(96, 36, 4096)`, load 8.1 s, 0.106 s/window forward, peak VRAM 36.2 GB, ~33 s GPU
+wall. Full table: `runs/cosmos3_probe/2026-07-26-zerogpu-nano.json`.
+
+| features | joints test R² | gripper test R² |
+|---|---|---|
+| heuristic (18, 26) — best Cosmos3 pair | 0.359 | 0.708 |
+| depth-scaled Wan pick (2, 12) | 0.327 | 0.706 |
+| suggested (11, 24) — top-2 by val R² | 0.324 | 0.613 |
+| best single block (15 joints / 17 gripper) | 0.399 | 0.822 |
+| state-only ridge (same as Wan probe) | **0.456** | **0.881** |
+| *Wan2.2-TI2V-5B best pair (2, 10), for reference* | *0.365* | *0.698* |
+
+Verdict: **frozen Cosmos3 features do not beat the state-only ridge either → stay on Wan for
+the T-16 LoRA.** The robotics pretraining is visible but small: gripper readability is
+clearly above Wan's (0.822 vs. 0.698 single-block) and approaches the state-only ceiling,
+while joints land in the same ~0.33–0.40 band as Wan. Note the top-2-by-val pair (11, 24)
+*overfits the val episodes* (val 0.465 → test 0.324) — with 2 val episodes, pair selection
+by val R² is noisy; the depth heuristic generalized better here. Neither backbone's frozen
+prior linearly encodes next-chunk actions, so the earlier conclusion stands unchanged: the
+action value must come from fine-tuning, and Wan stays primary (Apache 2.0, 5B vs. 16B —
+cheaper to LoRA and to serve). Cosmos3 remains the fallback candidate if the Wan LoRA
+underdelivers; the probe harness reruns against any diffusers-native backbone.
+
 ## Next steps after a green smoke run
 
 1. ~~Record which blocks give the most action-predictive features~~ — done twice: label-free
