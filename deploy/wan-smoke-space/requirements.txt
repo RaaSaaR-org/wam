@@ -13,5 +13,10 @@ ftfy
 numpy
 pydantic>=2
 pyyaml
+# probe.py: real GR00T episodes (parquet + mp4) and mp4 export of generated futures.
+pyarrow
+opencv-python-headless
+imageio
+imageio-ffmpeg
 # The adapter under test, straight from the public repo — no vendored copy to drift.
 wam @ git+https://github.com/RaaSaaR-org/wam@main

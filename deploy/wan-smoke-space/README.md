@@ -10,20 +10,27 @@ pinned: false
 short_description: Verify the WAM Wan backbone adapter on a real GPU
 models:
   - Wan-AI/Wan2.2-TI2V-5B-Diffusers
+datasets:
+  - nvidia/GR00T-N1.7-AppleToPlate
 ---
 
-# WAM — Wan backbone smoke test (ZeroGPU)
+# WAM — Wan backbone on ZeroGPU
 
-Verification harness for [`RaaSaaR-org/wam`](https://github.com/RaaSaaR-org/wam) task T-15:
-does the real Wan DiT produce usable action-readout features through the WAM interfaces,
-with the shapes `WanI2VAdapter` claims? Nothing is trained here.
+Verification harness for [`RaaSaaR-org/wam`](https://github.com/RaaSaaR-org/wam) (T-15,
+T-16 prep). `smoke.py` and `probe.py` are deployed verbatim from `scripts/` in that repo,
+so this Space and an HF Jobs run execute exactly the same code. Three tabs:
 
-`smoke.py` is deployed verbatim from `scripts/hf_job_wan_smoke.py` in that repo, so this Space
-and an HF Jobs run execute exactly the same checks:
-
-load → derived geometry → `condition_video` → `condition_text` → `condition_state` →
-`features()` token count / finiteness / non-constancy → determinism across two forwards →
-`ActionHead.decode` → peak VRAM and wall time.
+- **smoke test** — does the real Wan DiT produce usable action-readout features through
+  the WAM interfaces, with the shapes `WanI2VAdapter` claims? load → derived geometry →
+  `condition_video/text/state` → `features()` token count / finiteness → determinism →
+  `ActionHead.decode` → peak VRAM and wall time. Optional label-free readout ablation.
+- **readout probes (real data)** — real GR00T-G1 episode windows through the frozen DiT;
+  every block's pooled features are ridge-regressed onto the BC-relabeled action chunks
+  and ranked by held-out-episode R². Validates the ablation's (20, 29) pick against real
+  labels; a state-only ridge is the floor to beat.
+- **generate future** — sample a diffusion video from a real episode's start frame + an
+  instruction: what does the backbone imagine the robot will do? Qualitative probe and
+  presentation material, not a training path.
 
 ## Why it is built this way
 

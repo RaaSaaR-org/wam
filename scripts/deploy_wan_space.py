@@ -23,6 +23,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPACE_DIR = REPO_ROOT / "deploy" / "wan-smoke-space"
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "hf_job_wan_smoke.py"
+PROBE_SCRIPT = REPO_ROOT / "scripts" / "hf_job_wan_probe.py"
+CONVERTER_SCRIPT = REPO_ROOT / "scripts" / "convert_lerobot_g1.py"
 DEFAULT_SPACE = "wam-wan-smoke"
 # 'zero-a10g' is the API's (legacy) identifier for ZeroGPU; the actual hardware is an
 # RTX Pro 6000 Blackwell — 48 GB for `large`, the @spaces.GPU default.
@@ -67,9 +69,14 @@ def pinned_requirements() -> tuple[str, str]:
 
 
 def payload() -> list[tuple[Path, str]]:
-    """(local file, path in the Space). The smoke script is renamed, never edited."""
+    """(local file, path in the Space). The scripts are renamed/copied verbatim, never edited."""
     files = [(path, path.name) for path in sorted(SPACE_DIR.iterdir()) if path.is_file()]
-    return [*files, (SMOKE_SCRIPT, "smoke.py")]
+    return [
+        *files,
+        (SMOKE_SCRIPT, "smoke.py"),
+        (PROBE_SCRIPT, "probe.py"),
+        (CONVERTER_SCRIPT, "convert_lerobot_g1.py"),
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
