@@ -52,7 +52,12 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
   action value must come from fine-tuning.
   Next: LoRA fine-tune — that one needs Jobs, ZeroGPU cannot hold a training run.
 - **D2** MVP set (10–30 h) → joint video/action training (`wam.training.joint`).
-- Ablation world-action vs. action-only on real data → AC-07 verdict.
+- Ablation world-action vs. action-only on real data → **first AC-07 verdict recorded**
+  (2026-07-26, `scripts/run_ablation.py`, tiny backbone, 402 GR00T episodes, identical
+  362/40 split + config as the baseline): the video branch **hurts** offline — holdout MSE
+  2.09e-05 vs. 1.10e-05, gripper acc −2%. The tiny video loss plateaus (~0.72), so the
+  shared trunk pays a multi-task tax; a measurable AC-07 advantage must come from the
+  pretrained prior. Rerun after the Wan LoRA fine-tune (`runs/t18-real-ablation-seed0`).
 
 ## 6. Real rollouts (M4 / E3)
 
