@@ -1,6 +1,6 @@
 """Closed-loop executor (receding horizon, replanning) and inference server.
 
-``CheckpointPolicy`` is exported lazily so ``import wam.runtime`` stays torch-free;
+The checkpoint policies are exported lazily so ``import wam.runtime`` stays torch-free;
 everything else here is numpy/pydantic only.
 """
 
@@ -27,16 +27,19 @@ __all__ = [
     "ClosedLoopExecutor",
     "DummyPolicy",
     "ExecutorConfig",
+    "JointCheckpointPolicy",
     "LoopResult",
     "RolloutResult",
     "run_mock_loop",
     "run_rollouts",
 ]
 
+_LAZY_POLICIES = ("CheckpointPolicy", "JointCheckpointPolicy")
+
 
 def __getattr__(name: str) -> Any:
-    if name == "CheckpointPolicy":
-        from wam.runtime.policies import CheckpointPolicy
+    if name in _LAZY_POLICIES:
+        from wam.runtime import policies
 
-        return CheckpointPolicy
+        return getattr(policies, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

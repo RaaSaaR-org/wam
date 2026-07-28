@@ -13,6 +13,20 @@ Usage examples::
   .venv/bin/python scripts/rollout.py --rollouts 10 --fault-injection
   .venv/bin/python scripts/rollout.py --policy remote --server-uri ws://127.0.0.1:8765
   .venv/bin/python scripts/rollout.py --robot g1 --policy dummy --rollouts 1
+  .venv/bin/python scripts/rollout.py --robot mujoco_g1 --policy dummy --rollouts 1
+  .venv/bin/python scripts/rollout.py --robot mujoco_g1 --policy joint \\
+      --checkpoint runs/t18-real-ablation-seed0/checkpoint.safetensors \\
+      --policy-camera head --image-hw 120 160
+
+POLICY KINDS: ``dummy`` (sinusoid), ``checkpoint`` (action-only baseline, T-13), ``joint``
+(the world-action model, T-16) and ``remote`` (either, over WebSocket). ``joint`` and
+``checkpoint`` load different artifacts and are not interchangeable.
+
+WHAT A ``--policy joint`` SIM RUN MEASURES, AND WHAT IT DOES NOT: on ``mujoco_g1`` it
+measures latency against the deadline, the safety/watchdog paths under real model timing,
+and that predicted chunks survive the filter at all. It does NOT measure task competence —
+MuJoCo renderings are not RealSense images and no video backbone in this repo has seen one
+(docs/sim.md, "What this does not prove", item 1). Label such runs accordingly.
 
 THE ``sim:reach`` SUCCESS PROXY (MockRobot only, ``--task sim:reach``):
   ``success_fn(state) = mean_j |q_j - REACH_TARGET_RAD_j| < --reach-tolerance-rad``.
@@ -37,10 +51,11 @@ declares is still enforced deterministically (FR-07) and E2 gate thresholds are 
 FAULT INJECTION (``--fault-injection``, AC-06): wraps the policy so every k-th predict
 returns an all-NaN chunk (safety layer must nan_reject -> HOLD) and every m-th predict
 stalls past the executor deadline (chunk discarded -> hold, watchdog not fed). Rollouts
-are labeled ``task="sim:fault_injection"`` — BOTH supported robots run simulated today
-("mock" = MockRobot, "g1" = G1Adapter on FakeG1Transport), and the acceptance harness
-detects sim evidence solely via the ``sim:`` task prefix — so AC-03 excludes them and
-AC-06 reports pending_hardware instead of claiming real-robot safe-stop evidence.
+are labeled ``task="sim:fault_injection"`` — EVERY supported robot runs simulated today
+("mock" = MockRobot, "g1" = G1Adapter on FakeG1Transport, "mujoco_g1" = the same G1Adapter
+on MuJoCo contact physics), and the acceptance harness detects sim evidence solely via the
+``sim:`` task prefix — so AC-03 excludes them and AC-06 reports pending_hardware instead of
+claiming real-robot safe-stop evidence.
 
 Exit codes: 0 = rollouts completed; 1 = usage/config error; 2 = E2 static gate failed.
 """
@@ -69,7 +84,7 @@ from wam.interfaces import (
     RunMetadata,
     load_config,
 )
-from wam.robot import MockRobot
+from wam.robot import MockRobot, get_robot
 from wam.runtime import (
     DEFAULT_INSTRUCTION,
     ClosedLoopExecutor,
@@ -192,12 +207,25 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--robot", choices=("mock", "g1"), default="mock")
-    parser.add_argument("--policy", choices=("checkpoint", "dummy", "remote"), default="checkpoint")
+    parser.add_argument("--robot", choices=("mock", "g1", "mujoco_g1"), default="mock")
+    parser.add_argument(
+        "--policy", choices=("checkpoint", "joint", "dummy", "remote"), default="checkpoint"
+    )
     parser.add_argument(
         "--checkpoint",
         type=Path,
         default=_REPO_ROOT / "runs" / "d1-overfit-seed0" / "checkpoint.safetensors",
+    )
+    parser.add_argument(
+        "--policy-camera",
+        default=None,
+        help=(
+            "which Observation.images key the policy reads, overriding the trained "
+            "config.camera (--policy checkpoint|joint; e.g. 'head' for the MuJoCo scene)"
+        ),
+    )
+    parser.add_argument(
+        "--policy-device", default="cpu", help="torch device for --policy checkpoint|joint"
     )
     parser.add_argument("--server-uri", default=None, help="ws://host:port for --policy remote")
     parser.add_argument("--remote-timeout-s", type=float, default=1.0)
@@ -223,6 +251,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="robot yaml (default: configs/robot/<robot>.yaml)",
+    )
+    parser.add_argument(
+        "--image-hw",
+        type=int,
+        nargs=2,
+        metavar=("H", "W"),
+        default=None,
+        help="override the sim render size (--robot mujoco_g1); must match the policy's backbone",
     )
     parser.add_argument(
         "--safety-config", type=Path, default=_REPO_ROOT / "configs" / "safety" / "default.yaml"
@@ -309,11 +345,88 @@ def _build_g1(args: argparse.Namespace):
     return G1_SPEC, config.control_dt_s, limits, factory
 
 
+def _build_mujoco_g1(args: argparse.Namespace):
+    """(spec, dt_s, robot_limits, robot_factory) for MujocoG1Robot — the E2 sim robot.
+
+    The SAME canonical space, the SAME ``G1Adapter`` and the SAME safety chain as
+    ``--robot g1``; only the transport differs (MuJoCo contact physics and rendered
+    cameras instead of ``FakeG1Transport``). Limits AND gains come from ``--robot-config``
+    (``configs/robot/mujoco_g1.yaml``) — the ``gains`` there are SIM gains measured on
+    ``configs/sim/g1_scene.xml``, never the hardware placeholders of ``g1.yaml`` (OD-08).
+    Needs the optional ``mujoco`` dependency (``uv pip install wam[sim]``) plus the fetched
+    vendor model (``scripts/fetch_g1_model.py``).
+    """
+    from wam.robot.g1 import G1_SPEC, G1Config
+
+    robot_section = load_config(args.robot_config)["robot"]
+    spec = CanonicalSpaceSpec(**robot_section["canonical_space"])
+    if spec != G1_SPEC:
+        raise SystemExit(
+            f"--robot-config {args.robot_config}: canonical_space does not match the G1 "
+            f"adapter's G1_SPEC ({G1_SPEC.num_joints} joints, "
+            f"gripper_dims={G1_SPEC.gripper_dims})"
+        )
+    limits_cfg: dict[str, Any] = dict(robot_section.get("limits", {}))
+    gains_cfg: dict[str, Any] = dict(robot_section.get("gains", {}))
+    config_kwargs: dict[str, Any] = {
+        key: tuple(float(x) for x in limits_cfg[key])
+        for key in ("q_min", "q_max", "dq_max")
+        if key in limits_cfg
+    }
+    config_kwargs.update(
+        {key: tuple(float(x) for x in gains_cfg[key]) for key in ("kp", "kd") if key in gains_cfg}
+    )
+    dt_s = robot_section.get("control", {}).get("dt_s")
+    if dt_s is not None:
+        config_kwargs["control_dt_s"] = float(dt_s)
+    config = G1Config(**config_kwargs)
+    limits: dict[str, Any] = {
+        "q_min": config.q_min,
+        "q_max": config.q_max,
+        "dq_max": config.dq_max,
+        "ddq_max": tuple(
+            float(x)
+            for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
+        ),
+    }
+
+    sim_cfg: dict[str, Any] = dict(robot_section.get("sim", {}))
+    robot_kwargs: dict[str, Any] = {"config": config}
+    if "scene" in sim_cfg:
+        robot_kwargs["scene_path"] = _REPO_ROOT / str(sim_cfg["scene"])
+    if "keyframe" in sim_cfg:
+        robot_kwargs["keyframe"] = str(sim_cfg["keyframe"])
+    if "cameras" in sim_cfg:
+        robot_kwargs["cameras"] = tuple(str(c) for c in sim_cfg["cameras"])
+    if "image_hw" in sim_cfg:
+        robot_kwargs["image_hw"] = tuple(int(x) for x in sim_cfg["image_hw"])
+    # CLI override: a trained policy dictates its own input resolution (the backbone's
+    # patchifier and positional table are built for exactly one H x W), while the yaml's
+    # 256x256 is what every measured number in docs/sim.md was taken at. Overriding here
+    # keeps that config — and its measurements — untouched.
+    if args.image_hw is not None:
+        robot_kwargs["image_hw"] = tuple(args.image_hw)
+
+    def factory(index: int, *, jitter: bool) -> RobotAdapter:
+        del index, jitter  # the scene keyframe is fixed; start-pose jitter is a mock-only knob
+        return get_robot("mujoco_g1", **robot_kwargs)
+
+    return G1_SPEC, config.control_dt_s, limits, factory
+
+
 def _build_policy(args: argparse.Namespace, spec: CanonicalSpaceSpec, dt_s: float) -> Policy:
     if args.policy == "checkpoint":
         from wam.runtime.policies import CheckpointPolicy  # torch import stays lazy
 
-        return CheckpointPolicy(args.checkpoint)
+        return CheckpointPolicy(
+            args.checkpoint, device=args.policy_device, camera=args.policy_camera
+        )
+    if args.policy == "joint":
+        from wam.runtime.policies import JointCheckpointPolicy
+
+        return JointCheckpointPolicy(
+            args.checkpoint, device=args.policy_device, camera=args.policy_camera
+        )
     if args.policy == "remote":
         if not args.server_uri:
             raise SystemExit("--policy remote requires --server-uri ws://host:port")
@@ -327,13 +440,18 @@ def _build_policy(args: argparse.Namespace, spec: CanonicalSpaceSpec, dt_s: floa
 
 def _provenance(args: argparse.Namespace, policy: Policy) -> tuple[str | None, str | None, dict]:
     """(checkpoint_ref, dataset_snapshot_ref, extra provenance) for the run_metadata line."""
-    if args.policy == "checkpoint":
+    if args.policy in ("checkpoint", "joint"):
         md = policy.metadata  # type: ignore[attr-defined]
-        return (
-            str(Path(args.checkpoint).resolve()),
-            md.dataset_snapshot_ref,
-            {"checkpoint_run_id": md.run_id, "checkpoint_config_hash": md.config_hash},
-        )
+        # Which camera key was actually read, and whether that was an override. Like every
+        # other entry here this reaches the log only via config_hash, so two runs that differ
+        # only in camera are distinguishable artifacts; the value itself is echoed on stdout.
+        extra = {
+            "checkpoint_run_id": md.run_id,
+            "checkpoint_config_hash": md.config_hash,
+            "policy_camera": policy.camera,  # type: ignore[attr-defined]
+            "policy_camera_overridden": args.policy_camera is not None,
+        }
+        return (str(Path(args.checkpoint).resolve()), md.dataset_snapshot_ref, extra)
     if args.policy == "remote":
         try:
             md = dict(policy.info().get("metadata") or {})  # type: ignore[attr-defined]
@@ -361,7 +479,9 @@ def main(argv: list[str] | None = None) -> int:
     task = (SIM_TASK_PREFIX + FAULT_INJECTION_TASK) if args.fault_injection else args.task
     if args.robot_config is None:
         args.robot_config = _REPO_ROOT / "configs" / "robot" / f"{args.robot}.yaml"
-    if args.robot == "g1":
+    if args.robot == "mujoco_g1":
+        spec, dt_s, robot_limits, robot_factory = _build_mujoco_g1(args)
+    elif args.robot == "g1":
         spec, dt_s, robot_limits, robot_factory = _build_g1(args)
     else:
         spec, dt_s, robot_limits, robot_factory = _build_mock(args)
@@ -485,9 +605,14 @@ def main(argv: list[str] | None = None) -> int:
         misses = sum(r.deadline_misses for r in results)
         rates = [r.policy_rate_hz for r in results]
         if results:
+            # The camera is echoed because it is the one policy input whose being wrong is
+            # invisible everywhere else: the chunk stays finite, in-bounds and on time. It
+            # reaches the log only through config_hash, which nothing reads by eye.
+            camera = getattr(base_policy, "camera", None)
             print(
                 f"[rollout] task={task} robot={args.robot} policy={args.policy} "
-                f"n={len(results)} success={n_success} estops={n_estop} "
+                + (f"camera={camera} " if camera else "")
+                + f"n={len(results)} success={n_success} estops={n_estop} "
                 f"watchdog_timeouts={wd} deadline_misses={misses} "
                 f"interventions={kinds} min_rate_hz={min(rates):.1f}"
             )

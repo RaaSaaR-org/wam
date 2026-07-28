@@ -4,6 +4,8 @@
 Usage:
   .venv/bin/python scripts/serve_policy.py --dummy                       # DummyPolicy
   .venv/bin/python scripts/serve_policy.py --checkpoint runs/d1-overfit-seed0/checkpoint.safetensors
+  .venv/bin/python scripts/serve_policy.py --joint \
+      --checkpoint runs/t18-real-ablation-seed0/checkpoint.safetensors --device cuda
 
 Runs the inference side only — safety layer, watchdog and robot control stay on the
 client (see wam.runtime.server). Prints ``serving ws://host:port`` once bound and runs
@@ -40,9 +42,25 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=_REPO_ROOT / "configs" / "robot" / "mock.yaml",
         help="robot config providing the canonical space for --dummy",
     )
+    parser.add_argument(
+        "--joint",
+        action="store_true",
+        help="--checkpoint is a JointWorldActionModel (world-action, T-16), not action-only",
+    )
+    parser.add_argument("--device", default="cpu", help="torch device for --checkpoint")
+    parser.add_argument(
+        "--policy-camera",
+        default=None,
+        help="Observation.images key to read, overriding the trained config.camera (--joint only)",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765, help="0 = OS-assigned port")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.joint and args.checkpoint is None:
+        parser.error("--joint requires --checkpoint")
+    if args.policy_camera is not None and not args.joint:
+        parser.error("--policy-camera applies to --joint checkpoints only")
+    return args
 
 
 def _build_dummy_policy(robot_config: Path) -> Policy:
@@ -69,11 +87,27 @@ def _build_checkpoint_policy(path: Path) -> Policy:
         return model
 
 
+def _build_joint_policy(path: Path, device: str, camera: str | None) -> Policy:
+    """Serve a world-action checkpoint (T-16). No fallback: unlike the action-only model,
+    ``JointWorldActionModel`` needs ``JointCheckpointPolicy`` to reach ``predict``."""
+    from wam.runtime.policies import JointCheckpointPolicy
+
+    policy = JointCheckpointPolicy(path, device=device, camera=camera)
+    md = policy.metadata
+    print(
+        f"loaded world-action checkpoint run_id={md.run_id} config_hash={md.config_hash} "
+        f"camera={policy.camera!r} device={device}"
+    )
+    return policy
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    if args.checkpoint is not None:
-        policy: Policy = _build_checkpoint_policy(args.checkpoint)
+    if args.checkpoint is not None and args.joint:
+        policy: Policy = _build_joint_policy(args.checkpoint, args.device, args.policy_camera)
+    elif args.checkpoint is not None:
+        policy = _build_checkpoint_policy(args.checkpoint)
     else:
         policy = _build_dummy_policy(args.robot_config)
 

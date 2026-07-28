@@ -589,3 +589,178 @@ def test_checkpoint_policy_loads_and_predicts(tmp_path: Path) -> None:
         result = executor.run_rollout("r-ckpt")
     assert result.executed_cycles == 2
     assert loop_robot.sim_time_ns > 0
+
+
+# --------------------------------------------------------------- JointCheckpointPolicy (T-16)
+#
+# The world-action counterpart of the block above. These build their own checkpoint in
+# ``tmp_path`` rather than leaning on a ``runs/`` artifact: the joint checkpoints that exist
+# there are 15-joint G1 models on 120x160 frames, while everything else in this module runs on
+# MockRobot's 6-joint / 64x64 space.
+
+
+def _joint_checkpoint(tmp_path: Path, camera: str = "front"):
+    """An untrained JointWorldActionModel checkpoint shaped for MockRobot(spec=SPEC)."""
+    from wam.backbones.tiny import TinyBackboneConfig
+    from wam.decoders import ActionHeadConfig
+    from wam.encoders import ActionChunkEncoderConfig, StateMLPConfig
+    from wam.training import JointTrainer, JointTrainingConfig
+
+    config = JointTrainingConfig(
+        state=StateMLPConfig(embedding_dim=8, hidden_dims=(16,), num_joints=N_JOINTS),
+        backbone=TinyBackboneConfig(
+            feature_dim=32,
+            patch_size=16,
+            depth=1,
+            num_heads=4,
+            num_frames=2,
+            image_hw=(64, 64),  # MockRobot's render size
+            state_embedding_dim=8,
+        ),
+        action_encoder=ActionChunkEncoderConfig(
+            latent_dim=8, target_dim=N_JOINTS, hidden_dims=(16,)
+        ),
+        head=ActionHeadConfig(
+            feature_dim=32, num_steps=8, target_dim=N_JOINTS, hidden_dims=(32,), dt_s=DT_S
+        ),
+        camera=camera,
+        seed=0,
+    )
+    path = tmp_path / "joint.safetensors"
+    JointTrainer(config).save_checkpoint(path, run_id="joint-test")
+    return path
+
+
+def _mock_observation(robot: MockRobot) -> Observation:
+    images = {name: frames[0] for name, frames in robot.render_frames(1).items()}
+    return Observation(images=images, state=robot.read_state(), instruction="Greife den Wuerfel.")
+
+
+def test_joint_checkpoint_policy_loads_and_predicts(tmp_path: Path) -> None:
+    from wam.runtime import JointCheckpointPolicy  # lazy export; torch import lives here
+
+    policy = JointCheckpointPolicy(_joint_checkpoint(tmp_path), device="cpu")
+    assert isinstance(policy, Policy)
+    assert policy.metadata.run_id == "joint-test"
+    assert policy.metadata.checkpoint_ref  # traceability, AC-04
+    assert policy.camera == "front"
+
+    obs = _mock_observation(MockRobot(spec=SPEC))
+    c1 = policy.predict(obs)
+    c2 = policy.predict(obs)
+
+    assert c1.validate(SPEC) == []
+    assert c1.targets.shape == (8, N_JOINTS)
+    assert c1.targets.dtype == np.float32
+    assert np.isfinite(c1.targets).all()
+    np.testing.assert_array_equal(c1.targets, c2.targets)  # deterministic eval/no-grad
+    np.testing.assert_array_equal(c1.gripper_target, c2.gripper_target)
+
+
+def test_joint_policy_reads_the_overridden_camera_and_fails_loudly_on_a_missing_one(
+    tmp_path: Path,
+) -> None:
+    """The override picks a DIFFERENT view, and an absent key raises instead of falling back.
+
+    A policy silently reading the wrong camera would look healthy in every log line the
+    executor writes — the chunk is finite, in-bounds and on time. It is only wrong.
+    """
+    from wam.interfaces import ActionMode
+    from wam.runtime import JointCheckpointPolicy
+
+    path = _joint_checkpoint(tmp_path, camera="front")
+    robot = MockRobot(spec=SPEC)
+    robot.execute(  # move q[0] so the two cameras' dot columns differ
+        ActionChunk(
+            mode=ActionMode.JOINT_DELTA,
+            targets=np.full((4, N_JOINTS), 0.05, dtype=np.float32),
+            gripper_target=np.zeros(4, dtype=np.float32),
+            dt_s=DT_S,
+        ),
+        prefix_steps=4,
+    )
+    obs = _mock_observation(robot)
+
+    trained = JointCheckpointPolicy(path).predict(obs)
+    override = JointCheckpointPolicy(path, camera="wrist")
+    assert override.camera == "wrist"
+    assert not np.array_equal(trained.targets, override.predict(obs).targets)
+
+    with pytest.raises(KeyError, match="no camera 'nose'"):
+        JointCheckpointPolicy(path, camera="nose").predict(obs)
+
+
+def test_joint_predict_runs_one_backbone_pass_at_the_clean_timestep(tmp_path: Path) -> None:
+    """Representation-only readout: ONE forward_flow per predict, at t=1 (clean).
+
+    Both halves are the latency claim. A second pass would mean test-time denoising, and any
+    t < 1 would mean the policy reads a partially destroyed observation — the flow convention
+    is ``x_t = (1-t)*x0 + t*x1`` with x1 clean.
+    """
+    import torch
+
+    from wam.runtime import JointCheckpointPolicy
+
+    policy = JointCheckpointPolicy(_joint_checkpoint(tmp_path))
+    backbone = policy.model.backbone
+    obs = _mock_observation(MockRobot(spec=SPEC))
+
+    seen_t: list[float] = []
+    original = backbone.forward_flow
+
+    def counting(video_latents, t, text_ctx, state_ctx):
+        seen_t.append(float(torch.as_tensor(t).reshape(-1)[0]))
+        return original(video_latents, t, text_ctx, state_ctx)
+
+    backbone.forward_flow = counting  # type: ignore[method-assign]
+    try:
+        chunk = policy.predict(obs)
+    finally:
+        backbone.forward_flow = original  # type: ignore[method-assign]
+
+    assert seen_t == [1.0]
+
+    # ... and t is load-bearing: the same readout at the noisy end gives a different chunk.
+    model = policy.model
+    image = torch.as_tensor(obs.images[model.config.camera])
+    frames = image.unsqueeze(0).expand(model.config.backbone.num_frames, -1, -1, -1)
+    latents = backbone.encode_video(frames.unsqueeze(0))
+    ctx = (
+        backbone.condition_text(obs.instruction),
+        backbone.condition_state(model.state_encoder.encode(obs.state)),
+    )
+    with torch.no_grad():
+        _, clean = backbone.forward_flow(latents, torch.ones(1), *ctx)
+        _, noisy = backbone.forward_flow(latents, torch.zeros(1), *ctx)
+    np.testing.assert_array_equal(chunk.targets, model.action_head.decode(clean[0]).targets)
+    assert not np.array_equal(chunk.targets, model.action_head.decode(noisy[0]).targets)
+
+
+def test_the_two_checkpoint_policies_reject_each_others_artifacts(tmp_path: Path) -> None:
+    """Action-only and world-action checkpoints are different artifacts. Fail at load, loudly.
+
+    The two failure modes differ because the mismatch is caught at different layers: a joint
+    checkpoint carries tensors ``ActionOnlyModel`` has no slots for (state_dict), while an
+    action-only checkpoint is missing whole config sections the joint model requires (pydantic).
+    """
+    from pydantic import ValidationError
+
+    from wam.runtime import CheckpointPolicy, JointCheckpointPolicy
+
+    with pytest.raises(RuntimeError, match="Unexpected key.*action_encoder"):
+        CheckpointPolicy(_joint_checkpoint(tmp_path))
+
+    if CHECKPOINT.exists():
+        with pytest.raises(ValidationError, match="action_encoder"):
+            JointCheckpointPolicy(CHECKPOINT)
+
+
+def test_joint_policy_drives_the_closed_loop_through_the_safety_layer(tmp_path: Path) -> None:
+    from wam.runtime import JointCheckpointPolicy
+
+    policy = JointCheckpointPolicy(_joint_checkpoint(tmp_path))
+    executor, loop_robot, logger = make_executor(tmp_path, policy=policy, max_cycles=2)
+    with logger:
+        result = executor.run_rollout("r-joint")
+    assert result.executed_cycles == 2
+    assert loop_robot.sim_time_ns > 0
