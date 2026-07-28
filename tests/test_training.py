@@ -13,8 +13,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from pydantic import ValidationError
+from torch import nn
 
-from wam.backbones.tiny import TinyBackboneConfig
+from wam.backbones.registry import build_backbone, build_backbone_config
+from wam.backbones.tiny import TinyBackboneConfig, TinyVideoBackbone
+from wam.backbones.wan_i2v import WanBackboneConfig
 from wam.decoders import ActionHeadConfig
 from wam.encoders import ActionChunkEncoderConfig, StateMLPConfig
 from wam.interfaces.protocols import Observation, Policy
@@ -490,6 +494,360 @@ class TestJointTrainer:
         cfg = JointTrainingConfig.from_yaml(REPO_ROOT / "configs" / "training" / "joint.yaml")
         assert cfg.action_encoder.max_steps >= cfg.head.num_steps
         assert cfg.action_encoder.target_dim == cfg.head.target_dim
+
+
+# -- backbone swappability (FR-09): tagged config union ---------------------------------------
+
+
+WAN_SECTION: dict = {
+    "kind": "wan_i2v",
+    "model_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    "feature_dim": FEATURE_DIM,  # cross-validated against head.feature_dim
+    "state_embedding_dim": STATE_DIM,  # ... and against state.embedding_dim
+}
+
+
+class TestBackboneConfigUnion:
+    def test_shipped_joint_yaml_stays_tiny(self) -> None:
+        cfg = JointTrainingConfig.from_yaml(REPO_ROOT / "configs" / "training" / "joint.yaml")
+        assert type(cfg.backbone) is TinyBackboneConfig
+        assert cfg.backbone.kind == "tiny"
+
+    def test_tagged_wan_section_validates_as_wan(self) -> None:
+        cfg = joint_config(backbone=WAN_SECTION)
+        assert type(cfg.backbone) is WanBackboneConfig
+        assert cfg.backbone.model_id == "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+
+    def test_untagged_wan_shaped_section_is_rejected(self) -> None:
+        # Without the discriminator this used to validate as an all-defaults 64-dim tiny
+        # config and silently train the wrong model.
+        untagged = {k: v for k, v in WAN_SECTION.items() if k != "kind"}
+        with pytest.raises(ValidationError):
+            joint_config(backbone=untagged)
+
+    def test_json_round_trip_preserves_the_union_member(self) -> None:
+        cfg = joint_config(backbone=WAN_SECTION)
+        restored = JointTrainingConfig.model_validate_json(cfg.model_dump_json())
+        assert type(restored.backbone) is WanBackboneConfig
+        assert restored == cfg
+
+    def test_legacy_untagged_tiny_section_still_validates(self) -> None:
+        # The shape of every config dict embedded in a checkpoint written before the union.
+        data = joint_config().model_dump()
+        data["backbone"].pop("kind")
+        assert type(JointTrainingConfig.model_validate(data).backbone) is TinyBackboneConfig
+
+    def test_wan_config_is_hashable_into_config_hash(self) -> None:
+        # AC-04: a torch dtype object anywhere in the config would make this raise TypeError.
+        assert isinstance(config_hash(joint_config(backbone=WAN_SECTION)), str)
+
+
+class TestBuildBackbone:
+    def test_untagged_mapping_is_tagged_tiny(self) -> None:
+        config = build_backbone_config({"feature_dim": FEATURE_DIM, "num_frames": NUM_FRAMES})
+        assert type(config) is TinyBackboneConfig
+        assert config.feature_dim == FEATURE_DIM
+
+    def test_tagged_wan_mapping(self) -> None:
+        config = build_backbone_config({"kind": "wan_i2v", "lora_rank": 8})
+        assert type(config) is WanBackboneConfig
+        assert config.lora_rank == 8
+
+    def test_untagged_wan_shaped_mapping_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            build_backbone_config({"model_id": "Wan-AI/Wan2.2-TI2V-5B-Diffusers", "lora_rank": 8})
+
+    def test_config_instance_passes_through(self) -> None:
+        config = tiny_backbone_config()
+        assert build_backbone_config(config) == config
+
+    def test_builds_the_tiny_module(self) -> None:
+        backbone = build_backbone(tiny_backbone_config())
+        assert isinstance(backbone, TinyVideoBackbone)
+        assert backbone.config == tiny_backbone_config()
+
+    def test_unknown_kind_raises(self) -> None:
+        class Bogus:
+            kind = "sora"
+
+        with pytest.raises(ValueError, match="unknown backbone kind"):
+            build_backbone(Bogus())  # type: ignore[arg-type]
+
+    def test_name_registry_is_untouched(self) -> None:
+        # build_backbone is a second entry point, not a replacement: AC-05 still enumerates
+        # every adapter by name.
+        from wam.backbones import available_backbones
+
+        assert available_backbones() == ("flux3", "tiny", "wan_i2v")
+
+
+# -- backbone swappability (FR-09): module injection ------------------------------------------
+
+
+class FakeFlowBackbone(nn.Module):
+    """A second, independent FlowBackbone in PIXEL space (one video token per frame).
+
+    Deliberately NOT a TinyVideoBackbone subclass and deliberately trivial: its only job is to
+    prove ``JointWorldActionModel`` talks to the protocol and never to a concrete backbone.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.text_table = nn.Embedding(8, FEATURE_DIM)  # the "text tower" — the frozen part
+        self.pixel_in = nn.Linear(3, FEATURE_DIM)
+        self.pixel_out = nn.Linear(FEATURE_DIM, 3)
+        self.state_in = nn.Linear(STATE_DIM, FEATURE_DIM)
+
+    @property
+    def name(self) -> str:
+        return "fake-flow"
+
+    @property
+    def feature_dim(self) -> int:
+        return FEATURE_DIM
+
+    def encode_video(self, video) -> torch.Tensor:
+        frames = torch.as_tensor(video)
+        frames = frames[None] if frames.ndim == 4 else frames
+        return frames.float() / 255.0 if frames.dtype == torch.uint8 else frames.float()
+
+    def decode_video(self, video_latents) -> torch.Tensor:
+        return torch.as_tensor(video_latents).float()
+
+    def condition_video(self, video) -> torch.Tensor:
+        return self.pixel_in(self.encode_video(video)).mean(dim=(2, 3))
+
+    def condition_text(self, text: str) -> torch.Tensor:
+        return self.text_table(torch.tensor([[len(text) % 8]]))
+
+    def condition_state(self, state_embedding) -> torch.Tensor:
+        emb = torch.as_tensor(state_embedding, dtype=torch.float32)
+        return self.state_in(emb)[:, None, :]
+
+    def features(self, video_ctx, text_ctx, state_ctx) -> torch.Tensor:
+        batch = video_ctx.shape[0]
+        text = text_ctx.expand(batch, -1, -1) if text_ctx.shape[0] == 1 else text_ctx
+        return torch.cat([video_ctx, text, state_ctx], dim=1)
+
+    def forward_flow(self, video_latents, t, text_ctx, state_ctx) -> tuple[torch.Tensor, ...]:
+        hidden = self.pixel_in(torch.as_tensor(video_latents).float())
+        hidden = hidden + torch.as_tensor(t, dtype=torch.float32).reshape(-1, 1, 1, 1, 1)
+        return self.pixel_out(hidden), self.features(hidden.mean(dim=(2, 3)), text_ctx, state_ctx)
+
+    def num_video_tokens(self, video_latents=None) -> int:
+        return NUM_FRAMES
+
+    def frozen_part_names(self) -> tuple[str, ...]:
+        return ("text_table",)
+
+
+class LatentFlowBackbone(FakeFlowBackbone):
+    """FlowBackbone whose ``encode_video`` returns VAE-SHAPED latents ``[B, 8, 2, 3, 4]``.
+
+    The whole point is the shape: nothing in ``JointWorldActionModel`` may assume the
+    ``[B, F, H, W, 3]`` pixel layout, and the 24 video tokens (F' x H' x W') must come from
+    ``num_video_tokens(latents)`` — the tiny config would claim 8 here.
+    """
+
+    LATENT_SHAPE = (8, 2, 3, 4)  # (C, F', H', W')
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.token_in = nn.Linear(self.LATENT_SHAPE[0], FEATURE_DIM)
+        self.token_out = nn.Linear(FEATURE_DIM, self.LATENT_SHAPE[0])
+
+    def encode_video(self, video) -> torch.Tensor:
+        pixels = super().encode_video(video)
+        numel = int(np.prod(self.LATENT_SHAPE))
+        flat = pixels.reshape(pixels.shape[0], -1)[:, :numel]
+        return flat.reshape(pixels.shape[0], *self.LATENT_SHAPE).detach()
+
+    def decode_video(self, video_latents) -> torch.Tensor:
+        # Shape-correct stand-in, not a true inverse — no test round-trips through it.
+        latents = torch.as_tensor(video_latents).float()
+        pooled = latents.mean(dim=(1, 3, 4))  # [B, F']
+        return pooled[:, :, None, None, None].expand(-1, NUM_FRAMES, IMAGE_HW, IMAGE_HW, 3)
+
+    def forward_flow(self, video_latents, t, text_ctx, state_ctx) -> tuple[torch.Tensor, ...]:
+        latents = torch.as_tensor(video_latents).float()
+        batch = latents.shape[0]
+        channels, *grid = self.LATENT_SHAPE
+        tokens = latents.permute(0, 2, 3, 4, 1).reshape(batch, -1, channels)
+        hidden = self.token_in(tokens)
+        hidden = hidden + torch.as_tensor(t, dtype=torch.float32).reshape(batch, 1, 1)
+        velocity = self.token_out(hidden).reshape(batch, *grid, channels).permute(0, 4, 1, 2, 3)
+        return velocity, self.features(hidden, text_ctx, state_ctx)
+
+    def num_video_tokens(self, video_latents=None) -> int:
+        if video_latents is None:
+            return int(np.prod(self.LATENT_SHAPE[1:]))
+        _, _, frames, height, width = torch.as_tensor(video_latents).shape
+        return frames * height * width
+
+
+class TestBackboneInjection:
+    def test_injected_backbone_is_used_and_drives_the_frozen_registry(self) -> None:
+        torch.manual_seed(0)
+        fake = FakeFlowBackbone()
+        model = JointWorldActionModel(joint_config(), backbone=fake)
+        assert model.backbone is fake
+        assert set(model.frozen_parts) == {"text_table"}  # NOT tiny's text_embedding/text_pos
+        assert model.frozen_parameter_names() == ("backbone.text_table.weight",)
+
+    def test_gradients_reach_the_injected_backbone(self) -> None:
+        trainer = JointTrainer(joint_config(), backbone=FakeFlowBackbone())
+        trainer.compute_losses(make_batch(batch_size=2))["total"].backward()
+        assert TrainingMonitor.module_grad_norms(trainer.model)["backbone"] > 0.0
+
+    def test_pixel_fake_trains(self) -> None:
+        trainer = JointTrainer(joint_config(), backbone=FakeFlowBackbone())
+        history = trainer.train(make_batch(batch_size=4), steps=5)
+        assert all(np.isfinite(entry["total"]) for entry in history)
+        assert history[-1]["total"] < history[0]["total"]
+
+    def test_empty_frozen_part_names_yields_an_empty_registry(self) -> None:
+        # A backbone that arrives pre-frozen (LoRA-adapted) has nothing left for us to freeze.
+        class PreFrozen(FakeFlowBackbone):
+            def frozen_part_names(self) -> tuple[str, ...]:
+                return ()
+
+        model = JointWorldActionModel(joint_config(), backbone=PreFrozen())
+        assert model.frozen_parts == {}
+        assert model.frozen_parameter_names() == ()
+
+    def test_non_module_backbone_is_rejected(self) -> None:
+        # Structurally a FlowBackbone (an adapter wrapping a third-party pipeline often is),
+        # but not an nn.Module — so its parameters would never reach the optimizer.
+        class PlainAdapter:
+            name = "plain"
+            feature_dim = FEATURE_DIM
+
+            def __getattr__(self, item: str):
+                return lambda *args, **kwargs: None
+
+        with pytest.raises(TypeError, match="nn.Module"):
+            JointWorldActionModel(joint_config(), backbone=PlainAdapter())
+
+    def test_incomplete_backbone_lists_the_missing_members(self) -> None:
+        with pytest.raises(TypeError, match="forward_flow") as excinfo:
+            JointWorldActionModel(joint_config(), backbone=nn.Linear(2, 2))
+        assert "encode_video" in str(excinfo.value)
+
+    def test_model_and_backbone_are_mutually_exclusive(self) -> None:
+        model = JointWorldActionModel(joint_config(), backbone=FakeFlowBackbone())
+        with pytest.raises(TypeError, match="not both"):
+            JointTrainer(joint_config(), model, backbone=FakeFlowBackbone())
+
+
+class TestLatentSpaceBackbone:
+    def test_shapes_line_up_and_the_loss_is_finite(self) -> None:
+        trainer = JointTrainer(joint_config(), backbone=LatentFlowBackbone())
+        batch = make_batch(batch_size=2)
+        out = trainer.model.co_denoise(
+            batch, torch.tensor([0.3, 0.7]), generator=torch.Generator().manual_seed(0)
+        )
+        latent_shape = (2, *LatentFlowBackbone.LATENT_SHAPE)
+        assert out["video_velocity_pred"].shape == latent_shape
+        assert out["video_velocity_target"].shape == latent_shape
+        assert out["features"].shape == (2, 24 + 2, FEATURE_DIM)  # 24 video + text + state
+        assert out["video_feature"].shape == (2, FEATURE_DIM)
+
+        losses = trainer.compute_losses(batch)
+        assert torch.isfinite(losses["total"])
+        losses["total"].backward()
+        norms = TrainingMonitor.module_grad_norms(trainer.model)
+        for module in ("backbone", "action_encoder", "velocity_head", "action_head"):
+            assert norms[module] > 0.0, f"no gradient reached {module}"
+
+    def test_token_count_comes_from_the_batch_not_the_config(self) -> None:
+        backbone = LatentFlowBackbone()
+        latents = backbone.encode_video(make_batch(batch_size=2)["frames"])
+        assert backbone.num_video_tokens(latents) == 24
+        assert tiny_backbone_config().num_video_tokens == 8  # what the old code would have used
+
+
+# -- external training loop: step(), param groups, resume -------------------------------------
+
+
+class TestTrainerStepAndResume:
+    def test_step_matches_train_bitwise(self) -> None:
+        from wam.training._utils import prepare_tensor_batch
+
+        batch = make_batch(batch_size=4)
+        looped = JointTrainer(joint_config())
+        history = looped.train(batch, steps=3)
+
+        manual = JointTrainer(joint_config())
+        manual.model.train()
+        prepared = prepare_tensor_batch(batch, manual.device)
+        manual_history = [manual.step(prepared, step=index) for index in range(3)]
+
+        assert manual_history == history  # identical loss dicts, float for float
+        params = zip(looped.model.named_parameters(), manual.model.named_parameters(), strict=True)
+        for (name, a), (_, b) in params:
+            assert torch.equal(a, b), name
+
+    def test_single_param_group_without_backbone_lr(self) -> None:
+        trainer = JointTrainer(joint_config())
+        assert len(trainer.optimizer.param_groups) == 1
+        assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(trainer.config.lr)
+
+    def test_backbone_lr_splits_the_param_groups(self) -> None:
+        trainer = JointTrainer(joint_config(backbone_lr=1e-4))
+        backbone, rest = trainer.optimizer.param_groups
+        assert backbone["lr"] == pytest.approx(1e-4)
+        assert rest["lr"] == pytest.approx(trainer.config.lr)
+        expected = {id(p) for p in trainer.model.backbone.parameters() if p.requires_grad}
+        assert {id(p) for p in backbone["params"]} == expected
+        assert not {id(p) for p in rest["params"]} & expected
+
+    def test_state_dict_resumes_optimizer_and_rng(self) -> None:
+        batch = make_batch(batch_size=4)
+        source = JointTrainer(joint_config())
+        source.train(batch, steps=2)
+        weights = {name: value.clone() for name, value in source.model.state_dict().items()}
+        trainer_state = source.state_dict()
+        expected = source.train(batch, steps=1)[0]
+
+        resumed = JointTrainer(joint_config())
+        resumed.model.load_state_dict(weights)
+        resumed.load_state_dict(trainer_state)
+        assert resumed.train(batch, steps=1)[0] == expected
+
+    def test_trainable_state_dict_round_trips_with_strict_false(self, tmp_path: Path) -> None:
+        trainer = JointTrainer(joint_config())
+        trainer.train(make_batch(batch_size=4), steps=2)
+        payload = trainer.model.trainable_state_dict()
+        assert "backbone.text_embedding.weight" not in payload  # frozen parts are left out
+        assert "backbone.video_proj.weight" in payload
+
+        path = tmp_path / "adapters.safetensors"
+        trainer.save_checkpoint(path, state_dict=payload)
+        with pytest.raises(RuntimeError, match="Missing key"):
+            load_joint_checkpoint(path)
+
+        model, _ = load_joint_checkpoint(path, strict=False)
+        reference = dict(trainer.model.named_parameters())
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert torch.equal(param, reference[name]), name
+
+
+class TestEncodeInstructions:
+    def test_padding_token_is_one_column_wide(self) -> None:
+        # A real text tower pads "" out to its full window; using the whole thing as the
+        # padding token would blow up the concat width instead of adding one column.
+        from wam.training._utils import encode_instructions
+
+        class WideEmptyTextTower:
+            def condition_text(self, text: str) -> torch.Tensor:
+                length = len(text.split()) or 512
+                return torch.full((1, length, 8), float(length))
+
+        ctx = encode_instructions(WideEmptyTextTower(), ["lift", "lift the cube"], 2)
+        assert ctx.shape == (2, 3, 8)
+        assert torch.equal(ctx[0, 1:], torch.full((2, 8), 512.0))
+        assert torch.equal(ctx[1], torch.full((3, 8), 3.0))
 
 
 # -- shipped configs x shipped dataset (drift gate) -------------------------------------------

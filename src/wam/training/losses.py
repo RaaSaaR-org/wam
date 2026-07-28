@@ -116,14 +116,32 @@ def action_regression_loss(
     return _masked_mean(per_element, mask)
 
 
-def video_flow_loss(velocity_pred: Tensor, velocity_target: Tensor) -> Tensor:
-    """Video branch loss: velocity MSE on video latents ``[B, F, H, W, C]`` (PRD §10.4)."""
+def video_flow_loss(
+    velocity_pred: Tensor, velocity_target: Tensor, mask: Tensor | None = None
+) -> Tensor:
+    """Video branch loss: velocity MSE in the backbone's video latent space (PRD §10.4).
+
+    The loss lives in WHATEVER space ``FlowBackbone.encode_video`` returns: pixels in [0, 1]
+    for the tiny identity VAE (``[B, F, H, W, 3]``), VAE latents for a real backbone
+    (``[B, C, F', H', W']``). Magnitudes are therefore NOT comparable across backbones — a
+    ``weights.video`` tuned against tiny means nothing against Wan.
+
+    With a real VAE the latents MUST be mean/std-normalized before the flow target is built.
+    Raw Wan latents carry per-channel scales of order 1e1, so the squared velocity error is
+    two-plus orders of magnitude above the action terms and the video branch swamps action
+    learning outright (R-07) — the failure looks like "action losses plateau", not like a
+    video bug.
+
+    Optional ``mask`` (bool or 0-1, broadcastable over the leading dims) restricts the mean to
+    valid entries — e.g. dropping the conditioning-frame latents that are copied in, not
+    predicted. ``mask=None`` is a plain mean over all elements.
+    """
     if velocity_pred.shape != velocity_target.shape:
         raise ValueError(
             f"velocity shape mismatch: {tuple(velocity_pred.shape)} vs "
             f"{tuple(velocity_target.shape)}"
         )
-    return (velocity_pred - velocity_target).pow(2).mean()
+    return _masked_mean((velocity_pred - velocity_target).pow(2), mask)
 
 
 def alignment_loss(video_features: Tensor, action_features: Tensor) -> Tensor:

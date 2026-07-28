@@ -18,9 +18,16 @@
 - decoder branch: ``ActionHead`` regresses the clean chunk from the shared features (inverse
   dynamics, PRD §8.2) so smoothness/limit regularizers act in normalized action space.
 
-Frozen-parts registry: text/VAE-equivalents are frozen for the MVP (PRD §10.3 step 4). For
-the tiny backbone that is the text embedding table + text positional table (the "text
-encoder"); the tiny "VAE" is the identity and has no parameters. The registry lives in
+The model is backbone-agnostic (FR-09): it depends on the ``FlowBackbone`` protocol and never
+on a concrete class. The backbone is either built from ``config.backbone`` — a discriminated
+union tagged by ``kind`` — or injected ready-made, which is how a multi-GB adapted DiT is
+loaded once and reused. Everything backbone-shaped is asked of the instance: the video latent
+space (``encode_video``), how many leading feature tokens are video (``num_video_tokens``) and
+which parts to freeze (``frozen_part_names``).
+
+Frozen-parts registry: text/VAE-equivalents are frozen for the MVP (PRD §10.3 step 4). The
+backbone names them — for tiny the text embedding table + text positional table (its "VAE" is
+the identity and has no parameters), for Wan the VAE and the text tower. The registry lives in
 ``JointWorldActionModel.frozen_parts`` and freezing happens at construction.
 
 ``JointTrainer`` optimizes the weighted sum of the PRD §10.4 loss dict:
@@ -31,16 +38,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor, nn
 from torch.utils.data import Dataset
 
-from wam.backbones.tiny import TinyBackboneConfig, TinyVideoBackbone
+from wam.backbones.registry import build_backbone
+from wam.backbones.tiny import TinyBackboneConfig
+from wam.backbones.wan_i2v import WanBackboneConfig
 from wam.decoders import ActionHead, ActionHeadConfig
 from wam.encoders import ActionChunkEncoder, ActionChunkEncoderConfig, StateMLP, StateMLPConfig
+from wam.interfaces.protocols import FlowBackbone, Observation
+from wam.interfaces.schema import ActionChunk
 from wam.interfaces.versioning import RunMetadata, load_config
 
 from ._utils import (
@@ -62,12 +73,18 @@ from .monitor import TrainingMonitor
 
 __all__ = [
     "ActionVelocityHead",
+    "BackboneConfig",
     "JointLossWeights",
     "JointTrainer",
     "JointTrainingConfig",
     "JointWorldActionModel",
     "load_joint_checkpoint",
 ]
+
+#: Tagged union of every trainable backbone config (FR-09). The ``kind`` discriminator is what
+#: keeps a Wan section from validating as an all-defaults tiny config; ``build_backbone``
+#: dispatches on the same tag, so adding a backbone touches exactly this alias and the registry.
+BackboneConfig = Annotated[TinyBackboneConfig | WanBackboneConfig, Field(discriminator="kind")]
 
 
 class JointLossWeights(BaseModel):
@@ -91,7 +108,7 @@ class JointTrainingConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     state: StateMLPConfig
-    backbone: TinyBackboneConfig = TinyBackboneConfig()
+    backbone: BackboneConfig = TinyBackboneConfig()
     action_encoder: ActionChunkEncoderConfig
     head: ActionHeadConfig
     velocity_hidden_dims: tuple[int, ...] = Field(default=(64,), min_length=1, max_length=3)
@@ -99,6 +116,9 @@ class JointTrainingConfig(BaseModel):
     seed: int = 0
     device: str = "cpu"
     lr: float = Field(default=3e-3, gt=0)
+    #: Separate LR for everything under ``backbone.``; ``None`` == one group at ``lr``. An
+    #: adapted large backbone wants a far smaller LR than freshly-initialized heads.
+    backbone_lr: float | None = Field(default=None, gt=0)
     weight_decay: float = Field(default=1e-4, ge=0)
     grad_clip: float = Field(default=1.0, gt=0)
     batch_size: int = Field(default=16, ge=1)
@@ -106,6 +126,22 @@ class JointTrainingConfig(BaseModel):
     weights: JointLossWeights = JointLossWeights()
     limit_margin: float = Field(default=0.95, gt=0, le=1.0)
     camera: str = "front"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _tag_legacy_backbone(cls, data: Any) -> Any:
+        """Tag an untagged ``backbone`` section as ``kind='tiny'``.
+
+        The discriminated union would otherwise reject every artifact written before it
+        existed: the shipped ``configs/training/*.yaml`` and the config dict embedded in every
+        checkpoint on disk. Tagging on the way in keeps those loading bit-identically while new
+        configs must name their backbone explicitly.
+        """
+        if isinstance(data, Mapping):
+            backbone = data.get("backbone")
+            if isinstance(backbone, Mapping) and "kind" not in backbone:
+                return {**data, "backbone": {**backbone, "kind": "tiny"}}
+        return data
 
     @model_validator(mode="after")
     def _consistent_dims(self) -> JointTrainingConfig:
@@ -166,13 +202,34 @@ class ActionVelocityHead(nn.Module):
 class JointWorldActionModel(nn.Module):
     """Backbone flow pathway + ActionChunkEncoder + action velocity head + ActionHead."""
 
-    #: module attribute names frozen at construction (text/VAE equivalents, PRD §10.3 step 4)
+    #: Fallback frozen-part names for a backbone that predates ``frozen_part_names`` (tiny's
+    #: text embedding + text positional table, PRD §10.3 step 4). The backbone is authoritative.
     FROZEN_PART_NAMES: tuple[str, ...] = ("text_embedding", "text_pos")
 
-    def __init__(self, config: JointTrainingConfig) -> None:
+    def __init__(self, config: JointTrainingConfig, backbone: nn.Module | None = None) -> None:
         super().__init__()
         self.config = config
-        self.backbone = TinyVideoBackbone(config.backbone)
+        # Injection point for an already-loaded backbone: a multi-GB DiT is built and adapted
+        # once by the caller and handed in, instead of being rebuilt per model instance.
+        resolved = backbone if backbone is not None else build_backbone(config.backbone)
+        if not isinstance(resolved, nn.Module):
+            raise TypeError(
+                f"backbone must be an nn.Module, got {type(resolved).__name__}: the joint model "
+                "registers it as a submodule, so a plain object would leave its parameters out "
+                "of .parameters() (nothing to optimize), out of .state_dict() (nothing "
+                "checkpointed) and out of .to(device) (silent CPU/GPU split)"
+            )
+        if not isinstance(resolved, FlowBackbone):
+            missing = sorted(
+                name
+                for name in getattr(FlowBackbone, "__protocol_attrs__", ())
+                if not hasattr(resolved, name)
+            )
+            raise TypeError(
+                f"backbone {type(resolved).__name__} does not implement FlowBackbone; "
+                f"missing: {missing or 'unknown (protocol members unavailable)'}"
+            )
+        self.backbone = resolved
         self.state_encoder = StateMLP(config.state)
         self.action_encoder = ActionChunkEncoder(config.action_encoder)  # training only
         self.velocity_head = ActionVelocityHead(
@@ -193,8 +250,15 @@ class JointWorldActionModel(nn.Module):
             nn.Linear(recon_hidden, enc.target_dim + enc.gripper_dims),
         )
         # Frozen-parts registry: name -> parameter-bearing module/parameter, frozen in place.
+        # The BACKBONE names its own frozen parts (tiny: text tables; Wan: VAE + text tower) —
+        # the model must not know which those are (FR-09). An empty tuple is legitimate: a
+        # backbone that arrives pre-frozen (LoRA-adapted, base weights already requires_grad=
+        # False) has nothing left for us to freeze.
+        part_names = tuple(
+            getattr(self.backbone, "frozen_part_names", lambda: self.FROZEN_PART_NAMES)()
+        )
         self.frozen_parts: dict[str, nn.Module | nn.Parameter] = {
-            name: getattr(self.backbone, name) for name in self.FROZEN_PART_NAMES
+            name: getattr(self.backbone, name) for name in part_names
         }
         for part in self.frozen_parts.values():
             if isinstance(part, nn.Parameter):
@@ -206,6 +270,16 @@ class JointWorldActionModel(nn.Module):
     def frozen_parameter_names(self) -> tuple[str, ...]:
         """Fully-qualified names of all frozen parameters (for tests/audits)."""
         return tuple(name for name, param in self.named_parameters() if not param.requires_grad)
+
+    def trainable_state_dict(self) -> dict[str, Tensor]:
+        """``state_dict`` restricted to parameters with ``requires_grad``.
+
+        The checkpoint payload for an adapted large backbone: LoRA/adapter tensors and heads
+        only, so a run does not write the frozen base weights into every checkpoint. Reload it
+        with ``strict=False`` on top of the same base weights.
+        """
+        trainable = {name for name, param in self.named_parameters() if param.requires_grad}
+        return {name: value for name, value in self.state_dict().items() if name in trainable}
 
     def co_denoise(
         self,
@@ -221,13 +295,10 @@ class JointWorldActionModel(nn.Module):
         Returns velocity predictions + targets for both branches, the shared features, the
         decoded chunk and the pooled alignment features (see module docstring).
         """
-        frames = torch.as_tensor(batch["frames"])
-        if frames.dtype == torch.uint8:
-            video_clean = frames.float() / 255.0
-        else:
-            video_clean = frames.float()
-        if video_clean.ndim == 4:
-            video_clean = video_clean[None]
+        # The backbone owns the pixel->latent step (identity for tiny, a real VAE otherwise),
+        # so the flow target is built in whatever space that backbone trains in. Batching and
+        # uint8 scaling are its business too — nothing here may assume a pixel layout.
+        video_clean = self.backbone.encode_video(batch["frames"])
         batch_size = video_clean.shape[0]
 
         targets = torch.as_tensor(batch["targets"], dtype=torch.float32)
@@ -260,13 +331,19 @@ class JointWorldActionModel(nn.Module):
         state_ctx = self.backbone.condition_state(state_emb)
 
         video_velocity_pred, features = self.backbone.forward_flow(video_t, t, text_ctx, state_ctx)
+        # A real backbone runs in bf16/fp16; the loss and the action branch stay in fp32 so the
+        # small action terms are not rounded away against the video term (R-07). No-ops on fp32.
+        video_velocity_pred = video_velocity_pred.float()
+        features = features.float()
         pooled = features.mean(dim=1)  # [B, D] shared conditioning for the action branch
         action_velocity_pred = self.velocity_head(action_t, pooled, t)
         decoded = self.action_head(pooled)
         recon = self.action_recon(action_clean)  # [B, T, D+G] — the encoder's anchor
         target_dim = self.config.action_encoder.target_dim
 
-        num_video = self.config.backbone.num_video_tokens
+        # Asked of the backbone, not the config: Wan derives the count from the latent geometry
+        # of THIS batch, tiny reads it off its config.
+        num_video = self.backbone.num_video_tokens(video_t)
         return {
             "video_velocity_pred": video_velocity_pred,
             "video_velocity_target": video_velocity,
@@ -281,21 +358,88 @@ class JointWorldActionModel(nn.Module):
             "action_feature": self.align_proj(action_clean.mean(dim=1)),  # [B, D]
         }
 
+    @torch.no_grad()
+    def predict(self, observation: Observation, *, camera: str | None = None) -> ActionChunk:
+        """Policy protocol: one :class:`Observation` -> one canonical :class:`ActionChunk`.
+
+        This is the **representation-only** readout of the joint model, and it is the reason a
+        world-action model can close a 2 Hz loop at all: one forward pass at the CLEAN end of
+        the flow, then ``ActionHead`` on the shared features. The video velocity comes back and
+        is discarded — no iterative denoising, no video sampled at test time, one backbone pass
+        per control cycle rather than one per denoising step. The video branch's whole job at
+        inference is to have shaped the features during training (AC-07).
+
+        ``t = 1`` follows from WAM's flow convention (``x_t = (1-t)*x0 + t*x1``, x1 clean): the
+        observed frame enters unnoised, which is the only timestep at which the backbone is
+        being asked to read a real observation rather than a partially destroyed one.
+
+        The camera frame is **tiled** to the backbone's ``num_frames`` context. For a video
+        backbone that is a real limitation — N copies of one still carry no motion — but it is
+        what ``ClosedLoopExecutor`` can supply today (one render per cycle); a rolling frame
+        buffer is the follow-up. ``camera`` overrides the trained ``config.camera``, for the
+        case where the deployment names the same view differently (sim: ``head``); it changes
+        which ``Observation.images`` key is read, never what the model expects to see.
+        """
+        key = camera if camera is not None else self.config.camera
+        if key not in observation.images:
+            raise KeyError(f"observation has no camera {key!r}; have {sorted(observation.images)}")
+        device = next(self.parameters()).device
+        image = torch.as_tensor(observation.images[key]).to(device)
+        frames = image.unsqueeze(0).expand(self.config.backbone.num_frames, -1, -1, -1)
+        video_latents = self.backbone.encode_video(frames.unsqueeze(0))
+        t = torch.ones(1, dtype=torch.float32, device=device)
+        state_emb = self.state_encoder.encode(observation.state)
+        text_ctx = self.backbone.condition_text(observation.instruction)
+        state_ctx = self.backbone.condition_state(state_emb)
+        _, features = self.backbone.forward_flow(video_latents, t, text_ctx, state_ctx)
+        # decode() mean-pools the token axis in fp32 — same reduction co_denoise applies before
+        # the action branch, so a chunk predicted here matches the one trained against.
+        return self.action_head.decode(features[0])
+
 
 class JointTrainer:
     """Seeded AdamW loop over the combined weighted loss dict (T-16/T-17)."""
 
-    def __init__(self, config: JointTrainingConfig, model: JointWorldActionModel | None = None):
+    def __init__(
+        self,
+        config: JointTrainingConfig,
+        model: JointWorldActionModel | None = None,
+        *,
+        backbone: nn.Module | None = None,
+    ):
+        if model is not None and backbone is not None:
+            raise TypeError("pass either model= or backbone=, not both")
         self.config = config
         self.device = torch.device(config.device)
         torch.manual_seed(config.seed)
-        self.model = (model or JointWorldActionModel(config)).to(self.device)
-        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        self.model = (model or JointWorldActionModel(config, backbone=backbone)).to(self.device)
         self.optimizer = torch.optim.AdamW(
-            trainable, lr=config.lr, weight_decay=config.weight_decay
+            self._param_groups(), lr=config.lr, weight_decay=config.weight_decay
         )
         self._rng = torch.Generator().manual_seed(config.seed)
         self.metadata: RunMetadata | None = None
+
+    def _param_groups(self) -> list[Any]:
+        """Trainable parameters as AdamW input — one group, or backbone/rest at separate LRs.
+
+        With ``backbone_lr`` unset this returns a flat parameter LIST, not a one-element group
+        dict: that is the exact call shape the trainer has always used, so optimizer state
+        dicts written by earlier runs keep loading unchanged. Both groups are emitted even when
+        empty so the saved layout does not depend on how much of the backbone is trainable.
+        """
+        named = [(name, p) for name, p in self.model.named_parameters() if p.requires_grad]
+        if self.config.backbone_lr is None:
+            return [param for _, param in named]
+        return [
+            {
+                "params": [p for name, p in named if name.startswith("backbone.")],
+                "lr": self.config.backbone_lr,
+            },
+            {
+                "params": [p for name, p in named if not name.startswith("backbone.")],
+                "lr": self.config.lr,
+            },
+        ]
 
     def compute_losses(self, batch: Mapping[str, Any]) -> dict[str, Tensor]:
         """Weighted PRD §10.4 loss dict incl. ``'total'`` for one batch."""
@@ -339,6 +483,44 @@ class JointTrainer:
         )
         return losses
 
+    def step(
+        self,
+        batch: Mapping[str, Any],
+        *,
+        monitor: TrainingMonitor | None = None,
+        step: int = 0,
+    ) -> dict[str, float]:
+        """One forward/backward/clip/update on ``batch`` -> the history entry for that step.
+
+        The unit an external training loop drives (LR schedules, gradient accumulation,
+        distributed sampling, mid-run checkpointing): ``train`` is nothing but this in a loop
+        over ``iterate_batches``. ``step`` is only the label written into the entry and handed
+        to the monitor; it does not affect the update.
+        """
+        snapshot = TrainingMonitor.snapshot_params(self.model) if monitor else None
+        losses = self.compute_losses(batch)
+        self.optimizer.zero_grad(set_to_none=True)
+        losses["total"].backward()
+        grad_norm = float(
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in self.model.parameters() if p.requires_grad],
+                self.config.grad_clip,
+            )
+        )
+        self.optimizer.step()
+
+        entry = {name: float(value.detach()) for name, value in losses.items()}
+        entry["step"] = float(step)
+        entry["grad_norm"] = grad_norm
+        if monitor is not None:
+            monitor.record_step(
+                step,
+                {k: v for k, v in entry.items() if k not in ("step", "grad_norm")},
+                grad_norms=TrainingMonitor.module_grad_norms(self.model),
+                update_ratio=TrainingMonitor.param_update_ratio(self.model, snapshot or {}),
+            )
+        return entry
+
     def train(
         self,
         data: Dataset | Mapping[str, Any],
@@ -349,7 +531,6 @@ class JointTrainer:
         """Run ``steps`` optimizer steps (default ``config.steps``); returns per-step history."""
         num_steps = steps if steps is not None else self.config.steps
         self.model.train()
-        history: list[dict[str, float]] = []
         batches = iterate_batches(
             data,
             steps=num_steps,
@@ -357,31 +538,35 @@ class JointTrainer:
             seed=self.config.seed,
             device=self.device,
         )
-        for step, batch in enumerate(batches):
-            snapshot = TrainingMonitor.snapshot_params(self.model) if monitor else None
-            losses = self.compute_losses(batch)
-            self.optimizer.zero_grad(set_to_none=True)
-            losses["total"].backward()
-            grad_norm = float(
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.model.parameters() if p.requires_grad],
-                    self.config.grad_clip,
-                )
-            )
-            self.optimizer.step()
+        return [
+            self.step(batch, monitor=monitor, step=index) for index, batch in enumerate(batches)
+        ]
 
-            entry = {name: float(value.detach()) for name, value in losses.items()}
-            entry["step"] = float(step)
-            entry["grad_norm"] = grad_norm
-            history.append(entry)
-            if monitor is not None:
-                monitor.record_step(
-                    step,
-                    {k: v for k, v in entry.items() if k not in ("step", "grad_norm")},
-                    grad_norms=TrainingMonitor.module_grad_norms(self.model),
-                    update_ratio=TrainingMonitor.param_update_ratio(self.model, snapshot or {}),
-                )
-        return history
+    # -- resume / checkpointing ------------------------------------------------------------
+
+    def state_dict(self) -> dict[str, Any]:
+        """Everything a resume needs BESIDES the weights: optimizer moments + RNG streams.
+
+        Both RNG streams matter and they are different objects: ``self._rng`` seeds the
+        per-step timestep and flow noise (so a resumed run sees the same noise schedule),
+        while the global torch stream drives the DataLoader shuffle and any dropout.
+        """
+        state: dict[str, Any] = {
+            "optimizer": self.optimizer.state_dict(),
+            "rng": self._rng.get_state(),
+            "torch_rng": torch.random.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["cuda_rng"] = torch.cuda.get_rng_state_all()
+        return state
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        """Restore :meth:`state_dict`. CUDA RNG is skipped when the device is unavailable."""
+        self.optimizer.load_state_dict(state["optimizer"])
+        self._rng.set_state(state["rng"])
+        torch.random.set_rng_state(state["torch_rng"])
+        if "cuda_rng" in state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(list(state["cuda_rng"]))
 
     def save_checkpoint(
         self,
@@ -390,8 +575,13 @@ class JointTrainer:
         run_id: str = "joint",
         dataset_snapshot_ref: str | None = None,
         git_commit: str | None = None,
+        state_dict: Mapping[str, Tensor] | None = None,
     ) -> RunMetadata:
-        """Write safetensors weights + embedded config and RunMetadata (FR-10, AC-04)."""
+        """Write safetensors weights + embedded config and RunMetadata (FR-10, AC-04).
+
+        ``state_dict`` overrides the payload — pass ``model.trainable_state_dict()`` to write
+        adapters only instead of a frozen multi-GB base (reload with ``strict=False``).
+        """
         metadata = RunMetadata.create(
             run_id,
             self.config,
@@ -399,7 +589,7 @@ class JointTrainer:
             dataset_snapshot_ref=dataset_snapshot_ref,
             git_commit=git_commit,
         )
-        save_checkpoint(self.model, self.config, path, metadata)
+        save_checkpoint(self.model, self.config, path, metadata, state_dict=state_dict)
         self.metadata = metadata
         return metadata
 
@@ -412,11 +602,19 @@ class JointTrainer:
         return trainer
 
 
-def load_joint_checkpoint(path: str | Path) -> tuple[JointWorldActionModel, RunMetadata]:
-    """Load ``(JointWorldActionModel, RunMetadata)`` from a safetensors checkpoint."""
+def load_joint_checkpoint(
+    path: str | Path, *, backbone: nn.Module | None = None, strict: bool = True
+) -> tuple[JointWorldActionModel, RunMetadata]:
+    """Load ``(JointWorldActionModel, RunMetadata)`` from a safetensors checkpoint.
+
+    ``backbone`` injects an already-loaded backbone instead of rebuilding one from the embedded
+    config; ``strict=False`` accepts an adapters-only checkpoint (see
+    :meth:`JointWorldActionModel.trainable_state_dict`), where the base weights come from that
+    injected backbone rather than from the file.
+    """
     state_dict, config_dict, metadata = load_checkpoint_raw(path)
     config = JointTrainingConfig.model_validate(config_dict)
-    model = JointWorldActionModel(config)
-    model.load_state_dict(state_dict)
+    model = JointWorldActionModel(config, backbone=backbone)
+    model.load_state_dict(state_dict, strict=strict)
     model.eval()
     return model, metadata

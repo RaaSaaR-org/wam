@@ -24,7 +24,7 @@ from typing import Any
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
-from torch import nn
+from torch import Tensor, nn
 
 from wam.interfaces.versioning import JsonlRunLogger, RunMetadata
 
@@ -141,12 +141,22 @@ class TrainingMonitor:
         return norms
 
     @staticmethod
-    def snapshot_params(model: nn.Module) -> dict[str, torch.Tensor]:
-        """Detached parameter clones for a later ``param_update_ratio`` comparison."""
-        return {name: param.detach().clone() for name, param in model.named_parameters()}
+    def snapshot_params(model: nn.Module, *, trainable_only: bool = False) -> dict[str, Tensor]:
+        """Detached parameter clones for a later ``param_update_ratio`` comparison.
+
+        ``trainable_only`` skips frozen parameters. For a large adapted backbone (LoRA on a
+        multi-billion-parameter DiT) a full snapshot clones the frozen base weights once per
+        monitored step — gigabytes of pure noise, since ``param_update_ratio`` divides by a
+        reference norm those frozen weights dominate and never move.
+        """
+        return {
+            name: param.detach().clone()
+            for name, param in model.named_parameters()
+            if param.requires_grad or not trainable_only
+        }
 
     @staticmethod
-    def param_update_ratio(model: nn.Module, before: Mapping[str, torch.Tensor]) -> float:
+    def param_update_ratio(model: nn.Module, before: Mapping[str, Tensor]) -> float:
         """``||theta_now - theta_before|| / (||theta_before|| + eps)`` over all parameters."""
         delta_sq = 0.0
         ref_sq = 0.0

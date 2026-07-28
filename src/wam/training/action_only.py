@@ -132,12 +132,16 @@ class ActionOnlyModel(nn.Module):
         return self.action_head(self.pooled_features(batch))
 
     @torch.no_grad()
-    def predict(self, observation: Observation) -> ActionChunk:
+    def predict(self, observation: Observation, *, camera: str | None = None) -> ActionChunk:
         """Policy protocol: one Observation -> one canonical ActionChunk.
 
         The configured camera's single frame is tiled to the backbone's ``num_frames`` context.
+        ``camera`` overrides the trained ``config.camera`` for a deployment that names the same
+        view differently (sim renders ``head``, the converted episodes trained on ``ego``) —
+        same override as ``JointWorldActionModel.predict``, so an AC-07 comparison can put both
+        models on the identical observation stream.
         """
-        camera = self.config.camera
+        camera = camera if camera is not None else self.config.camera
         if camera not in observation.images:
             raise KeyError(
                 f"observation has no camera {camera!r}; have {sorted(observation.images)}"

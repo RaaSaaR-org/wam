@@ -133,6 +133,40 @@ class TestVideoFlowLoss:
         with pytest.raises(ValueError, match="mismatch"):
             video_flow_loss(torch.zeros(1, 2, 4, 4, 3), torch.zeros(1, 3, 4, 4, 3))
 
+    def test_mask_excludes_samples(self) -> None:
+        pred = torch.stack([torch.ones(2, 4, 4, 3), torch.full((2, 4, 4, 3), 3.0)])
+        target = torch.zeros(2, 2, 4, 4, 3)
+        mask = torch.tensor([1.0, 0.0])  # [B]
+        # Only sample 0 contributes: mean(1^2) = 1.0 (unmasked would be (1 + 9) / 2 = 5).
+        assert video_flow_loss(pred, target, mask).item() == pytest.approx(1.0)
+        assert video_flow_loss(pred, target).item() == pytest.approx(5.0)
+
+    def test_frame_mask(self) -> None:
+        # [B, F] mask — e.g. excluding conditioning frames that are copied in, not predicted.
+        pred = torch.ones(1, 2, 4, 4, 3)
+        target = torch.zeros(1, 2, 4, 4, 3)
+        assert video_flow_loss(pred, target, torch.tensor([[0.0, 1.0]])).item() == pytest.approx(
+            1.0
+        )
+
+    def test_all_masked_is_zero(self) -> None:
+        loss = video_flow_loss(
+            torch.ones(2, 2, 4, 4, 3), torch.zeros(2, 2, 4, 4, 3), torch.zeros(2)
+        )
+        assert loss.item() == 0.0
+
+    def test_default_mask_is_a_plain_mean(self) -> None:
+        # Regression guard: routing through _masked_mean must not change the unmasked value.
+        torch.manual_seed(0)
+        pred = torch.randn(2, 2, 4, 4, 3)
+        target = torch.randn(2, 2, 4, 4, 3)
+        assert torch.equal(video_flow_loss(pred, target), (pred - target).pow(2).mean())
+
+    def test_latent_shaped_inputs(self) -> None:
+        # The loss is shape-agnostic: [B, C, F, H, W] VAE latents work exactly like pixels.
+        pred = torch.full((2, 48, 3, 8, 10), 2.0)
+        assert video_flow_loss(pred, torch.zeros_like(pred)).item() == pytest.approx(4.0)
+
 
 class TestAlignmentLoss:
     def test_identical_is_zero(self) -> None:

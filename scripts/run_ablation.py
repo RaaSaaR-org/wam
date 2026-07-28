@@ -33,7 +33,7 @@ import numpy as np
 import torch
 from overfit_d1 import build_eval_pairs, dataset_snapshot_hash
 
-from wam.backbones.tiny import TinyBackboneConfig
+from wam.backbones.registry import build_backbone_config
 from wam.decoders import ActionHeadConfig
 from wam.encoders import ActionChunkEncoderConfig, StateMLPConfig
 from wam.evaluation import (
@@ -88,7 +88,10 @@ def build_joint_config(base_cfg: dict, args: argparse.Namespace) -> JointTrainin
     head = ActionHeadConfig(**base_cfg["head"])
     return JointTrainingConfig(
         state=StateMLPConfig(**base_cfg["state"]),
-        backbone=TinyBackboneConfig(**base_cfg["backbone"]),
+        # Dispatch on the embedded `kind` instead of assuming tiny: backbone configs are a
+        # discriminated union with extra="forbid", so a checkpoint written by a Wan run would
+        # otherwise blow up inside TinyBackboneConfig on its own fields.
+        backbone=build_backbone_config(base_cfg["backbone"]),
         action_encoder=ActionChunkEncoderConfig(
             latent_dim=32,
             hidden_dims=(64,),

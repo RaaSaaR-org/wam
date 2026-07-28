@@ -21,10 +21,12 @@ CHECKPOINT_CONFIG_KEY = "wam_config_json"
 CHECKPOINT_METADATA_KEY = "wam_run_metadata_json"
 
 
-def encode_instructions(
-    backbone: nn.Module, instruction: str | Sequence[str], batch: int
-) -> Tensor:
+def encode_instructions(backbone: Any, instruction: str | Sequence[str], batch: int) -> Tensor:
     """Instruction(s) -> text context tokens for ``backbone.features``.
+
+    ``backbone`` is annotated ``Any``, not ``nn.Module``: adapters only have to satisfy the
+    structural ``BackboneAdapter``/``FlowBackbone`` protocols, and the ones wrapping a
+    third-party pipeline are plain classes holding a module, not modules themselves.
 
     A single string (or a list with one unique value) is encoded once as ``[1, T, D]`` and
     broadcast by the backbone. Mixed per-sample instructions are encoded individually and
@@ -39,7 +41,10 @@ def encode_instructions(
         return backbone.condition_text(texts[0])
     ctxs = [backbone.condition_text(text) for text in texts]
     max_len = max(ctx.shape[1] for ctx in ctxs)
-    pad = backbone.condition_text("")  # [1, 1, D] deterministic padding token
+    # ONE token wide, whatever the backbone's empty-text context length is: a real text tower
+    # pads "" out to its full max_text_tokens, so using the whole thing would expand to
+    # (max_len - len) * max_text_tokens columns and silently break the concat width.
+    pad = backbone.condition_text("")[:, :1]  # [1, 1, D] deterministic padding token
     padded = [
         torch.cat([ctx, pad.expand(1, max_len - ctx.shape[1], -1)], dim=1)
         if ctx.shape[1] < max_len
@@ -99,13 +104,27 @@ def iterate_batches(
             produced += 1
 
 
-def save_checkpoint(model: nn.Module, config: Any, path: str | Path, metadata: RunMetadata) -> Path:
-    """Serialize ``model.state_dict()`` to safetensors with config + RunMetadata metadata."""
+def save_checkpoint(
+    model: nn.Module,
+    config: Any,
+    path: str | Path,
+    metadata: RunMetadata,
+    *,
+    state_dict: Mapping[str, Tensor] | None = None,
+) -> Path:
+    """Serialize ``model.state_dict()`` to safetensors with config + RunMetadata metadata.
+
+    ``state_dict`` overrides what is written. That is how an adapted large backbone stays
+    checkpointable: ``JointWorldActionModel.trainable_state_dict()`` holds the LoRA/adapter
+    tensors only, so a run does not copy the frozen multi-GB base weights into every
+    checkpoint. Restoring such a file needs ``strict=False`` plus the same base weights.
+    """
     from safetensors.torch import save_file
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    state = {name: tensor.contiguous() for name, tensor in model.state_dict().items()}
+    source = model.state_dict() if state_dict is None else state_dict
+    state = {name: tensor.contiguous() for name, tensor in source.items()}
     save_file(
         state,
         str(target),

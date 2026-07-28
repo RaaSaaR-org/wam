@@ -1,0 +1,76 @@
+# WAM training config — joint video/action flow-matching on the REAL GR00T-G1 episodes,
+# but with the tiny backbone (T-16 dry-run twin of configs/training/joint_wan_gr00t.yaml).
+#
+# Purpose: exercise the whole training CLI end to end on CPU with no Wan weights. Every
+# shape here is the shape of datasets/gr00t-apple-full (converted by
+# scripts/convert_lerobot_g1.py): 15 canonical joints (waist_yaw + 7 DoF per arm), 2 gripper
+# channels in the STATE (per-hand grasp synergy) but 1 in the ACTION (the two hands are
+# averaged into one commanded synergy), 16-step chunks at the ego camera's 30 fps, frames
+# 120x160. What differs from the GPU config is the `backbone:` block, the feature widths
+# that follow from it (head/velocity), and the optimizer scale — the dataset code path,
+# the action/state shapes and the loss inventory are identical.
+#
+# The `training` section maps 1:1 onto wam.training.joint.JointTrainingConfig.
+wam_config_version: "0.1.0"
+
+training:
+  seed: 0
+  device: cpu
+  lr: 0.003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  batch_size: 8
+  steps: 200
+  camera: ego # the only camera the GR00T source ships (manifest cameras.ego)
+  limit_margin: 0.95
+
+  weights: # PRD §10.4 loss inventory; tiny is pixel-space, so video is comparable here
+    video: 1.0
+    action_flow: 1.0
+    action_recon: 1.0 # encoder anchor (flow targets are detached from the encoder)
+    action_reg: 1.0
+    gripper: 0.5
+    alignment: 0.1
+    smoothness: 0.01
+    limit: 0.001
+
+  state: # StateMLPConfig (FR-02) — input width 15 q + 15 dq + 10 imu + 2 gripper = 42
+    embedding_dim: 32
+    hidden_dims: [64, 64]
+    num_joints: 15
+    gripper_dims: 2 # RobotState.gripper_state is per hand (left, right)
+    use_layernorm: true
+    activation: gelu
+
+  backbone: # TinyBackboneConfig flow pathway (FR-03/FR-09)
+    kind: tiny
+    feature_dim: 64
+    # 120 and 160 share gcd 40, so patch 20 divides both and leaves a 6x8 grid: a 9-frame
+    # clip is 432 video tokens instead of the 2700 patch 8 would cost — the difference
+    # between a CPU smoke run and an overnight one.
+    patch_size: 20
+    depth: 2
+    num_heads: 4
+    num_frames: 9 # same context length as the Wan config, so this is a true dry run
+    image_hw: [120, 160] # native converter output (--resize 120 160); no padding needed here
+    text_vocab: 256
+    max_text_tokens: 16
+    state_embedding_dim: 32
+
+  action_encoder: # ActionChunkEncoderConfig (training only, PRD 9.5)
+    latent_dim: 32
+    hidden_dims: [64]
+    target_dim: 15
+    gripper_dims: 1 # ActionChunk.gripper_target is the mean of both hands' synergy
+    max_steps: 32
+
+  head: # ActionHeadConfig decoder on shared features (FR-04)
+    feature_dim: 64
+    num_steps: 16 # convert_lerobot_g1.py --chunk-steps 16 (the recorded chunk length)
+    target_dim: 15
+    gripper_dims: 1
+    mode: joint_delta
+    dt_s: 0.0333333 # 30 fps ego camera; the converter stamps dt from the parquet timestamps
+    hidden_dims: [64]
+
+  velocity_hidden_dims: [64] # ActionVelocityHead MLP widths
