@@ -184,7 +184,7 @@ def run(frames: int, height: int, width: int, blocks: str, instruction: str, abl
 
 
 def run_probe(episodes: int, windows_per_ep: int, frames: int, height: int, width: int,
-              chunk_steps: int):  # fmt: skip
+              chunk_steps: int, readout: str = ""):  # fmt: skip
     """Probe tab: data + windows on CPU, features on GPU, ridge analysis on CPU."""
     import probe
 
@@ -211,6 +211,7 @@ def run_probe(episodes: int, windows_per_ep: int, frames: int, height: int, widt
             "--height", str(int(height)),
             "--width", str(int(width)),
             "--chunk-steps", str(int(chunk_steps)),
+            "--readout", (readout or "").strip() or probe.DEFAULT_READOUTS,
             "--out", "/tmp/wan_probe_report.json",
         ]  # fmt: skip
         args = probe.parse_args(probe_argv)
@@ -326,9 +327,14 @@ verbatim from `scripts/`). First run downloads ~34 GB before any GPU is requeste
     with gr.Tab("readout probes (real data)"):
         gr.Markdown(
             "Label-validated readout check: real GR00T-G1 windows through the frozen DiT, "
-            "every block's pooled features ridge-regressed onto the BC action labels, "
-            "ranked by held-out-episode R². Confirms (or overturns) the label-free "
-            "ablation pick (20, 29); a state-only ridge is the floor to beat."
+            "every block's features ridge-regressed onto the BC action labels, ranked by "
+            "held-out-episode R². A state-only ridge is the floor to beat.\n\n"
+            "**Readouts (I-1).** The recorded verdicts were all measured through `mean` — a "
+            "mean-pool over the token grid, which deletes *where* things are. `grid<R>x<C>` "
+            "keeps that geometry; `rand<N>` pools the same tokens into N equally sized random "
+            "groups, so it has the identical feature width and isolates geometry from "
+            "dimensionality. **grid > rand ⇒ position carries signal; grid ≈ rand ⇒ the "
+            "mean-pool verdict stands.**"
         )
         with gr.Row():
             p_episodes = gr.Number(value=12, label="episodes", precision=0)
@@ -338,12 +344,20 @@ verbatim from `scripts/`). First run downloads ~34 GB before any GPU is requeste
             p_height = gr.Number(value=192, label="height", precision=0)
             p_width = gr.Number(value=256, label="width", precision=0)
             p_chunk = gr.Number(value=16, label="chunk steps (label)", precision=0)
+        # Blank resolves to probe.DEFAULT_READOUTS inside run_probe: `probe` is imported
+        # lazily (a broken import must cost one tab, not the whole Space), so the default
+        # cannot be read here without vendoring a second copy of it.
+        p_readout = gr.Textbox(
+            value="",
+            placeholder="mean,grid2x2,rand4",
+            label="readouts — blank = default (first is primary; 192x256 → a 6x8 token grid)",
+        )
         probe_btn = gr.Button("Run readout probes", variant="primary")
         probe_log = gr.Textbox(label="log", lines=28, max_lines=28, show_copy_button=True)
         probe_report = gr.JSON(label="report")
         probe_btn.click(
             run_probe,
-            [p_episodes, p_windows, p_frames, p_height, p_width, p_chunk],
+            [p_episodes, p_windows, p_frames, p_height, p_width, p_chunk, p_readout],
             [probe_log, probe_report],
         )
 

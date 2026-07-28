@@ -141,6 +141,199 @@ def test_probe_r2_separates_signal_from_noise() -> None:
     assert good["test_r2"] > bad["test_r2"]
 
 
+def test_parse_readouts_round_trips_and_rejects_junk() -> None:
+    assert probe.parse_readouts("mean,grid2x2,rand4") == (
+        ("mean", None),
+        ("grid", (2, 2)),
+        ("rand", 4),
+    )
+    # order preserved, duplicates dropped, whitespace and case tolerated
+    assert probe.parse_readouts(" GRID3x4 , mean ,grid3x4") == (("grid", (3, 4)), ("mean", None))
+    assert [probe.readout_label(k, p) for k, p in probe.parse_readouts("mean,grid2x2,rand4")] == [
+        "mean",
+        "grid2x2",
+        "rand4",
+    ]
+    assert probe.readout_width("mean", None, 8) == 8
+    assert probe.readout_width("grid", (2, 2), 8) == 32
+    assert probe.readout_width("rand", 4, 8) == 32
+
+    for bad in ("grid2", "grid0x2", "gridaxb", "rand", "rand0", "pool", ""):
+        with pytest.raises(ValueError):
+            probe.parse_readouts(bad)
+
+
+def test_mean_readout_is_the_historical_pooling() -> None:
+    """`mean` must stay byte-identical to the old `.float().mean(dim=1)` — it is the anchor
+    that keeps runs/wan_probe/ reproducible while the spatial readouts are added."""
+    torch = pytest.importorskip("torch")
+
+    tokens = torch.randn(1, 2 * 6 * 8, 16, dtype=torch.float32)
+    out = probe.apply_readouts(tokens, (2, 6, 8), (("mean", None),))
+    torch.testing.assert_close(out["mean"], tokens.float().mean(dim=1), rtol=0, atol=0)
+
+
+def test_grid_readout_keeps_position_where_mean_pool_destroys_it() -> None:
+    """I-1 in miniature: a signal that lives in ONE spatial cell survives the grid readout and
+    is annihilated by the mean-pool, because the grid never averages across cells."""
+    torch = pytest.importorskip("torch")
+
+    grid = (2, 6, 8)  # the real probe geometry: 5 frames at 192x256 through the Wan VAE
+    frames, rows, cols = grid
+    dim = 4
+    # Two windows that differ ONLY in which half of the frame carries the +1 activation.
+    left = torch.zeros(1, frames, rows, cols, dim)
+    left[:, :, :, : cols // 2] = 1.0
+    right = torch.zeros(1, frames, rows, cols, dim)
+    right[:, :, :, cols // 2 :] = 1.0
+    tokens = torch.cat([left, right]).reshape(2, frames * rows * cols, dim)
+
+    out = probe.apply_readouts(tokens, grid, probe.parse_readouts("mean,grid1x2"))
+    # mean-pool: both windows collapse to the same vector — the difference is gone
+    torch.testing.assert_close(out["mean"][0], out["mean"][1])
+    # grid1x2: two cells of 1.0/0.0, mirrored between the windows
+    torch.testing.assert_close(out["grid1x2"][0], torch.tensor([1.0] * dim + [0.0] * dim))
+    torch.testing.assert_close(out["grid1x2"][1], torch.tensor([0.0] * dim + [1.0] * dim))
+
+
+def test_grid_readout_pools_cells_and_averages_time() -> None:
+    torch = pytest.importorskip("torch")
+
+    grid = (2, 6, 8)
+    frames, rows, cols = grid
+    dim = 3
+    # value = the spatial column index, constant in time -> a 2x2 grid must average columns
+    space = torch.arange(cols, dtype=torch.float32).reshape(1, 1, 1, cols, 1)
+    tokens = space.expand(1, frames, rows, cols, dim).reshape(1, frames * rows * cols, dim)
+
+    out = probe.apply_readouts(tokens, grid, probe.parse_readouts("mean,grid1x2,grid2x2"))
+    assert out["grid1x2"].shape == (1, 2 * dim)
+    assert out["grid2x2"].shape == (1, 4 * dim)
+    # left half = mean(0..3) = 1.5, right half = mean(4..7) = 5.5
+    torch.testing.assert_close(out["grid1x2"][0], torch.tensor([1.5] * dim + [5.5] * dim))
+    # rows are identical, so both grid rows repeat the same pair of column means
+    torch.testing.assert_close(out["grid2x2"][0], torch.tensor(([1.5] * dim + [5.5] * dim) * 2))
+    torch.testing.assert_close(out["mean"][0], torch.full((dim,), 3.5))
+
+
+def test_random_control_matches_grid_width_and_is_seeded() -> None:
+    """`rand<N>` is the control that makes the grid comparison mean anything: same width, same
+    group sizes, geometry replaced by a seeded permutation."""
+    torch = pytest.importorskip("torch")
+
+    grid = (2, 6, 8)
+    tokens = torch.randn(3, grid[0] * grid[1] * grid[2], 5)
+    out = probe.apply_readouts(tokens, grid, probe.parse_readouts("grid2x2,rand4"), seed=0)
+    assert out["rand4"].shape == out["grid2x2"].shape == (3, 4 * 5)
+    # same tokens, so the two readouts must agree on the overall mean but not on the cells
+    torch.testing.assert_close(
+        out["rand4"].reshape(3, 4, 5).mean(1), out["grid2x2"].reshape(3, 4, 5).mean(1)
+    )
+    assert not torch.allclose(out["rand4"], out["grid2x2"])
+
+    same = probe.apply_readouts(tokens, grid, probe.parse_readouts("rand4"), seed=0)
+    other = probe.apply_readouts(tokens, grid, probe.parse_readouts("rand4"), seed=1)
+    torch.testing.assert_close(out["rand4"], same["rand4"], rtol=0, atol=0)
+    assert not torch.allclose(out["rand4"], other["rand4"])
+
+
+def test_readout_width_matches_what_apply_readouts_produces() -> None:
+    """`extract_features` preallocates from `readout_width` and assigns from `apply_readouts`,
+    so a disagreement between the two would corrupt the feature matrix silently for every
+    readout whose width happened to divide the allocated one."""
+    torch = pytest.importorskip("torch")
+
+    grid = (2, 6, 8)
+    dim = 7
+    tokens = torch.randn(1, grid[0] * grid[1] * grid[2], dim)
+    readouts = probe.parse_readouts("mean,grid1x2,grid2x2,grid3x4,grid6x8,rand4,rand12,rand48")
+    out = probe.apply_readouts(tokens, grid, readouts)
+    for kind, param in readouts:
+        label = probe.readout_label(kind, param)
+        assert out[label].shape == (1, probe.readout_width(kind, param, dim)), label
+
+
+def test_readouts_reject_geometry_that_does_not_fit() -> None:
+    torch = pytest.importorskip("torch")
+
+    tokens = torch.randn(1, 2 * 6 * 8, 4)
+    with pytest.raises(ValueError, match="tokens but the grid"):
+        probe.apply_readouts(tokens, (2, 6, 7), probe.parse_readouts("grid2x2"))
+    with pytest.raises(ValueError, match="does not divide"):
+        probe.apply_readouts(tokens, (2, 6, 8), probe.parse_readouts("grid4x4"))
+    with pytest.raises(ValueError, match="only 48 tokens exist"):
+        probe.apply_readouts(tokens, (2, 6, 8), probe.parse_readouts("rand64"))
+
+
+def test_analyze_probes_scores_every_readout_and_controls_for_width() -> None:
+    """The dict form ranks each readout separately, keeps the primary one in the legacy place,
+    and reports the grid-vs-random control."""
+    from wam.interfaces.schema import RobotState, ValidityMask
+
+    rng = np.random.default_rng(3)
+    n, d, label_dim = 96, 16, 10
+    episode_of = np.repeat(np.arange(8), n // 8)
+    signal = rng.standard_normal((n, d)).astype(np.float32)
+    labels = signal @ rng.standard_normal((d, label_dim)).astype(np.float32)
+
+    def stack(informative: np.ndarray) -> np.ndarray:
+        return np.stack(
+            [rng.standard_normal((n, informative.shape[1])).astype(np.float32),
+             informative,
+             rng.standard_normal((n, informative.shape[1])).astype(np.float32)],
+            axis=1,
+        )  # fmt: skip
+
+    # grid2x2 sees the signal; mean sees noise only; rand4 has grid2x2's width but no signal
+    features = {
+        "mean": stack(rng.standard_normal((n, d)).astype(np.float32)),
+        "grid2x2": stack(np.tile(signal, (1, 4))),
+        "rand4": stack(rng.standard_normal((n, 4 * d)).astype(np.float32)),
+    }
+    windows = [
+        {
+            "label": labels[i],
+            "episode": int(episode_of[i]),
+            "start": i,
+            "state": RobotState(
+                timestamp_ns=i,
+                q=rng.standard_normal(15).astype(np.float32),
+                dq=np.zeros(15, dtype=np.float32),
+                imu=probe._zero_imu(),
+                gripper_state=np.zeros(2, dtype=np.float32),
+                validity=ValidityMask(q=True, dq=True, imu=False, gripper=True),
+            ),
+        }
+        for i in range(n)
+    ]
+    args = probe.parse_args(
+        ["--data-dir", "unused", "--measured-blocks", "1,2", "--heuristic-blocks", "0,2"]
+    )
+    report = probe.smoke.Report()
+    probe.analyze_probes(features, windows, args, report)
+
+    assert not report.failed
+    result = report.info["probe"]
+    # the primary readout (first key) still occupies the legacy top-level slot
+    assert result["readout"] == "mean"
+    assert result["per_block"] == result["readouts"]["mean"]["per_block"]
+    assert set(result["readouts"]) == {"mean", "grid2x2", "rand4"}
+    assert result["readouts"]["grid2x2"]["ranking_by_val_r2"][0] == 1
+
+    comparison = result["readout_comparison"]
+    grid_r2 = comparison["per_readout"]["grid2x2"]["suggested_joints_test_r2"]
+    assert grid_r2 > comparison["per_readout"]["mean"]["suggested_joints_test_r2"]
+    control = comparison["grid_vs_random_control"]
+    assert [c["control"] for c in control] == ["rand4"]
+    assert control[0]["geometry_helps"] and control[0]["grid_r2"] == grid_r2
+    assert comparison["any_geometry_gain_over_control"]
+    # state_only is fitted once and shared, so every readout quotes the identical floor
+    floors = {
+        r["candidates"]["state_only"]["joints"]["test_r2"] for r in result["readouts"].values()
+    }
+    assert floors == {comparison["state_only_joints_test_r2"]}
+
+
 def test_analyze_probes_ranks_the_informative_block(tmp_path: Path) -> None:
     from wam.interfaces.schema import RobotState, ValidityMask
 

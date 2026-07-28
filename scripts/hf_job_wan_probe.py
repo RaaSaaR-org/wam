@@ -26,10 +26,16 @@ Two jobs, one script — both run free on the ZeroGPU Space (``deploy/wan-smoke-
 1. **Probe mode** (default). The 2026-07-26 readout ablation ranked DiT blocks by
    *label-free* sensitivity and picked (20, 29). This validates that pick against real
    action labels: windows of real GR00T-G1 ego frames + robot states go through the frozen
-   Wan DiT once each, every block's token-pooled features are ridge-regressed onto the
-   BC-relabeled action chunk, and blocks are ranked by held-out-**episode** R². A
-   state-only ridge (raw q/dq/gripper) is the floor the video features must beat to prove
-   they carry action-relevant signal beyond proprioception.
+   Wan DiT once each, every block's features are ridge-regressed onto the BC-relabeled
+   action chunk, and blocks are ranked by held-out-**episode** R². A state-only ridge (raw
+   q/dq/gripper) is the floor the video features must beat to prove they carry
+   action-relevant signal beyond proprioception.
+
+   ``--readout`` (T-26 / I-1) decides how a ``[B, S, D]`` activation becomes one vector, and
+   scores several choices on the *same* forward passes: ``mean`` (the historical mean-pool,
+   kept byte-for-byte so ``runs/wan_probe/`` stays reproducible), ``grid<R>x<C>`` (keep the
+   token geometry), ``rand<N>`` (same width, geometry removed — the control that separates
+   "position matters" from "more dimensions").
 
 2. **--generate**. Sample an actual future video from the same checkpoint, conditioned on
    a real episode's first frame + an instruction (``WanImageToVideoPipeline``). Nothing WAM
@@ -73,6 +79,9 @@ DEFAULT_MODEL_ID = smoke.DEFAULT_MODEL_ID
 DEFAULT_INSTRUCTION = "move the apple to the plate"
 NUM_JOINTS = 15
 GRIPPER_DIMS = 2
+# Mean-pool (the historical readout, so the recorded numbers stay the anchor), one coarse
+# spatial grid, and the same-width random control that tells the two apart — see I-1 below.
+DEFAULT_READOUTS = "mean,grid2x2,rand4"
 # The standard Wan quality negative prompt (from the model card); generation only.
 DEFAULT_NEGATIVE = (
     "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，"
@@ -111,6 +120,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     probe.add_argument("--heuristic-blocks", default="15,22", help="depth-heuristic reference")
     probe.add_argument("--state-seed", type=int, default=0, help="StateMLP init seed")
     probe.add_argument("--embedding-dim", type=int, default=32, help="StateMLP embedding dim")
+    probe.add_argument(
+        "--readout",
+        default=DEFAULT_READOUTS,
+        help="comma list of token->vector readouts: 'mean' | 'grid<R>x<C>' | 'rand<N>' (I-1). "
+        f"The first one is the primary (reported under info.probe). Default: {DEFAULT_READOUTS}",
+    )
+    probe.add_argument(
+        "--readout-seed", type=int, default=0, help="permutation seed for rand<N> readouts"
+    )
 
     gen = p.add_argument_group("generation (--generate)")
     gen.add_argument("--generate", action="store_true", help="sample a future video instead")
@@ -216,7 +234,134 @@ def build_windows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], str, 
     return windows, instruction, info
 
 
-# ---- GPU: pooled per-block features ------------------------------------------------------
+# ---- readouts: how a [B, S, D] activation collapses to one feature vector ------------------
+#
+# I-1 (docs/improvements.md). Everything recorded so far — T-15's block ranking, T-24's
+# "frozen Cosmos3 does not beat state-only either" — measured the backbone *through a
+# mean-pool*. Averaging the token grid deletes *where* things are, and "the cube is at token
+# (4, 6)" is the single most useful item in that map for pick-and-place. So those runs did not
+# show the spatial information is absent from the backbone; they showed it does not survive
+# averaging. Two different claims, and the weaker one is currently written into TASKS.md as
+# the stronger one. These readouts are the difference.
+#
+# `rand<N>` is what makes the comparison worth anything: it pools the same tokens into N groups
+# of the same size, chosen by a seeded permutation instead of by geometry, so it has the
+# *identical* feature width as the grid it controls. grid > rand means geometry carries signal;
+# grid ~= rand means we only bought dimensions and the mean-pool verdict stands.
+
+Readout = tuple[str, Any]
+
+
+def parse_readouts(spec: str) -> tuple[Readout, ...]:
+    """``"mean,grid2x2,rand4"`` -> ``(("mean", None), ("grid", (2, 2)), ("rand", 4))``.
+
+    Order is preserved and duplicates are dropped; the first entry is the primary readout.
+    """
+    out: list[Readout] = []
+    seen: set[str] = set()
+    for raw in spec.split(","):
+        name = raw.strip().lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if name == "mean":
+            out.append(("mean", None))
+        elif name.startswith("grid"):
+            parts = name[4:].split("x")
+            if len(parts) != 2 or not all(p.isdigit() and int(p) > 0 for p in parts):
+                raise ValueError(f"bad grid readout {raw!r} — expected e.g. 'grid2x2'")
+            out.append(("grid", (int(parts[0]), int(parts[1]))))
+        elif name.startswith("rand"):
+            groups = name[4:]
+            if not groups.isdigit() or int(groups) < 1:
+                raise ValueError(f"bad rand readout {raw!r} — expected e.g. 'rand4'")
+            out.append(("rand", int(groups)))
+        else:
+            raise ValueError(
+                f"unknown readout {raw!r} — expected 'mean', 'grid<R>x<C>' or 'rand<N>'"
+            )
+    if not out:
+        raise ValueError("--readout must name at least one readout")
+    return tuple(out)
+
+
+def readout_label(kind: str, param: Any) -> str:
+    """Inverse of :func:`parse_readouts` for one entry — the key used in reports."""
+    if kind == "mean":
+        return "mean"
+    if kind == "grid":
+        return f"grid{param[0]}x{param[1]}"
+    return f"rand{param}"
+
+
+def readout_width(kind: str, param: Any, feature_dim: int) -> int:
+    """Feature width of one readout: ``cells * feature_dim`` (mean has one cell)."""
+    if kind == "mean":
+        return feature_dim
+    cells = param[0] * param[1] if kind == "grid" else int(param)
+    return cells * feature_dim
+
+
+def _spatial_tokens(tokens: Any, grid: tuple[int, int, int]) -> Any:
+    """``[B, S, D]`` -> ``[B, R*C, D]`` in fp32, averaged over the latent-frame axis.
+
+    Every geometry-preserving readout collapses time first: with the probe's 5 context frames
+    the Wan VAE leaves F'=2, so keeping that axis would double the feature width to test a
+    claim I-1 does not make. What is under test is *space*.
+    """
+    frames, rows, cols = grid
+    batch, tokens_n, dim = tokens.shape
+    if tokens_n != frames * rows * cols:
+        raise ValueError(
+            f"activation has {tokens_n} tokens but the grid {grid} implies {frames * rows * cols}"
+        )
+    collapsed = tokens.float().reshape(batch, frames, rows, cols, dim).mean(dim=1)
+    return collapsed.reshape(batch, rows * cols, dim)
+
+
+def apply_readouts(
+    tokens: Any, grid: tuple[int, int, int], readouts: tuple[Readout, ...], *, seed: int = 0
+) -> dict[str, Any]:
+    """``[B, S, D]`` -> ``{label: [B, width]}``, sharing the temporal collapse across readouts."""
+    import torch
+
+    out: dict[str, Any] = {}
+    flat: Any = None
+    for kind, param in readouts:
+        label = readout_label(kind, param)
+        if kind == "mean":
+            # Byte-for-byte the historical readout, so `mean` reproduces runs/wan_probe/.
+            out[label] = tokens.float().mean(dim=1)
+            continue
+        if flat is None:
+            flat = _spatial_tokens(tokens, grid)
+        batch, positions, dim = flat.shape
+        if kind == "grid":
+            cell_rows, cell_cols = param
+            _, rows, cols = grid
+            if rows % cell_rows or cols % cell_cols:
+                raise ValueError(
+                    f"{label} does not divide the {rows}x{cols} token grid evenly — pick "
+                    f"cell counts that divide it, or a different --height/--width"
+                )
+            cells = flat.reshape(
+                batch, cell_rows, rows // cell_rows, cell_cols, cols // cell_cols, dim
+            )
+            out[label] = cells.mean(dim=(2, 4)).reshape(batch, cell_rows * cell_cols * dim)
+            continue
+        groups = int(param)
+        if groups > positions:
+            raise ValueError(f"{label} wants {groups} groups but only {positions} tokens exist")
+        # Same group count and group size as the grid it controls, geometry replaced by chance.
+        order = np.random.default_rng(seed).permutation(positions)[: positions // groups * groups]
+        index = torch.as_tensor(
+            np.ascontiguousarray(order.reshape(groups, -1)), device=flat.device, dtype=torch.long
+        )
+        out[label] = flat[:, index, :].mean(dim=2).reshape(batch, groups * dim)
+    return out
+
+
+# ---- GPU: per-block features under every readout ------------------------------------------
 
 
 def extract_features(
@@ -224,8 +369,8 @@ def extract_features(
     windows: list[dict[str, Any]],
     instruction: str,
     report: smoke.Report,
-) -> np.ndarray:
-    """One frozen DiT forward per window -> token-pooled features ``[N, num_blocks, D]``."""
+) -> dict[str, np.ndarray]:
+    """One frozen DiT forward per window -> ``{readout: [N, num_blocks, width]}``."""
     import torch
 
     from wam.backbones.registry import get_backbone
@@ -245,8 +390,11 @@ def extract_features(
     adapter.load()
     report.check("probe.load", adapter.is_loaded, f"{time.perf_counter() - t0:.1f}s")
     geometry = adapter.describe()
-    report.info["geometry"] = geometry
     blocks = tuple(range(geometry["num_layers"]))
+    readouts = parse_readouts(args.readout)
+    grid = adapter.token_grid(args.frames, args.height, args.width)
+    geometry["token_grid"] = list(grid)
+    report.info["geometry"] = geometry
 
     torch.manual_seed(args.state_seed)
     encoder = StateMLP(
@@ -258,7 +406,15 @@ def extract_features(
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    pooled = np.zeros((len(windows), len(blocks), geometry["feature_dim"]), dtype=np.float32)
+    features = {
+        readout_label(kind, param): np.zeros(
+            (len(windows), len(blocks), readout_width(kind, param, geometry["feature_dim"])),
+            dtype=np.float32,
+        )
+        for kind, param in readouts
+    }
+    expected_tokens = adapter.expected_token_count(args.frames, args.height, args.width)
+    checked_tokens = False
     t0 = time.perf_counter()
     for i, window in enumerate(windows):
         video_ctx = adapter.condition_video(window["frames"][None])
@@ -266,19 +422,43 @@ def extract_features(
         with torch.no_grad():
             per_block = adapter.features_by_block(video_ctx, text_ctx, state_ctx, blocks=blocks)
         for j, block in enumerate(blocks):
-            pooled[i, j] = per_block[block].float().mean(dim=1)[0].cpu().numpy()
+            activation = per_block[block]
+            if not checked_tokens:
+                # The grid reshape is only meaningful if S is exactly F'*H'*W'. Assert it once,
+                # loudly: a mismatch means every spatial readout below is nonsense.
+                report.check(
+                    "probe.token_count_matches_grid",
+                    int(activation.shape[1]) == expected_tokens,
+                    f"S={int(activation.shape[1])}, grid {grid} implies {expected_tokens}",
+                )
+                checked_tokens = True
+            for label, value in apply_readouts(
+                activation, grid, readouts, seed=args.readout_seed
+            ).items():
+                features[label][i, j] = value[0].cpu().numpy()
     wall = time.perf_counter() - t0
     timings = {"forwards_s": round(wall, 2), "per_window_s": round(wall / max(len(windows), 1), 3)}
     if torch.cuda.is_available():
         timings["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
     report.info["timings"] = timings
+    report.info["readouts"] = {
+        label: {"width": int(arr.shape[2]), "cells": int(arr.shape[2] // geometry["feature_dim"])}
+        for label, arr in features.items()
+    }
 
-    report.check("probe.features_finite", bool(np.isfinite(pooled).all()), f"{pooled.shape}")
-    spread = float(pooled[:, 0].std(axis=0).mean())
+    shapes = ", ".join(f"{label}{arr.shape}" for label, arr in features.items())
     report.check(
-        "probe.features_vary_across_windows", spread > 1e-6, f"block-0 spread {spread:.4f}"
+        "probe.features_finite",
+        all(bool(np.isfinite(arr).all()) for arr in features.values()),
+        shapes,
     )
-    return pooled
+    spreads = {label: float(arr[:, 0].std(axis=0).mean()) for label, arr in features.items()}
+    report.check(
+        "probe.features_vary_across_windows",
+        min(spreads.values()) > 1e-6,
+        "block-0 spread " + ", ".join(f"{k}={v:.4f}" for k, v in spreads.items()),
+    )
+    return features
 
 
 # ---- CPU: ridge probes -------------------------------------------------------------------
@@ -347,19 +527,66 @@ def episode_split(episode_of: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
-def analyze_probes(
+def _score_one_readout(
     pooled: np.ndarray,
+    score: Any,
+    measured: tuple[int, ...],
+    heuristic: tuple[int, ...],
+    state_row: dict[str, Any],
+) -> dict[str, Any]:
+    """Block ranking + candidate pairs for ONE readout's ``[N, num_blocks, width]`` features."""
+    num_blocks = pooled.shape[1]
+    singles = {b: score(pooled[:, b]) for b in range(num_blocks)}
+    ranked = sorted(singles, key=lambda b: singles[b]["joints"]["val_r2"], reverse=True)
+    suggested = tuple(sorted(ranked[:2]))
+
+    def pair_features(blocks: tuple[int, ...]) -> np.ndarray:
+        return np.concatenate([pooled[:, b] for b in blocks], axis=1)
+
+    candidates = {
+        f"measured_{'_'.join(map(str, measured))}": score(pair_features(measured)),
+        f"heuristic_{'_'.join(map(str, heuristic))}": score(pair_features(heuristic)),
+        f"suggested_{'_'.join(map(str, suggested))}": score(pair_features(suggested)),
+        "state_only": state_row,
+    }
+    measured_key = f"measured_{'_'.join(map(str, measured))}"
+    heuristic_key = f"heuristic_{'_'.join(map(str, heuristic))}"
+    return {
+        "per_block": {str(b): singles[b] for b in range(num_blocks)},
+        "ranking_by_val_r2": ranked,
+        "suggested_blocks": list(suggested),
+        "candidates": candidates,
+        "verdict": {
+            "measured_beats_heuristic": candidates[measured_key]["joints"]["test_r2"]
+            >= candidates[heuristic_key]["joints"]["test_r2"],
+            "video_beats_state_only": candidates[measured_key]["joints"]["test_r2"]
+            > candidates["state_only"]["joints"]["test_r2"],
+        },
+    }
+
+
+def analyze_probes(
+    features: np.ndarray | dict[str, np.ndarray],
     windows: list[dict[str, Any]],
     args: argparse.Namespace,
     report: smoke.Report,
 ) -> None:
-    """Rank every block by held-out-episode R^2 against the real action labels.
+    """Rank every block by held-out-episode R^2 against the real action labels, per readout.
 
     Joint deltas (~1e-2 rad) and absolute gripper synergies (~1e-1..1) live on different
     scales, so a pooled R^2 would mostly measure gripper prediction. The two groups are
     scored separately; the block ranking uses the joint-delta score — that is the quantity
     the action head must actually get right.
+
+    ``features`` is either the ``{readout: [N, num_blocks, width]}`` dict from
+    :func:`extract_features` or a bare ``[N, num_blocks, D]`` array, which is treated as a
+    single ``mean`` readout (the Cosmos3 probe still hands one over). The FIRST readout is the
+    primary: it lands in ``info.probe`` unchanged, so `mean` keeps reproducing the numbers in
+    ``runs/wan_probe/`` while the spatial readouts are reported alongside it (I-1).
     """
+    readouts = {"mean": features} if isinstance(features, np.ndarray) else dict(features)
+    if not readouts:
+        raise ValueError("analyze_probes needs at least one readout")
     alphas = tuple(float(a) for a in args.alphas.split(",") if a.strip())
     measured = tuple(int(b) for b in args.measured_blocks.split(","))
     heuristic = tuple(int(b) for b in args.heuristic_blocks.split(","))
@@ -381,23 +608,20 @@ def analyze_probes(
             row["gripper"] = probe_r2(x, y_grip, split, alphas)
         return row
 
-    num_blocks = pooled.shape[1]
-    singles = {b: score(pooled[:, b]) for b in range(num_blocks)}
-    ranked = sorted(singles, key=lambda b: singles[b]["joints"]["val_r2"], reverse=True)
-    suggested = tuple(sorted(ranked[:2]))
-
-    def pair_features(blocks: tuple[int, ...]) -> np.ndarray:
-        return np.concatenate([pooled[:, b] for b in blocks], axis=1)
-
+    # Proprioception is the floor every readout must clear, and it does not depend on the
+    # backbone — fit it once so the comparison cannot drift between readouts.
     state_x = np.stack(
         [np.concatenate([w["state"].q, w["state"].dq, w["state"].gripper_state]) for w in windows]
     ).astype(np.float32)
-    candidates = {
-        f"measured_{'_'.join(map(str, measured))}": score(pair_features(measured)),
-        f"heuristic_{'_'.join(map(str, heuristic))}": score(pair_features(heuristic)),
-        f"suggested_{'_'.join(map(str, suggested))}": score(pair_features(suggested)),
-        "state_only": score(state_x),
+    state_row = score(state_x)
+
+    results = {
+        label: _score_one_readout(pooled, score, measured, heuristic, state_row)
+        for label, pooled in readouts.items()
     }
+    primary = next(iter(readouts))
+    singles = {int(b): row for b, row in results[primary]["per_block"].items()}
+    suggested = tuple(results[primary]["suggested_blocks"])
 
     def fmt(row: dict[str, Any]) -> str:
         joints = f"joints val={row['joints']['val_r2']:.4f} test={row['joints']['test_r2']:.4f}"
@@ -405,8 +629,8 @@ def analyze_probes(
             return f"{joints} | gripper test={row['gripper']['test_r2']:.4f}"
         return joints
 
-    print("\nblock  joints_val_R2  joints_test_R2  gripper_test_R2")
-    for b in range(num_blocks):
+    print(f"\n[readout: {primary}]\nblock  joints_val_R2  joints_test_R2  gripper_test_R2")
+    for b in sorted(singles):
         row = singles[b]
         grip = f"{row['gripper']['test_r2']:15.4f}" if "gripper" in row else " " * 15
         marker = (
@@ -421,24 +645,48 @@ def analyze_probes(
             f"{grip}{marker}"
         )
     print()
-    for name, row in candidates.items():
+    for name, row in results[primary]["candidates"].items():
         print(f"{name}: {fmt(row)}")
+
+    comparison = _compare_readouts(results, state_row)
+    if len(results) > 1:
+        print(
+            "\nreadout comparison (best suggested pair, joints test R^2; "
+            f"state-only floor {comparison['state_only_joints_test_r2']:.4f})"
+        )
+        for label, row in comparison["per_readout"].items():
+            flag = "beats state-only" if row["beats_state_only"] else "below state-only"
+            print(f"  {label:>10}: {row['suggested_joints_test_r2']:.4f}  ({flag})")
+        for control in comparison["grid_vs_random_control"]:
+            verdict = "geometry helps" if control["geometry_helps"] else "no geometry gain"
+            print(
+                f"  {control['grid']} {control['grid_r2']:.4f} vs same-width "
+                f"{control['control']} {control['control_r2']:.4f} -> {verdict}"
+            )
 
     values = [
         group[k]
-        for row in singles.values()
+        for result in results.values()
+        for row in result["per_block"].values()
         for group in row.values()
         for k in ("val_r2", "test_r2")
     ]
     report.check("probe.r2_finite", bool(np.isfinite(values).all()), f"{len(values)} scores")
-    best = max(max(group["test_r2"] for group in row.values()) for row in singles.values())
+    best = max(
+        max(group["test_r2"] for group in row.values())
+        for result in results.values()
+        for row in result["per_block"].values()
+    )
     report.check(
         "probe.features_predict_actions",
         best > 0.0,
         f"best single-block held-out R2 {best:.4f} (0 = train-mean predictor)",
     )
-    measured_key = f"measured_{'_'.join(map(str, measured))}"
-    heuristic_key = f"heuristic_{'_'.join(map(str, heuristic))}"
+    report.check(
+        "probe.readouts_scored",
+        set(results) == set(readouts),
+        f"{len(results)} readout(s): {', '.join(results)}",
+    )
     report.info["probe"] = {
         "metric": "multi-output R^2 on held-out episodes (alpha chosen on val episodes); "
         "joint deltas and gripper synergies scored separately, ranking by joints",
@@ -446,16 +694,66 @@ def analyze_probes(
         f"+ {args.chunk_steps} gripper synergies",
         "split_episodes": {k: split[f"{k}_eps"].tolist() for k in ("train", "val", "test")},
         "alphas": list(alphas),
-        "per_block": {str(b): singles[b] for b in range(num_blocks)},
-        "ranking_by_val_r2": ranked,
-        "suggested_blocks": list(suggested),
-        "candidates": candidates,
-        "verdict": {
-            "measured_beats_heuristic": candidates[measured_key]["joints"]["test_r2"]
-            >= candidates[heuristic_key]["joints"]["test_r2"],
-            "video_beats_state_only": candidates[measured_key]["joints"]["test_r2"]
-            > candidates["state_only"]["joints"]["test_r2"],
-        },
+        "readout": primary,
+        **results[primary],
+        "readouts": results,
+        "readout_comparison": comparison,
+    }
+
+
+def _compare_readouts(
+    results: dict[str, dict[str, Any]], state_row: dict[str, Any]
+) -> dict[str, Any]:
+    """The I-1 headline: does any geometry-preserving readout clear the state-only floor, and
+    does it clear its own same-width random control?
+
+    Both questions are read off the *suggested* block pair — the pair each readout's own
+    ranking picks — because that is what a real action head would consume.
+    """
+    floor = state_row["joints"]["test_r2"]
+    per_readout: dict[str, Any] = {}
+    for label, result in results.items():
+        pair = next(k for k in result["candidates"] if k.startswith("suggested_"))
+        r2 = result["candidates"][pair]["joints"]["test_r2"]
+        blocks = [int(b) for b in result["per_block"]]
+        best_block = max(blocks, key=lambda b: result["per_block"][str(b)]["joints"]["test_r2"])
+        per_readout[label] = {
+            "suggested_blocks": result["suggested_blocks"],
+            "suggested_joints_test_r2": r2,
+            "best_single_block": best_block,
+            "best_single_block_joints_test_r2": result["per_block"][str(best_block)]["joints"][
+                "test_r2"
+            ],
+            "beats_state_only": r2 > floor,
+        }
+
+    controls = []
+    for label, row in per_readout.items():
+        if not label.startswith("grid"):
+            continue
+        rows, cols = (int(v) for v in label[4:].split("x"))
+        control = f"rand{rows * cols}"
+        if control not in per_readout:
+            continue
+        controls.append(
+            {
+                "grid": label,
+                "control": control,
+                "grid_r2": row["suggested_joints_test_r2"],
+                "control_r2": per_readout[control]["suggested_joints_test_r2"],
+                "geometry_helps": row["suggested_joints_test_r2"]
+                > per_readout[control]["suggested_joints_test_r2"],
+            }
+        )
+
+    spatial = [lbl for lbl in per_readout if lbl.startswith("grid")]
+    return {
+        "primary": next(iter(results)),
+        "state_only_joints_test_r2": floor,
+        "per_readout": per_readout,
+        "grid_vs_random_control": controls,
+        "any_spatial_beats_state_only": any(per_readout[l]["beats_state_only"] for l in spatial),
+        "any_geometry_gain_over_control": any(c["geometry_helps"] for c in controls),
     }
 
 
@@ -600,8 +898,8 @@ def main(argv: list[str] | None = None) -> int:
         windows, instruction, data_info = build_windows(args)
         report.info["data"] = data_info
         report.check("probe.windows_built", len(windows) >= 24, f"{len(windows)} windows")
-        pooled = extract_features(args, windows, instruction, report)
-        analyze_probes(pooled, windows, args, report)
+        features = extract_features(args, windows, instruction, report)
+        analyze_probes(features, windows, args, report)
     return finalize(report, args.out)
 
 

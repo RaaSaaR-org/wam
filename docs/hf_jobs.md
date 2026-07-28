@@ -185,6 +185,49 @@ state vector out-predicts 6144-dim frozen Wan features on both label groups. The
 prior alone does not linearly encode next-chunk actions — the action value has to come from
 fine-tuning (LoRA, T-16), which can also re-rank the blocks on adapted features.
 
+**Caveat, and why T-26 exists:** every number above was measured *through a mean-pool* over
+the token grid. That shows the spatial signal does not survive averaging — not that it is
+absent from the backbone. See the next section.
+
+## Spatial readouts (T-26 / I-1, code 2026-07-29, run pending)
+
+`--readout` scores several token→vector readouts on the *same* forward passes, with windows,
+labels, episode split and ridge code untouched, so the output stays directly comparable to
+both tables above:
+
+| readout | what it does | width |
+|---|---|---|
+| `mean` | the historical mean-pool, byte-for-byte — still reported as `info.probe` | 3 072 |
+| `grid<R>x<C>` | average-pool the token grid into R×C cells, kept separate | R·C · 3 072 |
+| `rand<N>` | the same tokens in N equally sized **random** groups | N · 3 072 |
+
+The random control is the point: a coarse grid has more dimensions than a mean-pool, and more
+dimensions alone can raise a ridge R². `rand<N>` has the identical width and group sizes with
+geometry removed, so **grid > rand** means position carries action signal, while **grid ≈ rand**
+means we only bought dimensions and the 2026-07-26 verdict stands.
+
+The grid is derived, never guessed: `WanI2VAdapter.token_grid(5, 192, 256)` → **(F'=2, H'=6,
+W'=8)**, 96 tokens (VAE spatial 16 / temporal 4, patch (1, 2, 2)), and the probe asserts the
+real activation's token count against it before any reshape — `probe.token_count_matches_grid`
+fails loudly rather than reshaping garbage. Time is averaged out first for the spatial
+readouts; what is under test is space.
+
+```bash
+uv run scripts/hf_job_wan_probe.py --source /model --data-dir data/raw/gr00t_apple \
+    --readout mean,grid2x2,rand4          # default; grid2x2 = cells of 3x4 tokens
+```
+
+On the Space, leave the readout box blank for the default. Read
+`info.probe.readout_comparison`: `any_spatial_beats_state_only` and
+`any_geometry_gain_over_control` are the two bits this run exists to produce.
+
+**Cost.** The GPU side does not change at all — still one forward per window, all readouts
+computed from the same activation (~7 s on ZeroGPU). What grows is the ridge, and it runs
+*outside* `@spaces.GPU`, so it burns no quota. Measured on this Mac at the real 96-window /
+12-episode layout: ~3 s for `mean`, ~12 s per `grid2x2`-width readout, ~44 s at `grid3x4`
+width. The default trio lands around 30 s; going wider than 3×4 cells is the first thing that
+actually costs something.
+
 ## Backbone bake-off: Cosmos3-Nano probe (T-24, 2026-07-26)
 
 `nvidia/Cosmos3-Nano` (16B MoT: 8B AR reasoner + 8B diffusion generator, robotics-pretrained
