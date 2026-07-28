@@ -19,7 +19,7 @@ import numpy as np
 
 from wam.interfaces.schema import ActionChunk, RobotState
 
-INTERFACES_VERSION = "0.1.0"
+INTERFACES_VERSION = "0.2.0"
 
 
 @dataclass
@@ -122,6 +122,63 @@ class BackboneAdapter(Protocol):
         """Run the backbone on the conditioning contexts and return intermediate features
         (tensor, last dim == feature_dim) for the ActionDecoder; may also drive video
         prediction internally."""
+        ...
+
+
+@runtime_checkable
+class FlowBackbone(BackboneAdapter, Protocol):
+    """A :class:`BackboneAdapter` that also exposes the rectified-flow training pathway
+    (T-16, PRD §10.3). ``JointWorldActionModel`` depends on exactly this — never on a
+    concrete backbone class (FR-09).
+
+    The flow convention is WAM's, not any backbone's: with ``x0`` noise and ``x1`` clean,
+    ``x_t = (1 - t) * x0 + t * x1`` and ``v = x1 - x0``, so ``t = 1`` is clean. Each adapter
+    maps ``t`` onto whatever its own scheduler expects (Wan counts denoising steps
+    *downwards* from 1000, so it flips both the timestep and the velocity sign internally).
+    Nothing outside the adapter may learn about that.
+
+    "Latents" is whatever space the backbone trains in: pixels for the tiny identity VAE,
+    normalized VAE latents for Wan. The video flow loss lives in that space, so its
+    magnitude is **not** comparable across backbones.
+    """
+
+    def encode_video(self, video: Any) -> Any:
+        """Raw frames (uint8 [B, F, H, W, 3] / [F, H, W, 3], or float) -> clean flow latents.
+
+        This is the backbone's VAE (identity for tiny). The result is what the flow target
+        is built from, so it must be deterministic and gradient-free.
+        """
+        ...
+
+    def decode_video(self, video_latents: Any) -> Any:
+        """Flow latents -> pixel frames [B, F, H, W, 3]. Inverse of :meth:`encode_video`."""
+        ...
+
+    def forward_flow(
+        self, video_latents: Any, t: Any, text_ctx: Any, state_ctx: Any
+    ) -> tuple[Any, Any]:
+        """One denoising pass -> ``(velocity_pred, features)``.
+
+        ``video_latents`` is the *noised* latent at ``t`` (scalar or [B] in [0, 1]).
+        ``velocity_pred`` has EXACTLY the shape of ``video_latents``; ``features`` is
+        [B, S, feature_dim] for the action branch, video tokens first.
+        """
+        ...
+
+    def num_video_tokens(self, video_latents: Any) -> int:
+        """How many LEADING tokens of ``features`` are video tokens.
+
+        A method, not a property: tiny reads it off its config, Wan derives it from the
+        latent geometry of the batch it was handed.
+        """
+        ...
+
+    def frozen_part_names(self) -> tuple[str, ...]:
+        """Attribute names of the parts frozen at construction (PRD §10.3 step 4).
+
+        Fed into the model's frozen-parts registry; for Wan these are the VAE and the text
+        tower, for tiny the text embedding tables.
+        """
         ...
 
 

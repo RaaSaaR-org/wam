@@ -206,13 +206,20 @@ class TestLoadConfig:
 class TestShippedConfigs:
     @pytest.mark.parametrize(
         "rel_path",
-        ["robot/mock.yaml", "robot/g1.yaml", "safety/default.yaml"],
+        [
+            "robot/mock.yaml",
+            "robot/g1.yaml",
+            "robot/mujoco_g1.yaml",
+            "safety/default.yaml",
+        ],
     )
     def test_loads_with_valid_version(self, rel_path: str) -> None:
         cfg = load_config(CONFIGS_DIR / rel_path)
         assert cfg["wam_config_version"] == WAM_CONFIG_VERSION
 
-    @pytest.mark.parametrize("rel_path", ["robot/mock.yaml", "robot/g1.yaml"])
+    @pytest.mark.parametrize(
+        "rel_path", ["robot/mock.yaml", "robot/g1.yaml", "robot/mujoco_g1.yaml"]
+    )
     def test_robot_config_consistency(self, rel_path: str) -> None:
         cfg = load_config(CONFIGS_DIR / rel_path)
         robot = cfg["robot"]
@@ -229,13 +236,15 @@ class TestShippedConfigs:
         assert len(limits["gripper_min"]) == spec.gripper_dims
         assert len(limits["gripper_max"]) == spec.gripper_dims
 
-    def test_g1_yaml_canonical_space_matches_adapter_spec(self) -> None:
-        """Coordination gate: the versioned g1.yaml and the hard-wired G1_SPEC/G1Config
+    @pytest.mark.parametrize("rel_path", ["robot/g1.yaml", "robot/mujoco_g1.yaml"])
+    def test_g1_yaml_canonical_space_matches_adapter_spec(self, rel_path: str) -> None:
+        """Coordination gate: every versioned G1 yaml and the hard-wired G1_SPEC/G1Config
         must describe the SAME canonical space — episodes, policies and calibration files
-        built from the yaml would otherwise be unusable on the adapter."""
+        built from the yaml would otherwise be unusable on the adapter. Both G1 configs are
+        covered: the hardware one and the MuJoCo (E2) one, which drives the same adapter."""
         from wam.robot.g1 import G1_SPEC, G1Config
 
-        robot = load_config(CONFIGS_DIR / "robot/g1.yaml")["robot"]
+        robot = load_config(CONFIGS_DIR / rel_path)["robot"]
         spec = CanonicalSpaceSpec(**robot["canonical_space"])
         assert spec == G1_SPEC  # names, order, gripper_dims, ee conventions
         limits = robot["limits"]
@@ -248,6 +257,30 @@ class TestShippedConfigs:
         assert cfg.q_min == tuple(limits["q_min"])
         assert len(limits["ddq_max"]) == G1_SPEC.num_joints
         assert len(limits["gripper_min"]) == G1_SPEC.gripper_dims
+
+    def test_mujoco_g1_yaml_gains_are_sim_only_and_well_formed(self) -> None:
+        """The MuJoCo config is the only shipped one carrying a `gains:` block. It must not
+        leak into the hardware placeholders (OD-08), and kd must be the per-joint critical
+        damping shape, never a flat number."""
+        from wam.robot.g1 import G1_SPEC, G1Config
+
+        robot = load_config(CONFIGS_DIR / "robot/mujoco_g1.yaml")["robot"]
+        gains = robot["gains"]
+        assert len(gains["kp"]) == len(gains["kd"]) == G1_SPEC.num_joints
+        assert all(v > 0 for v in gains["kp"] + gains["kd"])
+        assert max(gains["kd"]) > 4.0 * min(gains["kd"]), "kd must be per-joint, not flat"
+        hardware = load_config(CONFIGS_DIR / "robot/g1.yaml")["robot"]
+        assert "gains" not in hardware, "sim gains must not appear in the hardware config"
+        # It really does build the adapter config it claims to.
+        limits = robot["limits"]
+        G1Config(
+            q_min=tuple(limits["q_min"]),
+            q_max=tuple(limits["q_max"]),
+            dq_max=tuple(limits["dq_max"]),
+            kp=tuple(gains["kp"]),
+            kd=tuple(gains["kd"]),
+            control_dt_s=float(robot["control"]["dt_s"]),
+        )
 
     def test_safety_config_fields(self) -> None:
         cfg = load_config(CONFIGS_DIR / "safety/default.yaml")
