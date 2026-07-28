@@ -198,6 +198,20 @@ def test_read_state_stale_tick_degrades_validity() -> None:
     assert all(recovered.validity.as_dict().values())
 
 
+def test_forget_tick_clears_the_staleness_memory_for_a_deliberate_clock_rewind() -> None:
+    """The stale-tick detector is the runtime's only liveness signal, so it has exactly ONE
+    owner: ``forget_tick()``. A simulator's episode reset rewinds the transport clock, and
+    "the tick did not change" then no longer means "no new sample" — without this hook the
+    caller would have to poke ``_last_tick_ns`` from outside the class."""
+    adapter, _fake = connected_adapter()
+    assert all(adapter.read_state().validity.as_dict().values())
+    assert not any(adapter.read_state().validity.as_dict().values())  # same tick -> stale
+    adapter.forget_tick()
+    assert all(adapter.read_state().validity.as_dict().values())
+    # It clears the memory once; it does not disable staleness detection.
+    assert not any(adapter.read_state().validity.as_dict().values())
+
+
 def test_read_state_missing_gripper_degrades_only_gripper() -> None:
     class NoGripperTransport(FakeG1Transport):
         def read_low_state(self) -> dict:

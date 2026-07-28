@@ -1,0 +1,276 @@
+<!--
+  WAM MuJoCo scene — Unitree G1 EDU4 + Dex3-1 hands, upper-body pick-and-place (PRD §6, E2).
+
+  WHAT THIS IS
+    The E2 rung of the evaluation ladder: a real physics + real pixels stand-in for the robot,
+    so the closed loop (FR-05) can be exercised before hardware arrives. It is driven through
+    the same `G1Transport` seam as the real robot — MuJoCo is a third transport implementation
+    next to `DdsG1Transport` and `FakeG1Transport`, never a second robot adapter.
+
+  ROBOT SOURCE
+    MuJoCo Menagerie `unitree_g1` (g1_29dof_with_hand_rev_1_0), fetched to
+    assets/mujoco/unitree_g1/ and included UNMODIFIED below. Everything scene-specific lives
+    in this file so the vendor model can be re-fetched at any time.
+
+  ELEMENT ORDER IS DELIBERATE — do not reshuffle:
+    * <keyframe> comes BEFORE the <include> so `ready` is keyframe 0. MuJoCo merges keyframes
+      in document order, and the Menagerie file ships its own `stand` key. `stand` knows
+      nothing about the cube or the camera mounts, so MuJoCo zero-pads it: loading it drops
+      the cube at the world origin, inside the floor. `ready` is the only keyframe that
+      describes this scene. Look keyframes up by NAME anyway.
+    * <compiler> comes AFTER the <include>. `meshdir` is resolved relative to the directory of
+      the TOP-LEVEL model file, not the included one, so the Menagerie `meshdir="assets"` would
+      point at configs/sim/assets. Our element re-points it and must therefore win, i.e. come
+      last. `angle="radian"` is restated for the same reason — losing it would silently
+      reinterpret every joint range in the vendor file as degrees.
+
+  MVP SIMPLIFICATIONS (each one is a thing that has to change for a real setup)
+    * FIXED BASE. The pelvis is welded to the world and the 12 leg joints plus waist roll/pitch
+      are locked. The MVP controls the 15 canonical upper-body joints only (G1_JOINT_MAP), so
+      leg and balance dynamics would be pure noise. A real G1 stands on its own legs: drop the
+      weld and the joint locks, and add the vendor balance controller, before trusting any
+      whole-body result from this scene.
+    * CAMERAS RIDE ON WELDED MOUNTS. MJCF has no way to add a child element to a body that
+      came from an <include> — re-declaring `torso_link` is a duplicate-name compile error —
+      so the two cameras sit on near-massless bodies rigidly welded to `torso_link` and
+      `left_wrist_yaw_link`. Measured residual motion of a mount relative to its parent link
+      during a 0.8 Hz full-amplitude shoulder sweep: 9e-5 m (head) / 4.7e-4 m (wrist), i.e.
+      well under a pixel at 256x256. The cost is 2x6 extra DoF in qpos/qvel — index joints by
+      NAME, never by raw index. If MuJoCo ever grows body extension in MJCF, or if we start
+      generating the model through mjSpec, delete the mounts and put the cameras on the links.
+    * SQUARE HEAD CAMERA. `head` stands in for the G1 EDU4's RealSense D435i (OD-03) with
+      fovy=70, close to the sensor's 69 deg HORIZONTAL RGB FoV. The real sensor is 69x42 deg,
+      not square; we render square crops for the backbone. Replace fovy with the calibrated
+      intrinsics from OD-03 before any sim-to-real transfer.
+    * THE WRIST CAMERA HAS NO HARDWARE COUNTERPART. `wrist_left` is a research affordance
+      (eye-in-hand input for the backbone). Do not train a policy that needs it and then
+      expect it to run on the EDU4 as delivered.
+    * ONE CUBE, NO CLUTTER, NO DISTRACTORS. D1 (overfit one task) first, P6 (scale) later.
+    * The table is a rigid static box. No compliance, no tablecloth, no wobble.
+
+  KNOWN VENDOR-MODEL QUIRK (not ours to fix here): `left/right_wrist_pitch_joint` declares
+  actuatorfrcrange -5..5 Nm while its position actuator inherits kp=500. Holding the open
+  hand out over the table the controller asks for ~55 Nm, gets 5, and the joint sits ~0.11 rad
+  (6 deg) below its command. Every other arm joint tracks to <0.015 rad. Treat commanded and
+  achieved wrist pitch as different quantities; the same gap will exist on hardware.
+
+  Frames: robot faces +x, pelvis at (0, 0, 0.793). Table and cube sit inside the measured reach
+  envelope: with the base fixed, the Dex3 grasp centre reaches x ~ 0.38 m at the cube's height
+  (y = 0.12) and IK stops converging past ~0.42 m. Both hands were driven to their (mirrored)
+  spots on the table and made contact, so the workspace is genuinely two-handed.
+
+  What this scene does NOT promise: that closing the Dex3 on the cube yields a STABLE grasp.
+  Driving the fingers shut produces real thumb+finger contacts and lifts the cube ~6 mm before
+  it slips. Turning that into a hold is the policy's job (and a finger-controller question),
+  not the scene's.
+-->
+<mujoco model="wam_g1_pickplace">
+
+  <!-- ===================================================================================
+       KEYFRAME (must stay above the <include>, see header)
+
+       `ready` = neutral manipulation-ready pose: base at its welded pose, legs and waist
+       roll/pitch at zero (locked anyway), both upper arms hanging, forearms forward and
+       horizontal, wrists pitched down so the palms face the table, hands open. Measured at
+       this pose: the nearest hand surface clears the table top by 37 mm, the left fingertip
+       links sit 103-133 mm from the cube centre, and nothing is in contact (ncon = 0 apart
+       from cube-on-table). A starting point, not a grasp.
+
+       qpos layout (57 + 14 = 71 values, in body declaration order):
+         [0:7]   pelvis free joint          (welded; must match the weld's reference pose)
+         [7:19]  12 leg joints              (locked at 0)
+         [19:22] waist yaw / roll / pitch   (roll+pitch locked at 0)
+         [22:29] left arm  (shoulder p/r/y, elbow, wrist r/p/y)
+         [29:36] left hand (thumb 0/1/2, middle 0/1, index 0/1)   0 = open
+         [36:43] right arm
+         [43:50] right hand
+         [50:57] cube free joint (pos + quat)
+         [57:64] head camera mount free joint    (pose is dictated by its weld)
+         [64:71] left wrist camera mount free joint
+
+       ctrl layout (43 values) follows the ACTUATOR order of the Menagerie file, which is NOT
+       the qpos order: the right hand lists index before middle. Harmless here because every
+       finger target is 0, but resolve actuators by name in code.
+       =================================================================================== -->
+  <keyframe>
+    <key name="ready"
+      qpos="0 0 0.793 1 0 0 0
+            0 0 0 0 0 0  0 0 0 0 0 0
+            0 0 0
+            -0.2 0.2 0 0.2 0 0.45 0   0 0 0 0 0 0 0
+            -0.2 -0.2 0 0.2 0 0.45 0   0 0 0 0 0 0 0
+            0.34 0.12 0.7425 1 0 0 0
+            0.086036 0 1.197 1 0 0 0
+            0.177231 0.221273 0.813585 0.969565 0.099868 0.223052 0.014762"
+      ctrl="0 0 0 0 0 0  0 0 0 0 0 0
+            0 0 0
+            -0.2 0.2 0 0.2 0 0.45 0   0 0 0 0 0 0 0
+            -0.2 -0.2 0 0.2 0 0.45 0   0 0 0 0 0 0 0"/>
+  </keyframe>
+
+  <!-- The vendor model, verbatim. Relative to configs/sim/ -->
+  <include file="../../assets/mujoco/unitree_g1/g1_with_hands.xml"/>
+
+  <!-- Must come after the include; see header. -->
+  <compiler angle="radian" meshdir="../../assets/mujoco/unitree_g1/assets"/>
+
+  <!-- One stiffness setting for every constraint this file adds. MuJoCo's stock equality
+       softness (solref time constant 0.02 s) lets the welded pelvis sag ~25 mm under the
+       robot's own weight and waist_pitch creep ~4e-3 rad, so both are tightened to a
+       0.5 ms time constant with near-unit impedance. This is NOT physics — it is a
+       modelling device that stands in for the mechanical fixture / balance controller the
+       real robot has instead. -->
+  <default>
+    <default class="wam_rigid">
+      <equality solref="0.0005 1" solimp="0.9999 0.99999 1e-5 0.5 2"/>
+    </default>
+  </default>
+
+  <visual>
+    <!-- znear is in units of model extent (~2 m here); the wrist camera sits ~0.1 m from the
+         fingers, so the stock near plane clips exactly the thing it is there to look at. -->
+    <map znear="0.002" zfar="30"/>
+    <headlight diffuse="0.22 0.22 0.22" ambient="0.22 0.22 0.22" specular="0.06 0.06 0.06"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="150" elevation="-20"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.28 0.36 0.46" rgb2="0.05 0.06 0.08"
+      width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+      rgb1="0.17 0.19 0.22" rgb2="0.11 0.12 0.14" markrgb="0.5 0.5 0.5" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="4 4"
+      reflectance="0.05"/>
+    <!-- Names are prefixed so they cannot collide with the vendor file's `black` / `metal`. -->
+    <material name="wam_table_top" rgba="0.78 0.72 0.60 1" specular="0.15" shininess="0.2"/>
+    <material name="wam_table_frame" rgba="0.22 0.23 0.25 1" specular="0.3" shininess="0.4"/>
+    <material name="wam_cube" rgba="1.0 0.404 0.0 1" specular="0.25" shininess="0.3"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"/>
+
+    <!-- Lighting. The headlight alone renders the workspace flat, which would give the video
+         backbone no shading cue at all. One shadow-casting key light above-right, one soft
+         fill from the left, one weak directional to lift the shadow sides. Intensities are
+         deliberately low: at Menagerie's default brightness the table top saturates to pure
+         white and the cube's shadow disappears. All lights are static, so rendering stays
+         deterministic. Real setup: this is studio lighting, not a workshop — domain
+         randomisation over light pose/intensity is a P6 item, not an MVP one. -->
+    <light name="key_light" pos="0.9 0.6 2.2" dir="-0.25 -0.2 -1" directional="false"
+      diffuse="0.35 0.35 0.35" specular="0.15 0.15 0.15" castshadow="true"/>
+    <light name="fill_light" pos="-0.4 -0.9 1.9" dir="0.3 0.5 -1" directional="false"
+      diffuse="0.16 0.16 0.18" specular="0.03 0.03 0.03" castshadow="false"/>
+    <light name="ambient_light" pos="0 0 3" dir="0 0 -1" directional="true"
+      diffuse="0.10 0.10 0.10" specular="0 0 0" castshadow="false"/>
+
+    <!-- ---------------------------------------------------------------------------------
+         WORKSPACE
+
+         Static (jointless) table in front of the robot. Top surface at z = 0.72 m, i.e. just
+         below the pelvis (0.793 m) — the height at which BOTH G1 hands work comfortably with
+         the base fixed. Top spans x 0.24..0.64, y -0.32..0.32; the layout is mirror-symmetric
+         in y, so whatever the left hand reaches the right hand reaches too.
+
+         Real setup: measure the actual bench, then re-verify reach. The G1's arms are short
+         (shoulder at z = 1.085 m, ~0.53 m to the fingertips fully extended) and a bench 5 cm
+         too far forward puts the task out of reach with no warning at all — the IK simply
+         stops converging.
+         --------------------------------------------------------------------------------- -->
+    <body name="table" pos="0.44 0 0">
+      <geom name="table_top" type="box" pos="0 0 0.7075" size="0.20 0.32 0.0125"
+        material="wam_table_top" friction="0.8 0.02 0.002"/>
+      <geom name="table_leg_fl" type="box" pos="0.165 0.285 0.3475" size="0.018 0.018 0.3475"
+        material="wam_table_frame"/>
+      <geom name="table_leg_fr" type="box" pos="0.165 -0.285 0.3475" size="0.018 0.018 0.3475"
+        material="wam_table_frame"/>
+      <geom name="table_leg_bl" type="box" pos="-0.165 0.285 0.3475" size="0.018 0.018 0.3475"
+        material="wam_table_frame"/>
+      <geom name="table_leg_br" type="box" pos="-0.165 -0.285 0.3475" size="0.018 0.018 0.3475"
+        material="wam_table_frame"/>
+    </body>
+
+    <!-- The one graspable object. 45 mm cube, 100 g (~1100 kg/m3, light hardwood), EmAI orange
+         so it is unambiguous against the table and the floor for both the camera and any human
+         reviewer. Placed 10 cm in from the near table edge, on the LEFT side, inside the left
+         arm's reach envelope.
+         priority=1 makes the cube's friction win outright over the Dex3 finger meshes'
+         defaults, so grasp friction is one number in one place instead of a pairwise average.
+         condim=4 adds torsional friction — without it a box pinched between two fingertips
+         spins out of the grasp. The softer solref/solimp than the default keeps the contact
+         from ringing at 500 Hz when a fingertip lands on a flat face. -->
+    <body name="cube" pos="0.34 0.12 0.7425">
+      <freejoint name="cube_free"/>
+      <geom name="cube" type="box" size="0.0225 0.0225 0.0225" material="wam_cube" mass="0.1"
+        friction="1.2 0.05 0.005" condim="4" priority="1" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    </body>
+
+    <!-- ---------------------------------------------------------------------------------
+         CAMERA MOUNTS (see header for why these are separate welded bodies)
+
+         Each mount's frame is aligned with its parent link; the camera element carries the
+         aiming. `pos` here is the mount pose in the model's qpos0 configuration, so a plain
+         mj_resetData() also starts consistent with the weld and there is no startup snap.
+         MuJoCo cameras look down their own -z with +y up, hence the xyaxes triples.
+         --------------------------------------------------------------------------------- -->
+    <body name="head_cam_mount" pos="0.086036 0 1.197" gravcomp="1">
+      <freejoint name="head_cam_free"/>
+      <inertial pos="0 0 0" mass="0.02" diaginertia="2e-5 2e-5 2e-5"/>
+      <!-- Stand-in for the head RealSense D435i (OD-03): 1.5 cm in front of the head shell at
+           eye height, pitched 40 deg down so the whole table top is inside the frame. -->
+      <camera name="head" pos="0 0 0" xyaxes="0 -1 0  0.642788 0 0.766044" fovy="70"/>
+    </body>
+
+    <body name="wrist_cam_mount" pos="0.179773 0.168671 0.798235" gravcomp="1">
+      <freejoint name="wrist_cam_free"/>
+      <inertial pos="0 0 0" mass="0.02" diaginertia="2e-5 2e-5 2e-5"/>
+      <!-- Eye-in-hand. In the wrist_yaw frame +x runs down the fingers, the thumb opposes
+           towards -y, and index/middle are spread along +-z. A camera on the BACK of the hand
+           (+y) has the palm between it and the object — every back-of-hand offset tried was
+           occluded — so the mount sits 9 cm out along -z, beside the middle finger, looking
+           across the open grasp aperture. A chunky bracket, but the cube stays in frame from
+           `ready` all the way to finger contact, which is the whole point. -->
+      <camera name="wrist_left" pos="0 0 0"
+              xyaxes="-0.323688 -0.946164 0  -0.421769 0.144289 0.895149" fovy="80"/>
+    </body>
+  </worldbody>
+
+  <equality>
+    <!-- FIXED BASE. body2 defaults to the world. relpose is left at its automatic value, so
+         the weld holds the pelvis at its qpos0 pose (0 0 0.793, identity) — which is exactly
+         what the `ready` keyframe writes into the free joint, so there is no transient.
+         Stiffness comes from the `wam_rigid` default class. -->
+    <weld name="pelvis_to_world" body1="pelvis" class="wam_rigid"/>
+
+    <!-- LOCKED JOINTS. Everything that is not one of the 15 canonical upper-body joints. Each
+         constraint pins the joint to its qpos0 value (polycoef defaults to "0 1 0 0 0", and
+         with joint2 omitted only the constant term applies). The corresponding position
+         actuators still exist and still get ctrl=0 — the lock is defense in depth, not a
+         replacement for commanding them. Delete this whole block for whole-body work.
+         Stiffness comes from the `wam_rigid` default class. -->
+    <joint name="lock_left_hip_pitch" joint1="left_hip_pitch_joint" class="wam_rigid"/>
+    <joint name="lock_left_hip_roll" joint1="left_hip_roll_joint" class="wam_rigid"/>
+    <joint name="lock_left_hip_yaw" joint1="left_hip_yaw_joint" class="wam_rigid"/>
+    <joint name="lock_left_knee" joint1="left_knee_joint" class="wam_rigid"/>
+    <joint name="lock_left_ankle_pitch" joint1="left_ankle_pitch_joint" class="wam_rigid"/>
+    <joint name="lock_left_ankle_roll" joint1="left_ankle_roll_joint" class="wam_rigid"/>
+    <joint name="lock_right_hip_pitch" joint1="right_hip_pitch_joint" class="wam_rigid"/>
+    <joint name="lock_right_hip_roll" joint1="right_hip_roll_joint" class="wam_rigid"/>
+    <joint name="lock_right_hip_yaw" joint1="right_hip_yaw_joint" class="wam_rigid"/>
+    <joint name="lock_right_knee" joint1="right_knee_joint" class="wam_rigid"/>
+    <joint name="lock_right_ankle_pitch" joint1="right_ankle_pitch_joint" class="wam_rigid"/>
+    <joint name="lock_right_ankle_roll" joint1="right_ankle_roll_joint" class="wam_rigid"/>
+    <joint name="lock_waist_roll" joint1="waist_roll_joint" class="wam_rigid"/>
+    <joint name="lock_waist_pitch" joint1="waist_pitch_joint" class="wam_rigid"/>
+
+    <!-- CAMERA MOUNTS. relpose = pose of the mount in the parent link's frame, given
+         explicitly so the offsets are readable and independent of qpos0. -->
+    <weld name="head_cam_weld" body1="torso_link" body2="head_cam_mount" class="wam_rigid"
+      relpose="0.09 0 0.36  1 0 0 0"/>
+    <weld name="wrist_cam_weld" body1="left_wrist_yaw_link" body2="wrist_cam_mount" class="wam_rigid"
+      relpose="-0.02 0.02 -0.09  1 0 0 0"/>
+  </equality>
+
+</mujoco>

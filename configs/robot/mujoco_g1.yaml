@@ -1,0 +1,95 @@
+# WAM robot config — Unitree G1 in MuJoCo (E2 simulation, T-21).
+#
+# The SAME canonical space and the SAME adapter as configs/robot/g1.yaml — only the
+# transport differs (wam.robot.mujoco_g1.MujocoG1Robot composes wam.robot.g1.G1Adapter
+# with a MuJoCo transport). Scene: configs/sim/g1_scene.xml (fixed base, locked legs and
+# waist roll/pitch, table + cube, cameras "head" and "wrist_left"). The vendor model it
+# includes is fetched, not vendored: scripts/fetch_g1_model.py.
+#
+# The canonical space MUST match wam.robot.g1.G1_SPEC exactly (same joint names in the
+# same order, gripper_dims=2), like g1.yaml; tests/test_versioning.py covers this file
+# alongside robot/mock.yaml and robot/g1.yaml.
+# gripper_dims=2: [left, right], each normalized to [0, 1] and mapped to a Dex3 grasp
+# synergy in the transport.
+wam_config_version: "0.1.0"
+
+robot:
+  name: mujoco_g1
+  adapter: wam.robot.mujoco_g1
+
+  canonical_space:
+    schema_version: "0.1.0"
+    joint_names:
+      - waist_yaw
+      - left_shoulder_pitch
+      - left_shoulder_roll
+      - left_shoulder_yaw
+      - left_elbow
+      - left_wrist_roll
+      - left_wrist_pitch
+      - left_wrist_yaw
+      - right_shoulder_pitch
+      - right_shoulder_roll
+      - right_shoulder_yaw
+      - right_elbow
+      - right_wrist_roll
+      - right_wrist_pitch
+      - right_wrist_yaw
+    gripper_dims: 2
+    ee_frame: base
+    ee_rotation_convention: quat_wxyz
+
+  # Limits in canonical units: rad, rad/s, rad/s^2; gripper normalized [0, 1].
+  # q_min/q_max are the MJCF `jnt_range` values of the scene itself, rounded INWARD to 4
+  # decimals (6 of 15 joints differ from the raw range by 2-3e-5 rad, always narrower —
+  # MuJoCo clamps every actuator target to the range anyway, so a WIDER limit here would
+  # make the adapter's clipping lie, while a narrower one is merely conservative).
+  # They agree with g1.yaml's public-datasheet placeholders to <5 mrad (worst: elbow and
+  # wrist pitch/yaw, 4.40 mrad — g1.yaml is rounded to 2 decimals, and on shoulder_roll it
+  # is WIDER than the scene, so it is not uniformly the conservative side).
+  # dq_max/ddq_max are IDENTICAL to g1.yaml on purpose: they are conservative MVP policy
+  # caps (PRD §11.2), not hardware facts, and a sim-validated policy should carry the same
+  # velocity envelope onto the robot. wam.robot.mujoco_g1.SIM_DQ_MAX mirrors dq_max so the
+  # no-config `get_robot("mujoco_g1")` path enforces the same clip as this file.
+  limits:
+    q_min: [-2.618, -3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, -1.6144, -3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144]
+    q_max: [2.618, 2.6704, 2.2515, 2.618, 2.0944, 1.9722, 1.6144, 1.6144, 2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144]
+    dq_max: [1.5, 1.5, 1.5, 1.5, 1.5, 2.0, 2.0, 2.0, 1.5, 1.5, 1.5, 1.5, 2.0, 2.0, 2.0]
+    ddq_max: [4.0, 4.0, 4.0, 4.0, 4.0, 6.0, 6.0, 6.0, 4.0, 4.0, 4.0, 4.0, 6.0, 6.0, 6.0]
+    gripper_min: [0.0, 0.0]
+    gripper_max: [1.0, 1.0]
+
+  # SIM GAINS — NOT the conservative hardware placeholders of configs/robot/g1.yaml.
+  # This model carries the arm's real inertia with NO gravity compensation, so g1.yaml's
+  # kp=20/kd=0.5 lets the arm visibly sag (measured steady-state error 0.17 rad on a
+  # 0.5 rad elbow step, never settling).
+  # kp = 500 is the vendor Menagerie `g1` actuator-class stiffness, i.e. the value the model
+  # itself was authored for. kd is per-joint CRITICAL damping, 2*sqrt(kp*m_eff) — exactly
+  # what the vendor's `dampratio="1"` compiles to, recoverable from the scene via
+  # wam.robot.mujoco_g1.scene_critical_damping(). A FLAT kd is the wrong shape: the wrist
+  # roll's effective inertia is 1/36 of the waist's.
+  # Measured on the two protocols (see the mujoco_transport module docstring):
+  #   fixed absolute target, 1.5 s hold, -0.5 rad elbow step -> elbow |err| 0.0064 rad,
+  #     mean 0.0030, max 0.0091 over the 15 joints; 5 s gravity hold -> max droop 0.0091 rad
+  #   THROUGH G1Adapter.execute() (the only protocol the runtime uses) -> a joint executes
+  #     mean 0.39 of a ONE-CONTROL-PERIOD step within that period, 0.95 of a 25-step chunk.
+  #     That residual under-execution is architectural (the adapter re-bases on the measured
+  #     q, so loop lag is discarded) and is NOT tunable away — kp=4000 only reaches 0.86.
+  #     Recorded action labels and safety-intervention rates from this sim are therefore not
+  #     calibrated; see docs/sim.md "Known limitations".
+  # These numbers describe MuJoCo, not the robot: do NOT copy them into g1.yaml (OD-08).
+  gains:
+    kp: [500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0]
+    kd: [28.2, 20.68, 14.94, 14.41, 13.57, 4.7, 7.65, 6.3, 20.68, 14.94, 14.41, 13.57, 4.7, 7.65, 6.3]
+
+  control:
+    dt_s: 0.02 # 50 Hz; = MujocoG1Transport.control_dt_s = 10 x the 2 ms model timestep.
+    # Chunks MUST use this dt_s: the adapter paces per-step commands on the SIM clock, which
+    # advances exactly control_dt_s per motor command.
+
+  # Scene + camera wiring for wam.robot.mujoco_g1.MujocoG1Robot.
+  sim:
+    scene: configs/sim/g1_scene.xml
+    keyframe: ready # manipulation-ready pose; restored by MujocoG1Robot.reset()
+    cameras: [head, wrist_left] # become the Observation.images keys
+    image_hw: [256, 256]

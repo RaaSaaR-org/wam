@@ -351,6 +351,21 @@ class G1Adapter:
         """Release the e-stop latch (deliberate operator action)."""
         self._estopped = False
 
+    def forget_tick(self) -> None:
+        """Drop the cached previous transport tick, so the NEXT ``read_state()`` cannot be
+        judged stale.
+
+        ``read_state()`` marks a sample stale (and clears every validity flag) when the
+        transport tick is unchanged since the previous read. That is the runtime's only
+        liveness signal, so it has exactly one owner — this method — rather than callers
+        poking the cache.
+
+        Call it ONLY after the transport's clock has been deliberately rewound or restarted
+        (a simulator episode reset, a reconnect), where "the tick did not change" no longer
+        means "no new sample". Calling it in a running loop would mask a stalled controller.
+        """
+        self._last_tick_ns = None
+
     # -- pure mapping / unit helpers (no hardware, fully testable) ------------------------
 
     @staticmethod
