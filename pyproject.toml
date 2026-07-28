@@ -14,10 +14,27 @@ train = ["torch", "einops", "safetensors"]
 data = ["pyarrow", "opencv-python", "av"]
 serve = ["websockets>=12"]
 # Wan backbone (T-15/OD-04): diffusers-backed VAE + umT5 + DiT. GPU only in practice.
-wan = ["torch", "diffusers>=0.35", "transformers>=4.51", "accelerate", "sentencepiece", "ftfy"]
+# peft injects the T-16 LoRA adapters into the DiT blocks; safetensors saves them alone
+# (--save-adapter-only), which is what makes a 30-minute checkpoint interval affordable.
+wan = [
+    "torch",
+    "diffusers>=0.35",
+    "transformers>=4.51",
+    "accelerate",
+    "sentencepiece",
+    "ftfy",
+    "peft>=0.14",
+    "safetensors",
+]
 # Launching GPU work on HF Jobs (docs/hf_jobs.md).
 jobs = ["huggingface_hub>=0.34"]
-dev = ["pytest", "ruff"]
+# MuJoCo simulation (E2): physics + offscreen rendering behind the G1Transport seam
+# (wam.robot.mujoco_g1 / mujoco_transport). CPU only, works headless on macOS and Linux.
+# The G1 model itself is NOT a package — fetch it with scripts/fetch_g1_model.py.
+sim = ["mujoco"]
+# peft is a dev dependency too: without it the LoRA tests skip instead of run, and a broken
+# adapter surface would then only show up on the cluster.
+dev = ["pytest", "ruff", "peft>=0.14"]
 
 [build-system]
 requires = ["hatchling"]
