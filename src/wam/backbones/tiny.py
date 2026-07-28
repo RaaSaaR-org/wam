@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import re
 import zlib
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -34,8 +34,12 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 class TinyBackboneConfig(BaseModel):
     """Configuration for :class:`TinyVideoBackbone`. Frozen (hashable into config_hash)."""
 
-    model_config = ConfigDict(frozen=True)
+    # extra="forbid": with the backbone config now a discriminated union, an untagged
+    # Wan-shaped dict would otherwise validate into an all-defaults 64-dim tiny config and
+    # train the wrong model silently. Fail loudly instead.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
+    kind: Literal["tiny"] = "tiny"
     feature_dim: int = Field(default=64, gt=0, description="Token width; last dim of features().")
     patch_size: int = Field(default=8, gt=0, description="Square spatial patch edge in pixels.")
     depth: int = Field(default=2, ge=1, le=4, description="Number of transformer blocks (1-2).")
@@ -206,6 +210,28 @@ class TinyVideoBackbone(nn.Module):
         feats = self.blocks(self._build_sequence(tokens, text_ctx, state_ctx))
         velocity = self._unpatchify_head(feats[:, : self.config.num_video_tokens])
         return velocity, feats
+
+    # ---- FlowBackbone ----------------------------------------------------------------------
+
+    def encode_video(self, video: Any) -> Tensor:
+        """Identity VAE: raw frames -> flow latents == pixels in [0, 1], [B, F, H, W, 3].
+
+        This is exactly the expression ``JointWorldActionModel.co_denoise`` used to inline
+        before the video branch became backbone-agnostic (uint8 -> /255, else float).
+        """
+        return self._to_video_tensor(video)
+
+    def decode_video(self, video_latents: Any) -> Tensor:
+        """Inverse of :meth:`encode_video` — identity, since the latents already are pixels."""
+        return self._to_video_tensor(video_latents)
+
+    def num_video_tokens(self, video_latents: Any = None) -> int:
+        """Leading video tokens in ``features``; fixed by the config, so the batch is ignored."""
+        return self.config.num_video_tokens
+
+    def frozen_part_names(self) -> tuple[str, ...]:
+        """The text embedding table + text positional table (PRD §10.3 step 4)."""
+        return ("text_embedding", "text_pos")
 
     # ---- Internals -----------------------------------------------------------------------
 

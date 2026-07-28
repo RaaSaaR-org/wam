@@ -25,13 +25,23 @@ Pipeline (DreamZero recipe):
   (default: mid/late depth = ``num_layers//2`` and ``3*num_layers//4``), averaged
   -> ``[B, S, inner_dim]`` with S = F' * (H/s/p_h) * (W/s/p_w).
 
+Training (T-16, PRD §10.3) reuses that single DiT call through the ``FlowBackbone`` pathway:
+``encode_video()``/``decode_video()`` for the VAE round-trip, ``forward_flow()`` for one
+velocity + feature pass, ``add_lora()`` for the trainable part. ``forward_flow()`` is the ONLY
+place Wan's conventions (timesteps counting DOWN from 1000, velocity pointing noise-ward) are
+translated into WAM's (``x_t = (1-t)*x0 + t*x1``, ``t=1`` clean); nothing above the adapter —
+neither the losses nor ``JointWorldActionModel.co_denoise`` — may learn about them (FR-09).
+
 Swapping this adapter in must not change the data schema or the robot API (FR-09/AC-05).
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 WAN_NAME = "wan2.1-i2v"
 WAN_DIT_HIDDEN_DIM = 5120
@@ -45,11 +55,83 @@ WAN_TEXT_DIM = 4096
 DEFAULT_FEATURE_BLOCKS: tuple[int, ...] = (20, 30)
 DEFAULT_MAX_TEXT_TOKENS = 512
 
+# Wan's noise schedule is discretized into 1000 training steps counted DOWNWARDS (1000 = pure
+# noise, 0 = clean) — the mirror image of WAM's t in [0, 1] with t=1 clean. Used by exactly one
+# expression, in forward_flow().
+WAN_NUM_TRAIN_TIMESTEPS = 1000
+# Every Linear inside a Wan transformer block: self-attention (attn1), cross-attention (attn2)
+# and the FFN. Verified by introspection on WanTransformer3DModel; matched by SUFFIX, so the
+# same six names cover all 30/40 blocks. attn2.add_k_proj/add_v_proj exist only on checkpoints
+# with a CLIP image tower and are appended by add_lora() when config.added_kv_proj_dim is set.
+DEFAULT_LORA_TARGETS: tuple[str, ...] = ("to_q", "to_k", "to_v", "to_out.0", "net.0.proj", "net.2")
+
+_LORA_WEIGHT_NAME = "pytorch_lora_weights.safetensors"  # diffusers' save_lora_adapter layout
+
 _WEIGHTS_MISSING_MSG = (
     "Wan2.1 weights not available — pass checkpoint_path=<local snapshot dir> (or "
     "model_id=<hub repo> with allow_download=True) and install the runtime "
     "(diffusers>=0.35 + transformers); nothing is downloaded implicitly."
 )
+
+
+class WanBackboneConfig(BaseModel):
+    """Declarative config for :class:`WanI2VAdapter` — the ``kind="wan_i2v"`` arm of the
+    backbone union next to :class:`~wam.backbones.tiny.TinyBackboneConfig`.
+
+    TORCH-FREE by construction: every field is a JSON primitive, a ``Literal`` or a tuple, so
+    the whole training config stays YAML-round-trippable and hashable by
+    ``wam.interfaces.versioning.config_hash`` (AC-04). Never put a ``torch.dtype`` in here —
+    ``dtype``/``lora_param_dtype`` are the string names the adapter resolves at load time.
+
+    Frozen + ``extra="forbid"``: with the backbone config a discriminated union, a typo'd or
+    tiny-shaped field must fail loudly instead of silently training an all-defaults model.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["wan_i2v"] = "wan_i2v"
+    # Weight source: exactly one of the two, checkpoint_path (a local snapshot) taking
+    # precedence. allow_download stays False so a training run never blocks on a 34 GB pull.
+    model_id: str | None = None
+    checkpoint_path: str | None = None
+    allow_download: bool = False
+    dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
+    device: str = "cuda"
+    device_map: str | None = None
+    feature_dim: int = Field(default=3072, gt=0, description="DiT inner dim (TI2V-5B: 3072).")
+    num_frames: int = Field(default=9, gt=0, description="Pixel frames per clip (VAE input).")
+    image_hw: tuple[int, int] = Field(
+        default=(128, 160),
+        description="Frames are resized to this before the VAE; must be DiT-legal (see "
+        "encode_video), which raw dataset sizes such as GR00T's 120x160 are not.",
+    )
+    state_embedding_dim: int = Field(default=32, gt=0)
+    max_text_tokens: int = Field(default=512, gt=0)
+    feature_blocks: tuple[int, ...] = Field(
+        default=(2, 10),
+        description="Readout depths; measured on GR00T-G1 action labels, not a heuristic "
+        "(configs/model/wan22_ti2v_5b.yaml).",
+    )
+    lora_rank: int = Field(default=32, gt=0)
+    lora_alpha: int = Field(default=64, gt=0)
+    lora_dropout: float = Field(default=0.0, ge=0.0, lt=1.0)
+    lora_targets: tuple[str, ...] = DEFAULT_LORA_TARGETS
+    lora_blocks: tuple[int, ...] | None = Field(
+        default=None, description="Restrict LoRA to these block depths; None = every block."
+    )
+    lora_param_dtype: Literal["float32", "bfloat16"] = "float32"
+    gradient_checkpointing: bool = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> WanBackboneConfig:
+        height, width = self.image_hw
+        if height <= 0 or width <= 0:
+            raise ValueError(f"image_hw must be positive, got {self.image_hw}")
+        if not self.feature_blocks or any(b < 0 for b in self.feature_blocks):
+            raise ValueError(
+                f"feature_blocks must be non-empty and >= 0, got {self.feature_blocks}"
+            )
+        return self
 
 
 def default_feature_blocks(num_layers: int) -> tuple[int, ...]:
@@ -120,6 +202,10 @@ class WanI2VAdapter:
         self._image_dim: int | None = None
         self._vae_spatial = WAN_VAE_SPATIAL_STRIDE
         self._vae_temporal = WAN_VAE_TEMPORAL_STRIDE
+        # The instruction is constant for a whole rollout (and for most of an epoch), while the
+        # umT5 tower is the priciest frozen part to re-run — and it is deterministic.
+        self._text_cache: dict[Any, Any] = {}
+        self._lora_adapter: str | None = None
 
     # ---- BackboneAdapter protocol (metadata is available without weights) ---------------
 
@@ -256,6 +342,9 @@ class WanI2VAdapter:
         self._tokenizer = tokenizer
         self._image_encoder = image_encoder
         self._image_processor = image_processor
+        # Both caches describe the modules we are replacing here, not the adapter.
+        self._text_cache.clear()
+        self._lora_adapter = None
 
         self.feature_blocks = tuple(resolved)
         self._num_layers = num_layers
@@ -339,14 +428,7 @@ class WanI2VAdapter:
         import torch
 
         pixels = self._to_pixel_tensor(video)  # [B, 3, F, H, W] fp32 in [-1, 1]
-        mod_h = self._vae_spatial * self._patch_size[1]
-        mod_w = self._vae_spatial * self._patch_size[2]
-        _, _, _, height, width = pixels.shape
-        if height % mod_h or width % mod_w:
-            raise ValueError(
-                f"frame size {height}x{width} must be a multiple of {mod_h}x{mod_w} "
-                f"(vae stride {self._vae_spatial} x patch {self._patch_size[1:]})"
-            )
+        self._check_pixel_grid(pixels)
         with torch.no_grad():
             posterior = self._vae.encode(pixels.to(self._device_of(self._vae))).latent_dist
             latents = posterior.mode()  # deterministic: no sampling in a feature extractor
@@ -364,12 +446,19 @@ class WanI2VAdapter:
         """Instruction(s) -> frozen umT5 context ``[B, max_text_tokens, text_dim]``.
 
         Padding positions are zeroed (same convention as the diffusers Wan pipelines).
+        Memoized per prompt: the tower is frozen and deterministic, so re-encoding the same
+        instruction every training step (or every closed-loop tick) is pure waste. ``attach()``
+        drops the cache, since it swaps the very tower that produced it.
         """
         self._require_loaded()
         import torch
 
         if self._tokenizer is None or self._text_encoder is None:
             raise RuntimeError("no text encoder attached — load() builds tokenizer + umT5")
+        key = text if isinstance(text, str) else tuple(text)
+        cached = self._text_cache.get(key)
+        if cached is not None:
+            return cached
         prompts = [text] if isinstance(text, str) else list(text)
         batch = self._tokenizer(
             prompts,
@@ -385,34 +474,56 @@ class WanI2VAdapter:
         with torch.no_grad():
             embeds = self._text_encoder(ids, attention_mask=mask).last_hidden_state
         masked = embeds * mask.unsqueeze(-1).to(embeds.dtype)
-        return masked.to(device=self.device, dtype=self._model_dtype())
+        result = masked.to(device=self.device, dtype=self._model_dtype())
+        self._text_cache[key] = result
+        return result
 
     def condition_state(self, state_embedding: Any) -> Any:
         """StateEncoder output ``[B, E]`` -> one extra context token ``[B, 1, text_dim]``.
 
-        The projection is created lazily on first use (fp32, ``requires_grad=True``) — it is
-        the adapter's only trainable parameter block; register it with the optimizer via
-        ``state_projection``.
+        The projection is built on first use if the caller did not build it eagerly (fp32,
+        ``requires_grad=True``) — it is the adapter's only non-LoRA trainable block; register it
+        with the optimizer via ``state_projection`` or :meth:`trainable_parameters`.
         """
         self._require_loaded()
         import torch
-        from torch import nn
 
         x = self._as_tensor(state_embedding).to(torch.float32)
         if x.ndim == 1:
             x = x.unsqueeze(0)
         if x.ndim != 2:
             raise ValueError(f"state_embedding must be [B, E] or [E], got shape {tuple(x.shape)}")
-        embed_dim = int(x.shape[-1])
-        if self._state_proj is None:
-            self._state_proj = nn.Linear(embed_dim, self._text_dim).to(self.device)
-        elif self._state_proj.in_features != embed_dim:
-            raise ValueError(
-                f"state embedding dim changed: projection expects "
-                f"{self._state_proj.in_features}, got {embed_dim}"
-            )
-        token = self._state_proj(x.to(self.device)).unsqueeze(1)
+        proj = self.build_state_projection(int(x.shape[-1]))
+        token = proj(x.to(proj.weight.device)).unsqueeze(1)
         return token.to(self._model_dtype())
+
+    def build_state_projection(self, embed_dim: int) -> Any:
+        """Create (once) the trainable state -> text-context projection; returns it.
+
+        EAGER on purpose: an optimizer is built before the first batch, so a projection that
+        only materializes inside the first ``condition_state()`` call would never be registered
+        and would train nothing. Lives on the TRANSFORMER's device, not ``self.device``: with
+        ``device_map`` the model is sharded and ``self.device`` is only the nominal target.
+        Stays fp32 while the DiT may be bf16 — it is one small matrix, and its gradients are
+        the adapter's whole proprioception path.
+        """
+        self._require_loaded()
+        import torch
+        from torch import nn
+
+        dim = int(embed_dim)
+        if dim < 1:
+            raise ValueError(f"embed_dim must be >= 1, got {embed_dim}")
+        if self._state_proj is not None:
+            if self._state_proj.in_features != dim:
+                raise ValueError(
+                    f"state embedding dim changed: projection expects "
+                    f"{self._state_proj.in_features}, got {dim}"
+                )
+            return self._state_proj
+        device = self._device_of(self._transformer)
+        self._state_proj = nn.Linear(dim, self._text_dim).to(device=device, dtype=torch.float32)
+        return self._state_proj
 
     # ---- feature readout ---------------------------------------------------------------
 
@@ -437,6 +548,29 @@ class WanI2VAdapter:
         The per-block variant exists for readout ablations — which depth carries the most
         conditioning signal; :meth:`features` is the protocol method and averages its blocks.
         """
+        return self._forward_dit(video_ctx, text_ctx, state_ctx, blocks=blocks)[1]
+
+    def _forward_dit(
+        self,
+        latents: Any,
+        text_ctx: Any,
+        state_ctx: Any,
+        *,
+        timestep: Any = None,
+        blocks: tuple[int, ...] | None = None,
+        condition_latents: Any = None,
+    ) -> tuple[Any, dict[int, Any]]:
+        """The single DiT call of this adapter -> ``(output, {block_index: activation})``.
+
+        Readout (:meth:`features_by_block`) and the flow pathway (:meth:`forward_flow`) differ
+        only in what they do with the two return values, so they cannot drift apart — and the
+        denoised ``output``, which the readout path throws away, costs nothing extra here.
+
+        ``latents`` may be the :meth:`condition_video` dict (CLIP image embeds included) or a
+        bare latent tensor. ``timestep=None`` reproduces the historical constant-``self.timestep``
+        long tensor byte-for-byte, so the recorded probe/ablation numbers (docs/hf_jobs.md,
+        runs/wan_probe/) stay reproducible; the flow pathway passes its own float schedule.
+        """
         self._require_loaded()
         import torch
 
@@ -445,22 +579,28 @@ class WanI2VAdapter:
             raise ValueError(
                 f"blocks must be non-empty indices in [0, {self._num_layers}), got {selected!r}"
             )
-        latents = video_ctx["latents"] if isinstance(video_ctx, dict) else video_ctx
+        video_ctx = latents
+        latent_tensor = video_ctx["latents"] if isinstance(video_ctx, dict) else video_ctx
         image_embeds = video_ctx.get("image_embeds") if isinstance(video_ctx, dict) else None
-        hidden_states = self._build_hidden_states(latents)
+        hidden_states = self._build_hidden_states(latent_tensor, condition_latents)
         if text_ctx is None:
             raise ValueError("text_ctx is required (condition_text output)")
+        batch = int(hidden_states.shape[0])
         encoder_hidden_states = text_ctx
+        # One instruction, many clips: condition_text() encodes a single prompt once per rollout
+        # while the latent batch is the training batch — broadcast instead of re-encoding.
+        if int(text_ctx.shape[0]) == 1 and batch > 1:
+            encoder_hidden_states = text_ctx.expand(batch, -1, -1)
         if state_ctx is not None:
-            encoder_hidden_states = torch.cat([text_ctx, state_ctx], dim=1)
+            encoder_hidden_states = torch.cat([encoder_hidden_states, state_ctx], dim=1)
         if self._image_dim and image_embeds is None:
             raise ValueError(
                 "this checkpoint expects CLIP image conditioning "
                 f"(image_dim={self._image_dim}) — pass the condition_video() dict"
             )
-        ts = torch.full(
-            (hidden_states.shape[0],), int(self.timestep), dtype=torch.long, device=self.device
-        )
+        ts = timestep
+        if ts is None:
+            ts = torch.full((batch,), int(self.timestep), dtype=torch.long, device=self.device)
 
         captured: dict[int, Any] = {}
         handles = []
@@ -470,13 +610,13 @@ class WanI2VAdapter:
                 transformer_blocks[index].register_forward_hook(self._make_hook(captured, index))
             )
         try:
-            self._transformer(
+            output = self._transformer(
                 hidden_states=hidden_states,
                 timestep=ts,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_hidden_states_image=image_embeds,
                 return_dict=False,
-            )
+            )[0]
         finally:
             for handle in handles:
                 handle.remove()
@@ -490,7 +630,7 @@ class WanI2VAdapter:
                     f"block {index} activation has last dim {activation.shape[-1]}, expected "
                     f"{self._feature_dim} — block output is not the residual stream"
                 )
-        return captured
+        return output, captured
 
     @staticmethod
     def _make_hook(sink: dict[int, Any], index: int) -> Any:
@@ -499,19 +639,378 @@ class WanI2VAdapter:
 
         return hook
 
-    def expected_token_count(self, num_frames: int, height: int, width: int) -> int:
-        """S for ``num_frames`` pixel frames at ``height`` x ``width`` (shape self-check)."""
+    def token_grid(self, num_frames: int, height: int, width: int) -> tuple[int, int, int]:
+        """The ``(F', H', W')`` token layout for ``num_frames`` pixel frames at ``H`` x ``W``.
+
+        Patchify is a strided ``Conv3d`` followed by ``flatten(2).transpose(1, 2)``
+        (``WanTransformer3DModel.patch_embedding``), so the sequence axis of a ``[B, S, D]``
+        activation is **row-major over (F', H', W')** and reshapes to ``[B, F', H', W', D]``.
+        That reshape is what a geometry-preserving readout needs (docs/improvements.md I-1);
+        the mean-pool readout does not care, which is precisely the confound I-1 tests.
+
+        Only the token *count* is self-checkable here (:meth:`expected_token_count` is its
+        product, and the probe asserts it against the real activation). The axis *order* is a
+        property of diffusers' patch embedder, not of this adapter.
+        """
         latent_frames = 1 + (num_frames - 1) // self._vae_temporal
         p_t, p_h, p_w = self._patch_size
         return (
-            (latent_frames // p_t)
-            * (height // self._vae_spatial // p_h)
-            * (width // self._vae_spatial // p_w)
+            latent_frames // p_t,
+            height // self._vae_spatial // p_h,
+            width // self._vae_spatial // p_w,
         )
+
+    def expected_token_count(self, num_frames: int, height: int, width: int) -> int:
+        """S for ``num_frames`` pixel frames at ``height`` x ``width`` (shape self-check)."""
+        frames, rows, cols = self.token_grid(num_frames, height, width)
+        return frames * rows * cols
+
+    # ---- FlowBackbone: latent round-trip + rectified-flow pass (T-16) ---------------------
+
+    def encode_video(self, video: Any, *, image_hw: tuple[int, int] | None = None) -> Any:
+        """Raw frames -> clean flow latents ``[B, z, F', H/s, W/s]``, fp32.
+
+        Same input contract as :meth:`condition_video` (uint8 ``[B, F, H, W, 3]`` /
+        ``[F, H, W, 3]``, or float already in [-1, 1]) plus an optional resize: recorded
+        datasets do not come in DiT-legal sizes — GR00T-G1 frames are 120x160 and 120 is not a
+        multiple of ``vae_spatial * patch`` (16), so the caller passes e.g.
+        ``image_hw=(128, 160)`` and gets a clip the VAE and the patch embedder both accept.
+
+        fp32 and ``no_grad`` on purpose: this is the flow TARGET. Rounding it to bf16 would put
+        the quantization noise of the target into every velocity loss, and a gradient path back
+        into the frozen VAE would train nothing while doubling the activation memory.
+        """
+        self._require_loaded()
+        import torch
+
+        pixels = self._to_pixel_tensor(video)  # [B, 3, F, H, W] fp32 in [-1, 1]
+        if image_hw is not None:
+            pixels = self._resize_pixels(pixels, (int(image_hw[0]), int(image_hw[1])))
+        self._check_pixel_grid(pixels)
+        with torch.no_grad():
+            posterior = self._vae.encode(pixels.to(self._device_of(self._vae))).latent_dist
+            latents = self._normalize_latents(posterior.mode())  # deterministic: no sampling
+        return latents.to(device=self.device, dtype=torch.float32)
+
+    def decode_video(self, video_latents: Any) -> Any:
+        """Flow latents -> pixel frames ``[B, F, H, W, 3]`` in [0, 1] (inverse of encode_video).
+
+        The [0, 1] range is WAM's pixel convention (see the tiny backbone's identity VAE), not
+        Wan's [-1, 1] — everything above the adapter compares predicted to recorded frames in
+        [0, 1]. Inference-only: rollout previews and E2/E3 artefacts, never a loss.
+        """
+        self._require_loaded()
+        import torch
+
+        latents = self._as_tensor(video_latents)
+        if latents.ndim != 5:
+            raise ValueError(
+                f"video_latents must be [B, z, F', h, w], got shape {tuple(latents.shape)}"
+            )
+        vae_device = self._device_of(self._vae)
+        vae_dtype = next(self._vae.parameters()).dtype
+        with torch.no_grad():
+            scaled = self.denormalize_latents(latents.to(device=vae_device, dtype=torch.float32))
+            decoded = self._vae.decode(scaled.to(vae_dtype))
+        frames = decoded.sample if hasattr(decoded, "sample") else decoded[0]  # [B, 3, F, H, W]
+        frames = ((frames.float() + 1.0) / 2.0).clamp(0.0, 1.0)
+        return frames.permute(0, 2, 3, 4, 1).contiguous()
+
+    def num_video_tokens(self, video_latents: Any) -> int:
+        """Leading video tokens of :meth:`forward_flow`'s features, from the latent geometry.
+
+        Wan's DiT sequence IS the patchified video — text and state ride in through
+        cross-attention, not as sequence positions — so this is the FULL feature length. It is
+        derived per batch rather than read off a config because the clip size is a property of
+        the data, and cross-checked against :meth:`expected_token_count`, which computes the
+        same number from the PIXEL geometry. Disagreement means our stride bookkeeping is off
+        and every downstream token slice would be silently misaligned.
+        """
+        latents = self._as_tensor(video_latents)
+        if latents.ndim != 5:
+            raise ValueError(
+                f"video_latents must be [B, z, F', h, w], got shape {tuple(latents.shape)}"
+            )
+        _, _, frames, height, width = (int(v) for v in latents.shape)
+        p_t, p_h, p_w = self._patch_size
+        tokens = (frames // p_t) * (height // p_h) * (width // p_w)
+        expected = self.expected_token_count(
+            (frames - 1) * self._vae_temporal + 1,
+            height * self._vae_spatial,
+            width * self._vae_spatial,
+        )
+        if tokens != expected:
+            raise RuntimeError(
+                f"token count disagrees with the pixel-side derivation ({tokens} vs {expected}) "
+                f"for latents {tuple(latents.shape)} — check vae strides / patch size"
+            )
+        return tokens
+
+    def forward_flow(
+        self, video_latents: Any, t: Any, text_ctx: Any, state_ctx: Any
+    ) -> tuple[Any, Any]:
+        """One rectified-flow pass -> ``(velocity, features)``; WAM conventions in, WAM out.
+
+        Exactly two translations happen here, and nowhere else in the codebase — that is the
+        whole point of this method, so ``losses.py`` and ``JointWorldActionModel.co_denoise``
+        never learn anything Wan-specific (FR-09):
+
+        1. TIMESTEP. WAM's ``t`` is a flow position in [0, 1] with ``t=1`` CLEAN; Wan's
+           scheduler counts denoising steps DOWNWARDS from ``WAN_NUM_TRAIN_TIMESTEPS``
+           (1000 = pure noise). So ``ts = (1 - t) * 1000``, float32 — Wan2.2 takes float
+           timesteps and even per-token ones, so there is nothing to round here.
+        2. SIGN. The DiT predicts the velocity of ITS trajectory, which runs noise-ward
+           (clean -> noise); WAM's target is ``v = x1 - x0``, the same line traversed the other
+           way. Hence the minus.
+
+        Get either wrong and training still converges — to the time-reverse of the intended
+        video, with an action branch conditioned on features from the wrong noise level.
+
+        ``video_latents`` is the NOISED latent ``[B, z, F', h, w]`` (fp32 from
+        :meth:`encode_video`, mixed with noise by the caller); ``t`` is a scalar or ``[B]``.
+        Returns velocity with exactly that shape, and ``[B, S, feature_dim]`` features averaged
+        over ``feature_blocks``, both fp32 so the losses never see the model dtype.
+        """
+        self._require_loaded()
+        import torch
+
+        latents = self._as_tensor(video_latents)
+        if latents.ndim != 5:
+            raise ValueError(
+                f"video_latents must be [B, z, F', h, w], got shape {tuple(latents.shape)}"
+            )
+        batch = int(latents.shape[0])
+        z = int(latents.shape[1])
+        if self._in_channels != z:
+            # Readout can fake the I2V packing (context frames are both the "noisy" and the
+            # "clean" half — see _build_hidden_states); TRAINING cannot: which frames are
+            # context, and what the temporal mask encodes per diffusion step, is unresolved.
+            # Wan2.2-TI2V-5B has in_channels == z == 48 and never reaches this branch.
+            raise NotImplementedError(
+                f"flow training needs a DiT whose in_channels ({self._in_channels}) equals the "
+                f"latent width ({z}); this checkpoint uses the Wan I2V [noisy | mask | clean] "
+                "packing, whose training semantics are unresolved — use Wan2.2-TI2V-5B for the "
+                "flow pathway, or features()/features_by_block() for frozen readout"
+            )
+        t_vec = torch.as_tensor(t, dtype=torch.float32, device=latents.device)
+        if t_vec.ndim == 0:
+            t_vec = t_vec.reshape(1)
+        if t_vec.ndim != 1:
+            raise ValueError(f"t must be a scalar or [B] vector, got shape {tuple(t_vec.shape)}")
+        if t_vec.shape[0] == 1 and batch > 1:
+            t_vec = t_vec.expand(batch)
+        if t_vec.shape[0] != batch:
+            raise ValueError(f"t batch {t_vec.shape[0]} does not match latent batch {batch}")
+        ts = ((1.0 - t_vec) * WAN_NUM_TRAIN_TIMESTEPS).to(torch.float32)
+
+        hidden = latents.to(device=self._device_of(self._transformer), dtype=self._model_dtype())
+        output, captured = self._forward_dit(
+            hidden, text_ctx, state_ctx, timestep=ts.to(hidden.device)
+        )
+        features = torch.stack([captured[i] for i in self.feature_blocks], dim=0).mean(dim=0)
+        return -output.float(), features.float()
+
+    def frozen_part_names(self) -> tuple[str, ...]:
+        """Attribute names of the parts frozen for good: the VAE and the text/image towers.
+
+        The DiT is NOT in here — it is frozen too, but ``add_lora()`` deliberately reopens a
+        low-rank slice of it, and a frozen-parts audit must not flag that as a leak.
+        """
+        names = ("_vae", "_text_encoder", "_image_encoder")
+        return tuple(name for name in names if getattr(self, name) is not None)
+
+    # ---- LoRA fine-tuning (T-16, PRD §10.3) ----------------------------------------------
+
+    def add_lora(
+        self,
+        *,
+        rank: int = 32,
+        alpha: int = 64,
+        dropout: float = 0.0,
+        target_modules: tuple[str, ...] | list[str] | None = None,
+        blocks: tuple[int, ...] | None = None,
+        adapter_name: str = "wam",
+        param_dtype: str = "float32",
+    ) -> int:
+        """Inject LoRA into the frozen DiT; returns the number of trainable parameters.
+
+        Uses ``transformer.add_adapter()``, NOT ``peft.get_peft_model()``: the latter wraps the
+        model and renames the module tree (``base_model.model.blocks.i``), which would break
+        every ``.blocks[i]`` hook this adapter registers for feature readout — the action branch
+        would go dark the moment fine-tuning starts.
+
+        ``blocks`` restricts the adaptation to a few depths (e.g. the readout blocks and below);
+        by default every block is adapted.
+        """
+        self._require_loaded()
+        try:
+            from peft import LoraConfig
+        except ImportError as err:  # pragma: no cover - exercised on machines without the extra
+            raise RuntimeError(
+                f"LoRA fine-tuning requires peft (pip install peft) ({err})"
+            ) from err
+
+        attached = getattr(self._transformer, "peft_config", None) or {}
+        if self._lora_adapter is not None or adapter_name in attached:
+            raise RuntimeError(
+                f"a LoRA adapter is already attached ({self._lora_adapter or adapter_name!r}); "
+                "a second injection would stack adapters on the same base weights and silently "
+                "change what a checkpoint means — build a fresh adapter instead"
+            )
+        targets = [str(name) for name in (target_modules or DEFAULT_LORA_TARGETS)]
+        if getattr(self._transformer.config, "added_kv_proj_dim", None):
+            # I2V checkpoints route the CLIP image tokens through attn2's extra k/v projections;
+            # leaving those frozen would adapt only half of the cross-attention.
+            targets += ["attn2.add_k_proj", "attn2.add_v_proj"]
+        spec: str | list[str] = targets
+        if blocks is not None:
+            depths = tuple(int(b) for b in blocks)
+            if not depths or any(b < 0 or b >= self._num_layers for b in depths):
+                raise ValueError(
+                    f"blocks must be non-empty indices in [0, {self._num_layers}), got {blocks!r}"
+                )
+            # peft matches plain target names by SUFFIX, which cannot express "only at these
+            # depths" — a fully anchored regex can, and anchoring is what keeps 'blocks.1' from
+            # also matching 'blocks.10'.
+            suffixes = "|".join(re.escape(name) for name in targets)
+            indices = "|".join(str(b) for b in depths)
+            spec = rf"^blocks\.(?:{indices})\.(?:.*\.)?(?:{suffixes})$"
+
+        self._transformer.add_adapter(
+            LoraConfig(
+                r=int(rank), lora_alpha=int(alpha), lora_dropout=float(dropout), target_modules=spec
+            ),
+            adapter_name=adapter_name,
+        )
+        trainable = self._activate_lora_parameters(param_dtype)
+        if not trainable:  # pragma: no cover - peft raises first, but never train a no-op
+            raise RuntimeError(f"LoRA injection matched no module against {spec!r}")
+        self._lora_adapter = adapter_name
+        return trainable
+
+    def _activate_lora_parameters(self, param_dtype: str) -> int:
+        """Unfreeze + upcast the freshly injected LoRA weights; returns their parameter count.
+
+        ``attach()`` calls ``requires_grad_(False)`` on the whole DiT, and peft injects into
+        that frozen tree — without this pass the optimizer would get an empty (or, worse, a
+        silently bf16) parameter set and the run would look like it trains. fp32 masters keep
+        Adam's second moment meaningful under a bf16 base.
+        """
+        import torch
+
+        supported = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+        dtype = supported.get(param_dtype)
+        if dtype is None:
+            raise ValueError(
+                f"unknown lora param_dtype {param_dtype!r}; supported: {sorted(supported)}"
+            )
+        total = 0
+        for name, param in self._transformer.named_parameters():
+            if "lora_" not in name:
+                continue
+            if param.dtype != dtype:
+                param.data = param.data.to(dtype)
+            param.requires_grad_(True)
+            total += int(param.numel())
+        return total
+
+    def lora_parameters(self) -> dict[str, Any]:
+        """``{qualified name: nn.Parameter}`` of the injected LoRA weights (optimizer input)."""
+        self._require_loaded()
+        return {n: p for n, p in self._transformer.named_parameters() if "lora_" in n}
+
+    def trainable_parameters(self) -> dict[str, Any]:
+        """Everything this adapter contributes to an optimizer: LoRA weights + state projection.
+
+        Assembled by name instead of filtering ``requires_grad`` over the DiT: a base weight
+        that somehow stayed unfrozen must show up as an audit failure, not as free training.
+        """
+        params = {f"transformer.{n}": p for n, p in self.lora_parameters().items()}
+        if self._state_proj is not None:
+            params.update({f"state_proj.{n}": p for n, p in self._state_proj.named_parameters()})
+        return params
+
+    def lora_state_dict(self) -> dict[str, Any]:
+        """Detached CPU copy of the LoRA weights — all a fine-tune checkpoint has to carry."""
+        return {name: p.detach().to("cpu").clone() for name, p in self.lora_parameters().items()}
+
+    def load_lora_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """In-place inverse of :meth:`lora_state_dict` (the adapter must already be injected)."""
+        import torch
+
+        params = self.lora_parameters()
+        if not params:
+            raise RuntimeError("no LoRA adapter attached — call add_lora() or load_lora() first")
+        missing = sorted(set(params) - set(state_dict))
+        unexpected = sorted(set(state_dict) - set(params))
+        if missing or unexpected:
+            raise ValueError(
+                f"LoRA state dict does not match the injected adapter: "
+                f"missing={missing[:4]}, unexpected={unexpected[:4]}"
+            )
+        with torch.no_grad():
+            for name, param in params.items():
+                value = self._as_tensor(state_dict[name])
+                if tuple(value.shape) != tuple(param.shape):
+                    raise ValueError(
+                        f"LoRA weight {name} has shape {tuple(value.shape)}, expected "
+                        f"{tuple(param.shape)}"
+                    )
+                param.copy_(value.to(device=param.device, dtype=param.dtype))
+
+    def save_lora(self, directory: str | Path) -> Path:
+        """Write the adapter in the diffusers LoRA layout; returns the weight file path.
+
+        Portable on purpose: the same file loads into a stock diffusers Wan pipeline, so a
+        checkpoint can be inspected (does the predicted video look right?) without any of WAM.
+        """
+        self._require_loaded()
+        if self._lora_adapter is None:
+            raise RuntimeError("no LoRA adapter attached — call add_lora() or load_lora() first")
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        self._transformer.save_lora_adapter(str(path), adapter_name=self._lora_adapter)
+        return path / _LORA_WEIGHT_NAME
+
+    def load_lora(
+        self, directory: str | Path, *, adapter_name: str = "wam", param_dtype: str = "float32"
+    ) -> int:
+        """Inverse of :meth:`save_lora`: inject a saved adapter; returns trainable param count.
+
+        Do NOT call ``add_lora()`` first — peft rebuilds the config from the saved ranks.
+        """
+        self._require_loaded()
+        if self._lora_adapter is not None:
+            raise RuntimeError(
+                f"a LoRA adapter is already attached ({self._lora_adapter!r}); load_lora() "
+                "builds its own from the saved weights — start from a fresh adapter"
+            )
+        self._transformer.load_lora_adapter(
+            str(Path(directory)),
+            adapter_name=adapter_name,
+            prefix=None,
+            weight_name=_LORA_WEIGHT_NAME,
+        )
+        self._lora_adapter = adapter_name
+        return self._activate_lora_parameters(param_dtype)
+
+    def enable_gradient_checkpointing(self, enable: bool = True) -> None:
+        """Trade DiT activation memory for a recompute (the 5B will not fit 24 GB otherwise).
+
+        diffusers checkpoints with ``use_reentrant=False``, which is REQUIRED here and not just
+        preferable: the reentrant variant detaches block outputs from the autograd graph, and
+        the readout hooks capture exactly those outputs — the action branch would silently
+        train on constants.
+        """
+        self._require_loaded()
+        if enable:
+            self._transformer.enable_gradient_checkpointing()
+        else:
+            self._transformer.disable_gradient_checkpointing()
 
     # ---- internals -----------------------------------------------------------------------
 
-    def _build_hidden_states(self, latents: Any) -> Any:
+    def _build_hidden_states(self, latents: Any, condition_latents: Any = None) -> Any:
         """Latents -> DiT input channels (I2V checkpoints expect [latents, mask, condition])."""
         import torch
 
@@ -530,7 +1029,35 @@ class WanI2VAdapter:
             dtype=latents.dtype,
             device=latents.device,
         )
-        return torch.cat([latents, mask, latents], dim=1)
+        # Readout has a single tensor and passes it as both halves — unchanged behaviour. A
+        # sampler/trainer that separates noisy latents from clean context passes the latter as
+        # condition_latents; the flow pathway refuses this layout outright (see forward_flow).
+        condition = latents if condition_latents is None else condition_latents
+        return torch.cat([latents, mask, condition], dim=1)
+
+    def _check_pixel_grid(self, pixels: Any) -> None:
+        """Reject frame sizes the VAE + patch embedder cannot tile (H, W multiples of s*p)."""
+        mod_h = self._vae_spatial * self._patch_size[1]
+        mod_w = self._vae_spatial * self._patch_size[2]
+        _, _, _, height, width = pixels.shape
+        if height % mod_h or width % mod_w:
+            raise ValueError(
+                f"frame size {height}x{width} must be a multiple of {mod_h}x{mod_w} "
+                f"(vae stride {self._vae_spatial} x patch {self._patch_size[1:]})"
+            )
+
+    def _resize_pixels(self, pixels: Any, image_hw: tuple[int, int]) -> Any:
+        """Bilinear per-frame resize of [B, 3, F, H, W] (no temporal interpolation, ever)."""
+        import torch
+
+        batch, channels, frames, height, width = pixels.shape
+        if (height, width) == image_hw:
+            return pixels
+        flat = pixels.transpose(1, 2).reshape(batch * frames, channels, height, width)
+        resized = torch.nn.functional.interpolate(
+            flat, size=image_hw, mode="bilinear", align_corners=False
+        )
+        return resized.reshape(batch, frames, channels, *image_hw).transpose(1, 2).contiguous()
 
     def _normalize_latents(self, latents: Any) -> Any:
         import torch
@@ -544,6 +1071,24 @@ class WanI2VAdapter:
         mean_t = torch.tensor(mean, dtype=latents.dtype, device=latents.device).view(*shape)
         std_t = torch.tensor(std, dtype=latents.dtype, device=latents.device).view(*shape)
         return (latents - mean_t) / std_t
+
+    def denormalize_latents(self, latents: Any) -> Any:
+        """Inverse of :meth:`_normalize_latents`: back from unit scale into the VAE's own scale.
+
+        Public because anything that hands latents to the VAE decoder needs it — the flow model
+        works entirely in the normalized space, the decoder only understands the raw one.
+        """
+        import torch
+
+        cfg = self._vae.config
+        mean = getattr(cfg, "latents_mean", None)
+        std = getattr(cfg, "latents_std", None)
+        if not mean or not std:
+            return latents
+        shape = (1, -1, 1, 1, 1)
+        mean_t = torch.tensor(mean, dtype=latents.dtype, device=latents.device).view(*shape)
+        std_t = torch.tensor(std, dtype=latents.dtype, device=latents.device).view(*shape)
+        return latents * std_t + mean_t
 
     def _encode_last_frame(self, pixels: Any) -> Any:
         """CLIP embedding of the last observed frame (diffusers uses hidden_states[-2])."""

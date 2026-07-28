@@ -1,5 +1,12 @@
-# WAM backbone config — Wan2.2-TI2V-5B through WanI2VAdapter (OD-04; kwargs for
-# wam.backbones.registry.get_backbone("wan_i2v", **backbone)).
+# WAM backbone config — Wan2.2-TI2V-5B through WanI2VAdapter (OD-04). The `backbone:` block
+# validates as wam.backbones.wan_i2v.WanBackboneConfig (extra="forbid": an unknown key here
+# is a hard error, not a silently ignored typo) and is consumed by
+# wam.backbones.registry.build_backbone_config() -> build_backbone(), which is what
+# scripts/train_t16_lora.py --backbone-config splices in.
+#
+# NOT kwargs for get_backbone("wan_i2v", **backbone): that path constructs the bare
+# WanI2VAdapter for the frozen-readout jobs (scripts/hf_job_wan_probe.py) and knows nothing
+# about `kind` or the lora_* fields, which describe the TRAINABLE surface around it.
 #
 # feature_blocks is MEASURED on real action labels: the 2026-07-26 ZeroGPU readout probes
 # (docs/hf_jobs.md, runs/wan_probe/) ridge-regressed per-block features onto GR00T-G1
@@ -7,11 +14,38 @@
 # ablation pick (20, 29) and the (15, 22) depth heuristic on joints AND gripper test R².
 # Caveat: no frozen video features beat a state-only ridge yet — the pick is provisional
 # until LoRA fine-tuning (T-16) re-ranks the blocks on adapted features.
+#
+# image_hw is 128x160, NOT the 120x160 the GR00T converter writes: the Wan-VAE downsamples
+# 16x spatially and the DiT patchifies 2x on top, so H and W must be multiples of 32. 120 is
+# illegal (120/32 = 3.75) and 128 is the nearest legal size — one row band of padding. The
+# other direction (upsample to 256x448, the Wan reference resolution) would cost ~4x the
+# video tokens to carry exactly the information a 120x160 source already contains.
+# With num_frames 9 -> F' = 1 + (9-1)//4 = 3 latent frames -> 3 * 4 * 5 = 60 video tokens.
+#
+# The former `timestep: 0` key is gone. It only ever selected the noise level for the FROZEN
+# readout path (features/features_by_block), which now takes it per call and still defaults
+# to 0; the flow path (forward_flow) derives its DiT timestep from the rectified-flow t of
+# the step being trained, so a config-level constant would be actively wrong there.
 wam_config_version: "0.1.0"
 
 backbone:
+  kind: wan_i2v
   model_id: Wan-AI/Wan2.2-TI2V-5B-Diffusers
-  feature_blocks: [2, 10]
   dtype: bfloat16
-  timestep: 0
+  feature_blocks: [2, 10]
+  feature_dim: 3072 # DiT inner dim of the 5B variant (14B would be 5120)
+  num_frames: 9
+  image_hw: [128, 160]
+  state_embedding_dim: 32 # must equal StateMLPConfig.embedding_dim of the training config
   max_text_tokens: 512
+
+  # LoRA on the DiT blocks (T-16). The base weights stay frozen and only the adapters are
+  # checkpointed (--save-adapter-only), which keeps a 30-minute checkpoint interval cheap
+  # enough to survive the 4-hour Slurm cap.
+  lora_rank: 32
+  lora_alpha: 64 # alpha/rank = 2: the usual "scale up the low-rank update" setting
+  lora_dropout: 0.0
+  lora_targets: [to_q, to_k, to_v, to_out.0, net.0.proj, net.2] # attn q/k/v/out + both FFN
+  lora_blocks: null # null = every block; a subset only if VRAM forces it
+  lora_param_dtype: float32 # adapters in fp32 while the frozen base stays bf16
+  gradient_checkpointing: true
