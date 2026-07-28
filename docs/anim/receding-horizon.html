@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WAM — receding horizon</title>
+<style>
+  body { margin: 0; padding: 48px 24px; background: #0A0A0A;
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; }
+  h1 { color: #F5F5F4; font-size: 20px; font-weight: 700; margin: 0 0 6px; }
+  p  { color: #78716C; font-size: 14px; margin: 0 0 24px; }
+  .emai-lottie { position: relative; margin: 0; border-radius: 16px; overflow: hidden;
+    border: 1px solid #2A2A2A;
+    background:
+      radial-gradient(120% 80% at 50% 0%, rgba(255,103,0,.12), transparent 60%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Ccircle cx='1.2' cy='1.2' r='1.2' fill='white' fill-opacity='.03'/%3E%3C/svg%3E"),
+      linear-gradient(160deg, #151515, #070707); }
+  .emai-lottie .emai-poster, .emai-lottie .emai-mount { width: 100%; display: block; }
+  .emai-lottie::before, .emai-lottie::after { content:""; position:absolute; left:0; right:0;
+    height:10px; z-index:2; border-top:2px solid #FF6700; border-bottom:2px solid #FF6700;
+    background: repeating-linear-gradient(-45deg, #FF6700 0 13px, #0A0A0A 13px 26px); }
+  .emai-lottie::before { top:0 } .emai-lottie::after { bottom:0 }
+</style>
+
+<main>
+  <h1>Receding horizon</h1>
+  <p>Every cycle predicts a whole action chunk; only its first <code>prefix_steps</code> are
+     executed. The rest is discarded, not queued.</p>
+
+  <figure class="emai-lottie" aria-label="The WAM closed loop runs observe, predict, filter, execute: a fresh observation reaches the policy, one forward pass fills a whole horizon of 16 action steps, the deterministic safety layer clips the steps that exceed the limits, only the first three steps are executed, and the untouched remainder is discarded when the loop goes back for a fresh observation.">
+    <img class="emai-poster" src="receding-horizon-poster.png" alt="">
+    <div class="emai-mount" hidden></div>
+  </figure>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+<script>
+(function () {
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var fig = document.querySelector('.emai-lottie');
+  var mount = fig.querySelector('.emai-mount');
+  mount.hidden = false; mount.style.display = 'block';   // visible BEFORE load: lottie measures text at load
+  fetch('receding-horizon.json').then(function (r) { return r.json(); }).then(function (data) {
+    window.__a = lottie.loadAnimation({ container: mount, renderer: 'svg', loop: true,
+                                        autoplay: true, animationData: data });
+    fig.querySelector('.emai-poster').style.display = 'none';
+  });
+})();
+</script>

@@ -1,21 +1,22 @@
 # WAM — Modular World Action Model
 
-A modular World-Action-System: one shared model predicts short visual futures and matching robot actions, executed as a safe closed loop on humanoid hardware (target: Unitree G1).
+One shared model predicts short visual futures **and** the matching robot actions, executed as a
+safe closed loop on humanoid hardware (target: Unitree G1 EDU4 + Dex3-1 hands).
 
 **Vision → world prediction → action → safe closed loop.**
 
 - PRD: internal document, kept outside this repository (v0.1, 2026-07-25)
-- Working notes for agents: `CLAUDE.md`
-- MVP task breakdown: `TASKS.md`
+- Working notes for agents: `CLAUDE.md` · MVP task breakdown: `TASKS.md`
+- Ordered path to real usage: `docs/ROADMAP.md` · How it fits together: `docs/architecture.md`
 
 ## Architecture (runtime)
 
 ```
 cameras + robot state + instruction
         │
-   [frozen VAE / text encoders]  [state encoder]
+   [frozen VAE / text encoder]   [state encoder]
         │                             │
-        └──────► video backbone (FLUX 3 | open fallback) ◄──────┘
+        └──────► video backbone (Wan2.2-TI2V-5B + LoRA) ◄──────┘
                         │
               action latents ──► action decoder ──► action chunk
                         │
@@ -26,31 +27,89 @@ cameras + robot state + instruction
               new observation ──► re-plan (receding horizon)
 ```
 
+The backbone is swappable by contract (FR-09): anything satisfying `BackboneAdapter` — plus
+`FlowBackbone` for joint training — drops in. Wan2.2-TI2V-5B (Apache 2.0) is the decided MVP
+backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and never bypassed.
+
+## Status (2026-07-28)
+
+**604 tests green.** M0–M4 are code-complete. What that does and does not mean:
+
+| Proven | How |
+|--------|-----|
+| Action-only policy learns real robot data | 402 real G1 episodes, 40 unseen: E1 mse 1.10e-5 vs. 1.63e-5 zero-delta baseline (−32 %) |
+| The Wan adapter works on real 5B weights | ZeroGPU, 13/13 checks, readout blocks label-validated to (2, 10) |
+| The closed loop survives contact physics | MuJoCo G1 + Dex3, rendered pixels, 1.19× realtime (`docs/sim.md`) |
+| The DDS wire layer is real | `DdsG1Transport` vs. a fake G1 on a CycloneDDS bus, arm64 container, 11/11 (`docker/dds/README.md`) |
+| T-16 can run on a cluster | LoRA path + resume harness, all CPU-testable (`cluster/discoverer/README.md`) |
+
+| Not proven | Why it matters |
+|------------|----------------|
+| **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge, and at tiny scale the video branch *hurts*. The whole claim now rests on the T-16 LoRA fine-tune — which has never been run. |
+| Anything on a physical robot | No G1 yet. Vendor conformance, E-stop chain, real limits and the Dex3 mapping are asserted, not measured. |
+| Real teleop data (D1/D2) | Everything so far is synthetic or converted from `nvidia/GR00T-N1.7-AppleToPlate`. |
+
+Open decisions: **OD-06** (FLUX 3 access — deferred to M5) and **OD-08** (which safety functions
+the vendor controller covers — verify at bring-up). Everything else is decided; see `TASKS.md`.
+
+## The one design idea worth knowing
+
+There is exactly **one** hardware seam, `G1Transport`, with three implementations —
+`FakeG1Transport` (unit tests), `MujocoG1Transport` (physics + pixels), `DdsG1Transport` (real
+vendor DDS). Above that seam the code is byte-identical in all three cases. There is deliberately
+no `MujocoAdapter`: the sim buys coverage of the *production* adapter, not of a sim-specific one.
+
+The same principle runs through the model side. `JointWorldActionModel` depends on the
+`FlowBackbone` protocol, never on a concrete backbone, and `WanFlowBackbone` keeps the 5B DiT, the
+VAE and the text tower **out of the module tree** — only LoRA parameters are registered. So
+"checkpoint the adapter, not the 5B model" is structurally enforced rather than a flag someone has
+to remember.
+
 ## Repo layout
 
 ```
-src/wam/        Python package (interfaces, backbones, encoders, decoders,
-                safety, robot, data, training, runtime, evaluation)
-configs/        versioned robot / model / training configs
-scripts/        entry points (record, train, replay, rollout)
+src/wam/        interfaces, backbones, encoders, decoders, safety, robot,
+                data, training, runtime, evaluation (each has its own README)
+configs/        versioned robot / model / training / sim configs
+scripts/        entry points (record, train, probe, replay, rollout)
+cluster/        HPC job scripts — discoverer/ = EuroHPC H200, sbatch-ready
+docker/dds/     arm64 DDS conformance harness (no robot required)
+deploy/         ZeroGPU Spaces for the free-tier Wan / Cosmos3 probes
 tests/          E0 unit tests
-docs/           specs (schema, safety interface, ...)
-idea/           PRD
+docs/           runbooks and specs
+datasets/       converted episodes (WAM format)  ·  runs/ experiment artifacts
 ```
 
-## Status
-
-M0–M4 code-complete (mock/sim verified, 445 tests). Pending: hardware (G1 + cameras + teleop),
-real datasets D1/D2, open decisions OD-01/02/03/04/06/07. Tasks: `TASKS.md` ·
-path to real usage: `docs/ROADMAP.md`.
-
-Key entry points:
+## Entry points
 
 ```
 scripts/run_mock_loop.py        M0: dummy policy + safety + watchdog closed loop
 scripts/record_mock_dataset.py  M1: synthetic dataset + validation gates
+scripts/convert_lerobot_g1.py   M1: LeRobot/GR00T G1 episodes -> WAM format
 scripts/overfit_d1.py           M2: D1 overfit gate + E1 eval
+scripts/run_ablation.py         M3: world-action vs. action-only (AC-07)
+scripts/train_t16_lora.py       M3: the Wan LoRA fine-tune (resumable, 4 h chunks)
+scripts/fetch_g1_model.py       E2: pull the MuJoCo G1 assets (~38 MB)
+scripts/rollout.py              M4: E2/E3 rollouts (mock | g1 | mujoco_g1)
+scripts/view_sim.sh             E2: watch the MuJoCo closed loop live (wraps mjpython)
 scripts/serve_policy.py         M4: WebSocket inference server
-scripts/rollout.py              M4: E2/E3 rollouts (mock | g1)
 scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 ```
+
+## Docs
+
+| File | What |
+|------|------|
+| `docs/ROADMAP.md` | Ordered path to real usage — read this first |
+| `docs/discoverer.md` | EuroHPC H200 cluster: machine facts, quotas, billing, gotchas |
+| `cluster/discoverer/README.md` | The same cluster as a runbook — six `sbatch` files in order |
+| `docs/sim.md` | MuJoCo scene, what it proves and what it does not |
+| `docker/dds/README.md` | DDS conformance + the ordered hardware bring-up checklist |
+| `docs/hf_jobs.md` | Free-tier GPU work: ZeroGPU Spaces and HF Jobs |
+| `docs/teleop.md` | Teleop + calibration workflow |
+
+## Next step
+
+Run T-16. Compute and code are both ready; the LoRA fine-tune on Discoverer+ is what turns
+"video helps" from a hypothesis into a measurement. Start with the free jobs in
+`cluster/discoverer/README.md` — they cost no GPU hours and prove the environment.

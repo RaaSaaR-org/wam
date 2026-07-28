@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1200" width="1200" height="1200" role="img" aria-label="The WAM state encoder takes four proprioception groups — joint positions, joint velocities, IMU and gripper — each carrying its own validity flag; any group flagged invalid is swapped for a learned missing embedding by torch.where before the groups are concatenated and run through a small MLP, so a dead sensor produces an embedding instead of a crash and its NaN values reach neither the output nor the gradient.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#151515"/>
+      <stop offset="1" stop-color="#070707"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.72">
+      <stop offset="0" stop-color="#FF6700" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FF6700" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1.2" cy="1.2" r="1.2" fill="#ffffff" fill-opacity="0.03"/>
+    </pattern>
+    <pattern id="tape" width="26" height="26" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+      <rect width="13" height="26" fill="#FF6700"/>
+      <rect x="13" width="13" height="26" fill="#0A0A0A"/>
+    </pattern>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9" fill="none" stroke="#FF6700" stroke-width="1.4"/>
+    </marker>
+    <style>
+      .disp { font-family: 'Space Grotesk','Helvetica Neue',Arial,sans-serif; font-weight:700; letter-spacing:-0.5px; }
+      .sans { font-family: 'Geist','Helvetica Neue',Arial,sans-serif; }
+      .mono { font-family: 'Geist Mono',ui-monospace,Menlo,monospace; }
+      .flow { stroke:#FF6700; stroke-width:3; opacity:0.45; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="1200" fill="url(#bg)"/>
+  <rect width="1200" height="1200" fill="url(#glow)"/>
+  <rect width="1200" height="1200" fill="url(#grid)"/>
+
+  <g opacity="0.08" transform="translate(1008,240) scale(1.54074) translate(-603.84613,-386.53845) translate(-3.8461304,13.461548)">
+    <path d="m 603.84613,761.53845 a 15,15 0 0 0 0,-30 30,30 0 0 1 0,-60 45,45 0 0 0 0,-90 60,60 0 0 0 0,120 75,75 0 0 0 0,-150 90,90 0 0 1 0,-180 105,105 0 0 0 0,-210 120,120 0 0 0 0,240 135,135 0 0 0 0,-270 150,150 0 0 0 0,300 165,165 0 0 0 0,-330 180,180 0 0 0 0,360 195,195 0 0 0 0,-389.999998 210,210 0 0 0 0,419.999998 225,225 0 0 0 0,-449.999998 240,240 0 0 0 0,479.999998 255,255 0 0 0 0,-509.999998 m 0,749.999998 a 375,375 0 0 0 0,-749.999998 375,375 0 0 0 0,749.999998" fill="none" stroke="#FF6700" stroke-width="1.298" stroke-linecap="round"/>
+  </g>
+
+  <text x="64" y="100" class="mono" font-size="22" letter-spacing="3" fill="#2DD4BF">WAM &#183; STATE ENCODER</text>
+  <text x="64" y="140" class="sans" font-size="24" fill="#A8A29E">Four sensor groups in, one embedding out &#8212; a dead sensor is just an input.</text>
+
+  <text x="64" y="196" class="mono" font-size="20" letter-spacing="2.5" fill="#2DD4BF">FOUR GROUPS &#183; ONE VALIDITY FLAG EACH</text>
+
+  <!-- Group cards -->
+  <rect x="64" y="220" width="250" height="140" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="86" y="266" class="mono" font-size="26" fill="#F5F5F4">q</text>
+  <text x="292" y="264" text-anchor="end" class="mono" font-size="17" fill="#78716C">[N]</text>
+  <text x="86" y="300" class="sans" font-size="17" fill="#A8A29E">joint positions</text>
+  <text x="86" y="336" class="mono" font-size="15" fill="#78716C">validity 1</text>
+
+  <rect x="338" y="220" width="250" height="140" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="360" y="266" class="mono" font-size="26" fill="#F5F5F4">dq</text>
+  <text x="566" y="264" text-anchor="end" class="mono" font-size="17" fill="#78716C">[N]</text>
+  <text x="360" y="300" class="sans" font-size="17" fill="#A8A29E">joint velocities</text>
+  <text x="360" y="336" class="mono" font-size="15" fill="#78716C">validity 1</text>
+
+  <rect x="612" y="220" width="250" height="140" rx="12" fill="#1F1F1F" stroke="#3D3D3D"/>
+  <rect x="612" y="220" width="6" height="140" rx="3" fill="#FF6700"/>
+  <text x="634" y="266" class="mono" font-size="26" fill="#F5F5F4">imu</text>
+  <text x="840" y="264" text-anchor="end" class="mono" font-size="17" fill="#78716C">[10]</text>
+  <text x="634" y="300" class="sans" font-size="17" fill="#A8A29E">orientation, gyro,</text>
+  <text x="634" y="320" class="sans" font-size="17" fill="#A8A29E">acceleration</text>
+  <text x="634" y="346" class="mono" font-size="15" fill="#FF6700">validity 0</text>
+
+  <rect x="886" y="220" width="250" height="140" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="908" y="266" class="mono" font-size="26" fill="#F5F5F4">gripper</text>
+  <text x="1114" y="264" text-anchor="end" class="mono" font-size="17" fill="#78716C">[G]</text>
+  <text x="908" y="300" class="sans" font-size="17" fill="#A8A29E">gripper state</text>
+  <text x="908" y="336" class="mono" font-size="15" fill="#78716C">validity 1</text>
+
+  <line x1="189" y1="364" x2="189" y2="392" class="flow" marker-end="url(#arrow)"/>
+  <line x1="463" y1="364" x2="463" y2="392" class="flow" marker-end="url(#arrow)"/>
+  <line x1="737" y1="364" x2="737" y2="392" class="flow" marker-end="url(#arrow)"/>
+  <line x1="1011" y1="364" x2="1011" y2="392" class="flow" marker-end="url(#arrow)"/>
+
+  <!-- The swap (hero) -->
+  <rect x="64" y="396" width="1072" height="170" rx="12" fill="rgba(255,103,0,0.10)" stroke="#FF6700" filter="url(#soft)"/>
+  <rect x="64" y="396" width="7" height="170" rx="3.5" fill="#FF6700"/>
+  <text x="92" y="432" class="mono" font-size="20" fill="#FF6700">torch.where(valid, x, missing[group])</text>
+  <rect x="74" y="452" width="230" height="64" rx="9" fill="#292929" stroke="#3D3D3D"/>
+  <text x="189" y="492" text-anchor="middle" class="mono" font-size="19" fill="#A8A29E">q</text>
+  <rect x="348" y="452" width="230" height="64" rx="9" fill="#292929" stroke="#3D3D3D"/>
+  <text x="463" y="492" text-anchor="middle" class="mono" font-size="19" fill="#A8A29E">dq</text>
+  <rect x="622" y="452" width="230" height="64" rx="9" fill="rgba(255,103,0,0.14)" stroke="#FF6700"/>
+  <text x="737" y="492" text-anchor="middle" class="mono" font-size="19" fill="#FF8534">missing['imu']</text>
+  <rect x="896" y="452" width="230" height="64" rx="9" fill="#292929" stroke="#3D3D3D"/>
+  <text x="1011" y="492" text-anchor="middle" class="mono" font-size="19" fill="#A8A29E">gripper</text>
+  <text x="92" y="546" class="sans" font-size="18" fill="#A8A29E">Never a multiply &#8212; NaN inside a dead group reaches neither the output nor the gradient.</text>
+
+  <line x1="600" y1="566" x2="600" y2="598" class="flow" marker-end="url(#arrow)"/>
+
+  <!-- Concat -->
+  <rect x="64" y="602" width="1072" height="84" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="92" y="652" class="mono" font-size="24" fill="#F5F5F4">concat -&gt; [2N + 10 + G]</text>
+  <text x="1108" y="650" text-anchor="end" class="mono" font-size="17" fill="#78716C">one flat vector</text>
+
+  <line x1="600" y1="686" x2="600" y2="718" class="flow" marker-end="url(#arrow)"/>
+
+  <!-- MLP -->
+  <rect x="64" y="722" width="1072" height="120" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="92" y="770" class="disp" font-size="30" fill="#F5F5F4">StateMLP</text>
+  <text x="1108" y="768" text-anchor="end" class="mono" font-size="17" fill="#78716C">trainable</text>
+  <text x="92" y="806" class="mono" font-size="18" fill="#78716C">Linear &#183; LayerNorm &#183; GELU &#183; &#8230; &#183; Linear &#183; 2&#8211;4 layers</text>
+
+  <line x1="600" y1="842" x2="600" y2="874" class="flow" marker-end="url(#arrow)"/>
+
+  <!-- Output -->
+  <rect x="64" y="878" width="1072" height="110" rx="12" fill="rgba(45,212,191,0.12)" stroke="#2DD4BF"/>
+  <text x="92" y="928" class="disp" font-size="32" fill="#F5F5F4">State embedding</text>
+  <text x="92" y="962" class="mono" font-size="19" fill="#2DD4BF">[E] float32 -&gt; conditions the backbone</text>
+
+  <text x="64" y="1042" class="sans" font-size="20" fill="#A8A29E">Each group owns a learned &#8220;missing&#8221; embedding &#8212; trained like any other parameter.</text>
+  <text x="64" y="1074" class="sans" font-size="20" fill="#78716C">The same module runs at training and at inference.</text>
+
+  <text x="64" y="1158" class="disp" font-size="30"><tspan fill="#F5F5F4">Em</tspan><tspan fill="#FF6700">AI</tspan></text>
+  <text x="1136" y="1158" text-anchor="end" class="mono" font-size="20" letter-spacing="1" fill="#78716C">emai.dev</text>
+
+  <rect x="0" y="0" width="1200" height="16" fill="url(#tape)"/>
+  <rect x="0" y="0" width="1200" height="2" fill="#FF6700"/>
+  <rect x="0" y="14" width="1200" height="2" fill="#FF6700"/>
+  <rect x="0" y="1184" width="1200" height="16" fill="url(#tape)"/>
+  <rect x="0" y="1184" width="1200" height="2" fill="#FF6700"/>
+  <rect x="0" y="1198" width="1200" height="2" fill="#FF6700"/>
+</svg>

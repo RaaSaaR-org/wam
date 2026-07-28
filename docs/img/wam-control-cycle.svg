@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1000" width="1400" height="1000" role="img" aria-label="One WAM control cycle has four possible endings: a stale loop trips the watchdog into hold or e-stop, a late prediction is discarded and the robot holds, an unusable state produces a zero-delta hold chunk that deliberately does not feed the watchdog, and only a clean cycle executes the first few steps of the safety-filtered chunk before the unexecuted remainder is thrown away.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#151515"/>
+      <stop offset="1" stop-color="#070707"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.28" cy="0.72" r="0.72">
+      <stop offset="0" stop-color="#FF6700" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FF6700" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1.2" cy="1.2" r="1.2" fill="#ffffff" fill-opacity="0.03"/>
+    </pattern>
+    <pattern id="tape" width="26" height="26" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+      <rect width="13" height="26" fill="#FF6700"/>
+      <rect x="13" width="13" height="26" fill="#0A0A0A"/>
+    </pattern>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9" fill="none" stroke="#FF6700" stroke-width="1.4"/>
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9" fill="none" stroke="#2DD4BF" stroke-width="1.4"/>
+    </marker>
+    <style>
+      .disp { font-family: 'Space Grotesk','Helvetica Neue',Arial,sans-serif; font-weight:700; letter-spacing:-0.5px; }
+      .sans { font-family: 'Geist','Helvetica Neue',Arial,sans-serif; }
+      .mono { font-family: 'Geist Mono',ui-monospace,Menlo,monospace; }
+      .flow { stroke:#FF6700; stroke-width:3; opacity:0.5; }
+      .branch { stroke:#2DD4BF; stroke-width:2.4; opacity:0.7; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="1000" fill="url(#bg)"/>
+  <rect width="1400" height="1000" fill="url(#glow)"/>
+  <rect width="1400" height="1000" fill="url(#grid)"/>
+
+  <g opacity="0.08" transform="translate(1190,250) scale(1.54074) translate(-603.84613,-386.53845) translate(-3.8461304,13.461548)">
+    <path d="m 603.84613,761.53845 a 15,15 0 0 0 0,-30 30,30 0 0 1 0,-60 45,45 0 0 0 0,-90 60,60 0 0 0 0,120 75,75 0 0 0 0,-150 90,90 0 0 1 0,-180 105,105 0 0 0 0,-210 120,120 0 0 0 0,240 135,135 0 0 0 0,-270 150,150 0 0 0 0,300 165,165 0 0 0 0,-330 180,180 0 0 0 0,360 195,195 0 0 0 0,-389.999998 210,210 0 0 0 0,419.999998 225,225 0 0 0 0,-449.999998 240,240 0 0 0 0,479.999998 255,255 0 0 0 0,-509.999998 m 0,749.999998 a 375,375 0 0 0 0,-749.999998 375,375 0 0 0 0,749.999998" fill="none" stroke="#FF6700" stroke-width="1.298" stroke-linecap="round"/>
+  </g>
+
+  <text x="64" y="100" class="mono" font-size="22" letter-spacing="3" fill="#2DD4BF">WAM &#183; ONE CONTROL CYCLE</text>
+  <text x="64" y="140" class="sans" font-size="24" fill="#A8A29E">Four ways a cycle can end &#8212; and only one of them moves the robot.</text>
+
+  <text x="64" y="204" class="mono" font-size="20" letter-spacing="2.5" fill="#2DD4BF">THE CYCLE</text>
+  <text x="700" y="204" class="mono" font-size="20" letter-spacing="2.5" fill="#2DD4BF">WHERE IT CAN END</text>
+
+  <!-- Observe -->
+  <rect x="64" y="222" width="520" height="84" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="92" y="262" class="disp" font-size="28" fill="#F5F5F4">Observe</text>
+  <text x="92" y="290" class="mono" font-size="18" fill="#78716C">read_state() -&gt; now_ns (robot clock)</text>
+  <line x1="324" y1="306" x2="324" y2="332" class="flow" marker-end="url(#arrow)"/>
+
+  <!-- Predict -->
+  <rect x="64" y="336" width="520" height="84" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="92" y="376" class="disp" font-size="28" fill="#F5F5F4">Predict</text>
+  <text x="92" y="404" class="mono" font-size="18" fill="#78716C">policy.predict(obs) &#183; host clock</text>
+  <line x1="324" y1="420" x2="324" y2="446" class="flow" marker-end="url(#arrow)"/>
+
+  <!-- Gate 1 -->
+  <rect x="64" y="450" width="520" height="84" rx="12" fill="#1F1F1F" stroke="#3D3D3D"/>
+  <text x="92" y="486" class="disp" font-size="26" fill="#F5F5F4">Watchdog expired?</text>
+  <text x="556" y="484" text-anchor="end" class="mono" font-size="15" letter-spacing="1.5" fill="#2DD4BF">GATE 1</text>
+  <text x="92" y="512" class="mono" font-size="16" fill="#78716C">watchdog.expired(now_ns)</text>
+  <line x1="584" y1="492" x2="694" y2="492" class="branch" marker-end="url(#arrow-teal)"/>
+  <text x="592" y="482" class="mono" font-size="16" fill="#2DD4BF">stale</text>
+  <line x1="324" y1="534" x2="324" y2="560" class="flow" marker-end="url(#arrow)"/>
+  <text x="338" y="554" class="mono" font-size="15" fill="#78716C">ok</text>
+
+  <!-- Gate 2 -->
+  <rect x="64" y="564" width="520" height="84" rx="12" fill="#1F1F1F" stroke="#3D3D3D"/>
+  <text x="92" y="600" class="disp" font-size="26" fill="#F5F5F4">Prediction late?</text>
+  <text x="556" y="598" text-anchor="end" class="mono" font-size="15" letter-spacing="1.5" fill="#2DD4BF">GATE 2</text>
+  <text x="92" y="626" class="mono" font-size="16" fill="#78716C">latency &gt; policy_deadline_ms (500 ms)</text>
+  <line x1="584" y1="606" x2="694" y2="606" class="branch" marker-end="url(#arrow-teal)"/>
+  <text x="592" y="596" class="mono" font-size="16" fill="#2DD4BF">late</text>
+  <line x1="324" y1="648" x2="324" y2="674" class="flow" marker-end="url(#arrow)"/>
+  <text x="338" y="668" class="mono" font-size="15" fill="#78716C">ok</text>
+
+  <!-- Gate 3 -->
+  <rect x="64" y="678" width="520" height="84" rx="12" fill="#1F1F1F" stroke="#3D3D3D"/>
+  <text x="92" y="714" class="disp" font-size="26" fill="#F5F5F4">State usable?</text>
+  <text x="556" y="712" text-anchor="end" class="mono" font-size="15" letter-spacing="1.5" fill="#2DD4BF">GATE 3</text>
+  <text x="92" y="740" class="mono" font-size="16" fill="#78716C">nan_reject &#183; schema_reject &#183; state_reject</text>
+  <line x1="584" y1="720" x2="694" y2="720" class="branch" marker-end="url(#arrow-teal)"/>
+  <text x="592" y="710" class="mono" font-size="16" fill="#2DD4BF">rejected</text>
+  <line x1="324" y1="762" x2="324" y2="788" class="flow" marker-end="url(#arrow)"/>
+  <text x="338" y="782" class="mono" font-size="15" fill="#78716C">ok</text>
+
+  <!-- Hero: the only path that moves the robot -->
+  <rect x="64" y="792" width="520" height="126" rx="12" fill="rgba(255,103,0,0.10)" stroke="#FF6700" filter="url(#soft)"/>
+  <rect x="64" y="792" width="7" height="126" rx="3.5" fill="#FF6700"/>
+  <text x="92" y="838" class="disp" font-size="32" fill="#F5F5F4">Execute the prefix</text>
+  <text x="92" y="872" class="mono" font-size="19" fill="#FF8534">robot.execute(safe_chunk, prefix_steps)</text>
+  <text x="92" y="900" class="mono" font-size="17" fill="#A8A29E">feed the watchdog &#183; discard the tail</text>
+
+  <!-- Exit 1 -->
+  <rect x="700" y="440" width="636" height="104" rx="12" fill="rgba(45,212,191,0.12)" stroke="#2DD4BF"/>
+  <text x="728" y="478" class="disp" font-size="26" fill="#F5F5F4">Hold or e-stop</text>
+  <text x="728" y="506" class="sans" font-size="18" fill="#A8A29E">The fresh chunk is discarded. The watchdog is re-armed</text>
+  <text x="728" y="528" class="sans" font-size="18" fill="#A8A29E">only after the safe state was commanded.</text>
+
+  <!-- Exit 2 -->
+  <rect x="700" y="554" width="636" height="104" rx="12" fill="rgba(45,212,191,0.12)" stroke="#2DD4BF"/>
+  <text x="728" y="592" class="disp" font-size="26" fill="#F5F5F4">Discard and hold</text>
+  <text x="728" y="620" class="sans" font-size="18" fill="#A8A29E">A late action is never executed. The watchdog is</text>
+  <text x="728" y="642" class="sans" font-size="18" fill="#A8A29E">not fed, so chronic lateness trips it.</text>
+
+  <!-- Exit 3 -->
+  <rect x="700" y="668" width="636" height="104" rx="12" fill="rgba(45,212,191,0.12)" stroke="#2DD4BF"/>
+  <text x="728" y="706" class="disp" font-size="26" fill="#F5F5F4">Zero-delta hold</text>
+  <text x="728" y="734" class="sans" font-size="18" fill="#A8A29E">Not watchdog food either: a stalled robot freezes</text>
+  <text x="728" y="756" class="sans" font-size="18" fill="#A8A29E">its own clock, so the streak is timed on the host.</text>
+
+  <!-- Why only a prefix -->
+  <rect x="700" y="792" width="636" height="126" rx="12" fill="#1F1F1F" stroke="#2A2A2A"/>
+  <text x="728" y="822" class="mono" font-size="19" letter-spacing="2" fill="#2DD4BF">WHY ONLY A PREFIX</text>
+  <text x="728" y="856" class="sans" font-size="19" fill="#A8A29E">The next observation is fresher than the rest of this</text>
+  <text x="728" y="880" class="sans" font-size="19" fill="#A8A29E">chunk, so the remainder is thrown away and replaced.</text>
+  <text x="728" y="906" class="mono" font-size="16" fill="#78716C">receding horizon &#183; FR-05</text>
+
+  <text x="64" y="958" class="disp" font-size="30"><tspan fill="#F5F5F4">Em</tspan><tspan fill="#FF6700">AI</tspan></text>
+  <text x="1336" y="958" text-anchor="end" class="mono" font-size="20" letter-spacing="1" fill="#78716C">emai.dev</text>
+
+  <rect x="0" y="0" width="1400" height="16" fill="url(#tape)"/>
+  <rect x="0" y="0" width="1400" height="2" fill="#FF6700"/>
+  <rect x="0" y="14" width="1400" height="2" fill="#FF6700"/>
+  <rect x="0" y="984" width="1400" height="16" fill="url(#tape)"/>
+  <rect x="0" y="984" width="1400" height="2" fill="#FF6700"/>
+  <rect x="0" y="998" width="1400" height="2" fill="#FF6700"/>
+</svg>

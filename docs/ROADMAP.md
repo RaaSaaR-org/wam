@@ -1,7 +1,9 @@
 # Roadmap to real usage
 
-Status 2026-07-26: M0–M4 code-complete and verified on mock/sim (465 tests, acceptance report
-in `runs/acceptance/`). Everything below is decisions, hardware, and real data — in order.
+Status 2026-07-27: M0–M4 code-complete (604 tests, acceptance report in `runs/acceptance/`), and
+the closed loop now also runs on MuJoCo contact physics with rendered pixels (`docs/sim.md`) and
+over a real DDS bus in an arm64 container (`docker/dds/README.md`). Everything below is decisions,
+hardware, and real data — in order.
 Details per task: `TASKS.md`. PRD §16 (internal document, outside this repository).
 
 ## 1. Decisions — resolved 2026-07-26
@@ -12,18 +14,55 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 | OD-03 | **Standard G1 EDU4 sensor set** — head RealSense D435i, RGB stream for WAM; depth/LiDAR unused in MVP | perception, data recording |
 | OD-07 | **VR teleop** (Unitree `xr_teleoperate`; headset model picked at purchase) | data recording |
 | OD-04 | Wan2.1/2.2 are Apache 2.0; start on `Wan2.2-TI2V-5B` (`docs/hf_jobs.md`) | M3 training |
-| OD-05 | **Free tier now** (Mac MPS + ZeroGPU); own RTX 5090 + H200 cluster later for T-16 | M3 training |
+| OD-05 | **Free tier now** (Mac MPS + ZeroGPU); for T-16: EuroHPC **Discoverer+** (NVIDIA H200) — access verified 2026-07-27, 5 000 GPU-hours, 4 h walltime cap, `docs/discoverer.md` | M3 training (**unblocked**) |
 | OD-02 | joint-delta primary, EE-delta supported in schema/safety | — |
 
 ## 2. Robot bring-up
 
-- Install `unitree_sdk2py`; implement the real methods in
-  `src/wam/robot/g1_transport.py::DdsG1Transport` (LowState/LowCmd topics, CRC, damping
-  service — hook points documented in the file). This is the **only** hardware-stubbed file;
-  everything above it is tested against `FakeG1Transport`.
-- Replace placeholder limits in `configs/robot/g1.yaml` with datasheet values.
-- Clarify which safety functions the vendor controller covers (OD-08); verify the E-stop
-  chain physically (`G1Adapter.estop()` → damping).
+**Nothing is hardware-stubbed any more.** `G1Adapter` now runs against three implementations of
+the same `G1Transport` seam — `FakeG1Transport` (unit tests), `MujocoG1Transport` (physics +
+pixels), `DdsG1Transport` (real vendor DDS, implemented and wire-verified in a container). The
+adapter code that will drive the robot is the *same* code in all three cases.
+
+Already testable without the robot (2026-07-27):
+
+- **Physics + pixels (T-25, `docs/sim.md`).** `uv pip install mujoco` +
+  `scripts/fetch_g1_model.py`, then `get_robot("mujoco_g1")` gives the real `G1Adapter` on a
+  MuJoCo G1 with Dex3 hands, a table, a cube and two cameras. Full `ClosedLoopExecutor` rollouts
+  run at 1.19× realtime including two 256×256 renders per cycle (28.5× realtime physics-only).
+  Sim gains kp=300/kd=15 live in `configs/robot/mujoco_g1.yaml`; `g1.yaml` keeps its conservative
+  hardware placeholders untouched. Caveats that matter: no stable grasp yet, welded base with 14
+  locked joints, invented camera extrinsics. Pinned by `tests/test_mujoco_g1.py` (21 tests,
+  skipped without the `mujoco` extra) — but those are contract tests; the measured physics
+  numbers come from ad-hoc scripts nothing re-runs.
+- **DDS wire layer (T-25a, `docker/dds/README.md`).** `docker/dds/run.sh` runs `DdsG1Transport`
+  against a fake G1 on a real CycloneDDS bus in a `linux/arm64` container — the EDU4's onboard
+  Jetson architecture — **11 PASS / 0 FAIL / 0 SKIP**: IDL mapping, CRC (plus a corruption
+  negative check), Dex3 topics, `emergency_damp`, the whole `G1Adapter` closed loop and the
+  stale-tick validity path, with the peer in a separate process so DDS discovery is real.
+
+Still genuinely needs the physical robot:
+
+- **Vendor conformance.** The container test is self-consistent (same `unitree_sdk2py` IDL and CRC
+  on both sides); that the vendor's Python struct layout matches the robot's C++ `LowCmd`
+  byte-for-byte is asserted, not verified. Confirm `rt/lowstate` at ~500 Hz first.
+- **Vendor RPC services.** `MotionSwitcherClient().ReleaseMode()` (the moment the robot stops
+  holding itself up) and `LocoClient().Damp()` as an escalation on top of the implemented wire
+  damping. Decide deliberately whether release belongs in `open()` or in an operator script.
+- **The E-stop chain, physically.** With the robot suspended: `G1Adapter.estop()` → joints go
+  limp-damped. Nothing autonomous runs before this passes.
+- **First contact on `rt/arm_sdk`, not `rt/lowcmd`** (`cmd_topic=G1_ARM_SDK_TOPIC,
+  arm_sdk_weight=1.0` — legs stay with the vendor controller). Implemented, untested.
+- **Machine variant**: reported `mode_machine`, 23- vs. 29-DoF waist, `mode_pr` 0 (series) vs. 1.
+- **Real limits and gains** (OD-08) → replace the placeholders in `configs/robot/g1.yaml` from the
+  datasheet; re-confirm `damp_kd`. Do **not** copy the sim gains over.
+- **The real Dex3 gripper mapping**: verify topic names and the RIS mode byte, determine the
+  per-joint vendor range, set `gripper_vendor_min/max`, and replace the mean-of-7 placeholder. The
+  MuJoCo synergy (measured from the Menagerie joint ranges) is the reference to aim at.
+- **Timing under load**: `execute()` paces on the clock, so the `dq_max·dt` clip is a velocity
+  limit only if commands really arrive `dt_s` apart. Measure jitter at the chosen `control_dt_s`.
+
+Ordered bring-up checklist: `docker/dds/README.md` § "Remaining steps for real-hardware bring-up".
 
 ## 3. Perception + teleop
 
@@ -50,7 +89,16 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
   (20, 29) and the (15, 22) heuristic — `configs/model/wan22_ti2v_5b.yaml`, details in
   `docs/hf_jobs.md`. Caveat: no frozen video features beat a state-only ridge yet, so the
   action value must come from fine-tuning.
-  Next: LoRA fine-tune — that one needs Jobs, ZeroGPU cannot hold a training run.
+  Next: LoRA fine-tune — ZeroGPU cannot hold a training run. **Compute and code are both
+  solved.** Discoverer+ (H200) is verified and the job chain is checked in at
+  `cluster/discoverer/` (env, weight staging, requeue probe, smoke test, readout probe — steps
+  1–3 cost no GPU hours). **T-16a done 2026-07-27**: `FlowBackbone` protocol, backbone-agnostic
+  joint model, LoRA on the Wan DiT via `WanFlowBackbone`, and `scripts/train_t16_lora.py` with
+  SIGUSR1-checkpoint/resume for the 4 h cap. 583 tests green, all runnable on CPU without Wan
+  weights. What remains is *running* it: `configs/training/joint_wan_gr00t.yaml` + `sbatch
+  50_train_t16.sbatch`.
+  Note for interpreting the result: the video flow loss now lives in **VAE latent space**, so
+  its magnitude is not comparable to the tiny-backbone pixel loss (the ~0.72 plateau in T-18).
 - **Backbone bake-off (T-24) — decided 2026-07-26:** probed `nvidia/Cosmos3-Nano` (16B MoT,
   robotics-pretrained with actions; its VAE is the Wan2.2 VAE) with the *same*
   frozen-feature ridge suite (`scripts/hf_job_cosmos3_probe.py`, ZeroGPU, 9/9 checks).
@@ -67,6 +115,14 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 
 ## 6. Real rollouts (M4 / E3)
 
+- Rehearse in MuJoCo first (`docs/sim.md`): the same `G1Adapter`, safety layer, watchdog and
+  executor, on contact physics — `scripts/rollout.py --robot mujoco_g1 --policy dummy` runs the
+  whole loop, E2 gates included. Open work before it is a proper E2 *rehearsal rig*: every
+  commanded joint delta is under-executed by a `prefix_steps`-dependent factor (the adapter
+  re-bases on the measured `q`, so loop lag is discarded — mean 0.39 of a one-control-period step,
+  0.95 of a 25-step chunk), which means sim action labels, safety-intervention rates and velocity-
+  envelope numbers are **not calibrated**. See "Known limitations" in `docs/sim.md`; the design
+  fix (bounded feed-forward in `G1Adapter.execute()`) is T-25c.
 - GPU box: `scripts/serve_policy.py --checkpoint …`; robot side:
   `scripts/rollout.py --robot g1 --policy remote --server-uri ws://…`.
 - Verify policy rate ≥ 2 Hz end-to-end over the wire.
@@ -77,9 +133,16 @@ Details per task: `TASKS.md`. PRD §16 (internal document, outside this reposito
 ## Parallelizable start
 
 Decisions are made — order the G1 EDU4 (+ VR headset) and run robot bring-up (step 2) as
-soon as it arrives. First code-touching step: `DdsG1Transport`. Until hardware arrives,
-real-data validation of encoders/decoders can run on public LeRobot datasets
-(video + joint states) — no robot required.
+soon as it arrives. The code-touching part of bring-up is **done**: `DdsG1Transport` is
+implemented and wire-verified, and the MuJoCo sim exercises the same adapter on physics. What is
+left on arrival is verification, not implementation. Until then, real-data validation of
+encoders/decoders runs on public LeRobot datasets (video + joint states) — no robot required.
+
+One thing the sim explicitly does **not** shorten: **D2**. MuJoCo renderings are not RealSense
+images, and the video backbone (Wan) has never seen one — the T-15/T-24 probes already showed both
+Wan and Cosmos3 hallucinate embodiment they have not observed. Sim frames test the vision
+*plumbing* (shape, dtype, cadence, pixels that change when the robot moves); they are not training
+data. Real teleop episodes remain the gate for T-16.
 
 **Done (2026-07-26):** `scripts/convert_lerobot_g1.py` converts LeRobot-v2.1 G1 episodes
 (nvidia/GR00T-N1.7-AppleToPlate, CC-BY-4.0) into the WAM episode format: 43-dim G1 state →
