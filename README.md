@@ -33,11 +33,11 @@ backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and ne
 
 ## Status (2026-07-29)
 
-**631 tests green.** M0–M4 are code-complete. What that does and does not mean:
+**648 tests green.** M0–M4 are code-complete. What that does and does not mean:
 
 | Proven | How |
 |--------|-----|
-| Action-only policy learns real robot data | 402 real G1 episodes, 40 unseen: E1 mse 1.10e-5 vs. 1.63e-5 zero-delta baseline (−32 %) |
+| Action-only policy trains and generalizes on real robot data | 402 real G1 episodes, 40 unseen: E1 mse 1.10e-5 vs. 1.63e-5 zero-delta baseline (−32 %) |
 | The Wan adapter works on real 5B weights | ZeroGPU, 13/13 checks, readout blocks label-validated to (2, 10) |
 | The closed loop survives contact physics | MuJoCo G1 + Dex3, rendered pixels, 1.19× realtime (`docs/sim.md`) |
 | The DDS wire layer is real | `DdsG1Transport` vs. a fake G1 on a CycloneDDS bus, arm64 container, 11/11 (`docker/dds/README.md`) |
@@ -46,6 +46,7 @@ backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and ne
 
 | Not proven | Why it matters |
 |------------|----------------|
+| **That the action-only policy learned anything a heuristic cannot do** | A causal repeat-last-action baseline scores mse 9.14e-6 — 17 % *better* than the trained model. The −32 % above is real, but it is the demonstration's own inertia. WAM-Bench puts the run at **L0, 28.6/100** (T-27, `docs/benchmark.md`). |
 | **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge — including with the spatial readout that could have explained it away (T-26) — and at tiny scale the video branch *hurts*. The whole claim now rests on the T-16 LoRA fine-tune, which has never been run. |
 | Anything on a physical robot | No G1 yet. Vendor conformance, E-stop chain, real limits and the Dex3 mapping are asserted, not measured. |
 | Real teleop data (D1/D2) | Everything so far is synthetic or converted from `nvidia/GR00T-N1.7-AppleToPlate`. |
@@ -89,6 +90,7 @@ scripts/record_mock_dataset.py  M1: synthetic dataset + validation gates
 scripts/convert_lerobot_g1.py   M1: LeRobot/GR00T G1 episodes -> WAM format
 scripts/overfit_d1.py           M2: D1 overfit gate + E1 eval
 scripts/run_ablation.py         M3: world-action vs. action-only (AC-07)
+scripts/run_bench.py            M3: WAM-Bench ladder on archived predictions (T-27)
 scripts/train_t16_lora.py       M3: the Wan LoRA fine-tune (resumable, 4 h chunks)
 scripts/fetch_g1_model.py       E2: pull the MuJoCo G1 assets (~38 MB)
 scripts/rollout.py              M4: E2/E3 rollouts (mock | g1 | mujoco_g1)
@@ -102,6 +104,7 @@ scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 | File | What |
 |------|------|
 | `docs/ROADMAP.md` | Ordered path to real usage — read this first |
+| `docs/benchmark.md` | WAM-Bench: the offline ladder, its KPIs, and the external benchmark landscape |
 | `docs/discoverer.md` | EuroHPC H200 cluster: machine facts, quotas, billing, gotchas |
 | `cluster/discoverer/README.md` | The same cluster as a runbook — six `sbatch` files in order |
 | `docs/sim.md` | MuJoCo scene, what it proves and what it does not |
@@ -114,3 +117,6 @@ scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 Run T-16. Compute and code are both ready; the LoRA fine-tune on Discoverer+ is what turns
 "video helps" from a hypothesis into a measurement. Start with the free jobs in
 `cluster/discoverer/README.md` — they cost no GPU hours and prove the environment.
+
+The bar it has to clear is `skill_vs_repeat_pct > 0` on WAM-Bench, not "beats the action-only
+baseline" — that baseline itself loses to a one-line heuristic.
