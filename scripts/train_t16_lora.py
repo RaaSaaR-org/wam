@@ -610,19 +610,70 @@ def _report_config_drift(
     )
 
 
-def _dataset_snapshot_hash(root: Path) -> str:
+def _dataset_snapshot_hash(root: Path, episodes: Sequence[Path] | None = None) -> str:
     """Content hash of a dataset directory (AC-04 ``dataset_snapshot_ref``).
 
     Mirrors ``scripts/overfit_d1.py``: every manifest embeds sha256 checksums of its data
     files, so hashing the manifests pins the full content without decoding a single frame.
+
+    ``episodes`` narrows the hash to the episodes actually trained on. That matters: a run
+    that excludes a holdout has a different training set than one that does not, and a
+    snapshot ref covering the whole root would report the two as identical.
     """
     from wam.data.episode import MANIFEST_FILENAME, list_episodes
 
     digest = hashlib.sha256()
-    for episode_dir in list_episodes(root):
+    for episode_dir in list_episodes(root) if episodes is None else episodes:
         digest.update(str(episode_dir.relative_to(root)).encode("utf-8"))
         digest.update((episode_dir / MANIFEST_FILENAME).read_bytes())
     return f"sha256:{digest.hexdigest()}"
+
+
+def _load_excluded_ids(path: Path) -> set[str]:
+    """Episode ids to keep out of training, from a plain id list or a ``predictions.jsonl``.
+
+    Accepting the baseline's predictions file directly is the point: ``run_ablation.py``
+    recovers T-18's holdout from exactly that file, so pointing both at it makes the fine-tune
+    and the evaluation share one definition of the split instead of two that can drift.
+    """
+    text = path.read_text(encoding="utf-8")
+    ids: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("{"):
+            episode_id = json.loads(line).get("episode_id")
+            if episode_id:
+                ids.add(str(episode_id))
+        else:
+            ids.add(line)
+    if not ids:
+        raise SystemExit(f"--exclude-episodes {path} yielded no episode ids")
+    return ids
+
+
+def _training_episodes(root: Path, exclude: Path | None) -> tuple[list[Path], set[str]]:
+    """Episode dirs under ``root`` minus ``exclude``, with the split logged and verified."""
+    from wam.data.episode import list_episodes
+
+    episodes = list_episodes(root)
+    if exclude is None:
+        return episodes, set()
+    excluded = _load_excluded_ids(exclude)
+    present = {p.name for p in episodes}
+    missing = excluded - present
+    if missing:
+        # Silently training on an episode the evaluator believes is held out is the exact
+        # failure this flag exists to prevent, so a split that does not line up is fatal.
+        raise SystemExit(
+            f"--exclude-episodes lists {len(missing)} episode(s) absent from {root}: "
+            f"{sorted(missing)[:5]}{'...' if len(missing) > 5 else ''}"
+        )
+    kept = [p for p in episodes if p.name not in excluded]
+    if not kept:
+        raise SystemExit(f"--exclude-episodes removed every episode under {root}")
+    return kept, excluded
 
 
 def _resolve_resume(manager: CheckpointManager, value: str | None) -> Path | None:
@@ -708,6 +759,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--training-config", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True, help="episode dataset root")
+    parser.add_argument(
+        "--exclude-episodes",
+        type=Path,
+        default=None,
+        help="file of episode ids to hold out (plain list, or a baseline predictions.jsonl) — "
+        "fine-tuning on the episodes the ablation scores on invalidates the AC-07 verdict",
+    )
     parser.add_argument("--camera", type=str, default=None, help="override training.camera")
     parser.add_argument("--out-dir", type=Path, required=True, help="run dir, shared by the chain")
     parser.add_argument(
@@ -799,25 +857,36 @@ def main(argv: list[str] | None = None) -> int:
         # Login-node pre-flight: proves the flag surface, the config splice and the dim
         # cross-checks before a job is ever queued. Deliberately touches neither the weights
         # nor the frames — both are the expensive part and neither can fail in a new way here.
-        from wam.data.episode import list_episodes
-
-        episodes = list_episodes(args.dataset) if args.dataset.is_dir() else []
+        episodes, excluded = (
+            _training_episodes(args.dataset, args.exclude_episodes)
+            if args.dataset.is_dir()
+            else ([], set())
+        )
         _log(
-            f"dry run OK | dataset {args.dataset} ({len(episodes)} episodes) | out {out_dir} | "
+            f"dry run OK | dataset {args.dataset} ({len(episodes)} train episodes, "
+            f"{len(excluded)} held out) | out {out_dir} | "
             f"resume={resume_from} | checkpoint every {args.checkpoint_every_min} min, "
             f"keep {args.checkpoints_total_limit}, adapter_only={args.save_adapter_only} | "
             f"max_hours={args.max_hours}"
         )
         return 0
 
+    episodes, excluded = _training_episodes(args.dataset, args.exclude_episodes)
+    _log(
+        f"training on {len(episodes)} episodes, {len(excluded)} held out"
+        + (f" via {args.exclude_episodes}" if args.exclude_episodes else " (no holdout)")
+    )
     dataset = EpisodeDataset(
-        args.dataset,
+        episodes,
         camera=config.camera,
         num_frames=config.backbone.num_frames,
         chunk_steps=config.head.num_steps,
     )
-    snapshot_ref = _dataset_snapshot_hash(args.dataset)
-    git_commit = read_git_commit(_REPO_ROOT)
+    snapshot_ref = _dataset_snapshot_hash(args.dataset, episodes)
+    # On the cluster the repo is rsynced without .git, so read_git_commit() finds no repository
+    # and reports "unknown" — which would leave the deliverable run with no code provenance.
+    # cluster/discoverer/sync.sh stamps the hash into WAM_GIT_COMMIT for exactly this case.
+    git_commit = os.environ.get("WAM_GIT_COMMIT", "").strip() or read_git_commit(_REPO_ROOT)
 
     # Seed BEFORE the backbone so an injected backbone initializes from the same stream the
     # non-injected path would have used; JointTrainer re-seeds and builds the heads after.

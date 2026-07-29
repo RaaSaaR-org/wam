@@ -21,7 +21,7 @@ all checked reachable 2026-07-28). Nothing has run on the cluster yet.
 | Username | `ffromm` · key `~/.ssh/id_ed25519_eu_ai_hub` (passphrase-protected) |
 | Slurm account / QoS | `ehpc-aif-2026pg01-905` · partition `common` |
 | **Budget** | **5 000 GPU-hours + 330 900 billing-hours, 0 used** |
-| **Max walltime** | **4 h per job**, max 4 running jobs |
+| **Max walltime** | **4 h per job**, max 4 running / 8 submitted jobs, ≤16 GPU + 416 CPU at once |
 | Project storage | `/valhalla/projects/ehpc-aif-2026pg01-905` — 5 TiB, setgid |
 | Home | `/home/ffromm` — 2 GB quota, 100 k inodes |
 | Support | `helpdesk@discoverer.bg` (institutional address only — §9) |

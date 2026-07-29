@@ -1,0 +1,50 @@
+# T-18 / AC-07 holdout — the episodes the ablation SCORES on.
+# Pass to train_t16_lora.py --exclude-episodes so the fine-tune never sees them;
+# fine-tuning on these makes the AC-07 verdict meaningless.
+#
+# Derived from: runs/d1-full-gen-seed0/predictions.jsonl (sha256:ea6df3b86d806156514c1053e6baa0d0800d81e635757ec1d393ff9806546165)
+#   python -c "import json;print('\n'.join(sorted({json.loads(l)['episode_id'] "
+#              "for l in open('runs/d1-full-gen-seed0/predictions.jsonl')})))"
+# run_ablation.py recovers the same set from that file at evaluation time; if the two
+# ever disagree the loader fails loudly rather than training on a scored episode.
+# 40 episodes.
+gr00t-apple-000020
+gr00t-apple-000037
+gr00t-apple-000048
+gr00t-apple-000050
+gr00t-apple-000051
+gr00t-apple-000071
+gr00t-apple-000075
+gr00t-apple-000104
+gr00t-apple-000111
+gr00t-apple-000128
+gr00t-apple-000132
+gr00t-apple-000144
+gr00t-apple-000155
+gr00t-apple-000158
+gr00t-apple-000161
+gr00t-apple-000169
+gr00t-apple-000181
+gr00t-apple-000183
+gr00t-apple-000197
+gr00t-apple-000207
+gr00t-apple-000215
+gr00t-apple-000222
+gr00t-apple-000241
+gr00t-apple-000244
+gr00t-apple-000248
+gr00t-apple-000258
+gr00t-apple-000261
+gr00t-apple-000272
+gr00t-apple-000282
+gr00t-apple-000286
+gr00t-apple-000298
+gr00t-apple-000308
+gr00t-apple-000312
+gr00t-apple-000316
+gr00t-apple-000327
+gr00t-apple-000350
+gr00t-apple-000361
+gr00t-apple-000373
+gr00t-apple-000387
+gr00t-apple-000388

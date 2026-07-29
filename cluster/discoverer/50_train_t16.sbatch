@@ -40,6 +40,9 @@ export PATH=${VIRTUAL_ENV}/bin:${PATH}
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# No .git on the cluster copy — sync.sh stamped the hash so run_metadata records real
+# provenance instead of "unknown" (AC-04). Empty/missing file just falls back to that.
+export WAM_GIT_COMMIT=$(cat "${PROJ}/wam/GIT_COMMIT" 2>/dev/null || true)
 
 nvidia-smi -L
 
@@ -56,12 +59,28 @@ RUN_ID=t16-lora-seed0
 OUT=${PROJ}/runs/${RUN_ID}
 mkdir -p "${OUT}"
 
+# Requeue safety rail. scontrol requeue keeps SLURM_JOB_ID and increments SLURM_RESTART_COUNT
+# (verified by 25_requeue_probe.sbatch: restarts=0 -> restarts=1). Without a cap, any failure
+# that exits 0 without writing DONE — an early return, a corrupt --resume checkpoint — is an
+# unbounded loop that re-queues itself onto every free H200 until the allocation is gone.
+# Checked before the model loads so a wedged run costs seconds, not a full staging pass.
+MAX_RESTARTS=24                      # ~96 GPU-h ceiling; a healthy 20k-step run needs <10
+RESTARTS=${SLURM_RESTART_COUNT:-0}
+if (( RESTARTS >= MAX_RESTARTS )); then
+  echo "FATAL: ${RESTARTS} restarts and still no ${OUT}/DONE — stopping instead of looping."
+  echo "       Inspect ${OUT} and the earlier ${PROJ}/logs/t16.*.out before resubmitting."
+  exit 1
+fi
+echo "=== T-16 pass $((RESTARTS + 1)) (restarts=${RESTARTS}) on $(hostname) at $(date -Is)"
+
 # The trap only fires while the shell is at `wait` — never run python in the foreground here.
+START=${SECONDS}
 python "${TRAIN}" \
     --backbone-config "${PROJ}/wam/configs/model/wan22_ti2v_5b.yaml" \
     --backbone-source "${PROJ}/models/Wan2.2-TI2V-5B" \
     --training-config "${PROJ}/wam/configs/training/joint_wan_gr00t.yaml" \
     --dataset "${PROJ}/data/gr00t-apple-full" \
+    --exclude-episodes "${PROJ}/wam/configs/splits/t18_holdout_episodes.txt" \
     --camera ego \
     --out-dir "${OUT}" \
     --resume latest \
@@ -85,11 +104,20 @@ RC=0
 while kill -0 "${PY}" 2>/dev/null; do
   wait "${PY}" && RC=0 || RC=$?
 done
-echo "trainer pid ${PY} exited ${RC} at $(date -Is) (usr1=${GOT_USR1})"
+ELAPSED=$((SECONDS - START))
+echo "trainer pid ${PY} exited ${RC} after ${ELAPSED}s at $(date -Is) (usr1=${GOT_USR1})"
 
 if [[ -f "${OUT}/DONE" ]]; then
   echo "T-16 COMPLETE — ${OUT}/DONE present, not requeueing"
   exit 0
+fi
+if [[ "${RC}" -eq 0 && "${GOT_USR1}" -eq 0 && "${ELAPSED}" -lt 300 ]]; then
+  # Exit 0, no DONE, never signalled, and gone in under 5 minutes: the trainer did nothing.
+  # Requeueing a silent no-op is the one path that can spin without ever burning a GPU long
+  # enough to look wrong, so treat it as fatal rather than as an interrupted slice.
+  echo "FATAL: trainer exited 0 after only ${ELAPSED}s with no ${OUT}/DONE and no signal —"
+  echo "       that is a no-op, not an interrupted slice. Refusing to requeue."
+  exit 1
 fi
 if [[ "${RC}" -ne 0 && "${GOT_USR1}" -eq 0 ]]; then
   # Died on its own (config error, OOM, ...). Requeueing that only rebuilds the same crash
