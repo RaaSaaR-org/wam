@@ -181,8 +181,18 @@ def state_embedding(args: argparse.Namespace, report: Report) -> torch.Tensor:
     else:
         state = synthetic_state()
     torch.manual_seed(0)
-    encoder = StateMLP(StateMLPConfig(embedding_dim=32, num_joints=len(state.q)))
+    # Both dims come from the state, never from StateMLPConfig's defaults: a real G1 episode has
+    # gripper_dims=2 (one per hand), and the default 1 made StateMLP.encode reject the very episode
+    # this check exists to accept.
+    encoder = StateMLP(
+        StateMLPConfig(
+            embedding_dim=32,
+            num_joints=len(state.q),
+            gripper_dims=len(state.gripper_state),
+        )
+    )
     report.info["state_dim"] = len(state.q)
+    report.info["gripper_dims"] = len(state.gripper_state)
     return encoder.encode(state)
 
 
@@ -233,8 +243,15 @@ def run_ablation(adapter: Any, args: argparse.Namespace, report: Report) -> None
     text_base = adapter.condition_text(args.instruction)
     text_alt = adapter.condition_text(ABLATE_INSTRUCTION)
     torch.manual_seed(0)
-    encoder = StateMLP(StateMLPConfig(embedding_dim=32, num_joints=7))
-    state_base = adapter.condition_state(encoder.encode(synthetic_state()))
+    probe_state = synthetic_state()
+    encoder = StateMLP(
+        StateMLPConfig(
+            embedding_dim=32,
+            num_joints=len(probe_state.q),
+            gripper_dims=len(probe_state.gripper_state),
+        )
+    )
+    state_base = adapter.condition_state(encoder.encode(probe_state))
     state_alt = adapter.condition_state(encoder.encode(synthetic_state(fill_q=0.5, fill_dq=0.3)))
 
     def forward(video_ctx: Any, text_ctx: Any, state_ctx: Any) -> dict[int, torch.Tensor]:
