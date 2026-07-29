@@ -22,20 +22,27 @@ learns from it:
 |---|---|---|---|
 | Joint training | `src/wam/training/joint.py:337` | `pooled = features.mean(dim=1)` → action branch | open (I-2) |
 | Inference | `src/wam/decoders/action_head.py:119` | leading dims mean-pooled in `decode()` | open (I-2) |
-| Wan probe | `scripts/hf_job_wan_probe.py:328` | `tokens.float().mean(dim=1)` | now **one of several** readouts (I-1) |
-| Cosmos3 probe | `scripts/hf_job_cosmos3_probe.py:285` | its own mean-pooled extractor | open |
+| Wan probe | `scripts/hf_job_wan_probe.py:328` | `tokens.float().mean(dim=1)` | ✅ **tested** (I-1): pooling is not the limit here |
+| Cosmos3 probe | `scripts/hf_job_cosmos3_probe.py:285` | its own mean-pooled extractor | open — but I-1 removed the reason to chase it |
 
 Mean-pooling destroys *where* things are. For pick-and-place, "the cube is at token (7,12)" is
 the single most useful item in the feature map, and the average deletes it. Precision is also
 the dimension where the entire field collapses on RoboDojo — no policy exceeds ~12 %.
 
-This is the common cause behind most items below.
+This was the suspected common cause behind most items below. I-1 tested it on the one row we
+could test cheaply — the frozen Wan probe — and found **no gain from keeping the geometry**
+(details below). That result is specific: frozen features, linear readout. It does not clear the
+training-path rows, where the pooling sits in front of a *learned* head that could exploit
+positions a ridge cannot. But it does mean the mean-pool is no longer an assumed culprit
+everywhere; each row now has to earn its own evidence.
 
 ---
 
 ## I-1 · Re-run the frozen-feature probe with a spatial readout
 
-**Priority: do this first — before T-16.** Cheap, and it may overturn a recorded verdict.
+**✅ Done — ran 2026-07-29 on ZeroGPU, 10/10 checks. Outcome: the confound was real but the
+verdict survives it.** `runs/wan_probe/2026-07-29-zerogpu-5b-readouts.json`. Result first, the
+reasoning that led here below it.
 
 **What we concluded** (T-15, T-24, *measured*): neither Wan2.2-TI2V-5B nor Cosmos3-Nano frozen
 features beat the state-only ridge. Wan best block pair joints R² — Cosmos3 0.359 / gripper
@@ -47,7 +54,44 @@ features beat the state-only ridge. Wan best block pair joints R² — Cosmos3 0
 backbone. We showed it does not survive averaging. Those are different claims, and we currently
 have the weaker one written down as the stronger one.
 
-**Implemented 2026-07-29 — not yet run.** `scripts/hf_job_wan_probe.py` grew a `--readout`
+**The result** (2026-07-29, *measured*): joints, held-out-episode R², block pair chosen on val —
+
+| Readout | Width | val | **test** |
+|---|---:|---:|---:|
+| `mean` | 3 072 | 0.404 | **0.310** |
+| `grid2x2` | 12 288 | 0.424 | **0.370** |
+| `rand4` (control) | 12 288 | 0.417 | **0.376** |
+| `state_only` | 52 | 0.547 | **0.456** |
+
+Gripper says the same thing more loudly: `state_only` 0.881 against 0.704 for the best readout.
+
+`grid2x2` scores **below** its own random control (0.338 vs. 0.3657 on the val-selected pair).
+The step up from `mean` to `grid2x2` looks like progress and is entirely explained by the 4×
+width — shuffling the same tokens into meaningless groups buys the same thing. Both report bits
+came back false:
+
+```
+any_geometry_gain_over_control: false
+any_spatial_beats_state_only:   false
+```
+
+**So the mean-pool was not the mistake.** The confound was real — we genuinely had not measured
+what we claimed — but testing it changed nothing except our confidence. T-15/T-24's verdict is
+now checked against the obvious alternative explanation and holds: 52 dimensions of raw robot
+state beat 12 288 dimensions of frozen video feature, and not because of how they were pooled.
+
+Cost: 7.6 s GPU (0.079 s/window, 24.6 GB peak). The three readouts share one set of forward
+passes, so the extra two were free. Token geometry verified in-run: `S=96, grid (2, 6, 8)`.
+
+**What it does not license.** This is about *frozen* features under a *linear* readout, on one
+task with 96 windows and a 12-episode split. It says nothing about whether a fine-tuned backbone
+carries action signal (T-16), nor whether a non-linear head could find what a ridge cannot. It
+also does not retire I-2: the training path still mean-pools, and a cross-attention head is
+motivated by literature, not by this measurement.
+
+---
+
+**How it was built.** `scripts/hf_job_wan_probe.py` grew a `--readout`
 flag; everything else (windows, labels, episode split, ridge code) is untouched, so the output
 is directly comparable to `runs/wan_probe/` and `runs/cosmos3_probe/`.
 
@@ -85,17 +129,16 @@ Read `info.probe.readout_comparison` in the report: `any_spatial_beats_state_onl
 primary readout (`mean`) still occupies `info.probe` unchanged, so the recorded numbers stay
 the anchor rather than being overwritten.
 
-**Cost:** hours, on ZeroGPU, free. No training.
+**Why it mattered:** the decision rule was written before the run, and both branches were worth
+having. Had the spatial readout beaten state-only, T-16's premise would have changed and OD-04
+would have deserved a second look. It lost, so LoRA still carries the burden — and now for a
+reason we tested rather than one we assumed.
 
-**Why it matters:** if spatial readout beats state-only, the premise of T-16 changes — LoRA no
-longer "carries the burden" alone, and the backbone bake-off (OD-04) may deserve a second look.
-If it still loses, the current verdict gets much stronger, and we stop wondering.
-
-**Still open after this lands:** the Cosmos3 probe (`scripts/hf_job_cosmos3_probe.py`) has its
-own extractor and still hands `analyze_probes` a mean-pooled array — which the legacy path
-accepts, so it keeps working and keeps reporting a single `mean` readout. Re-running T-24 with
-a spatial readout needs the MoT token grid worked out the same way; only worth doing if Wan's
-spatial readout actually changes the picture.
+**Still open:** the Cosmos3 probe (`scripts/hf_job_cosmos3_probe.py`) has its own extractor and
+still hands `analyze_probes` a mean-pooled array — which the legacy path accepts, so it keeps
+working and keeps reporting a single `mean` readout. Re-running T-24 spatially needs the MoT
+token grid worked out the same way. **Not worth doing:** the condition for it was Wan's spatial
+readout moving the number, and it did not.
 
 ---
 
@@ -256,15 +299,16 @@ Recorded so these do not get "improved" by accident:
 
 | # | Item | When | Cost |
 |---|---|---|---|
-| 1 | I-1 spatial-readout probe — **code landed 2026-07-29, run pending** | **before T-16** | hours, free |
-| 2 | I-2 cross-attention head | after D1 overfits on real data | days |
-| 3 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
-| 4 | I-3 flow branch deployed | D2 / scale | days + latency work |
-| 5 | I-4 state history | only if memory tasks become a target | days |
-| 6 | I-5 state as latent frames | M6 | weeks |
+| ~~1~~ | ~~I-1 spatial-readout probe~~ — **✅ ran 2026-07-29, verdict unchanged** | done | 7.6 s GPU, free |
+| 1 | I-2 cross-attention head | after D1 overfits on real data | days |
+| 2 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
+| 3 | I-3 flow branch deployed | D2 / scale | days + latency work |
+| 4 | I-4 state history | only if memory tasks become a target | days |
+| 5 | I-5 state as latent frames | M6 | weeks |
 
-I-1 is the only one that should jump the queue, because it tests a claim we have already written
-into `TASKS.md` as settled.
+I-1 jumped the queue because it tested a claim we had already written into `TASKS.md` as settled.
+It came back negative, which is the cheapest possible outcome: nothing downstream has to change,
+and the claim is now one we have earned rather than one we inherited from a pooling choice.
 
 ---
 

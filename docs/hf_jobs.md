@@ -185,11 +185,40 @@ state vector out-predicts 6144-dim frozen Wan features on both label groups. The
 prior alone does not linearly encode next-chunk actions — the action value has to come from
 fine-tuning (LoRA, T-16), which can also re-rank the blocks on adapted features.
 
-**Caveat, and why T-26 exists:** every number above was measured *through a mean-pool* over
+**Caveat, and why T-26 existed:** every number above was measured *through a mean-pool* over
 the token grid. That shows the spatial signal does not survive averaging — not that it is
-absent from the backbone. See the next section.
+absent from the backbone. The next section closes that gap: it is absent either way.
 
-## Spatial readouts (T-26 / I-1, code 2026-07-29, run pending)
+## Spatial readouts (T-26 / I-1, 2026-07-29)
+
+**Result: no geometry gain, verdict unchanged.** 10/10 checks on ZeroGPU,
+`runs/wan_probe/2026-07-29-zerogpu-5b-readouts.json`. Joints test R², block pair chosen on val:
+
+| readout | width | val | **test** |
+|---|---:|---:|---:|
+| `mean` | 3 072 | 0.404 | **0.310** |
+| `grid2x2` | 12 288 | 0.424 | **0.370** |
+| `rand4` (control) | 12 288 | 0.417 | **0.376** |
+| `state_only` | 52 | 0.547 | **0.456** |
+
+Gripper: 0.881 state-only against 0.704 for the best readout. On the val-selected pair
+`grid2x2` scores 0.338 against the control's 0.3657 — the grid is *behind* random grouping of
+the same tokens, so the rise from `mean` to `grid2x2` is width and nothing else. Both bits came
+back false:
+
+```
+any_geometry_gain_over_control: false
+any_spatial_beats_state_only:   false
+```
+
+Actual cost: **7.6 s GPU**, 0.079 s/window, 24.6 GB peak VRAM. Geometry check passed in-run
+(`S=96, grid (2, 6, 8) implies 96`). Consequence for the roadmap: T-16 keeps its premise, and
+re-running T-24 (Cosmos3) with a spatial readout is off the table — its precondition was Wan's
+readout moving the number.
+
+### How it works
+
+
 
 `--readout` scores several token→vector readouts on the *same* forward passes, with windows,
 labels, episode split and ridge code untouched, so the output stays directly comparable to
@@ -222,8 +251,8 @@ On the Space, leave the readout box blank for the default. Read
 `any_geometry_gain_over_control` are the two bits this run exists to produce.
 
 **Cost.** The GPU side does not change at all — still one forward per window, all readouts
-computed from the same activation (~7 s on ZeroGPU). What grows is the ridge, and it runs
-*outside* `@spaces.GPU`, so it burns no quota. Measured on this Mac at the real 96-window /
+computed from the same activation (7.6 s measured on ZeroGPU). What grows is the ridge, and it
+runs *outside* `@spaces.GPU`, so it burns no quota. Measured on this Mac at the real 96-window /
 12-episode layout: ~3 s for `mean`, ~12 s per `grid2x2`-width readout, ~44 s at `grid3x4`
 width. The default trio lands around 30 s; going wider than 3×4 cells is the first thing that
 actually costs something.

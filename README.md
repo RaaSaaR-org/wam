@@ -31,9 +31,9 @@ The backbone is swappable by contract (FR-09): anything satisfying `BackboneAdap
 `FlowBackbone` for joint training — drops in. Wan2.2-TI2V-5B (Apache 2.0) is the decided MVP
 backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and never bypassed.
 
-## Status (2026-07-28)
+## Status (2026-07-29)
 
-**604 tests green.** M0–M4 are code-complete. What that does and does not mean:
+**631 tests green.** M0–M4 are code-complete. What that does and does not mean:
 
 | Proven | How |
 |--------|-----|
@@ -42,10 +42,11 @@ backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and ne
 | The closed loop survives contact physics | MuJoCo G1 + Dex3, rendered pixels, 1.19× realtime (`docs/sim.md`) |
 | The DDS wire layer is real | `DdsG1Transport` vs. a fake G1 on a CycloneDDS bus, arm64 container, 11/11 (`docker/dds/README.md`) |
 | T-16 can run on a cluster | LoRA path + resume harness, all CPU-testable (`cluster/discoverer/README.md`) |
+| Frozen video features really do lose — it is not a pooling artefact | Spatial readouts vs. a same-width random control: geometry adds nothing (T-26, `docs/hf_jobs.md`) |
 
 | Not proven | Why it matters |
 |------------|----------------|
-| **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge, and at tiny scale the video branch *hurts*. The whole claim now rests on the T-16 LoRA fine-tune — which has never been run. |
+| **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge — including with the spatial readout that could have explained it away (T-26) — and at tiny scale the video branch *hurts*. The whole claim now rests on the T-16 LoRA fine-tune, which has never been run. |
 | Anything on a physical robot | No G1 yet. Vendor conformance, E-stop chain, real limits and the Dex3 mapping are asserted, not measured. |
 | Real teleop data (D1/D2) | Everything so far is synthetic or converted from `nvidia/GR00T-N1.7-AppleToPlate`. |
 
