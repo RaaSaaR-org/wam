@@ -630,27 +630,14 @@ def _dataset_snapshot_hash(root: Path, episodes: Sequence[Path] | None = None) -
 
 
 def _load_excluded_ids(path: Path) -> set[str]:
-    """Episode ids to keep out of training, from a plain id list or a ``predictions.jsonl``.
+    """Thin alias for ``wam.evaluation.load_episode_ids``.
 
-    Accepting the baseline's predictions file directly is the point: ``run_ablation.py``
-    recovers T-18's holdout from exactly that file, so pointing both at it makes the fine-tune
-    and the evaluation share one definition of the split instead of two that can drift.
+    The evaluator (``scripts/eval_t16.py``) reads the same file with the same function, so the
+    fine-tune's exclusion and the holdout it is scored on cannot drift apart.
     """
-    text = path.read_text(encoding="utf-8")
-    ids: set[str] = set()
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("{"):
-            episode_id = json.loads(line).get("episode_id")
-            if episode_id:
-                ids.add(str(episode_id))
-        else:
-            ids.add(line)
-    if not ids:
-        raise SystemExit(f"--exclude-episodes {path} yielded no episode ids")
-    return ids
+    from wam.evaluation import load_episode_ids
+
+    return load_episode_ids(path)
 
 
 def _training_episodes(root: Path, exclude: Path | None) -> tuple[list[Path], set[str]]:

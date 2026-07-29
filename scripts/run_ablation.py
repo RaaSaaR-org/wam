@@ -31,13 +31,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from overfit_d1 import build_eval_pairs, dataset_snapshot_hash
+from overfit_d1 import dataset_snapshot_hash
 
 from wam.backbones.registry import build_backbone_config
 from wam.decoders import ActionHeadConfig
 from wam.encoders import ActionChunkEncoderConfig, StateMLPConfig
 from wam.evaluation import (
     E1Report,
+    build_eval_pairs,
     compare_runs,
     e1_metrics,
     evaluate_policy,

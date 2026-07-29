@@ -333,6 +333,75 @@ def evaluate_policy(
     return predictions
 
 
+def load_episode_ids(path: str | Path) -> set[str]:
+    """Episode ids from a plain one-per-line list **or** from a ``predictions.jsonl``.
+
+    Accepting the predictions file directly is the point: the fine-tune excludes a holdout with
+    ``--exclude-episodes`` and the evaluator scores exactly that holdout, so pointing both at one
+    file makes them share a single definition of the split instead of two that can drift apart.
+    Blank lines and ``#`` comments are ignored.
+    """
+    ids: set[str] = set()
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("{"):
+            episode_id = json.loads(line).get("episode_id")
+            if episode_id:
+                ids.add(str(episode_id))
+        else:
+            ids.add(line)
+    return ids
+
+
+def build_eval_pairs(
+    episode_dir: str | Path, camera: str, chunk_steps: int
+) -> list[tuple[Observation, ActionChunk, str]]:
+    """``(Observation, target chunk, episode_id)`` triples for :func:`evaluate_policy`.
+
+    One triple per recorded action chunk. The observation is the frame and state in effect *at*
+    the chunk's timestamp — the last of each at or before ``ts``, never the next one, which would
+    hand the policy an observation from after the decision it is being asked to make.
+
+    Chunks shorter than ``chunk_steps`` are skipped and longer ones truncated, matching
+    ``EpisodeDataset``'s contract, so the holdout samples line up with what training saw.
+
+    ``EpisodeReader`` is imported inside the function on purpose: reading frames pulls in the
+    video decoding stack, and ``wam.evaluation`` is imported by torch-free, video-free consumers
+    (``scripts/run_bench.py`` scoring an archived ``predictions.jsonl`` on a laptop).
+    """
+    from wam.data.episode import EpisodeReader
+
+    reader = EpisodeReader(episode_dir)
+    frames = reader.read_frames(camera)
+    frame_ts = reader.frame_timestamps(camera)
+    states = reader.read_states()
+    state_ts = np.asarray([s.timestamp_ns for s in states], dtype=np.int64)
+    instruction = reader.manifest.instruction
+    episode_id = reader.manifest.episode_id
+
+    pairs: list[tuple[Observation, ActionChunk, str]] = []
+    for chunk, _executed_prefix, ts in reader.read_actions():
+        if chunk.num_steps < chunk_steps:
+            continue
+        target = (
+            chunk
+            if chunk.num_steps == chunk_steps
+            else ActionChunk(
+                mode=chunk.mode,
+                targets=np.asarray(chunk.targets[:chunk_steps], dtype=np.float32),
+                gripper_target=np.asarray(chunk.gripper_target[:chunk_steps], dtype=np.float32),
+                dt_s=chunk.dt_s,
+            )
+        )
+        frame_idx = max(int(np.searchsorted(frame_ts, ts, side="right")) - 1, 0)
+        state = states[max(int(np.searchsorted(state_ts, ts, side="right")) - 1, 0)]
+        obs = Observation(images={camera: frames[frame_idx]}, state=state, instruction=instruction)
+        pairs.append((obs, target, episode_id))
+    return pairs
+
+
 def holdout_split(
     episode_ids: Iterable[str],
     ratio: float,

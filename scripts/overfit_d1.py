@@ -45,6 +45,7 @@ from wam.decoders import ActionHeadConfig
 from wam.encoders import StateMLPConfig
 from wam.evaluation import (
     E1Report,
+    build_eval_pairs,
     compare_runs,
     e1_metrics,
     evaluate_policy,
@@ -238,39 +239,6 @@ def build_training_config(
         weights=ActionLossWeights(action=1.0, gripper=0.5, smoothness=0.0, limit=0.0),
         camera=camera,
     )
-
-
-def build_eval_pairs(
-    episode_dir: Path, camera: str, chunk_steps: int
-) -> list[tuple[Observation, ActionChunk, str]]:
-    """(Observation, target chunk, episode_id) pairs for evaluate_policy from one episode."""
-    reader = EpisodeReader(episode_dir)
-    frames = reader.read_frames(camera)
-    frame_ts = reader.frame_timestamps(camera)
-    states = reader.read_states()
-    state_ts = np.asarray([s.timestamp_ns for s in states], dtype=np.int64)
-    instruction = reader.manifest.instruction
-    episode_id = reader.manifest.episode_id
-
-    pairs: list[tuple[Observation, ActionChunk, str]] = []
-    for chunk, _executed_prefix, ts in reader.read_actions():
-        if chunk.num_steps < chunk_steps:
-            continue  # same contract as EpisodeDataset: shorter chunks are skipped
-        target = (
-            chunk
-            if chunk.num_steps == chunk_steps
-            else ActionChunk(
-                mode=chunk.mode,
-                targets=np.asarray(chunk.targets[:chunk_steps], dtype=np.float32),
-                gripper_target=np.asarray(chunk.gripper_target[:chunk_steps], dtype=np.float32),
-                dt_s=chunk.dt_s,
-            )
-        )
-        frame_idx = max(int(np.searchsorted(frame_ts, ts, side="right")) - 1, 0)
-        state = states[max(int(np.searchsorted(state_ts, ts, side="right")) - 1, 0)]
-        obs = Observation(images={camera: frames[frame_idx]}, state=state, instruction=instruction)
-        pairs.append((obs, target, episode_id))
-    return pairs
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

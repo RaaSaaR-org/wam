@@ -35,7 +35,41 @@ from wam.training import (
     load_joint_checkpoint,
 )
 
-__all__ = ["CheckpointPolicy", "DummyPolicy", "JointCheckpointPolicy"]
+__all__ = ["CheckpointPolicy", "DummyPolicy", "JointCheckpointPolicy", "load_joint_policy"]
+
+
+def load_joint_policy(
+    checkpoint_path: str | Path,
+    *,
+    device: str = "cpu",
+    camera: str | None = None,
+) -> JointCheckpointPolicy:
+    """Load a joint checkpoint of EITHER kind, building the frozen base only when required.
+
+    A self-contained checkpoint (tiny backbone) restores directly. A Wan-backed one does not:
+    ``WanFlowBackbone`` keeps the DiT, VAE and text tower out of the module tree, so the file holds
+    only ``backbone.lora.*`` and ``backbone.state_proj.*`` and the base has to arrive separately.
+
+    The branch is taken from the embedded config's ``requires_external_weights``, not from a
+    sidecar file or a guess at tensor names — the config is inside the checkpoint, so it travels
+    with it and cannot go missing. Callers that skip this and construct
+    :class:`JointCheckpointPolicy` directly work only for the self-contained case.
+
+    Building the base is the expensive step (weights off disk, tens of GB for Wan), which is why
+    it happens only on the branch that needs it.
+    """
+    from wam.backbones.registry import build_backbone
+    from wam.training._utils import load_checkpoint_raw
+    from wam.training.joint import JointTrainingConfig
+
+    _, config_dict, _ = load_checkpoint_raw(checkpoint_path)
+    config = JointTrainingConfig.model_validate(config_dict)
+    if not config.backbone.requires_external_weights:
+        return JointCheckpointPolicy(checkpoint_path, device=device, camera=camera)
+    backbone = build_backbone(config.backbone, load=True)
+    return JointCheckpointPolicy(
+        checkpoint_path, device=device, backbone=backbone, strict=False, camera=camera
+    )
 
 
 class CheckpointPolicy:

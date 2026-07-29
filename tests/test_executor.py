@@ -657,6 +657,32 @@ def test_joint_checkpoint_policy_loads_and_predicts(tmp_path: Path) -> None:
     np.testing.assert_array_equal(c1.gripper_target, c2.gripper_target)
 
 
+def test_load_joint_policy_restores_a_self_contained_checkpoint(tmp_path: Path) -> None:
+    """The shared loader used by rollout.py and eval_t16.py, on the tiny (self-contained) path."""
+    from wam.runtime.policies import load_joint_policy
+
+    policy = load_joint_policy(_joint_checkpoint(tmp_path), device="cpu")
+
+    assert isinstance(policy, Policy)
+    assert policy.metadata.run_id == "joint-test"
+    chunk = policy.predict(_mock_observation(MockRobot(spec=SPEC)))
+    assert np.isfinite(chunk.targets).all()
+
+
+def test_requires_external_weights_splits_the_two_backbone_kinds() -> None:
+    """The flag ``load_joint_policy`` branches on: only Wan keeps its base out of the file.
+
+    If tiny ever returned True the loader would try to fetch weights for a checkpoint that
+    already has them; if Wan ever returned False a T-16 checkpoint would load with strict=True
+    and fail on the base tensors that were never written.
+    """
+    from wam.backbones.tiny import TinyBackboneConfig
+    from wam.backbones.wan_i2v import WanBackboneConfig
+
+    assert TinyBackboneConfig().requires_external_weights is False
+    assert WanBackboneConfig(model_id="Wan-AI/Wan2.2-TI2V-5B").requires_external_weights is True
+
+
 def test_joint_policy_reads_the_overridden_camera_and_fails_loudly_on_a_missing_one(
     tmp_path: Path,
 ) -> None:

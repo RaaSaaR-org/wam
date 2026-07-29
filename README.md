@@ -33,7 +33,7 @@ backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and ne
 
 ## Status (2026-07-29)
 
-**648 tests green.** M0–M4 are code-complete. What that does and does not mean:
+**666 tests green.** M0–M4 are code-complete. What that does and does not mean:
 
 | Proven | How |
 |--------|-----|
@@ -92,6 +92,7 @@ scripts/overfit_d1.py           M2: D1 overfit gate + E1 eval
 scripts/run_ablation.py         M3: world-action vs. action-only (AC-07)
 scripts/run_bench.py            M3: WAM-Bench ladder on archived predictions (T-27)
 scripts/train_t16_lora.py       M3: the Wan LoRA fine-tune (resumable, 4 h chunks)
+scripts/eval_t16.py             M3: score a T-16 checkpoint on a PROVEN holdout (T-28)
 scripts/fetch_g1_model.py       E2: pull the MuJoCo G1 assets (~38 MB)
 scripts/rollout.py              M4: E2/E3 rollouts (mock | g1 | mujoco_g1)
 scripts/view_sim.sh             E2: watch the MuJoCo closed loop live (wraps mjpython)
@@ -105,6 +106,7 @@ scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 |------|------|
 | `docs/ROADMAP.md` | Ordered path to real usage — read this first |
 | `docs/benchmark.md` | WAM-Bench: the offline ladder, its KPIs, and the external benchmark landscape |
+| `docs/local_gpu.md` | Single consumer GPU: run, test and benchmark a checkpoint (no fine-tune) |
 | `docs/discoverer.md` | EuroHPC H200 cluster: machine facts, quotas, billing, gotchas |
 | `cluster/discoverer/README.md` | The same cluster as a runbook — six `sbatch` files in order |
 | `docs/sim.md` | MuJoCo scene, what it proves and what it does not |

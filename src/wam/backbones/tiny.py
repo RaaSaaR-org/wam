@@ -75,6 +75,11 @@ class TinyBackboneConfig(BaseModel):
     def num_video_tokens(self) -> int:
         return self.num_frames * self.patches_per_frame
 
+    @property
+    def requires_external_weights(self) -> bool:
+        """False: every parameter of this backbone lives in the checkpoint that saved it."""
+        return False
+
 
 def _sinusoidal_embedding(t: Tensor, dim: int) -> Tensor:
     """[B] float timesteps in [0, 1] -> [B, dim] sinusoidal embedding (deterministic)."""

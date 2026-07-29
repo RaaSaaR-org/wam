@@ -89,10 +89,13 @@ def _build_checkpoint_policy(path: Path) -> Policy:
 
 def _build_joint_policy(path: Path, device: str, camera: str | None) -> Policy:
     """Serve a world-action checkpoint (T-16). No fallback: unlike the action-only model,
-    ``JointWorldActionModel`` needs ``JointCheckpointPolicy`` to reach ``predict``."""
-    from wam.runtime.policies import JointCheckpointPolicy
+    ``JointWorldActionModel`` needs ``JointCheckpointPolicy`` to reach ``predict``.
 
-    policy = JointCheckpointPolicy(path, device=device, camera=camera)
+    Via ``load_joint_policy`` rather than that class directly, because a Wan-backed checkpoint
+    holds no base weights — they have to be built and loaded alongside it."""
+    from wam.runtime.policies import load_joint_policy
+
+    policy = load_joint_policy(path, device=device, camera=camera)
     md = policy.metadata
     print(
         f"loaded world-action checkpoint run_id={md.run_id} config_hash={md.config_hash} "

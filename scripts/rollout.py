@@ -422,9 +422,11 @@ def _build_policy(args: argparse.Namespace, spec: CanonicalSpaceSpec, dt_s: floa
             args.checkpoint, device=args.policy_device, camera=args.policy_camera
         )
     if args.policy == "joint":
-        from wam.runtime.policies import JointCheckpointPolicy
+        # load_joint_policy, not JointCheckpointPolicy directly: a Wan-backed T-16 checkpoint
+        # carries no base weights, so it needs the frozen backbone built and strict=False.
+        from wam.runtime.policies import load_joint_policy
 
-        return JointCheckpointPolicy(
+        return load_joint_policy(
             args.checkpoint, device=args.policy_device, camera=args.policy_camera
         )
     if args.policy == "remote":

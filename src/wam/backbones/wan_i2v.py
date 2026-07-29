@@ -133,6 +133,17 @@ class WanBackboneConfig(BaseModel):
             )
         return self
 
+    @property
+    def requires_external_weights(self) -> bool:
+        """True: the DiT, VAE and text tower stay OUT of the module tree.
+
+        So a checkpoint of a Wan-backed model holds only ``backbone.lora.*`` and
+        ``backbone.state_proj.*`` — never the multi-GB base. Restoring one needs the base
+        supplied as an already-loaded backbone and ``strict=False``; anything that loads a
+        checkpoint has to branch on this rather than assume the file is self-contained.
+        """
+        return True
+
 
 def default_feature_blocks(num_layers: int) -> tuple[int, ...]:
     """Mid/late-depth readout blocks for a DiT of ``num_layers`` (40 -> (20, 30))."""
