@@ -14,6 +14,7 @@ from wam.data import (
     EpisodeFormatError,
     EpisodeReader,
     EpisodeWriter,
+    frame_window_indices,
     list_episodes,
 )
 from wam.interfaces.schema import (
@@ -321,3 +322,33 @@ def test_writer_input_validation(tmp_path: Path) -> None:
         EpisodeWriter(tmp_path / "v", "ep-v2", robot.spec, FPS, "")
     with pytest.raises(ValueError, match="fps"):
         EpisodeWriter(tmp_path / "v2", "ep-v3", robot.spec, 0.0, "")
+
+
+class TestFrameWindowIndices:
+    """The single definition of which frames a sample sees (T-29). It exists as one function
+    because it used to exist as two that disagreed; these pin the contract both sides rely on."""
+
+    def test_window_ends_at_the_sample_and_reaches_backwards(self) -> None:
+        assert list(frame_window_indices(7, 4, 20)) == [4, 5, 6, 7]
+
+    def test_clamps_at_the_episode_start_by_repeating_the_first_frame(self) -> None:
+        # a real observation stream has nothing before its first frame either
+        assert list(frame_window_indices(1, 4, 20)) == [0, 0, 0, 1]
+        assert list(frame_window_indices(0, 3, 20)) == [0, 0, 0]
+
+    def test_never_reads_the_future(self) -> None:
+        for frame_idx in range(12):
+            window = frame_window_indices(frame_idx, 5, 12)
+            assert window.max() == frame_idx and window[-1] == frame_idx
+
+    def test_single_frame_window_is_just_the_sample(self) -> None:
+        assert list(frame_window_indices(9, 1, 20)) == [9]
+
+    def test_clamps_to_the_last_available_frame(self) -> None:
+        assert list(frame_window_indices(30, 3, 5)) == [4, 4, 4]
+
+    def test_rejects_degenerate_sizes(self) -> None:
+        with pytest.raises(ValueError, match="num_frames"):
+            frame_window_indices(3, 0, 10)
+        with pytest.raises(ValueError, match="num_available"):
+            frame_window_indices(3, 4, 0)

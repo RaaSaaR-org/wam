@@ -33,6 +33,7 @@ from ._utils import (
     encode_instructions,
     iterate_batches,
     load_checkpoint_raw,
+    resolve_frame_context,
     save_checkpoint,
 )
 from .losses import action_regression_loss, limit_penalty, smoothness_loss
@@ -135,19 +136,15 @@ class ActionOnlyModel(nn.Module):
     def predict(self, observation: Observation, *, camera: str | None = None) -> ActionChunk:
         """Policy protocol: one Observation -> one canonical ActionChunk.
 
-        The configured camera's single frame is tiled to the backbone's ``num_frames`` context.
+        Frames come from :func:`~wam.training._utils.resolve_frame_context` — the real window if
+        ``observation.image_history`` has one, else the single frame tiled to ``num_frames``.
         ``camera`` overrides the trained ``config.camera`` for a deployment that names the same
         view differently (sim renders ``head``, the converted episodes trained on ``ego``) —
-        same override as ``JointWorldActionModel.predict``, so an AC-07 comparison can put both
-        models on the identical observation stream.
+        same override, and the same frame resolution, as ``JointWorldActionModel.predict``, so an
+        AC-07 comparison can put both models on the identical observation stream.
         """
         camera = camera if camera is not None else self.config.camera
-        if camera not in observation.images:
-            raise KeyError(
-                f"observation has no camera {camera!r}; have {sorted(observation.images)}"
-            )
-        image = torch.as_tensor(observation.images[camera])
-        frames = image.unsqueeze(0).expand(self.config.backbone.num_frames, -1, -1, -1)
+        frames = resolve_frame_context(observation, camera, self.config.backbone.num_frames)
         state_emb = self.state_encoder.encode(observation.state)  # [E]
         video_ctx = self.backbone.condition_video(frames.unsqueeze(0))
         text_ctx = self.backbone.condition_text(observation.instruction)

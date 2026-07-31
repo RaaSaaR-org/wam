@@ -46,6 +46,7 @@ from wam.training import (
     load_action_only_checkpoint,
     load_joint_checkpoint,
 )
+from wam.training._utils import resolve_frame_context
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -972,3 +973,99 @@ class TestTrainingMonitor:
         assert all(line["config_hash"] == metadata.config_hash for line in lines)
         assert [line["step"] for line in lines[1:]] == [0, 1]
         assert all(line["kind"] == "training_step" for line in lines[1:])
+
+
+class TestResolveFrameContext:
+    """T-29 / I-7: what a policy shows the backbone. Both ``predict()`` implementations go
+    through this, so the action-only and world-action models cannot be fed different clips —
+    an AC-07 comparison between them is only meaningful if they are not."""
+
+    NUM_FRAMES = 4
+
+    def _obs(self, history: np.ndarray | None = None) -> Observation:
+        rng = np.random.default_rng(11)
+        image = rng.integers(0, 256, (IMAGE_HW, IMAGE_HW, 3), dtype=np.uint8)
+        if history is not None:
+            history = np.concatenate([history, image[None]], axis=0)
+        return Observation(
+            images={"front": image},
+            state=make_state(rng, ts=0),
+            instruction="pick",
+            image_history=None if history is None else {"front": history},
+        )
+
+    def _window(self, n: int) -> np.ndarray:
+        return np.stack(
+            [np.full((IMAGE_HW, IMAGE_HW, 3), i, dtype=np.uint8) for i in range(n)]
+        )
+
+    def test_without_history_the_single_frame_is_tiled(self) -> None:
+        frames = resolve_frame_context(self._obs(), "front", self.NUM_FRAMES)
+        assert frames.shape == (self.NUM_FRAMES, IMAGE_HW, IMAGE_HW, 3)
+        for i in range(1, self.NUM_FRAMES):
+            assert torch.equal(frames[i], frames[0])  # no motion whatsoever
+
+    def test_with_history_the_real_window_is_used(self) -> None:
+        obs = self._obs(self._window(self.NUM_FRAMES - 1))
+        frames = resolve_frame_context(obs, "front", self.NUM_FRAMES)
+        assert frames.shape == (self.NUM_FRAMES, IMAGE_HW, IMAGE_HW, 3)
+        assert not torch.equal(frames[0], frames[-1])
+        assert torch.equal(frames[-1], torch.as_tensor(obs.images["front"]))
+
+    def test_wrong_length_history_is_rejected_not_resampled(self) -> None:
+        """Silently padding or truncating would reintroduce exactly the class of bug T-29 is
+        about: the model being fed something other than what it was trained on, quietly."""
+        obs = self._obs(self._window(self.NUM_FRAMES))  # one frame too many
+        with pytest.raises(ValueError, match="image_history"):
+            resolve_frame_context(obs, "front", self.NUM_FRAMES)
+
+    def test_history_not_ending_at_the_observation_is_rejected(self) -> None:
+        """The Observation invariant. A history misaligned in time is the failure mode that
+        produces a plausible number from the wrong frames — it must not be silently accepted."""
+        rng = np.random.default_rng(5)
+        obs = Observation(
+            images={"front": rng.integers(0, 256, (IMAGE_HW, IMAGE_HW, 3), dtype=np.uint8)},
+            state=make_state(rng, ts=0),
+            instruction="pick",
+            image_history={"front": self._window(self.NUM_FRAMES)},
+        )
+        with pytest.raises(ValueError, match="last frame"):
+            resolve_frame_context(obs, "front", self.NUM_FRAMES)
+
+    def test_missing_camera_is_reported_with_the_available_keys(self) -> None:
+        with pytest.raises(KeyError, match="wrist"):
+            resolve_frame_context(self._obs(), "wrist", self.NUM_FRAMES)
+
+    def test_history_for_another_camera_is_ignored(self) -> None:
+        """A rolling buffer that only tracks one view must not change what a different view
+        gets — it falls back to tiling, which is correct rather than an error."""
+        obs = self._obs()
+        obs.image_history = {"wrist": self._window(self.NUM_FRAMES)}
+        frames = resolve_frame_context(obs, "front", self.NUM_FRAMES)
+        assert torch.equal(frames[0], frames[-1])
+
+    def test_both_policies_resolve_frames_identically(self) -> None:
+        """The AC-07 guarantee, checked rather than documented: same observation in, same clip
+        to the backbone, for the action-only and the world-action model alike."""
+        import inspect
+
+        for cls in (ActionOnlyModel, JointWorldActionModel):
+            source = inspect.getsource(cls.predict)
+            assert "resolve_frame_context(" in source, f"{cls.__name__}.predict"
+            assert ".expand(" not in source, (
+                f"{cls.__name__}.predict tiles frames itself instead of going through "
+                "resolve_frame_context — that is how the two paths drifted apart before"
+            )
+
+    def test_tiling_and_an_explicitly_tiled_history_agree(self) -> None:
+        """The reproducibility guarantee for every pre-T-29 number: the default path is exactly
+        'a history of N copies of the current frame', so nothing about the archived runs changed
+        when the history branch was added. Verified once against the real d1-full-gen-seed0
+        checkpoint on real chunks (bit-identical) and pinned here for the general case."""
+        obs = self._obs()
+        tiled = resolve_frame_context(obs, "front", self.NUM_FRAMES)
+        obs.image_history = {
+            "front": np.repeat(obs.images["front"][None], self.NUM_FRAMES, axis=0)
+        }
+        explicit = resolve_frame_context(obs, "front", self.NUM_FRAMES)
+        assert torch.equal(tiled, explicit)

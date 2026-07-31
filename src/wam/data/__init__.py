@@ -30,6 +30,7 @@ from wam.data.episode import (
     EpisodeReader,
     EpisodeWriter,
     TableInfo,
+    frame_window_indices,
     list_episodes,
 )
 from wam.data.replay import (
@@ -92,6 +93,7 @@ __all__ = [
     "ValidationReport",
     "ValidationThresholds",
     "episode_report",
+    "frame_window_indices",
     "list_episodes",
     "replay_episode",
     "validate_dataset",

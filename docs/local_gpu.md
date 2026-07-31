@@ -185,6 +185,50 @@ Reference points on the identical 40-episode holdout, including the first T-16 c
 The bar is still unbeaten: the highest score in that table is the run that loses hardest to inertia
 after the tiny one. Read the level. `docs/benchmark.md` has the full column and the diagnosis.
 
+### 3b. T-29 — re-score with the frames training actually used
+
+**Do this before treating the numbers above as settled.** Every one of them was produced with
+`predict()` tiling a single camera frame to the backbone's 9-frame context, while training fed the
+real 9-frame window ending at the chunk (`docs/improvements.md` I-7). A video backbone trained on a
+moving clip was graded on a freeze-frame — and repeat-last-action, the baseline it loses to, is
+nothing but motion continuity.
+
+`--frame-history` feeds the window `EpisodeDataset` selected, via the same
+`frame_window_indices`. No retraining; the checkpoint is untouched and only the input changes.
+
+```bash
+# A: how everything before 2026-07-30 was measured
+python scripts/eval_t16.py --run-dir runs/t16-lora-seed0 \
+    --dataset datasets/gr00t-apple-full \
+    --holdout configs/splits/t18_holdout_episodes.txt \
+    --backbone-source /path/to/Wan2.2-TI2V-5B --device cuda \
+    --out runs/t16-lora-seed0/eval-t29-tiled
+
+# B: what training fed the model — one flag different
+python scripts/eval_t16.py --run-dir runs/t16-lora-seed0 \
+    --dataset datasets/gr00t-apple-full \
+    --holdout configs/splits/t18_holdout_episodes.txt \
+    --backbone-source /path/to/Wan2.2-TI2V-5B --device cuda \
+    --frame-history --out runs/t16-lora-seed0/eval-t29-history
+
+python scripts/run_bench.py runs/t16-lora-seed0/eval-t29-{tiled,history} --compare --no-write
+```
+
+Run **both** rather than reusing `eval-latest`: that one came from another day and possibly another
+machine, and an A/B whose halves differ in more than the thing under test is not an A/B. Cost is one
+extra pass — minutes. On Discoverer+ the whole thing including the verdict is one job:
+`sbatch cluster/discoverer/61_eval_t29_frame_history.sbatch`.
+
+The mode is written into `bench.json`'s `run_name` (`…+frame_history`), because two prediction files
+from one checkpoint differ only in what the policy was shown, and a report that does not say which
+will eventually be compared against the wrong one.
+
+**Decision rule, fixed before the run** — `skill_vs_repeat_pct` moves toward or past 0 → T-16 and
+T-18 were measured out of distribution, `docs/benchmark.md` needs a correction rather than an
+addendum, and AC-07 reopens (re-run the T-18 ablation the same way before concluding anything).
+Essentially unchanged → the model had the motion and still lost to inertia, the negative is about
+the model rather than the harness, and I-8 (the data-scaling curve) is next.
+
 `--compare` refuses two runs whose holdouts differ, so the columns always mean the same thing.
 
 Because scoring only reads `predictions.jsonl`, a **new rung costs no retrain** — every past run is

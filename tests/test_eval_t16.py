@@ -198,3 +198,38 @@ def test_load_episode_ids_reads_lists_and_predictions_jsonl(tmp_path: Path) -> N
     assert load_episode_ids(plain) == {"ep-a", "ep-b"}
     assert load_episode_ids(preds) == {"ep-a", "ep-b"}
     assert load_episode_ids(plain) == tw._load_excluded_ids(plain)
+
+
+# -- T-29 / I-7: --frame-history ------------------------------------------------------------
+
+
+def test_frame_history_runs_end_to_end_and_names_itself_in_the_report(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The T-29 A/B has to be readable months later. Two predictions.jsonl from ONE checkpoint
+    differ only in what the policy was shown, so the report must say which — otherwise the
+    comparison silently becomes checkpoint-vs-checkpoint."""
+    from wam.evaluation import BenchReport
+
+    run_dir, holdout = trained
+    out = tmp_path / "with-history"
+
+    assert _run_eval(run_dir, holdout, out, "--frame-history") == 0
+
+    bench = BenchReport.from_json((out / "bench.json").read_text())
+    assert bench.run_name.endswith("+frame_history")
+    assert bench.num_predictions > 0
+
+
+def test_default_stays_the_historical_tiled_path(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Off by default, so re-scoring an archived run reproduces it instead of quietly
+    redefining what every number before 2026-07-30 meant."""
+    from wam.evaluation import BenchReport
+
+    run_dir, holdout = trained
+    out = tmp_path / "default"
+
+    assert _run_eval(run_dir, holdout, out) == 0
+    assert "+frame_history" not in BenchReport.from_json((out / "bench.json").read_text()).run_name

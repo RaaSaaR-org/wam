@@ -681,6 +681,28 @@ class EpisodeReader:
         return self._dir / info.file
 
 
+def frame_window_indices(frame_idx: int, num_frames: int, num_available: int) -> np.ndarray:
+    """The ``num_frames`` frame indices a sample at ``frame_idx`` sees, oldest first.
+
+    **The single definition of "which frames does the model get".** It exists as one function
+    because it used to exist as two: the training dataset selected the real window ending at the
+    chunk while ``predict()`` tiled a single frame, and nobody noticed until a world-action model
+    had been scored on freeze-frames (T-29, ``docs/improvements.md`` I-7). Training and evaluation
+    now call this, so the two cannot drift apart again without changing one line.
+
+    The window ends **at** ``frame_idx`` (inclusive) and reaches backwards. Near the start of an
+    episode it is clamped, i.e. the earliest frame repeats — a real observation stream has no
+    frames before its first one either, and clamping is what a rolling buffer does at startup.
+    The last element is always ``frame_idx``.
+    """
+    if num_frames < 1:
+        raise ValueError(f"num_frames must be >= 1, got {num_frames}")
+    if num_available < 1:
+        raise ValueError(f"num_available must be >= 1, got {num_available}")
+    lo = frame_idx - num_frames + 1
+    return np.clip(np.arange(lo, frame_idx + 1), 0, num_available - 1)
+
+
 def list_episodes(root_dir: str | Path) -> list[Path]:
     """All episode directories (containing ``manifest.json``) under ``root_dir``, sorted."""
     root = Path(root_dir)

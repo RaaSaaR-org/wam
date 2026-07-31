@@ -168,6 +168,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="local dir holding the frozen base weights; required when scoring a checkpoint "
         "trained on another machine, whose recorded path does not exist here",
     )
+    parser.add_argument(
+        "--frame-history",
+        action="store_true",
+        help="show the policy the real num_frames window ending at each chunk — the same window "
+        "EpisodeDataset fed during training — instead of one frame tiled num_frames times. OFF "
+        "by default so this reproduces the runs recorded before 2026-07-30; the A/B between the "
+        "two modes is T-29 (docs/improvements.md I-7). Use a separate --out per mode.",
+    )
     parser.add_argument("--out", type=Path, default=None, help="default: --run-dir")
     parser.add_argument(
         "--skip-split-check",
@@ -201,12 +209,24 @@ def main(argv: list[str] | None = None) -> int:
     else:
         holdout = verify_split(args.dataset, holdout_ids, metadata.dataset_snapshot_ref)
 
+    # T-29: which frames the policy sees. OFF reproduces every result recorded before
+    # 2026-07-30 (one frame, tiled by predict()); ON feeds the window training actually used.
+    num_frames = config.backbone.num_frames if args.frame_history else None
     pairs = []
     for episode_dir in holdout:
-        pairs.extend(build_eval_pairs(episode_dir, policy.camera, config.head.num_steps))
+        pairs.extend(
+            build_eval_pairs(
+                episode_dir, policy.camera, config.head.num_steps, num_frames=num_frames
+            )
+        )
     if not pairs:
         raise SystemExit(f"no eval chunks built from {len(holdout)} episode(s)")
-    print(f"scoring {len(pairs)} chunks over {len(holdout)} episodes ...")
+    frames_note = (
+        f"real {num_frames}-frame window (T-29)"
+        if args.frame_history
+        else f"1 frame tiled to {config.backbone.num_frames} (historical default)"
+    )
+    print(f"scoring {len(pairs)} chunks over {len(holdout)} episodes | frames: {frames_note}")
 
     predictions = evaluate_policy(policy, pairs)
     save_predictions_jsonl(predictions, out_dir / "predictions.jsonl")
@@ -220,7 +240,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Same two calls scripts/run_bench.py makes, so re-scoring this run later from the archived
     # predictions.jsonl reproduces these files exactly rather than a second dialect of them.
-    bench = bench_metrics(predictions, run_name=metadata.run_id)
+    # The frame mode goes into run_name, not just the log: two predictions.jsonl from the same
+    # checkpoint differ only in what the policy was shown, and a report that does not say which
+    # is a report that will eventually be compared against the wrong one.
+    run_name = metadata.run_id + ("+frame_history" if args.frame_history else "")
+    bench = bench_metrics(predictions, run_name=run_name)
     (out_dir / "bench.json").write_text(bench.to_json() + "\n")
     (out_dir / "bench.md").write_text(bench.render_markdown())
 

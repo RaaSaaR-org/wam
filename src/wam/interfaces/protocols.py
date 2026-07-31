@@ -19,17 +19,30 @@ import numpy as np
 
 from wam.interfaces.schema import ActionChunk, RobotState
 
-INTERFACES_VERSION = "0.2.0"
+INTERFACES_VERSION = "0.3.0"
 
 
 @dataclass
 class Observation:
     """Single policy input. ``images`` maps camera name (e.g. 'front', 'wrist') to an
-    HxWxC uint8/float32 numpy array; ``instruction`` is the language task string."""
+    HxWxC uint8/float32 numpy array; ``instruction`` is the language task string.
+
+    ``image_history`` optionally carries the *preceding* frames for a camera as a single
+    ``[T, H, W, C]`` stack, oldest first, **whose last entry is** ``images[key]``. It exists
+    because a video backbone is trained on a moving clip and, without it, has to be shown the
+    same still N times — which carries no motion at all (T-29, ``docs/improvements.md`` I-7).
+
+    Optional on purpose, and the invariant above is what makes it safe to be optional: the
+    history is a strict superset of ``images``, so a policy that ignores it is still correct,
+    and a producer that fills it wrongly is detectable rather than silently degrading. Sources
+    that genuinely have no history (a single render, the first cycles of a closed loop) leave
+    it ``None``; the policy then falls back to tiling and says so.
+    """
 
     images: dict[str, np.ndarray]
     state: RobotState
     instruction: str
+    image_history: dict[str, np.ndarray] | None = None
 
 
 @dataclass

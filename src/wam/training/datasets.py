@@ -121,6 +121,8 @@ class EpisodeDataset(Dataset):
         return samples
 
     def _window_episode(self, reader: Any) -> list[dict[str, Any]]:
+        from wam.data.episode import frame_window_indices
+
         _check_identity_normalization(reader.manifest)
         frames = reader.read_frames(self.camera)  # uint8 [n, H, W, 3]
         frame_ts = reader.frame_timestamps(self.camera)  # int64 [n]
@@ -152,8 +154,9 @@ class EpisodeDataset(Dataset):
                 )
 
             frame_idx = max(int(np.searchsorted(frame_ts, ts, side="right")) - 1, 0)
-            lo = frame_idx - self.num_frames + 1
-            indices = np.clip(np.arange(lo, frame_idx + 1), 0, frames.shape[0] - 1)
+            # Shared with build_eval_pairs so training and evaluation cannot select different
+            # windows — which is precisely what happened before T-29.
+            indices = frame_window_indices(frame_idx, self.num_frames, frames.shape[0])
             state = states[max(int(np.searchsorted(state_ts, ts, side="right")) - 1, 0)]
 
             imu = np.concatenate(

@@ -356,7 +356,11 @@ def load_episode_ids(path: str | Path) -> set[str]:
 
 
 def build_eval_pairs(
-    episode_dir: str | Path, camera: str, chunk_steps: int
+    episode_dir: str | Path,
+    camera: str,
+    chunk_steps: int,
+    *,
+    num_frames: int | None = None,
 ) -> list[tuple[Observation, ActionChunk, str]]:
     """``(Observation, target chunk, episode_id)`` triples for :func:`evaluate_policy`.
 
@@ -367,11 +371,22 @@ def build_eval_pairs(
     Chunks shorter than ``chunk_steps`` are skipped and longer ones truncated, matching
     ``EpisodeDataset``'s contract, so the holdout samples line up with what training saw.
 
+    ``num_frames`` fills ``Observation.image_history`` with the window ending at that frame — the
+    **same** window ``EpisodeDataset`` selected during training, via the same
+    :func:`~wam.data.episode.frame_window_indices`. Left ``None`` the observation carries a single
+    frame and a video policy tiles it, which is what every result recorded before 2026-07-30 was
+    measured with; the default therefore reproduces those runs rather than silently redefining
+    them (T-29, ``docs/improvements.md`` I-7).
+
+    Memory: the window is a *view* into the episode's frame array whenever it does not need
+    clamping, so history costs nothing beyond the array already held by the single-frame path.
+    Only the first few chunks of an episode, where the window runs off the front, are copies.
+
     ``EpisodeReader`` is imported inside the function on purpose: reading frames pulls in the
     video decoding stack, and ``wam.evaluation`` is imported by torch-free, video-free consumers
     (``scripts/run_bench.py`` scoring an archived ``predictions.jsonl`` on a laptop).
     """
-    from wam.data.episode import EpisodeReader
+    from wam.data.episode import EpisodeReader, frame_window_indices
 
     reader = EpisodeReader(episode_dir)
     frames = reader.read_frames(camera)
@@ -397,7 +412,20 @@ def build_eval_pairs(
         )
         frame_idx = max(int(np.searchsorted(frame_ts, ts, side="right")) - 1, 0)
         state = states[max(int(np.searchsorted(state_ts, ts, side="right")) - 1, 0)]
-        obs = Observation(images={camera: frames[frame_idx]}, state=state, instruction=instruction)
+        history = None
+        if num_frames is not None:
+            indices = frame_window_indices(frame_idx, num_frames, frames.shape[0])
+            lo = frame_idx - num_frames + 1
+            # A contiguous unclamped window is a slice, i.e. a view — no copy. Fancy indexing
+            # (the clamped case, only near the episode start) copies.
+            window = frames[lo : frame_idx + 1] if lo >= 0 else frames[indices]
+            history = {camera: window}
+        obs = Observation(
+            images={camera: frames[frame_idx]},
+            state=state,
+            instruction=instruction,
+            image_history=history,
+        )
         pairs.append((obs, target, episode_id))
     return pairs
 

@@ -179,6 +179,21 @@ readout moving the number, and it did not.
 the verdict is hypothesis.** Cheapest item in this document and the only one that can retract a
 recorded conclusion. **Run it before acting on the T-16 result.**
 
+> **Status 2026-08-01: built, tested, not yet run.** The offline path is implemented (T-29,
+> 700 tests green) and waits only for a GPU:
+>
+> ```bash
+> sbatch cluster/discoverer/61_eval_t29_frame_history.sbatch    # both modes + the verdict
+> ```
+>
+> Local equivalent and the full runbook: `docs/local_gpu.md` §3b. What shipped:
+> `Observation.image_history` (optional, `INTERFACES_VERSION` 0.3.0),
+> `wam.data.episode.frame_window_indices` as the **one** definition of the window that both
+> `EpisodeDataset` and `build_eval_pairs` now call, `resolve_frame_context` shared by both
+> `predict()` implementations, and `eval_t16.py --frame-history` — **off by default**, so the
+> archived runs stay reproducible and the A/B is an explicit experiment. Verified bit-identical
+> to the pre-T-29 path on real chunks from `d1-full-gen-seed0`.
+
 `EpisodeDataset` hands the model the `num_frames` frames *ending at* the chunk timestamp:
 
 ```python
@@ -209,14 +224,17 @@ follow-up" (`joint.py:376-379`). Nobody connected it to the number.
 (`interfaces/protocols.py:27-30`), so this is a versioned-interface question, not a one-liner.
 Two shapes, and they are not exclusive:
 
-- *Offline (does the verdict change?)* — the frames are already in hand: `build_eval_pairs` reads
-  the whole episode. Feeding the same window `EpisodeDataset` would have selected needs no new
-  contract if the history is passed alongside the `Observation` on the eval path only. Enough to
-  answer the question, and it does not touch the robot-facing code at all.
-- *Closed loop (does the robot get one?)* — needs a rolling buffer, because `ClosedLoopExecutor`
-  supplies one render per cycle. Stateful policy, so it also needs a reset-between-episodes rule
-  and a defined answer for the first N cycles (pad by repeating — i.e. today's behaviour, but
-  only at startup rather than forever). Do this second, and only if the offline run says it matters.
+- *Offline (does the verdict change?)* — **done.** The frames were already in hand:
+  `build_eval_pairs` reads the whole episode, so `num_frames=` now attaches the window
+  `EpisodeDataset` selected, through the same `frame_window_indices`. `Observation` grew an
+  optional `image_history` so `evaluate_policy` stays policy-agnostic; the invariant that its last
+  frame **is** `images[key]` is what makes the field safe to be optional, and it is checked rather
+  than trusted. Robot-facing code untouched.
+- *Closed loop (does the robot get one?)* — **not done, deliberately.** Needs a rolling buffer,
+  because `ClosedLoopExecutor` supplies one render per cycle. That makes the policy stateful, which
+  drags in a reset-between-episodes rule and a defined answer for the first N cycles (pad by
+  repeating — today's behaviour, but only at startup rather than forever). It changes the deployed
+  path, so it gets its own review, and only if the offline run says it matters.
 
 **Cost:** one eval pass over the 40 holdout episodes — minutes, ~0.2 GPU-h, **no retraining**. The
 checkpoint is unchanged; only what we show it changes.

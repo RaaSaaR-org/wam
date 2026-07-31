@@ -58,6 +58,7 @@ from ._utils import (
     encode_instructions,
     iterate_batches,
     load_checkpoint_raw,
+    resolve_frame_context,
     save_checkpoint,
 )
 from .losses import (
@@ -373,19 +374,17 @@ class JointWorldActionModel(nn.Module):
         observed frame enters unnoised, which is the only timestep at which the backbone is
         being asked to read a real observation rather than a partially destroyed one.
 
-        The camera frame is **tiled** to the backbone's ``num_frames`` context. For a video
-        backbone that is a real limitation — N copies of one still carry no motion — but it is
-        what ``ClosedLoopExecutor`` can supply today (one render per cycle); a rolling frame
-        buffer is the follow-up. ``camera`` overrides the trained ``config.camera``, for the
-        case where the deployment names the same view differently (sim: ``head``); it changes
-        which ``Observation.images`` key is read, never what the model expects to see.
+        The frames come from :func:`~wam.training._utils.resolve_frame_context`: the real window
+        when ``observation.image_history`` carries one, otherwise the single frame **tiled** to
+        ``num_frames``. Training always fed a real window, so the tiled path is a train/inference
+        mismatch and not a neutral default — it is what every world-action number recorded before
+        2026-07-30 was measured with (T-29, ``docs/improvements.md`` I-7). ``camera`` overrides
+        the trained ``config.camera``, for the case where the deployment names the same view
+        differently (sim: ``head``); it changes which key is read, never what the model expects.
         """
         key = camera if camera is not None else self.config.camera
-        if key not in observation.images:
-            raise KeyError(f"observation has no camera {key!r}; have {sorted(observation.images)}")
         device = next(self.parameters()).device
-        image = torch.as_tensor(observation.images[key]).to(device)
-        frames = image.unsqueeze(0).expand(self.config.backbone.num_frames, -1, -1, -1)
+        frames = resolve_frame_context(observation, key, self.config.backbone.num_frames).to(device)
         video_latents = self.backbone.encode_video(frames.unsqueeze(0))
         t = torch.ones(1, dtype=torch.float32, device=device)
         state_emb = self.state_encoder.encode(observation.state)

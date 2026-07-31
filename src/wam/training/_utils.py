@@ -21,6 +21,48 @@ CHECKPOINT_CONFIG_KEY = "wam_config_json"
 CHECKPOINT_METADATA_KEY = "wam_run_metadata_json"
 
 
+def resolve_frame_context(observation: Any, camera: str, num_frames: int) -> Tensor:
+    """The ``[T, H, W, C]`` clip a policy shows the backbone for ``observation``.
+
+    Shared by both ``predict()`` implementations so the action-only and world-action models are
+    always fed the identical observation stream — an AC-07 comparison between them is only
+    meaningful if they are.
+
+    Two sources, and which one is used is a property of the caller, not a setting:
+
+    - ``observation.image_history[camera]`` — the real preceding frames, when the producer has
+      them (offline eval via ``build_eval_pairs(num_frames=…)``, or a rolling buffer in a closed
+      loop). This is what training fed the model.
+    - the single ``observation.images[camera]``, **tiled** ``num_frames`` times, when it does not.
+      N copies of one still carry no motion, so a video backbone is being asked to read a clip
+      that stands still. It is what ``ClosedLoopExecutor`` can supply today (one render per cycle)
+      and it is the confound T-29 exists to measure; see ``docs/improvements.md`` I-7.
+
+    The history is validated rather than trusted: wrong length is an error, and its last frame
+    must be ``images[camera]`` — the invariant documented on :class:`~wam.interfaces.Observation`
+    and the one that makes a silently-misaligned history impossible. The comparison is a few tens
+    of kB against a backbone forward pass, so it is free where it matters.
+    """
+    if camera not in observation.images:
+        raise KeyError(f"observation has no camera {camera!r}; have {sorted(observation.images)}")
+    image = torch.as_tensor(observation.images[camera])
+    history = (observation.image_history or {}).get(camera)
+    if history is None:
+        return image.unsqueeze(0).expand(num_frames, *([-1] * image.ndim))
+    frames = torch.as_tensor(history)
+    if frames.ndim != image.ndim + 1 or frames.shape[0] != num_frames:
+        raise ValueError(
+            f"image_history[{camera!r}]: expected [{num_frames}, *{tuple(image.shape)}], "
+            f"got {tuple(frames.shape)}"
+        )
+    if not torch.equal(frames[-1], image):
+        raise ValueError(
+            f"image_history[{camera!r}]: last frame must be images[{camera!r}] (oldest first). "
+            "A history that does not end at the current observation is misaligned in time."
+        )
+    return frames
+
+
 def encode_instructions(backbone: Any, instruction: str | Sequence[str], batch: int) -> Tensor:
     """Instruction(s) -> text context tokens for ``backbone.features``.
 
