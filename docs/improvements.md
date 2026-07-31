@@ -1,9 +1,15 @@
 # Improvements — state encoder, action head, backbone readout
 
-**Status 2026-07-28.** M0–M4 code-complete (617 tests green). The blockers are real teleop data
-and running T-16 on Discoverer+, *not* code. This document collects architectural improvements
-that are worth doing **after** D1 overfits on real data — plus one cheap experiment that should
-run before T-16, because it may invalidate a conclusion we already recorded.
+**Status 2026-07-30.** M0–M4 code-complete (681 tests green). T-16 has run: the Wan2.2-TI2V-5B
+LoRA scores WAM-Bench **L0, 48.4/100** with `skill_vs_repeat_pct` **−32.4 %**, so the pretrained
+prior does not clear the bar either (`docs/benchmark.md`, `TASKS.md` T-16). Every route to
+"video helps" has now returned a negative on the same 402 success-only episodes of one task.
+
+That makes this document's job different from a week ago. It is no longer a list of things to do
+after D1 — **it is the list of reasons the negative might not mean what it looks like**, ordered
+by how cheaply each can be ruled out. Two of them (I-7, I-3) are deviations between the trained
+path and the deployed path, found by reading the code *after* the result came in, and one of them
+(I-7) sits directly under the verdict.
 
 Each item carries an evidence label:
 
@@ -35,6 +41,31 @@ could test cheaply — the frozen Wan probe — and found **no gain from keeping
 training-path rows, where the pooling sits in front of a *learned* head that could exploit
 positions a ridge cannot. But it does mean the mean-pool is no longer an assumed culprit
 everywhere; each row now has to earn its own evidence.
+
+---
+
+## The second through-line: the deployed path is not the trained path
+
+Found while reading the code after the T-16 verdict. In **two** places, `predict()` does
+something training never did — and both deviations point at the same measured failure signature.
+
+| # | Trained on | Deployed / evaluated on | Item |
+|---|---|---|---|
+| 1 | a real 9-frame window, `frames[indices]` (`training/datasets.py:156`) | **one** frame tiled 9×, `image.expand(num_frames, …)` (`training/joint.py:388`) | **I-7** |
+| 2 | both `velocity_head` (flow) and `action_head` (regression) (`joint.py:338-339`) | `action_head` only — the flow branch is never sampled | **I-3** |
+
+The T-16 result is `skill_vs_zero` **+25.9 %**, `skill_vs_repeat` **−32.4 %**, `smoothness_ratio`
+**0.29**. Read as a symptom rather than a score, that is: *moves in roughly the right direction,
+far too smoothly, and loses to motion continuity.* Deviation 1 removes motion from the visual
+input, which is what a model would need to beat motion continuity. Deviation 2 is a mean-seeking
+regressor, which is what produces a trajectory 3.4× smoother than a demonstration. Neither is
+proof of anything, and this ordering is post-hoc — the symptom was known before the causes were
+looked for, so both need their own falsifiable run and both get one below.
+
+**Neither deviation affects T-15 / T-24 / T-26.** The frozen-feature probes build their own real
+multi-frame windows and use a ridge, not `predict()`. "Frozen features carry no action signal past
+a state-only ridge" stands independently. What is under review is only the verdict on *trained*
+world-action models — T-18 and T-16, which share the `predict()` path.
 
 ---
 
@@ -142,6 +173,68 @@ readout moving the number, and it did not.
 
 ---
 
+## I-7 · Give the policy a frame history at inference — the T-16 eval measured a still
+
+**Evidence: the mismatch is measured (it is in the code, both sides quoted below); its effect on
+the verdict is hypothesis.** Cheapest item in this document and the only one that can retract a
+recorded conclusion. **Run it before acting on the T-16 result.**
+
+`EpisodeDataset` hands the model the `num_frames` frames *ending at* the chunk timestamp:
+
+```python
+frame_idx = max(int(np.searchsorted(frame_ts, ts, side="right")) - 1, 0)
+lo = frame_idx - self.num_frames + 1
+indices = np.clip(np.arange(lo, frame_idx + 1), 0, frames.shape[0] - 1)   # datasets.py:154-156
+```
+
+`JointWorldActionModel.predict` hands it the same frame nine times:
+
+```python
+frames = image.unsqueeze(0).expand(self.config.backbone.num_frames, -1, -1, -1)   # joint.py:388
+```
+
+So a backbone trained to read a moving clip is evaluated on a freeze-frame repeated nine times.
+Both world-action numbers on record (T-18 tiny, T-16 LoRA) were produced this way — `eval_t16.py`
+and `run_ablation.py` both go through `build_eval_pairs` → `evaluate_policy` → `policy.predict()`.
+
+**Why this is not a rounding error.** The baseline the model must beat is repeat-last-action,
+which is nothing but motion continuity. A static clip carries no velocity at all, so the only
+motion evidence left is `dq` from the state vector — the very channel the action-only baseline
+already has. Whatever the video branch might contribute about *where things are going*, the
+evaluation deleted before asking. This is not a new discovery so much as an unjoined dot: the
+`predict()` docstring already calls the tiling "a real limitation … a rolling frame buffer is the
+follow-up" (`joint.py:376-379`). Nobody connected it to the number.
+
+**Scope.** `Observation.images` is documented as one `HxWxC` array per camera
+(`interfaces/protocols.py:27-30`), so this is a versioned-interface question, not a one-liner.
+Two shapes, and they are not exclusive:
+
+- *Offline (does the verdict change?)* — the frames are already in hand: `build_eval_pairs` reads
+  the whole episode. Feeding the same window `EpisodeDataset` would have selected needs no new
+  contract if the history is passed alongside the `Observation` on the eval path only. Enough to
+  answer the question, and it does not touch the robot-facing code at all.
+- *Closed loop (does the robot get one?)* — needs a rolling buffer, because `ClosedLoopExecutor`
+  supplies one render per cycle. Stateful policy, so it also needs a reset-between-episodes rule
+  and a defined answer for the first N cycles (pad by repeating — i.e. today's behaviour, but
+  only at startup rather than forever). Do this second, and only if the offline run says it matters.
+
+**Cost:** one eval pass over the 40 holdout episodes — minutes, ~0.2 GPU-h, **no retraining**. The
+checkpoint is unchanged; only what we show it changes.
+
+**Decision rule, fixed before the run.** Re-score `runs/t16-lora-seed0` with the true frame window,
+identical split, identical bench code:
+
+- `skill_vs_repeat_pct` **moves materially toward or past 0** → the T-16 verdict was measured out
+  of distribution and must be re-stated; T-18's too, and `docs/benchmark.md` needs a correction
+  rather than an addendum. AC-07 goes back to open.
+- **essentially unchanged** → the negative gets substantially stronger: the model had the motion
+  available and still lost to inertia, which is a claim about the model rather than the harness.
+  Then the honest bottleneck really is data, and I-8 is next.
+
+Either way the result is worth more than the run costs, which is why it is item 1.
+
+---
+
 ## I-2 · Replace mean-pool with cross-attention in the action head
 
 **Evidence: literature + hypothesis.** Best value/effort ratio of the architectural changes.
@@ -165,7 +258,7 @@ intuition.
 
 ## I-3 · Make the flow branch the deployed path
 
-**Evidence: literature.**
+**Evidence: literature — plus, since T-16, a symptom of our own.** Promoted from "not urgent".
 
 We already train two action paths:
 
@@ -186,8 +279,24 @@ executor floor is ≥2 Hz (`ExecutorConfig.min_policy_rate_hz`, PRD §11.1) and 
 500 ms — n denoising steps must fit. AHA-WAM reaches ~57 Hz with a comparable structure, so the
 budget is not obviously a problem, but it is the thing that decides feasibility.
 
-**Not urgent while D1 is a single demonstrated way to do one task** — multimodality is a
-D2/scale problem. Listed here so the reason the regression head is fine *today* is written down.
+**What changed on 2026-07-30.** The argument above was purely a priori: mean-seeking regression
+*should* average over valid alternatives. T-16 then produced the matching symptom — a
+`smoothness_ratio` of **0.29**, i.e. predictions 3.4× smoother than the demonstrations they are
+scored against, together with a positive `skill_vs_zero` and a negative `skill_vs_repeat`. A
+model outputting the blandly-averaged trajectory of the task is what that combination looks like.
+The earlier note said multimodality is a D2/scale problem; the evidence now says the *smoothing*
+shows up at D1 scale, whether or not the cause is multimodality.
+
+**Cheap version first.** The velocity head is already trained in every T-16 checkpoint and simply
+never sampled. Adding a sampler and re-scoring `runs/t16-lora-seed0` needs **no retraining** — the
+same "re-score what we already have" move as I-7, and it can share that eval pass. Do it after
+I-7, since a static-clip conditioning signal would handicap both heads equally and confound the
+comparison.
+
+**Then the latency question**, which decides whether it can ship: the executor floor is ≥2 Hz
+(`ExecutorConfig.min_policy_rate_hz`, PRD §11.1) with a 500 ms deadline, so n denoising steps must
+fit alongside the backbone pass. AHA-WAM reaches ~57 Hz with a comparable structure, so this is a
+budget to measure, not an obvious wall.
 
 ---
 
@@ -273,6 +382,64 @@ T-24. Same decision rule. If I-1 lands first, run it with the spatial readout.
 
 ---
 
+## I-8 · Measure the data-scaling curve before buying more data with months
+
+**Evidence: hypothesis. Uses assets we already own.**
+
+Every negative we have — T-18 (tiny trunk hurts), T-15/T-24/T-26 (frozen features carry nothing),
+T-16 (LoRA loses to inertia) — was produced on the *same* 402 success-only GR00T episodes of one
+task. "Not enough data" is the standing explanation for all three, and it has never been tested.
+It is also the most expensive conclusion in the project: it implies a G1 EDU4, a teleop rig and
+months of recording (D1/D2, `docs/ROADMAP.md`).
+
+Test it with what is already staged. Retrain T-16 at **40 / 120 / 362** training episodes,
+identical everything else, and score each on the same 40-episode holdout. `run_bench.py` already
+compares runs and refuses mismatched holdouts, so the curve costs no new measurement code.
+
+**Cost:** 3 runs; the full one took a fraction of the 5 000 GPU-h allocation, and the two smaller
+ones are cheaper still. Nothing here needs a robot.
+
+**Decision rule, fixed before the run:**
+
+- `skill_vs_repeat_pct` **improves monotonically** with episode count → data is the binding
+  constraint, the extrapolation says roughly how much is needed, and the case for D1/D2 collection
+  is evidence rather than hope.
+- **flat or non-monotonic** → more of *this* data will not fix it. Then the question is the kind of
+  data (task diversity, failure cases, a live gripper — I-9) or the architecture (I-2), and months
+  of recording the same task would have been the wrong move.
+
+Weakness to state up front: three points on one task cannot distinguish "needs more episodes" from
+"needs more *tasks*". A useful variant, at the same cost, is holding episode count fixed and
+varying task diversity across public LeRobot sets.
+
+---
+
+## I-9 · Score on a dataset whose gripper actually opens
+
+**Evidence: measured (T-27).**
+
+The demonstrated gripper channel in `datasets/gr00t-apple-full` has peak-to-peak range **0.120**,
+sitting on the 0.5 binarization threshold — it never opens or closes. `gripper_accuracy` 0.89 is
+thresholding noise, and WAM-Bench emits it as a warning rather than a metric.
+
+The consequence is larger than one bad number: **the benchmark is structurally blind to grasping**,
+which is the entire point of pick-and-place and the thing AC-01/02 are about. Every verdict we have
+is a verdict about arm trajectories only.
+
+**Fix:** select a public LeRobot dataset with real open/close transitions and re-run the ladder
+there. No robot, no new code — `convert_lerobot_g1.py` already exists and the bench thresholds are
+dataset-independent module constants. Until then, no offline result should be described as evidence
+about manipulation, only about reaching.
+
+Related and cheap, in `docs/benchmark.md` rather than here: **L4's gate is one-sided.**
+`smoothness_ratio ≤ 2` scored T-16's 0.29 a full 20/20 while that value means the prediction is
+3.4× *smoother* than a demonstration — a defect, not a virtue. A two-sided band would catch it.
+Recorded rather than quietly patched, because changing a pre-registered threshold after seeing the
+number it scored is exactly the move the pre-registration exists to prevent; it changes no level
+here (L4 is only reachable through L1 and L2, and this run stops at L0).
+
+---
+
 ## What not to change
 
 Recorded so these do not get "improved" by accident:
@@ -297,18 +464,31 @@ Recorded so these do not get "improved" by accident:
 
 ## Suggested order
 
+Re-ordered 2026-07-30 around one principle: **anything that can change the meaning of a number we
+have already recorded comes before anything that produces a new number.** Items 1–2 re-score an
+existing checkpoint and need no retraining at all.
+
 | # | Item | When | Cost |
 |---|---|---|---|
-| ~~1~~ | ~~I-1 spatial-readout probe~~ — **✅ ran 2026-07-29, verdict unchanged** | done | 7.6 s GPU, free |
-| 1 | I-2 cross-attention head | after D1 overfits on real data | days |
-| 2 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
-| 3 | I-3 flow branch deployed | D2 / scale | days + latency work |
-| 4 | I-4 state history | only if memory tasks become a target | days |
-| 5 | I-5 state as latent frames | M6 | weeks |
+| ~~—~~ | ~~I-1 spatial-readout probe~~ — **✅ ran 2026-07-29, verdict unchanged** | done | 7.6 s GPU, free |
+| **1** | **I-7 frame history at inference** — may retract the T-16/T-18 verdict | **now, before acting on T-16** | ~0.2 GPU-h, no retrain |
+| 2 | I-3 flow branch deployed (sampler on the existing velocity head) | with or right after I-7 | days, no retrain |
+| 3 | I-9 dataset with a live gripper | before any claim about grasping | hours, no GPU |
+| 4 | I-8 data-scaling curve | before committing months to D1/D2 collection | 3 runs, existing allocation |
+| 5 | I-2 cross-attention head | after 1–4 say whether the readout was the problem | days + retrain |
+| 6 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
+| 7 | I-4 state history | only if memory tasks become a target | days |
+| 8 | I-5 state as latent frames | M6 | weeks |
 
 I-1 jumped the queue because it tested a claim we had already written into `TASKS.md` as settled.
 It came back negative, which is the cheapest possible outcome: nothing downstream has to change,
 and the claim is now one we have earned rather than one we inherited from a pooling choice.
+
+I-7 is now in the same position, one level more serious: I-1 questioned how we *probed* the
+backbone, I-7 questions what we *showed* it. If the answer is "nothing changes", the T-16 negative
+becomes one of the better-supported results in the project. If the answer is "it moves", then two
+recorded verdicts were measured out of distribution and the cost of finding that out was one eval
+pass. The asymmetry is why it is item 1 despite being the smallest item in the file.
 
 ---
 
