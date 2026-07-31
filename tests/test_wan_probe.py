@@ -383,3 +383,109 @@ def test_analyze_probes_ranks_the_informative_block(tmp_path: Path) -> None:
     assert per_block["1"]["joints"]["test_r2"] > 0.9 > per_block["0"]["joints"]["test_r2"]
     assert result["candidates"]["measured_1_2"]["joints"]["test_r2"] > 0.9
     assert result["verdict"]["measured_beats_heuristic"] in (True, False)
+
+
+# ---- LoRA on the generate path (--gen-lora) -------------------------------------------------
+
+
+class _FakePeftConfig:
+    def __init__(self, r: int, lora_alpha: int) -> None:
+        self.r = r
+        self.lora_alpha = lora_alpha
+
+
+class _FakeTransformer:
+    """Records what ``apply_lora`` asked of it; no DiT and no GPU involved."""
+
+    def __init__(self) -> None:
+        self.loaded: dict | None = None
+        self.activated: tuple | None = None
+        self.peft_config = {"wam": _FakePeftConfig(32, 64)}
+
+    def load_lora_adapter(self, path, *, adapter_name, prefix, weight_name):
+        self.loaded = {
+            "path": str(path),
+            "adapter_name": adapter_name,
+            "prefix": prefix,
+            "weight_name": weight_name,
+        }
+
+    def set_adapters(self, names, weights):
+        self.activated = (names, weights)
+
+
+class _FakePipe:
+    def __init__(self) -> None:
+        self.transformer = _FakeTransformer()
+
+
+def _write_lora_dir(root: Path, *, metadata: bool = True) -> Path:
+    """A minimal export_lora.py output: two tensors plus the adapter metadata."""
+    import torch
+    from safetensors.torch import save_file
+
+    root.mkdir(parents=True, exist_ok=True)
+    meta = {"format": "pt"}
+    if metadata:
+        meta["lora_adapter_metadata"] = json.dumps({"r": 32, "lora_alpha": 64})
+    save_file(
+        {
+            "blocks.0.attn1.to_q.lora_A.weight": torch.zeros(32, 16),
+            "blocks.0.attn1.to_q.lora_B.weight": torch.zeros(16, 32),
+        },
+        str(root / "pytorch_lora_weights.safetensors"),
+        metadata=meta,
+    )
+    return root
+
+
+def test_apply_lora_attaches_model_relative_keys_and_sets_the_scale(tmp_path: Path) -> None:
+    """``prefix=None`` is the contract: the export writes model-relative names, so the
+    pipeline-level loader (which expects a ``transformer.`` prefix) would match nothing."""
+    lora_dir = _write_lora_dir(tmp_path / "lora")
+    args = probe.parse_args(
+        ["--data-dir", "unused", "--gen-lora", str(lora_dir), "--gen-lora-scale", "0.5"]
+    )
+    pipe = _FakePipe()
+    info = probe.apply_lora(pipe, args, probe.smoke.Report())
+
+    assert pipe.transformer.loaded == {
+        "path": str(lora_dir),
+        "adapter_name": "wam",
+        "prefix": None,
+        "weight_name": "pytorch_lora_weights.safetensors",
+    }
+    assert pipe.transformer.activated == ("wam", 0.5)
+    # alpha/r is 2.0, so "scale 0.5" means the adapter runs at its trained strength x 0.5.
+    assert info["effective_scaling"] == pytest.approx(1.0)
+    assert info["tensors"] == 2
+
+
+def test_apply_lora_flags_a_missing_alpha_instead_of_silently_halving_it(tmp_path: Path) -> None:
+    """Without the metadata the loader infers alpha = r, so the adapter would run at half
+    strength and read as a weak fine-tune. That has to show up as a failed check."""
+    lora_dir = _write_lora_dir(tmp_path / "lora", metadata=False)
+    args = probe.parse_args(["--data-dir", "unused", "--gen-lora", str(lora_dir)])
+    report = probe.smoke.Report()
+    probe.apply_lora(_FakePipe(), args, report)
+    assert "generate.lora_metadata" in report.failed
+
+
+def test_apply_lora_reports_the_checkpoint_the_pixels_came_from(tmp_path: Path) -> None:
+    """AC-04: a clip has to be attributable to a run, so provenance rides along into the
+    report rather than living only in the directory nobody looks at."""
+    lora_dir = _write_lora_dir(tmp_path / "lora")
+    (lora_dir / "wam_provenance.json").write_text(
+        json.dumps({"run_id": "t16-lora-seed0", "config_hash": "45ee9e60"})
+    )
+    args = probe.parse_args(["--data-dir", "unused", "--gen-lora", str(lora_dir)])
+    info = probe.apply_lora(_FakePipe(), args, probe.smoke.Report())
+    assert info["provenance"]["run_id"] == "t16-lora-seed0"
+
+
+def test_apply_lora_refuses_a_directory_without_an_exported_adapter(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    args = probe.parse_args(["--data-dir", "unused", "--gen-lora", str(empty)])
+    with pytest.raises(FileNotFoundError, match="export_lora.py"):
+        probe.apply_lora(_FakePipe(), args, probe.smoke.Report())

@@ -40,6 +40,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--duration", type=int, default=None, help="GPU_DURATION seconds variable")
     p.add_argument("--hardware", default=ZERO_GPU, help="Space hardware (default ZeroGPU)")
     p.add_argument("--public", action="store_true", help="create it public (default private)")
+    p.add_argument(
+        "--set-hf-token",
+        action="store_true",
+        help="copy this machine's HF token into the Space as an HF_TOKEN secret. Needed only to "
+        "read a PRIVATE repo from inside the Space (e.g. an exported LoRA); a Space gets no "
+        "token of its own, so snapshot_download would 401 without it.",
+    )
     p.add_argument("--dry-run", action="store_true", help="show what would be uploaded")
     return p.parse_args(argv)
 
@@ -121,6 +128,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     for key, value in variables.items():
         api.add_space_variable(space_id, key, value)
+    if args.set_hf_token:
+        from huggingface_hub import get_token
+
+        token = get_token()
+        if not token:
+            print("no local HF token found — run `hf auth login` first", file=sys.stderr)
+            return 2
+        # A secret, not a variable: variables are visible on the Space's settings page to
+        # anyone who can see the Space.
+        api.add_space_secret(space_id, "HF_TOKEN", token)
+        print("set HF_TOKEN secret (private repos readable from the Space)")
 
     api.create_commit(
         space_id,

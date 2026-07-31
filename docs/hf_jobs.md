@@ -346,6 +346,107 @@ the LoRA (T-16) on real demos stays the way to close the fresh-start embodiment 
 Presentation cut: `runs/presentation/wam_07_fulltask_chunked{,_en}.mp4` (30 s, rebuild
 via `runs/presentation/build/make_chunked_video.py`).
 
+## Watching a fine-tune's video prior (T-16 LoRA on the generate tab, 2026-07-30)
+
+Every generation above ran the **base** prior. Once T-16 produced a checkpoint, the same tab can
+run the fine-tuned one — the "generate future" tab grew a **LoRA repo/path** box and a **scale**
+slider, and `--gen-lora` / `--gen-lora-scale` do the same on the CLI.
+
+This costs no sampler. `WanFlowBackbone.save_adapter` was always meant to be portable ("it
+loads into a stock diffusers Wan pipeline, so a checkpoint can be watched as video without
+WAM"), but it needs the 19 GB base resident just to walk a module tree.
+`scripts/export_lora.py` does the same conversion as a pure key rename, on a laptop, from the
+330 MB checkpoint alone:
+
+```bash
+.venv/bin/python scripts/export_lora.py \
+    --checkpoint runs/t16-lora-seed0/checkpoints/step-020000/model.safetensors \
+    --out runs/t16-lora-seed0/lora-diffusers
+# 600 tensors, r=32 alpha=64, 322.5 MB fp32
+```
+
+Three transforms: `backbone.lora.blocks__0__attn1__to_q__lora_A__wam__weight` →
+`blocks.0.attn1.to_q.lora_A.weight` (undo `WanFlowBackbone`'s `nn.ParameterDict` mangling, drop
+the adapter name); the peft `LoraConfig` into the safetensors `lora_adapter_metadata`; and
+`state_proj` to its own file.
+
+**The metadata is load-bearing, and this is the trap.** `load_lora_adapter` reconstructs the
+config from the weights when no metadata is present, and infers `lora_alpha = r`. We train at
+`alpha=64, r=32` — scaling 2.0 — so an adapter without it loads at **half** the strength it was
+trained with and reads as a weak fine-tune. Measured both ways:
+
+| | rebuilt `r` | rebuilt `lora_alpha` | scaling |
+|---|---|---|---|
+| with `lora_adapter_metadata` | 32 | 64 | **2.0** ✓ |
+| without | 32 | 32 | 1.0 ✗ |
+
+`save_lora_adapter` writes that key too, so the resume path was never affected — only a
+hand-rolled export would have been.
+
+Loading goes through `pipe.transformer.load_lora_adapter(..., prefix=None)`, not the
+pipeline-level `load_lora_weights`: the exported keys are model-relative, which is exactly what
+`WanI2VAdapter.load_lora` reads back. Same file, same loader, so the Space shows what a resume
+would restore. `peft` had to join `requirements.txt`, and `--set-hf-token` on
+`deploy_wan_space.py` puts an `HF_TOKEN` secret on the Space so it can read a private adapter
+repo (a Space carries no token of its own).
+
+**What this can and cannot answer.** The sharp question is embodiment: the base prior has never
+seen a G1 and invents a generic manipulator for the arm it cannot see (above). Same start frame,
+same prompt, same seed, scale 0 vs 1 attributes every difference to training. What it cannot
+answer is competence — three reasons, all worth stating before anyone reads a nice clip as
+progress:
+
+- the adapter trained at **9 frames of 128×160**; generating 49 frames at 480×640 is
+  extrapolation, and the trained geometry is recorded in `wam_provenance.json` for that reason;
+- the video loss was deliberately downweighted to **0.5** so the latent flow residual would not
+  dominate the action branch (R-07) — fidelity was never the objective;
+- the DiT trained with **proprioception tokens concatenated onto the text context**
+  (`wan_i2v.py:605`), which a diffusers pipeline cannot supply, so this runs without them.
+
+And the action branch is not in the file at all. On WAM-Bench the full checkpoint reaches L0
+(48.4/100) and loses to repeat-last-action by 32 % — a plausible-looking video is not evidence
+the policy works. This is a diagnostic, not a demo; `runs/presentation/` remains the
+presentation material.
+
+### Measured (2026-07-30): the fine-tune is geometry-bound, and it learned to stand still
+
+Five ZeroGPU calls, episode 0 / frame 150 (Dex3 hand at the apple, arm not yet in view — where
+the base prior has to invent it), same prompt and seed 0 throughout. Artifacts in
+`runs/presentation/t16_lora_futures/`. `motion` is the mean absolute frame-to-frame difference
+in 0–255.
+
+| geometry | LoRA scale | motion | what it looks like |
+|---|---|---|---|
+| 49 × 480×640 | 0.0 (base) | 2.93 | coherent grasp + place, **green-white tube** for the arm |
+| 49 × 480×640 | 0.35 | 2.96 | coherent grasp + place, **white/silver segmented arm** |
+| 49 × 480×640 | 1.0 (as trained) | 1.57 | collapses after ~frame 5: plate becomes a blob, contrast washes out |
+| 9 × 128×160 | 0.0 (base) | 29.48 | psychedelic colour noise — **the base cannot generate here at all** |
+| 9 × 128×160 | 1.0 (as trained) | 0.73 | clean, stable, correct scene — and almost nothing moves |
+
+Three findings, and the third is the one that matters:
+
+1. **The embodiment gap does close, at reduced strength.** Scale 0.35 keeps the base's structure
+   (motion 2.96 vs 2.93, std 53 vs 55) and replaces the hallucinated green tube with a
+   white/silver segmented arm — much closer to the G1's actual silver arm. Everything else was
+   held fixed, so that difference is attributable to training alone. Effective scaling at
+   "1.0" is 2.0 (alpha/r), so 0.35 is ~0.7× the trained delta.
+2. **Full strength is out of distribution, not broken.** At 4× the trained resolution and 5× the
+   length the adapter destroys the prior; at its own 9 × 128×160 it is the *base* that produces
+   garbage while the adapter renders a clean, stable scene. Neither model is bad — each is bad
+   away from where it trained. Any future presentation clip should use a low scale.
+3. **It learned to predict almost no change.** In-distribution motion is **0.73** where the base
+   manages 29.5 and a real 0.3 s of demonstration moves considerably more. That is the same
+   pathology WAM-Bench found on the action side — `smoothness_ratio` 0.293, i.e. 3.4× smoother
+   than the demonstrations, which is why the model loses to repeat-last-action. The video branch
+   and the action branch failed the *same* way: both converged on "nothing much happens next".
+
+The per-block adapter magnitudes agree. `lora_B` starts at exactly zero in peft and 0 % of it is
+still zero, so training moved everything — but blocks 23–27 moved most (mean |B| 1.2e-2) and
+block 10 least (7.0e-3). Blocks 11–29 receive gradient *only* from the video loss (the readouts
+are at 2 and 10), so the downweighted video objective still reshaped the adapter more than the
+action objective did. That is a lead for the next run: the action losses are not driving this
+fine-tune.
+
 ## Next steps after a green smoke run
 
 1. ~~Record which blocks give the most action-predictive features~~ — done twice: label-free

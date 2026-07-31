@@ -30,7 +30,11 @@ so this Space and an HF Jobs run execute exactly the same code. Three tabs:
   labels; a state-only ridge is the floor to beat.
 - **generate future** — sample a diffusion video from a real episode's start frame + an
   instruction: what does the backbone imagine the robot will do? Qualitative probe and
-  presentation material, not a training path.
+  presentation material, not a training path. Optionally applies a **WAM fine-tune** (a
+  `scripts/export_lora.py` adapter, by repo id or path) at an adjustable strength — same
+  seed and start frame at scale 0 vs 1 shows what training changed, which for a robot the
+  base prior has never seen means: does the arm come out right? A private adapter repo needs
+  an `HF_TOKEN` secret on the Space (`deploy_wan_space.py --set-hf-token`).
 
 ## Why it is built this way
 

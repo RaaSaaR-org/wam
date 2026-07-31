@@ -141,6 +141,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     gen.add_argument("--gen-width", type=int, default=640)
     gen.add_argument("--gen-seed", type=int, default=0)
     gen.add_argument("--gen-out", default="wan_future.mp4")
+    gen.add_argument(
+        "--gen-lora",
+        default=None,
+        help="HF repo id or local dir holding a scripts/export_lora.py adapter; applies a WAM "
+        "fine-tune to the frozen prior. Omit for the base model.",
+    )
+    gen.add_argument(
+        "--gen-lora-scale",
+        type=float,
+        default=1.0,
+        help="adapter strength. 1.0 = as trained (the saved alpha/r is honoured), 0.0 = base "
+        "model. Sweep it to isolate what the fine-tune changed.",
+    )
 
     p.add_argument("--out", default="wan_probe_report.json")
     return p.parse_args(argv)
@@ -790,6 +803,81 @@ def load_gen_frame(args: argparse.Namespace) -> np.ndarray:
     raise ValueError(f"cannot read frame {args.gen_frame} from {video}")
 
 
+_LORA_WEIGHT_NAME = "pytorch_lora_weights.safetensors"
+
+
+def apply_lora(pipe: Any, args: argparse.Namespace, report: smoke.Report) -> dict[str, Any]:
+    """Attach a WAM fine-tune to the pipeline's DiT and set its strength.
+
+    Goes through ``pipe.transformer.load_lora_adapter``, not the pipeline-level
+    ``load_lora_weights``: the export writes model-relative keys (``blocks.0.attn1...``, no
+    ``transformer.`` prefix), which is exactly the layout ``WanI2VAdapter.load_lora`` reads back
+    with ``prefix=None``. Same file, same loader, so what the Space shows is what a resume would
+    restore.
+
+    The saved metadata carries ``lora_alpha=64, r=32``; without it the loader would infer
+    ``alpha = r`` and apply the adapter at half strength (see ``scripts/export_lora.py``). This
+    logs the rebuilt scaling so a wrong-strength run is visible in the report rather than being
+    mistaken for a weak fine-tune.
+    """
+    import json as _json
+
+    from safetensors import safe_open
+
+    source = str(args.gen_lora)
+    if Path(source).is_dir():
+        lora_dir = Path(source)
+    else:  # a Hub repo id — the download costs no GPU quota when it happens outside @spaces.GPU
+        from huggingface_hub import snapshot_download
+
+        lora_dir = Path(snapshot_download(source, repo_type="model"))
+
+    weight_file = lora_dir / _LORA_WEIGHT_NAME
+    if not weight_file.is_file():
+        raise FileNotFoundError(f"{weight_file} not found — run scripts/export_lora.py first")
+
+    with safe_open(str(weight_file), framework="pt") as handle:
+        meta = handle.metadata() or {}
+        tensor_count = len(handle.keys())
+    saved = _json.loads(meta.get("lora_adapter_metadata", "{}"))
+    if not saved:
+        report.check(
+            "generate.lora_metadata",
+            False,
+            "no lora_adapter_metadata — alpha will be inferred as r, halving the trained strength",
+        )
+
+    t0 = time.perf_counter()
+    pipe.transformer.load_lora_adapter(
+        str(lora_dir), adapter_name="wam", prefix=None, weight_name=_LORA_WEIGHT_NAME
+    )
+    pipe.transformer.set_adapters("wam", args.gen_lora_scale)
+    attach_s = time.perf_counter() - t0
+
+    config = pipe.transformer.peft_config["wam"]
+    report.check(
+        "generate.lora",
+        True,
+        f"{tensor_count} tensors, r={config.r} alpha={config.lora_alpha} "
+        f"(scaling {config.lora_alpha / config.r:g}) x scale {args.gen_lora_scale:g}, {attach_s:.1f}s",
+    )
+    info = {
+        "source": source,
+        "dir": str(lora_dir),
+        "tensors": tensor_count,
+        "scale": args.gen_lora_scale,
+        "rank": config.r,
+        "alpha": config.lora_alpha,
+        "effective_scaling": (config.lora_alpha / config.r) * args.gen_lora_scale,
+        "attach_s": round(attach_s, 1),
+    }
+    provenance = lora_dir / "wam_provenance.json"
+    if provenance.is_file():
+        # Which checkpoint these pixels came from, carried through to the report (AC-04).
+        info["provenance"] = _json.loads(provenance.read_text())
+    return info
+
+
 def generate_future(
     args: argparse.Namespace, image_rgb: np.ndarray, report: smoke.Report
 ) -> dict[str, Any]:
@@ -814,6 +902,8 @@ def generate_future(
     pipe.to(device)
     load_s = time.perf_counter() - t0
     report.check("generate.load", True, f"{load_s:.1f}s")
+
+    lora_info = apply_lora(pipe, args, report) if args.gen_lora else None
 
     start = Image.fromarray(image_rgb).resize((args.gen_width, args.gen_height), Image.LANCZOS)
     t0 = time.perf_counter()
@@ -848,6 +938,7 @@ def generate_future(
         "sample_s": round(sample_s, 1),
         "mp4": str(out_path),
         "start_png": str(out_path.with_suffix(".start.png")),
+        "lora": lora_info,
     }
     if torch.cuda.is_available():
         info["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)

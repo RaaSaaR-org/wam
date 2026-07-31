@@ -244,7 +244,7 @@ def run_probe(episodes: int, windows_per_ep: int, frames: int, height: int, widt
 
 
 def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: int,
-                 height: int, width: int, seed: int):  # fmt: skip
+                 height: int, width: int, seed: int, lora: str, lora_scale: float):  # fmt: skip
     """Generate tab: start frame on CPU, diffusion sampling on GPU, mp4 back to the UI."""
     import probe
 
@@ -257,7 +257,10 @@ def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: 
         source = snapshot_download(MODEL_ID, ignore_patterns=IGNORE)
         data_dir = download_episodes([int(episode)])
 
-        out = f"/tmp/wan_future_ep{int(episode)}_f{int(frame)}_seed{int(seed)}.mp4"
+        # The LoRA scale is in the filename: a sweep writes one file per strength, so the
+        # clips stay side by side instead of overwriting each other.
+        tag = f"_lora{float(lora_scale):g}" if lora.strip() else ""
+        out = f"/tmp/wan_future_ep{int(episode)}_f{int(frame)}_seed{int(seed)}{tag}.mp4"
         argv = [
             "--data-dir", data_dir,
             "--source", source,
@@ -274,6 +277,11 @@ def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: 
         ]  # fmt: skip
         if prompt.strip():
             argv += ["--gen-prompt", prompt.strip()]
+        if lora.strip():
+            argv += ["--gen-lora", lora.strip(), "--gen-lora-scale", str(float(lora_scale))]
+            log.append(f"LoRA: {lora.strip()} at scale {float(lora_scale):g}")
+        else:
+            log.append("LoRA: none (base model)")
         args = probe.parse_args(argv)
         image = probe.load_gen_frame(args)
         log.append(f"start frame: episode {episode} frame {frame}, {image.shape}")
@@ -377,13 +385,46 @@ verbatim from `scripts/`). First run downloads ~34 GB before any GPU is requeste
             g_steps = gr.Number(value=35, label="steps", precision=0)
             g_height = gr.Number(value=480, label="height", precision=0)
             g_width = gr.Number(value=640, label="width", precision=0)
+        gr.Markdown(
+            "**Apply a WAM fine-tune.** Leave blank for the base prior. With a LoRA, the same "
+            "seed + start frame + prompt at scale 0 / 0.5 / 1 isolates exactly what training "
+            "changed — the thing to watch is the *arm*, since the base model has never seen a "
+            "G1 and invents a generic manipulator. Caveats: the adapter was trained at 9 frames "
+            "of 128x160, so generating larger and longer is out of its distribution; and the "
+            "DiT was trained with proprioception tokens on the text context, which a diffusers "
+            "pipeline cannot supply."
+        )
+        with gr.Row():
+            g_lora = gr.Textbox(
+                value="",
+                label="LoRA repo or path (blank = base model)",
+                placeholder="<user>/wam-t16-lora-seed0",
+            )
+            g_lora_scale = gr.Slider(
+                minimum=0.0,
+                maximum=1.5,
+                value=1.0,
+                step=0.05,
+                label="LoRA scale (1.0 = as trained)",
+            )
         gen_btn = gr.Button("Generate future video", variant="primary")
         gen_video = gr.Video(label="generated future")
         gen_log = gr.Textbox(label="log", lines=16, max_lines=28, show_copy_button=True)
         gen_report = gr.JSON(label="report")
         gen_btn.click(
             run_generate,
-            [g_prompt, g_episode, g_frame, g_frames, g_steps, g_height, g_width, g_seed],
+            [
+                g_prompt,
+                g_episode,
+                g_frame,
+                g_frames,
+                g_steps,
+                g_height,
+                g_width,
+                g_seed,
+                g_lora,
+                g_lora_scale,
+            ],
             [gen_log, gen_video, gen_report],
         )
 

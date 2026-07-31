@@ -7,6 +7,8 @@ diffusers>=0.35.0
 transformers>=4.51.0
 accelerate
 safetensors
+# probe.py --gen-lora: load_lora_adapter() injects the adapter through peft.
+peft>=0.15.0
 sentencepiece
 protobuf
 ftfy
