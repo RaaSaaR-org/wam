@@ -225,6 +225,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--backbone-source",
+        default=None,
+        help=(
+            "local dir holding the frozen base weights (--policy joint). Needed when the "
+            "checkpoint was trained elsewhere: it records the training machine's path"
+        ),
+    )
+    parser.add_argument(
         "--policy-device", default="cpu", help="torch device for --policy checkpoint|joint"
     )
     parser.add_argument("--server-uri", default=None, help="ws://host:port for --policy remote")
@@ -427,7 +435,10 @@ def _build_policy(args: argparse.Namespace, spec: CanonicalSpaceSpec, dt_s: floa
         from wam.runtime.policies import load_joint_policy
 
         return load_joint_policy(
-            args.checkpoint, device=args.policy_device, camera=args.policy_camera
+            args.checkpoint,
+            device=args.policy_device,
+            camera=args.policy_camera,
+            backbone_source=args.backbone_source,
         )
     if args.policy == "remote":
         if not args.server_uri:

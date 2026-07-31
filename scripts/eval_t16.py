@@ -120,7 +120,7 @@ def verify_split(dataset: Path, holdout_ids: set[str], trained_ref: str) -> list
     return [p for p in episodes if p.name in holdout_ids]
 
 
-def build_policy(model_path: Path, device: str, camera: str | None):
+def build_policy(model_path: Path, device: str, camera: str | None, backbone_source: str | None):
     """``(policy, config, metadata)`` for the checkpoint, via the shared runtime loader."""
     from wam.runtime.policies import load_joint_policy
     from wam.training._utils import load_checkpoint_raw
@@ -129,8 +129,15 @@ def build_policy(model_path: Path, device: str, camera: str | None):
     _, config_dict, metadata = load_checkpoint_raw(model_path)
     config = JointTrainingConfig.model_validate(config_dict)
     if config.backbone.requires_external_weights:
+        recorded = getattr(config.backbone, "checkpoint_path", None)
         print(f"{config.backbone.kind}: checkpoint carries no base weights -> loading them")
-    policy = load_joint_policy(model_path, device=device, camera=camera)
+        # Worth printing both: the recorded path is the cluster's, and a checkpoint scored on a
+        # different box loads the base from somewhere else entirely. Which weights the numbers
+        # below came from should not be something you have to infer.
+        print(f"  base weights: {backbone_source or recorded} (recorded: {recorded})")
+    policy = load_joint_policy(
+        model_path, device=device, camera=camera, backbone_source=backbone_source
+    )
     return policy, config, metadata
 
 
@@ -154,6 +161,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--camera", type=str, default=None, help="override the trained camera key")
+    parser.add_argument(
+        "--backbone-source",
+        type=str,
+        default=None,
+        help="local dir holding the frozen base weights; required when scoring a checkpoint "
+        "trained on another machine, whose recorded path does not exist here",
+    )
     parser.add_argument("--out", type=Path, default=None, help="default: --run-dir")
     parser.add_argument(
         "--skip-split-check",
@@ -170,7 +184,9 @@ def main(argv: list[str] | None = None) -> int:
 
     model_path = resolve_checkpoint(args.run_dir, args.checkpoint)
     print(f"checkpoint {model_path}")
-    policy, config, metadata = build_policy(model_path, args.device, args.camera)
+    policy, config, metadata = build_policy(
+        model_path, args.device, args.camera, args.backbone_source
+    )
     print(
         f"run {metadata.run_id} | config {metadata.config_hash[:12]} | "
         f"backbone {config.backbone.kind} | camera {policy.camera} | device {policy.device}"

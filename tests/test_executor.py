@@ -683,6 +683,56 @@ def test_requires_external_weights_splits_the_two_backbone_kinds() -> None:
     assert WanBackboneConfig(model_id="Wan-AI/Wan2.2-TI2V-5B").requires_external_weights is True
 
 
+def test_relocate_backbone_repoints_weights_and_device_for_this_machine() -> None:
+    """A checkpoint records the TRAINING machine's weight path; loading elsewhere substitutes.
+
+    ``train_t16_lora`` keeps the weight location out of the committed YAML so ``config_hash``
+    matches across machines (AC-04). The cost is that a cluster-trained checkpoint embeds
+    ``/valhalla/...``, which does not exist on a local GPU box — without the substitution the
+    load fails looking for weights that were never going to be there.
+    """
+    from wam.backbones.wan_i2v import WanBackboneConfig
+    from wam.runtime.policies import _relocate_backbone
+
+    trained = WanBackboneConfig(checkpoint_path="/valhalla/projects/x/models/Wan", device="cuda")
+    local = _relocate_backbone(trained, source="/models/Wan2.2-TI2V-5B", device="cpu")
+
+    assert local.checkpoint_path == "/models/Wan2.2-TI2V-5B"
+    assert local.device == "cpu"
+    # Everything that describes WHAT was trained has to survive untouched, or the relocated
+    # config would build a different model than the adapters were fitted to.
+    assert local.feature_blocks == trained.feature_blocks
+    assert local.dtype == trained.dtype
+    assert trained.checkpoint_path == "/valhalla/projects/x/models/Wan"  # input not mutated
+
+
+def test_relocate_backbone_is_a_no_op_when_nothing_needs_moving() -> None:
+    """Same device, no source: return the config itself rather than a revalidated copy."""
+    from wam.backbones.wan_i2v import WanBackboneConfig
+    from wam.runtime.policies import _relocate_backbone
+
+    trained = WanBackboneConfig(checkpoint_path="/models/Wan", device="cuda")
+
+    assert _relocate_backbone(trained, source=None, device="cuda") is trained
+
+
+def test_relocate_backbone_rejects_a_source_for_a_weightless_backbone() -> None:
+    """Tiny holds no external weights, so a source for it is a mistake worth naming."""
+    from wam.backbones.tiny import TinyBackboneConfig
+    from wam.runtime.policies import _relocate_backbone
+
+    with pytest.raises(ValueError, match="holds no weights of its own"):
+        _relocate_backbone(TinyBackboneConfig(), source="/models/Wan", device="cpu")
+
+
+def test_load_joint_policy_rejects_a_source_for_a_self_contained_checkpoint(tmp_path: Path) -> None:
+    """Silently ignoring it would let someone believe they scored against other weights."""
+    from wam.runtime.policies import load_joint_policy
+
+    with pytest.raises(ValueError, match="self-contained"):
+        load_joint_policy(_joint_checkpoint(tmp_path), device="cpu", backbone_source="/models/Wan")
+
+
 def test_joint_policy_reads_the_overridden_camera_and_fails_loudly_on_a_missing_one(
     tmp_path: Path,
 ) -> None:

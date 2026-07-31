@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+from pydantic import BaseModel
 from torch import nn
 
 from wam.interfaces import ActionChunk, Observation, RunMetadata
@@ -38,11 +39,48 @@ from wam.training import (
 __all__ = ["CheckpointPolicy", "DummyPolicy", "JointCheckpointPolicy", "load_joint_policy"]
 
 
+def _relocate_backbone(backbone_config: BaseModel, *, source: str | Path | None, device: str):
+    """Point a trained backbone config at THIS machine's weights and device.
+
+    Where the frozen weights sit is machine-local. ``train_t16_lora`` keeps it off the committed
+    YAML on purpose and folds ``--backbone-source`` in at run time, so ``config_hash`` matches
+    across two machines training the identical model (AC-04). The consequence lands here: a
+    checkpoint trained on the cluster carries *that cluster's* absolute path, so loading it
+    anywhere else has to substitute a local one or ``build_backbone`` goes looking for weights
+    that are not on this disk.
+
+    ``device`` is overridden for the same reason it is at training time: the frozen tower is
+    materialized by ``build_backbone(load=True)`` BEFORE the policy moves the model, so a
+    checkpoint that recorded ``cuda`` would allocate tens of GB of VRAM on the way to a CPU
+    policy — or just fail outright on a box with no GPU.
+
+    ``config_hash`` is deliberately NOT recomputed. These two fields record where a run happened,
+    not what was trained, which is precisely why they were excluded from the hash to begin with.
+    """
+    fields = type(backbone_config).model_fields
+    updates: dict[str, object] = {}
+    if source is not None:
+        if "checkpoint_path" not in fields:
+            raise ValueError(
+                f"backbone kind {backbone_config.kind!r} holds no weights of its own, "
+                "so a backbone source does not apply to it"
+            )
+        updates["checkpoint_path"] = str(source)
+    if "device" in fields and backbone_config.device != device:
+        updates["device"] = device
+    if not updates:
+        return backbone_config
+    # model_validate rather than model_copy: a substituted path should face the same validation a
+    # freshly parsed config does, instead of slipping in unchecked.
+    return type(backbone_config).model_validate({**backbone_config.model_dump(), **updates})
+
+
 def load_joint_policy(
     checkpoint_path: str | Path,
     *,
     device: str = "cpu",
     camera: str | None = None,
+    backbone_source: str | Path | None = None,
 ) -> JointCheckpointPolicy:
     """Load a joint checkpoint of EITHER kind, building the frozen base only when required.
 
@@ -55,6 +93,10 @@ def load_joint_policy(
     with it and cannot go missing. Callers that skip this and construct
     :class:`JointCheckpointPolicy` directly work only for the self-contained case.
 
+    ``backbone_source`` relocates the frozen weights for this machine (see
+    :func:`_relocate_backbone`); without it the path recorded at training time is used as-is,
+    which is right on the machine that trained and wrong everywhere else.
+
     Building the base is the expensive step (weights off disk, tens of GB for Wan), which is why
     it happens only on the branch that needs it.
     """
@@ -65,8 +107,15 @@ def load_joint_policy(
     _, config_dict, _ = load_checkpoint_raw(checkpoint_path)
     config = JointTrainingConfig.model_validate(config_dict)
     if not config.backbone.requires_external_weights:
+        if backbone_source is not None:
+            raise ValueError(
+                f"backbone kind {config.backbone.kind!r} is self-contained: its weights are in "
+                "the checkpoint, so there is no external source to point at"
+            )
         return JointCheckpointPolicy(checkpoint_path, device=device, camera=camera)
-    backbone = build_backbone(config.backbone, load=True)
+    backbone = build_backbone(
+        _relocate_backbone(config.backbone, source=backbone_source, device=device), load=True
+    )
     return JointCheckpointPolicy(
         checkpoint_path, device=device, backbone=backbone, strict=False, camera=camera
     )

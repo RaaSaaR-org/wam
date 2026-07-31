@@ -53,6 +53,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="Observation.images key to read, overriding the trained config.camera (--joint only)",
     )
+    parser.add_argument(
+        "--backbone-source",
+        default=None,
+        help="local dir holding the frozen base weights (--joint); needed when the checkpoint "
+        "was trained on another machine, whose recorded path does not exist here",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765, help="0 = OS-assigned port")
     args = parser.parse_args(argv)
@@ -87,15 +93,18 @@ def _build_checkpoint_policy(path: Path) -> Policy:
         return model
 
 
-def _build_joint_policy(path: Path, device: str, camera: str | None) -> Policy:
+def _build_joint_policy(
+    path: Path, device: str, camera: str | None, backbone_source: str | None = None
+) -> Policy:
     """Serve a world-action checkpoint (T-16). No fallback: unlike the action-only model,
     ``JointWorldActionModel`` needs ``JointCheckpointPolicy`` to reach ``predict``.
 
     Via ``load_joint_policy`` rather than that class directly, because a Wan-backed checkpoint
-    holds no base weights — they have to be built and loaded alongside it."""
+    holds no base weights — they have to be built and loaded alongside it, from
+    ``backbone_source`` when this is not the machine that trained them."""
     from wam.runtime.policies import load_joint_policy
 
-    policy = load_joint_policy(path, device=device, camera=camera)
+    policy = load_joint_policy(path, device=device, camera=camera, backbone_source=backbone_source)
     md = policy.metadata
     print(
         f"loaded world-action checkpoint run_id={md.run_id} config_hash={md.config_hash} "
@@ -108,7 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     if args.checkpoint is not None and args.joint:
-        policy: Policy = _build_joint_policy(args.checkpoint, args.device, args.policy_camera)
+        policy: Policy = _build_joint_policy(
+            args.checkpoint, args.device, args.policy_camera, args.backbone_source
+        )
     elif args.checkpoint is not None:
         policy = _build_checkpoint_policy(args.checkpoint)
     else:
