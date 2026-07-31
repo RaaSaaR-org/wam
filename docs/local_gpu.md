@@ -24,21 +24,35 @@ and 4 temporally, so latents are `(B, 48, 3, 8, 10)`, and patchifying `[1, 2, 2]
 | resident at inference | bf16 |
 |---|---|
 | Wan DiT (5B), frozen | ~10 GB |
+| umT5 text tower, frozen | ~11 GB |
 | VAE (encoder path only — `decode_video` is unused here) | ~1.4 GB |
 | LoRA adapters + action branch | <0.1 GB |
 | activations, 60 tokens, batch 1 | negligible |
-| **total** | **~12 GB** |
+| **total** | **~23 GB** |
 
-The umT5 text tower is ~11 GB and is **not** in that budget: `condition_text` is cached
-(`src/wam/backbones/wan_i2v.py:459`) and one task has one instruction, so it is called once. Peak
-during that first call is real, though — see the ordering note under *Troubleshooting*.
+**Measured: 24.3 GB peak / 25.2 GB reserved** (smoke job `183599` on an H200; the readout probe
+independently saw 24.65 GB). So on a 32 GB card this fits with roughly **7 GB spare**, not the 20 GB
+an earlier version of this table implied.
 
-**Two levers.** Evicting the text tower already exists: `adapter.offload("text_encoder")`, exposed
-as `--offload-text` on the smoke script — but not yet wired into `eval_t16.py`, `rollout.py` or
-`serve_policy.py`. Truncating the DiT is not built: readouts are at blocks `[15, 22]` of 30, so
-blocks 23–29 are computed and discarded, worth ~23 % of weight and compute.
+That earlier version put the text tower outside the budget, reasoning that `condition_text` is cached
+(`src/wam/backbones/wan_i2v.py:459`) and one task has one instruction, so the tower runs once.
+Caching the *output* does not evict the *weights* — 11 GB of umT5 stays resident for the whole run
+unless something explicitly drops it. The ~12 GB figure was the **offloaded** budget presented as the
+default.
 
-> The table above is arithmetic, not a measurement. Step 1 measures it. Trust the measurement.
+**Two levers, and the first is no longer optional on a 32 GB card:**
+
+- **Evict the text tower** — `adapter.offload("text_encoder")` exists, exposed as `--offload-text` on
+  the smoke script, but is *not* wired into `eval_t16.py`, `rollout.py` or `serve_policy.py`. Expect
+  ~13 GB with it. Unmeasured: the 24.3 GB above was recorded with `offload_text: false`.
+- **Truncate the DiT** — not built. T-16 reads blocks `[2, 10]` of 30
+  (`configs/training/joint_wan_gr00t.yaml`, the depth the readout probe measured), so **blocks 11–29
+  are computed and thrown away — 19 of 30 layers, ~63 % of DiT weight and compute.** Worth more than
+  the text tower and it cuts latency too. (The smoke script's `[15, 22]` is the backbone default, not
+  what T-16 trains.)
+
+> Every number above except the two bolded measurements is arithmetic. Step 1 measures it on your
+> card. Trust the measurement.
 
 ---
 
@@ -101,8 +115,16 @@ python scripts/eval_t16.py \
     --run-dir runs/t16-lora-seed0 \
     --dataset datasets/gr00t-apple-full \
     --holdout configs/splits/t18_holdout_episodes.txt \
+    --backbone-source /path/to/Wan2.2-TI2V-5B \
     --device cuda
 ```
+
+**`--backbone-source` is not optional for a checkpoint trained on Discoverer+**, which is every
+checkpoint this runbook is about. The frozen weight location is deliberately kept out of the
+committed config so `config_hash` matches across machines training the identical model (AC-04) — the
+path is folded in at run time instead, so the file records `/valhalla/projects/...`. Without the
+override, loading here goes looking for weights on a filesystem this box does not have. The flag
+also exists on `rollout.py` and `serve_policy.py` for the same reason.
 
 One forward pass per chunk, ~960 chunks over 40 episodes — minutes, well under a GPU-hour. Writes
 into the run dir:
@@ -152,13 +174,16 @@ python scripts/run_ablation.py --baseline-run runs/d1-full-gen-seed0 \
 action-only baseline": that baseline (mse 1.10e-5) itself loses to a causal repeat-last-action
 heuristic (9.14e-6) by 17 %, so clearing it proves nothing. See `docs/benchmark.md`.
 
-Reference points on the identical 40-episode holdout:
+Reference points on the identical 40-episode holdout, including the first T-16 checkpoint:
 
-| | `d1-full-gen-seed0` (action-only) | `t18-real-ablation-seed0` (world-action) |
-|---|---|---|
-| level | **L0** beats-doing-nothing | **below L0** |
-| score | 28.6/100 | 19.9/100 |
-| `skill_vs_repeat_pct` | −20.9 % | −129.0 % |
+| | `d1-full-gen-seed0` (action-only) | `t18-real-ablation-seed0` (world-action) | `t16-lora-seed0` (Wan 5B LoRA) |
+|---|---|---|---|
+| level | **L0** beats-doing-nothing | **below L0** | **L0** beats-doing-nothing |
+| score | 28.6/100 | 19.9/100 | 48.4/100 |
+| `skill_vs_repeat_pct` | −20.9 % | −129.0 % | **−32.4 %** |
+
+The bar is still unbeaten: the highest score in that table is the run that loses hardest to inertia
+after the tiny one. Read the level. `docs/benchmark.md` has the full column and the diagnosis.
 
 `--compare` refuses two runs whose holdouts differ, so the columns always mean the same thing.
 
@@ -176,19 +201,24 @@ in, both using the checkpoint directly:
 # In-process, against the mock robot: safety layer, watchdog, receding horizon
 python scripts/rollout.py --robot mock --policy joint \
     --checkpoint runs/t16-lora-seed0/checkpoints/step-020000/model.safetensors \
+    --backbone-source /path/to/Wan2.2-TI2V-5B \
     --policy-device cuda --rollouts 5
 
 # MuJoCo G1 + Dex3 with rendered pixels (docs/sim.md)
 python scripts/rollout.py --robot mujoco_g1 --policy joint \
-    --checkpoint <same> --policy-device cuda --policy-camera head --image-hw 120 160
+    --checkpoint <same> --backbone-source <same-weights> \
+    --policy-device cuda --policy-camera head --image-hw 120 160
 ```
 
 Or serve it and drive from elsewhere on the network — this is how the Mac can sit in the loop
 without holding the weights:
 
 ```bash
-python scripts/serve_policy.py --joint --checkpoint <same> --device cuda   # on the 5090
-python scripts/rollout.py --policy remote --server-uri ws://<5090-host>:8765      # anywhere
+# on the 5090
+python scripts/serve_policy.py --joint --checkpoint <same> \
+    --backbone-source /path/to/Wan2.2-TI2V-5B --device cuda
+# anywhere — no weights, no GPU, no backbone source
+python scripts/rollout.py --policy remote --server-uri ws://<5090-host>:8765
 ```
 
 What a `--policy joint` sim run measures: **latency against the deadline**, the safety and watchdog
@@ -225,6 +255,11 @@ machinery).
 
 **`gripper: expected 1 values, got 2`** — a `StateMLPConfig` left at the default `gripper_dims=1`
 against a real G1 episode, which has one gripper value per hand. Derive both dims from the state.
+
+**Weights not found under `/valhalla/projects/...`** on a machine that has no such path — the
+checkpoint recorded where its frozen base sat *on the cluster*. Pass `--backbone-source` (§2). Only
+the location is substituted; the config's `config_hash` is untouched, because where a run happened
+was never part of what was trained.
 
 **`REFUSING TO SCORE`** — see §2. This is the guard working; do not paper over it.
 

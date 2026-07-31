@@ -94,6 +94,8 @@ Both existing real-data runs, identical 40-episode holdout:
 | horizon_ratio | 1.66 | 1.02 |
 | smoothness_ratio | 2.35 | 5.10 |
 
+Baselines on this holdout, for reference: zero-delta 1.63276e-05, repeat-last-action 9.13766e-06.
+
 Three things the previous dashboard could not say:
 
 1. **The action-only baseline loses to repeat-last-action.** T-14 recorded "E1 mse 1.10e-5 vs
@@ -112,6 +114,48 @@ Three things the previous dashboard could not say:
 Point 1 is the load-bearing one: **the bar T-16 has to clear is `skill_vs_repeat_pct > 0`**, not
 "beats the action-only baseline". Beating a model that itself loses to a one-line heuristic is not
 evidence that video helps.
+
+## The T-16 result (2026-07-30) — the bar was not cleared
+
+`runs/t16-lora-seed0`, 20 000 steps of Wan2.2-TI2V-5B LoRA on the 362 training episodes, scored on
+the same 40-episode holdout by `scripts/eval_t16.py` (split proven against the trainer's
+`dataset_snapshot_ref`, not asserted):
+
+| metric | action-only | world-action (tiny) | **T-16 LoRA (Wan 5B)** |
+|---|---|---|---|
+| **level** | L0 | below L0 | **L0** beats-doing-nothing |
+| **score** | 28.6 / 100 | 19.9 / 100 | **48.4 / 100** |
+| mse | 1.10439e-05 | 2.09285e-05 | 1.21027e-05 |
+| ci_mse | 2.30187e-05 | 5.26316e-05 | 3.24412e-05 |
+| skill_vs_zero_pct | +32.4% | −28.2% | +25.9% |
+| **skill_vs_repeat_pct** | −20.9% | −129.0% | **−32.4%** |
+| ci_skill_vs_repeat_pct | −7.0% | −144.6% | −50.7% |
+| horizon_ratio | 1.66 | 1.02 | 1.30 |
+| smoothness_ratio | 2.35 | 5.10 | 0.29 |
+
+**Read the level, not the score.** 48.4 is the highest number any WAM run has produced and it is the
+least informative column in the table: L1 and L2 both fail, so the 48.4 is L0's points plus the two
+diagnostic rungs, which measure *shape* and not *skill*. On the one pre-registered bar — beat causal
+repeat-last-action — the fine-tune is **worse than the action-only baseline** it was supposed to
+improve on, on the full holdout and by more than double on the task-critical chunks.
+
+`smoothness_ratio` **0.29** is the diagnosis and it is worth two points of care. It scores 20/20
+because the gate is "no jerkier than the demos" (≤ 2) — but 0.29 means the prediction is 3.4×
+*smoother* than a real demonstration, which is not a demonstration-like trajectory at all. Combined
+with a positive `skill_vs_zero` and a negative `skill_vs_repeat`, it is the signature of a model
+that has learned the average pose trajectory of the task and not the task: it moves in roughly the
+right direction, blandly, and a one-line heuristic that just keeps doing what the arm was already
+doing beats it. That the gate rewards this is a real weakness of L4 — a two-sided band would catch
+it — but the ladder still gets the verdict right, because L4 is only reachable through L1 and L2,
+and the *level* stops at L0.
+
+What this does and does not settle: it settles that on this dataset a pretrained video prior,
+fine-tuned end-to-end with the action branch, adds nothing an inertia heuristic does not already
+give — the last open route after T-15/T-24/T-26 ruled out frozen features. It settles nothing about
+world-action modelling in general. 402 success-only episodes of one task, and a gripper channel that
+never opens (warning 2 above), cannot separate "the approach does not work" from "there is not
+enough of the right data here to tell". The next informative experiment is more and better data, not
+another backbone.
 
 ---
 
