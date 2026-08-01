@@ -4,7 +4,12 @@ Ready-to-`sbatch` files for the EuroHPC H200 partition (PetaSC / Sofia Tech Park
 `ehpc-aif-2026pg01-905`. Machine facts, quotas, billing and gotchas: **`docs/discoverer.md`** —
 that is the *why*, this is the *how*.
 
-**Nothing here has been executed yet. Allocation untouched: 5 000 GPU-h, 0 % used.**
+**Steps 1–6 and 7 have run** — the environment build, the weight staging, the Wan smoke job, the
+readout probe, and T-16 itself (20 000 LoRA steps, `runs/t16-lora-seed0`, negative: WAM-Bench L0,
+`skill_vs_repeat_pct` −32.4 %). Steps 8–11 are staged and unrun.
+
+**No document here asserts how much of the allocation is left** — that number moves every job and a
+stale copy of it is worse than none. Read it live with `accountcheck` (`docs/discoverer.md` §9).
 
 ---
 
@@ -62,7 +67,7 @@ Checkpoints belong in `${PROJ}/runs` ([scratch](https://docs.discoverer.bg/scrat
 | 6 | `50_train_t16.sbatch` | project | the budget | the LoRA fine-tune |
 | 7 | `60_eval_t16.sbatch` | project | ~0.2 GPU-h | score the checkpoint on the proven holdout |
 | 8 | `61_eval_t29_frame_history.sbatch` | project | ~0.4 GPU-h | T-29 / I-7: tiled frame vs. the real window |
-| 9 | `63_eval_t30_flow_head.sbatch` | project | ~1 GPU-h | T-30 / I-3: regression head vs. the flow sampler |
+| 9 | `63_eval_t30_flow_head.sbatch` | project | ~4 GPU-h ×1–2 | T-30 / I-3: regression head vs. the flow sampler |
 | 10 | `55_train_i8_rung.sbatch` | project | ~36 GPU-h ×3 | I-8 / T-32 rungs 040 / 120 (+ a seed-1 replicate) |
 | 11 | `62_eval_i8_curve.sbatch` | project | ~1 GPU-h | both frame modes × 3 rungs, then the pre-registered verdict |
 
@@ -159,5 +164,5 @@ sync.sh                push repo + dataset from the Mac
 60_eval_t16.sbatch     score the checkpoint (the verdict)  ~0.2 GPU-h
 61_eval_t29_frame_history.sbatch  T-29 frame-mode A/B      ~0.4 GPU-h
 62_eval_i8_curve.sbatch the I-8 curve + its decision rule  ~1 GPU-h
-63_eval_t30_flow_head.sbatch      T-30 readout A/B         ~1 GPU-h
+63_eval_t30_flow_head.sbatch      T-30 readout A/B         ~4 GPU-h, resubmit to continue
 ```

@@ -104,7 +104,16 @@ declare -A TRAIN_SPLIT=(
 
 for RUN_ID in i8-rung040-seed0 i8-rung120-seed0 i8-rung040-seed1; do
   OUT=${RUNS}/${RUN_ID}
-  [[ -d "${OUT}" ]] || { echo "skip ${RUN_ID} (no run dir)"; continue; }
+  # DONE, not just the directory. The two headline rungs already died above without it; this loop
+  # also carries i8-rung040-seed1, whose only gate was a WARNING that promised a consequence the
+  # code did not implement. An unfinished replicate exists as a directory the moment its first
+  # requeue pass starts, so `-d` alone scored it and fed sigma_hat = |s40 - replicate| from a run
+  # that had not reached its step budget. That inflates sigma_hat, which inflates MATERIAL, which
+  # makes SPAN >= MATERIAL and STEEP harder — routing the verdict to C. The header of this file
+  # says a rule that holds only the expensive conclusion to a standard is a preference, not a
+  # decision rule; admitting a partial replicate made the CHEAP conclusion the easy one to reach.
+  # Unmeasured is the safe state: sigma_hat stays None and the rule refuses outcome A outright.
+  [[ -d "${OUT}" && -f "${OUT}/DONE" ]] || { echo "skip ${RUN_ID} (no finished run)"; continue; }
   SPLIT=${PROJ}/wam/configs/splits/${TRAIN_SPLIT[${RUN_ID}]}
   if [[ ! -f "${SPLIT}" ]]; then
     echo "FATAL: ${SPLIT} missing — that is the witness the split proof anchors on."

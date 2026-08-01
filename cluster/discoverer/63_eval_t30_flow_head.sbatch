@@ -186,7 +186,17 @@
 #SBATCH --partition=common
 #SBATCH --account=ehpc-aif-2026pg01-905
 #SBATCH --qos=ehpc-aif-2026pg01-905
-#SBATCH --time=06:00:00              # 10 arms, each rebuilding the frozen 5B base from disk
+# --time is the QoS MaxWall (docs/discoverer.md: ehpc-aif-2026pg01-905 is capped at 04:00:00; this
+# file asked for 06:00:00 until 2026-08-01, which sbatch rejects outright). Ten arms each rebuild
+# the frozen 5B base from disk and do NOT reliably fit in one pass, so see `arm` below: every arm
+# writes its own --out and is skipped once it holds a bench.json. The recovery procedure for a job
+# killed at the cap is `sbatch` again, and it continues where it stopped.
+#
+# Every line of this block starts with '#' at column 0 on purpose. Slurm's _opt_batch_script does
+# skip leading whitespace before testing for '#', so an indented continuation would in fact parse
+# — but the directive block is not the place to depend on having read the scheduler's source.
+#SBATCH --time=04:00:00
+#SBATCH --open-mode=append
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=26           # >26 threads/GPU burns billing faster than GPU-hours
@@ -316,9 +326,29 @@ if [[ -n "${FRAME_HISTORY}" ]]; then
 fi
 echo "frame mode: ${FRAME_HISTORY:-tiled single frame (pre-T-29 default)}"
 
-echo
-echo "=== A: the regression head (today's deployed readout)"
-python "${EVAL}" "${common[@]}" --out "${OUT}/${REG_DIR}"
+# One arm = one python pass into one --out. `arm` makes the whole sweep RESUMABLE, which the 4 h
+# QoS cap requires: ten arms each rebuild the frozen 5B base from disk and do not reliably fit in
+# one pass, and this job has no in-python checkpointing to requeue into the way 50_/55_ do.
+#
+# Skipping on bench.json rather than on predictions.jsonl is deliberate. A pass killed between
+# writing predictions and writing the reports left an arm that is NOT finished, and bench.json is
+# the last of the four files eval_t16.py writes — so a half-written arm re-runs instead of being
+# counted. The skip also cannot silently accept the WRONG arm: eval_t16.py's own guard_out_dir
+# refuses to write one readout's artifacts into a directory holding another's, so a directory that
+# survives this check and matches the tag is the arm it claims to be.
+arm() {
+  local label=$1 out=$2
+  shift 2
+  echo
+  if [[ -f "${out}/bench.json" ]]; then
+    echo "=== ${label} — already scored (${out##*/}/bench.json), skipping"
+    return 0
+  fi
+  echo "=== ${label}"
+  python "${EVAL}" "${common[@]}" "$@" --out "${out}"
+}
+
+arm "A: the regression head (today's deployed readout)" "${OUT}/${REG_DIR}"
 
 echo
 echo "=== pre-flight: what the action latent can carry at best (CPU, no GPU)"
@@ -330,31 +360,25 @@ python "${LATENT}" --checkpoint "${STEP_DIR}" \
 
 # Unquoted on purpose: FLOW_STEPS_LIST is a word list, not one argument.
 for n in ${FLOW_STEPS_LIST}; do
-  echo
-  echo "=== B(${n}): the flow readout, ${n} Euler step(s), one draw from noise"
-  python "${EVAL}" "${common[@]}" --flow-sampler --flow-steps "${n}" \
-    --out "${OUT}/eval-t30-flow${n}"
+  arm "B(${n}): the flow readout, ${n} Euler step(s), one draw from noise" \
+    "${OUT}/eval-t30-flow${n}" --flow-sampler --flow-steps "${n}"
 done
 
-echo
-echo "=== B_seed1: the same arm, second draw — this MEASURES the band the rule uses"
-python "${EVAL}" "${common[@]}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
-  --flow-seed "${REPLICATE_SEED}" --out "${OUT}/${SEED1_DIR}"
+arm "B_seed1: the same arm, second draw — this MEASURES the band the rule uses" \
+  "${OUT}/${SEED1_DIR}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
+  --flow-seed "${REPLICATE_SEED}"
 
-echo
-echo "=== B_mean: ${FLOW_MEAN_K} draws averaged — the MSE-fair comparison against A"
-python "${EVAL}" "${common[@]}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
-  --flow-mean-k "${FLOW_MEAN_K}" --out "${OUT}/${MEAN_DIR}"
+arm "B_mean: ${FLOW_MEAN_K} draws averaged — the MSE-fair comparison against A" \
+  "${OUT}/${MEAN_DIR}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
+  --flow-mean-k "${FLOW_MEAN_K}"
 
-echo
-echo "=== B_warm: integration starts at t0=${FLOW_T0} — the conditioning-mismatch control"
-python "${EVAL}" "${common[@]}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
-  --flow-t0 "${FLOW_T0}" --out "${OUT}/${WARM_DIR}"
+arm "B_warm: integration starts at t0=${FLOW_T0} — the conditioning-mismatch control" \
+  "${OUT}/${WARM_DIR}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
+  --flow-t0 "${FLOW_T0}"
 
-echo
-echo "=== B_warmK: the same control, ${FLOW_MEAN_K} draws — variance-matched to B_mean"
-python "${EVAL}" "${common[@]}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
-  --flow-t0 "${FLOW_T0}" --flow-mean-k "${FLOW_MEAN_K}" --out "${OUT}/${WARMK_DIR}"
+arm "B_warmK: the same control, ${FLOW_MEAN_K} draws — variance-matched to B_mean" \
+  "${OUT}/${WARMK_DIR}" --flow-sampler --flow-steps "${FLOW_PRIMARY}" \
+  --flow-t0 "${FLOW_T0}" --flow-mean-k "${FLOW_MEAN_K}"
 
 echo
 echo "=== the comparison (regression vs the MSE-fair flow arm)"
