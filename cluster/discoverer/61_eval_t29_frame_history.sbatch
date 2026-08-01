@@ -81,11 +81,32 @@ if [[ ! -d "${OUT}" ]]; then
   exit 1
 fi
 
+# Resolve CKPT to an absolute step dir BEFORE it reaches eval_t16.py. resolve_checkpoint does
+# `step_dir = Path(which)` for any non-"latest" value, with no join against --run-dir, so the
+# `CKPT=step-010696` invocation this file's own header advertises (line 15) would resolve against
+# the job's CWD and die on "step-010696/model.safetensors missing" — after the node is allocated.
+# CKPT=latest is unaffected either way; this makes the documented override work too.
+if [[ "${CKPT}" == "latest" && -e "${OUT}/latest" ]]; then
+  STEP_DIR=$(readlink -f "${OUT}/latest")
+elif [[ "${CKPT}" == "latest" ]]; then
+  STEP_DIR=$(ls -d "${OUT}"/checkpoints/step-* | sort | tail -1)
+elif [[ -d "${CKPT}" ]]; then
+  STEP_DIR="${CKPT}"
+else
+  STEP_DIR="${OUT}/checkpoints/${CKPT}"
+fi
+if [[ ! -f "${STEP_DIR}/model.safetensors" ]]; then
+  echo "FATAL: ${STEP_DIR}/model.safetensors missing — not a restorable checkpoint."
+  echo "       Available: $(ls -d "${OUT}"/checkpoints/step-* 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
+  exit 1
+fi
+echo "checkpoint dir: ${STEP_DIR}"
+
 # The two runs differ in EXACTLY one flag. Everything else — checkpoint, dataset, holdout,
 # camera, device — is held identical by construction below rather than by copy-paste.
 common=(
   --run-dir "${OUT}"
-  --checkpoint "${CKPT}"
+  --checkpoint "${STEP_DIR}"
   --dataset "${DATASET}"
   --holdout "${HOLDOUT}"
   --train-episodes "${TRAIN_SPLIT}"

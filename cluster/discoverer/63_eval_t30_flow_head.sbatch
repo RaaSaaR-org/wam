@@ -189,8 +189,9 @@
 # --time is the QoS MaxWall (docs/discoverer.md: ehpc-aif-2026pg01-905 is capped at 04:00:00; this
 # file asked for 06:00:00 until 2026-08-01, which sbatch rejects outright). Ten arms each rebuild
 # the frozen 5B base from disk and do NOT reliably fit in one pass, so see `arm` below: every arm
-# writes its own --out and is skipped once it holds a bench.json. The recovery procedure for a job
-# killed at the cap is `sbatch` again, and it continues where it stopped.
+# writes its own --out and is skipped once it holds a timing.json — the LAST file eval_t16.py
+# writes, not bench.json, for the reason spelled out at the `arm` definition. The recovery
+# procedure for a job killed at the cap is `sbatch` again, and it continues where it stopped.
 #
 # Every line of this block starts with '#' at column 0 on purpose. Slurm's _opt_batch_script does
 # skip leading whitespace before testing for '#', so an indented continuation would in fact parse
@@ -282,6 +283,16 @@ if [[ "${FLOW_MEAN_K}" -lt 2 ]]; then
   echo "       the single draw's conditional-variance penalty, and k=1 removes none of it."
   exit 1
 fi
+# 0 is eval_t16.py's DEFAULT_FLOW_SEED, so REPLICATE_SEED=0 makes the "replicate" arm re-run the
+# sweep arm's own draw into a differently-named directory: a redundant GPU arm, and a band that
+# collapses to ~0 because it is measuring a draw against itself. The verdict's mismatch test then
+# fires on nothing. Same class as the two guards above — refuse the one value the knob exists to
+# not take.
+if [[ "${REPLICATE_SEED}" -eq 0 ]]; then
+  echo "FATAL: REPLICATE_SEED must differ from the sweep arm's seed (0), got ${REPLICATE_SEED} —"
+  echo "       at 0 the replicate IS the original draw and the band it measures is identically 0."
+  exit 1
+fi
 
 if [[ ! -d "${OUT}" ]]; then
   echo "FATAL: ${OUT} does not exist — nothing to score."
@@ -314,7 +325,12 @@ SEED1_DIR=eval-t30-flow${FLOW_PRIMARY}-seed${REPLICATE_SEED}
 # and frame mode are held identical by construction below rather than by copy-paste.
 common=(
   --run-dir "${OUT}"
-  --checkpoint "${CKPT}"
+  # ${STEP_DIR}, not ${CKPT}: eval_t16.py's resolve_checkpoint does `step_dir = Path(which)` for
+  # any non-"latest" value, with NO join against --run-dir, so a bare `CKPT=step-016251` would
+  # resolve against the job's CWD and die with "step-016251/model.safetensors missing" — after
+  # the node is allocated, and after line 302 has echoed a correct-looking absolute path. STEP_DIR
+  # is already absolute for every branch above, so this is right for `latest` and for a step name.
+  --checkpoint "${STEP_DIR}"
   --dataset "${DATASET}"
   --holdout "${HOLDOUT}"
   --train-episodes "${TRAIN_SPLIT}"
