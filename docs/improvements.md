@@ -602,6 +602,116 @@ exists to avoid.
 GPU, ~6 h; the rule is `T30_RULE_V2`, in git before any arm ran, with V1's three defects recorded
 in the file rather than silently edited out.
 
+### DIAGNOSED 2026-08-01 — three defects, not one, and the recorded one is the smallest
+
+All measured on CPU against archived artifacts. No GPU, no allocation. `GAIN_RULE_V1` was written
+down before any of it was measured.
+
+**D3 — the head's gain is flat in `t`. CONFIRMED, and this is the defect already in this file.**
+The field the sampler needs is `v* = (x1 − z_t)/(1−t)`: a gain of `1/(1−t)`, running 1 → 32 over
+the deployed grid. `scripts/probe_velocity_head.py` on `step-020000` measures the Jacobian
+`−∂v/∂z` at 4.8590 (t=0), 4.8584 (t=0.5), 4.8527 (t=0.9375) — **constant to four significant
+figures, moving −0.13 % where the truth demands +1500 %.**
+
+The cause is sharper than "no timestep embedding", and it corrects what this file said. Per-column
+first-layer norms are latent 4.12, **t 1.68**, feats 0.92 — the `t` column carries *more* weight
+than an average feature column, so `t` is not underweighted. It is **concatenated**, which is
+additive conditioning, and the required gain is **multiplicative**. That is exactly why the
+recorded prior negative (a Fourier embedding alone, at tiny scale) failed: it improved the
+*resolution* of `t`, not the *form* of the conditioning.
+
+The flat-gain model then predicts the archived step sweep. One free parameter, fitted on the n=64
+arm alone, mapping latent error to action MSE via `k = 1.68201e-05 / 0.05583²`:
+
+| n | predicted | measured | |
+|---|---|---|---|
+| 1 | 9.01705e-04 | 1.52949e-01 | **missed** |
+| 4 | 1.67360e-04 | 1.22018e-03 | **missed** |
+| 16 | 2.82611e-04 | 3.15420e-04 | −10 % |
+| 32 | 3.02478e-04 | 3.13045e-04 | −3 % |
+| 64 | — | 3.12448e-04 | *fitted* |
+
+Gain fitted end-to-end on the holdout: **1.4088**. Gain measured directly from the checkpoint
+tensors: **1.434**. Independent routes, agreeing to 2 % — that is the load-bearing agreement, and
+it is the reason to believe the mechanism.
+
+**Do not oversell that table.** n=16/32/64 are already converged to one another, so "predicting"
+them is largely predicting flatness. And the model misses n=1 and n=4 outright: at dt=1 and
+dt=0.25 a single Euler step from unit noise leaves the regime a local linearization describes.
+
+**D1 — the action latent is 99.85 % a constant, by variance. NEW.**
+`scripts/check_action_latent.py` on the same checkpoint: between-step centroid std **1.422**,
+within-step (content) std **0.05583**, nearest-centroid step accuracy 1.0000. The content is
+`0.0558²/1.422² = 0.15 %` of the latent variance, and the flow is trained to transport `N(0, I)`
+onto that — so **99.85 % of the transport work is reproducing a fixed pattern** and the 0.15 %
+carrying the answer is the remainder. Nothing in WAM normalizes the action latent; SD's 0.18215
+scale factor exists for precisely this.
+
+**D2 — the head cannot identify the chunk position at small `t`. Structural.** One MLP is applied
+to all 16 chunk positions and takes **no step index** (`joint.py:230-235`). At small `t`, `z_t` is
+near-pure noise and identically distributed across positions, so the head cannot know which of the
+16 centroids (spread 1.422) to move toward. Position becomes recoverable only once
+`t·1.422 > (1−t)·1.0`, i.e. **`t > 0.416`**. Below that the correct field is *not representable*,
+and no encoding of `t` helps, because the missing information is not `t`.
+
+This was found analytically and then reproduced independently: a synthetic testbed built to
+compare head architectures had *every* arm fail, including the analytically-motivated ones,
+because it had faithfully reproduced D2. The arms were at their architecture's ceiling, not
+underfitting. An oracle control confirmed the harness itself is exact — fed the true field, the
+sampler lands on `x1` to 1e-15.
+
+### Ranked by a synthetic ablation — and it refuted the ranking I had pre-registered
+
+A CPU testbed reproduces the measured latent geometry exactly (positional std 1.422, content std
+0.05583, no step index) and ablates the three defects independently. An oracle control confirms
+the harness: fed the true field, the sampler lands on `x1` to 1e-15. 4 000 steps, feat 512.
+
+| arm | latent MSE | vs content-free floor |
+|---|---|---|
+| shipped (raw scalar `t`, no step index) | 3.597 | **1147×** |
+| `+pos` | 2.087e-02 | 6.66× |
+| `+pos +fourier` | 5.413e-03 | 1.73× |
+| `+pos +film` | 5.674e-03 | 1.81× |
+| `+pos +film +xpred` | 3.840e-03 | **1.23×** |
+| `+pos +film +NORM` | 5.309e-03 | 1.69× |
+| `+pos +film +xpred +NORM` | 5.724e-03 | 1.83× |
+
+**`NORM_V1` — pre-registered, and REFUTED.** The written prediction was that arms *without*
+normalization would score at or above the content-free floor and arms *with* it would score below.
+No arm beat the floor, and normalization changed almost nothing (5.674e-03 → 5.309e-03; it made
+the `xpred` arm *worse*). **D1 is not the dominant defect, and the priority order this file carried
+for part of 2026-08-01 — normalization first — was wrong.** Recorded, not retrofitted.
+
+**D2 is the dominant lever: 3.597 → 0.0209, a 172× improvement from the step index alone.** That
+is the largest single effect anywhere in this file.
+
+**The multiplicative-conditioning argument is not supported here.** Fourier (1.73×) slightly beats
+FiLM (1.81×), where the argument predicted the reverse. The *measurement* of a flat gain on the
+archived weights stands on its own — it is a direct Jacobian of real tensors — but the mechanism
+story attached to it ("additive conditioning cannot express a multiplicative gain") does not
+survive this ablation and should not be repeated as established.
+
+**Confound, stated so the null does not read as stronger than it is.** No arm beats the floor, so
+in this testbed the binding constraint is predicting the *content* from the conditioning vector at
+all, not transporting onto it. A normalization null under those conditions is weak evidence;
+the `+pos` result, which moves 172×, is not.
+
+### Why all three now sit behind I-10
+
+With a t-flat gain the sampler is `z ← z + g(x̂1 − z)dt`, which contracts onto the head's **own**
+`x̂1` estimate by `exp(−g)`. So the flow readout is a strictly-worse noisy copy of the regression
+head, converging *to* it as `g → ∞` and unable to beat it at any `g`. Implied latent error:
+flow-converged 0.2406 (4.3× the content), regression head 0.0454 (0.81× the content).
+
+Fixing the field therefore raises a ceiling set by the regression head — and I-10 measures that
+head losing 1.76× to a linear map on proprioception. A separate measurement of the conditional
+(near-duplicate observations, 1-NN twin MSE 2.238e-06 vs random-partner 2.431e-05, ratio **0.09**,
+monotone across all ten distance deciles; no bimodality signature; prediction sits *inside* the
+local ground-truth cloud rather than in a void) found it **near-deterministic on this dataset**.
+Under a near-deterministic conditional the regression head is Bayes-optimal and the flow branch
+has nothing to win. That verdict is dataset-specific and should be re-measured on any dataset with
+genuine branch points before it is generalized.
+
 ---
 
 ## I-4 · State history window
@@ -810,6 +920,69 @@ here (L4 is only reachable through L1 and L2, and this run stops at L0).
 
 ---
 
+## I-10 · The deployed model loses to a linear map from proprioception
+
+**Measured 2026-08-01. Two independent implementations, same number. No GPU, no allocation.**
+
+Fit a ridge regression from the 32-dim robot state at chunk time (q15 + dq15 + gripper2) to the
+flattened `[16, 15]` action chunk. Train on the 362 training episodes, score on the same 40
+holdout episodes the model was scored on, taken from its own `predictions.jsonl` via
+`load_episode_ids` so the split cannot drift.
+
+| predictor | holdout MSE | trainable params |
+|---|---|---|
+| zero-delta (hold still) | 1.632760e-05 | — |
+| **Wan-5B + LoRA, deployed** | **1.112983e-05** | **82 519 450** |
+| ridge, `q` only | 1.348259e-05 | 3 615 |
+| ridge, gripper only | 1.550558e-05 | 495 |
+| ridge, `dq` only | 6.869239e-06 | 3 615 |
+| **ridge, full 32-dim state** | **6.330899e-06** | **7 920** |
+
+**The 7 920-parameter linear map is 1.76× better than the 82.5 M-parameter model.** `dq` alone —
+fifteen joint-velocity readings, no vision at all — is 1.62× better. Ridge is flat across λ from
+1e-2 to 1e2 (6.3309e-06 → 6.3332e-06), so it is not memorizing.
+
+**Controls, asserted before anything was fitted.** The harness reproduces the archived zero-delta
+baseline (1.632760e-05 vs 1.63276e-05) and the model's own archived MSE (1.112983e-05 vs
+1.11298e-05) to every digit. A separate agent's independent implementation returned 6.330899e-06
+for the ridge — the same value to seven figures from different code.
+
+*Not* reproduced: repeat-last-action came out 8.041488e-06 here against the bench's 9.13766e-06,
+i.e. this file's definition of that baseline is not the bench's. It is not load-bearing for
+anything above and is recorded rather than quietly dropped.
+
+**The comparison is not "we forgot to feed it `dq`".** That was the obvious way for this result to
+be an artifact, so it was checked rather than assumed. `StateMLP` takes all four canonical groups
+— `_GROUP_ORDER = ("q", "dq", "imu", "gripper")` (`state_mlp.py:30`), each with its own input
+block (`:81-82`) — and the archived config carries `num_joints: 15, gripper_dims: 2,
+embedding_dim: 32`, so the state reaches the backbone through `condition_state` with `dq`
+included. The model therefore has **strictly more** information than the ridge: the same
+proprioception, plus vision. It loses by 1.76× anyway.
+
+### What it does and does not establish
+
+**Establishes:** on this holdout, under this metric, the visual pathway contributes nothing
+measurable. A model that loses to proprioception has not earned its backbone. The bench already
+knew half of this — `skill_vs_repeat_pct` is negative, i.e. the model loses to repeat-last-action
+— but "loses to one trivial baseline" and "loses to *any* linear function of proprioception" are
+different claims, and only the second one indicts the whole visual path.
+
+**Does not establish** that the task is trivial or that vision is useless for it. It equally
+supports the reading that **this MSE is largely satisfiable by momentum extrapolation**, in which
+case the metric was never measuring the thing we care about and *beating* it would not have proven
+much either. Both readings are damning for the current state, in different ways, and this
+measurement cannot separate them. Separating them needs a metric that a momentum extrapolator
+fails — task success, or a subset with genuine branch points.
+
+The parsimonious confound is recorded plainly: 402 episodes of **one** task, ~90 minutes of robot
+data, ~9 476 heavily-overlapping training chunks, against 82.5 M trainable parameters — about 36
+trainable parameters per scalar action target.
+
+`scripts/bench_ridge_baseline.py` ships this as a permanent bar. It is deliberately blind: it
+never reads a frame.
+
+---
+
 ## What not to change
 
 Recorded so these do not get "improved" by accident:
@@ -846,14 +1019,43 @@ existing checkpoint and need no retraining at all.
 | ~~—~~ | ~~I-7 re-score T-18 + `d1-full-gen-seed0`~~ — **✅ ran 2026-08-01 on a laptop CPU: both moved <0.05 pp, ladder is single-mode, AC-07 readable again** | done | **zero GPU**, no retrain |
 | ~~—~~ | ~~I-3 flow branch deployed~~ (T-30) — **ran 2026-08-01, job 184670: every arm SUSPECT, pre-registered refusal, question still open** | ran, no verdict | 0.56 GPU-h spent |
 | ~~—~~ | ~~Fix the flow sampler~~ — **audited 2026-08-01: no bug. All three suspects clean against the training path; the old tests were green *and blind* (mutation-proven), now fixed** | done | hours, no GPU |
-| **1** | **Give `ActionVelocityHead` a sense of time** — it takes `t` as one raw scalar beside 3 072 features and learns a t-flat gain, so the field cannot contract to zero at any step count. Timestep embedding **and** a readable step index, retrained head-only on the frozen encoder/recon (which already hits the 8.10e-07 ceiling). **Not a known fix** — a Fourier embedding alone did not work at tiny scale | now | hours + head-only retrain |
-| **2** | **Re-run T-30** once a flow arm clears the guard on its own — arms and `63_...sbatch` unchanged | after 1 | ~0.6 GPU-h |
-| 3 | I-9 re-score the ladder on the rescaled gripper (T-31) | after the converter's audit passes | ~0.2 GPU-h, no retrain |
-| 4 | I-8 data-scaling curve (T-32) | after 2 — a readout swap moves every rung at once | 3 runs, existing allocation |
-| 5 | I-2 cross-attention head | after 1–4 say whether the readout was the problem | days + retrain |
-| 6 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
-| 7 | I-4 state history | only if memory tasks become a target | days |
-| 8 | I-5 state as latent frames | M6 | weeks |
+| ~~1~~ | ~~**Give `ActionVelocityHead` a sense of time**~~ — **superseded 2026-08-01, see the re-order below.** The diagnosis was right and is now confirmed on the real weights, but it is the *third*-largest defect in the flow branch, and the whole branch is downstream of I-10 | demoted | hours + head-only retrain |
+| **1** | **I-10 · decide what the ridge result means** — the deployed model loses 1.76× to a 7 920-parameter linear map on proprioception. Either the visual path contributes nothing, or the metric is momentum-satisfiable. Needs a metric a momentum extrapolator fails, not another readout change | now | hours, no GPU |
+| **2** | **I-3/D2 · give the head a readable step index** — a correctness fix, not a refinement: with no step index and `z_t` near-pure noise below `t ≈ 0.416`, the head cannot tell which of 16 centroids to move toward and the correct field is **unrepresentable**. Worth **172×** in the ablation, the largest single effect in this file | after 1 says the branch is worth keeping | hours |
+| **3** | **I-3/D3 · give the head a real `t` embedding** — the gain is confirmed flat to 4 s.f. on the archived weights. Worth a further ~4× in the ablation. Fourier and FiLM measured equivalent, so take the simpler one; the "must be multiplicative" argument did **not** survive testing | with 2 | hours |
+| ~~4~~ | ~~**I-3/D1 · normalize the action latent**~~ — **`NORM_V1` refuted 2026-08-01.** The latent really is 99.85 % a fixed positional pattern, but normalizing it changed almost nothing in the ablation. Kept in the file as a measured negative, not a queued item | — | — |
+| 5 | **Re-run T-30** once a flow arm clears the guard on its own — arms and `63_...sbatch` unchanged | after 2–4 | ~0.6 GPU-h |
+| 6 | I-9 re-score the ladder on the rescaled gripper (T-31) | after the converter's audit passes | ~0.2 GPU-h, no retrain |
+| 7 | I-8 data-scaling curve (T-32) | after 1 — see below, I-10 changes what this curve would mean | 3 runs, existing allocation |
+| 8 | I-2 cross-attention head | after 1–5 say whether the readout was the problem | days + retrain |
+| 9 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
+| 10 | I-4 state history | only if memory tasks become a target | days |
+| 11 | I-5 state as latent frames | M6 | weeks |
+
+**Re-ordered again 2026-08-01, and this one is a demotion of the item that was #1 that morning.**
+The principle from 2026-07-30 still holds, but I-10 extends it: *anything that can change the
+meaning of a number we have already recorded* now includes the question of whether the headline
+metric measures the thing we care about at all. A 7 920-parameter blind baseline beating the
+deliverable is that kind of number.
+
+**One of these entries is a retraction of the same table earlier the same day.** For part of
+2026-08-01 this table had D1 (latent normalization) at #2 on the strength of a derivation, before
+the ablation that tested it had reported. `NORM_V1` was written down first and came back refuted,
+so D1 is struck and D2 promoted. The derivation is left in I-3 with its refutation attached rather
+than deleted — it was wrong for an interesting reason, and deleting it would make this file look
+like it has never mis-ranked anything.
+
+**Why the flow items dropped behind I-10.** On the flat-gain analysis in I-3 the flow readout
+contracts onto the regression head's own estimate, so it converges *to* that head and cannot beat
+it. Every flow fix is therefore capped by what the regression head knows — and I-10 measures that
+head losing to proprioception. Fixing the flow branch first would be optimizing the readout of a
+representation that has not been shown to carry anything.
+
+**Why I-8 slipped again, from 4 to 7.** The 2026-07-30 note said fitting a scaling curve through
+numbers a pending decode change may move is fitting to a moving target. I-10 is worse than a
+moving target: if the metric is momentum-satisfiable, N\* would be extrapolated from a curve
+measuring how fast the model learns to imitate `dq`. That is ~125 GPU-h to fit a curve whose
+y-axis is in question. **Still held for explicit confirmation, now for a second reason.**
 
 **Why I-9 moved but did not jump the queue.** Its *build* is done and cost no GPU, because the
 finding turned out to be a converter bug rather than a missing dataset. Its *re-score* still sits
