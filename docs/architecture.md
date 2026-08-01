@@ -74,7 +74,7 @@ those bounded numbers are read directly as radians (see the unit contract above)
 ## 2. The seams
 
 Every swappable module is a `@runtime_checkable` `Protocol` in `wam.interfaces.protocols`
-(`INTERFACES_VERSION = "0.2.0"`) — structural, so conformance is `isinstance`, never inheritance.
+(`INTERFACES_VERSION = "0.3.0"`) — structural, so conformance is `isinstance`, never inheritance.
 The protocol module is torch-free: tensors are typed `Any` with a documented contract ("last
 dimension is the feature dim"), and anything crossing the robot/safety boundary is numpy.
 
@@ -219,5 +219,9 @@ same trainer accepts the self-contained `tiny` backbone and a 5B DiT. That is wh
 and tested before a robot existed.
 
 It does not buy correctness of the *idea*. The open claim is AC-07 — that predicting video helps the
-action head at all — and it currently rests entirely on a LoRA fine-tune that has not been run. See
-the "Not proven" table in `README.md` before quoting anything from here as evidence.
+action head at all — and the LoRA fine-tune it rested on has now run and come back **negative**:
+WAM-Bench L0, `skill_vs_repeat_pct` −32.4 %, i.e. losing to repeat-last-action. That verdict is not
+yet final, because three confounds under it are staged and unrun (T-29 frame history, T-30 flow
+readout, T-32 data scaling), so the honest reading is "negative, measured out of distribution and
+through a readout training never deployed". See `docs/benchmark.md` and the "Not proven" table in
+`README.md` before quoting anything from here as evidence.

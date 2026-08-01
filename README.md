@@ -33,7 +33,7 @@ backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and ne
 
 ## Status (2026-07-29)
 
-**666 tests green.** M0–M4 are code-complete. What that does and does not mean:
+**858 tests green.** M0–M4 are code-complete. What that does and does not mean:
 
 | Proven | How |
 |--------|-----|
@@ -47,7 +47,7 @@ backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and ne
 | Not proven | Why it matters |
 |------------|----------------|
 | **That the action-only policy learned anything a heuristic cannot do** | A causal repeat-last-action baseline scores mse 9.14e-6 — 17 % *better* than the trained model. The −32 % above is real, but it is the demonstration's own inertia. WAM-Bench puts the run at **L0, 28.6/100** (T-27, `docs/benchmark.md`). |
-| **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge — including with the spatial readout that could have explained it away (T-26) — and at tiny scale the video branch *hurts*. The whole claim now rests on the T-16 LoRA fine-tune, which has never been run. |
+| **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge — including with the spatial readout that could have explained it away (T-26) — and at tiny scale the video branch *hurts*. The T-16 LoRA fine-tune has now run and is **negative** — WAM-Bench L0, `skill_vs_repeat_pct` −32.4 %, losing to repeat-last-action. Three confounds under that verdict are staged and unrun (T-29/T-30/T-32), so it is "negative, measured out of distribution", not "no". |
 | Anything on a physical robot | No G1 yet. Vendor conformance, E-stop chain, real limits and the Dex3 mapping are asserted, not measured. |
 | Real teleop data (D1/D2) | Everything so far is synthetic or converted from `nvidia/GR00T-N1.7-AppleToPlate`. |
 
@@ -108,7 +108,7 @@ scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 | `docs/benchmark.md` | WAM-Bench: the offline ladder, its KPIs, and the external benchmark landscape |
 | `docs/local_gpu.md` | Single consumer GPU: run, test and benchmark a checkpoint (no fine-tune) |
 | `docs/discoverer.md` | EuroHPC H200 cluster: machine facts, quotas, billing, gotchas |
-| `cluster/discoverer/README.md` | The same cluster as a runbook — six `sbatch` files in order |
+| `cluster/discoverer/README.md` | The same cluster as a runbook — eleven `sbatch` files in execution order |
 | `docs/sim.md` | MuJoCo scene, what it proves and what it does not |
 | `docker/dds/README.md` | DDS conformance + the ordered hardware bring-up checklist |
 | `docs/hf_jobs.md` | Free-tier GPU work: ZeroGPU Spaces and HF Jobs |
@@ -116,9 +116,15 @@ scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 
 ## Next step
 
-Run T-16. Compute and code are both ready; the LoRA fine-tune on Discoverer+ is what turns
-"video helps" from a hypothesis into a measurement. Start with the free jobs in
-`cluster/discoverer/README.md` — they cost no GPU hours and prove the environment.
+T-16 has run and lost to repeat-last-action. Three confounds under that verdict are staged on
+Discoverer+ (`cluster/discoverer/README.md`), in this order, and none of them needs a robot:
 
-The bar it has to clear is `skill_vs_repeat_pct > 0` on WAM-Bench, not "beats the action-only
-baseline" — that baseline itself loses to a one-line heuristic.
+1. `61_eval_t29_frame_history.sbatch` — T-29. Training fed the real `num_frames` window; `predict()`
+   fed one frame tiled. A backbone trained on a moving clip was graded on a freeze-frame.
+2. `63_eval_t30_flow_head.sbatch` — T-30. We train two action readouts and deploy the cheaper one.
+   The action *latent* reconstructs the holdout 15× better than the readout that was scored.
+3. `55_train_i8_rung.sbatch` ×3, then `62_eval_i8_curve.sbatch` — T-32. "Not enough data" has
+   explained every negative in this project and has never been tested.
+
+The bar any of them has to clear is `skill_vs_repeat_pct > 0` on WAM-Bench, not "beats the
+action-only baseline" — that baseline itself loses to a one-line heuristic.

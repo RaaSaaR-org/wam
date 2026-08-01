@@ -30,7 +30,8 @@ Already testable without the robot (2026-07-27):
   `scripts/fetch_g1_model.py`, then `get_robot("mujoco_g1")` gives the real `G1Adapter` on a
   MuJoCo G1 with Dex3 hands, a table, a cube and two cameras. Full `ClosedLoopExecutor` rollouts
   run at 1.19× realtime including two 256×256 renders per cycle (28.5× realtime physics-only).
-  Sim gains kp=300/kd=15 live in `configs/robot/mujoco_g1.yaml`; `g1.yaml` keeps its conservative
+  Sim gains kp=500 with per-joint critical damping (`SIM_KP`/`SIM_KD`, re-derivable via
+  `scene_critical_damping`) live in `configs/robot/mujoco_g1.yaml`; `g1.yaml` keeps its conservative
   hardware placeholders untouched. Caveats that matter: no stable grasp yet, welded base with 14
   locked joints, invented camera extrinsics. Pinned by `tests/test_mujoco_g1.py` (21 tests,
   skipped without the `mujoco` extra) — but those are contract tests; the measured physics

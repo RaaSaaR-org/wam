@@ -73,7 +73,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.get_device_capabili
 Confirm the repo is healthy before trusting any GPU number from it:
 
 ```bash
-python -m pytest -q          # 666 tests, all CPU
+python -m pytest -q          # the whole suite, all CPU
 ```
 
 ---
@@ -381,7 +381,10 @@ its training region"*. The faithful sampler — n backbone passes on an observat
 `t_k` — is not run at all, so **every negative below is about the flow branch AS SAMPLED THIS WAY,
 never about the flow branch as trained.**
 
-**Decision rule `T30_RULE_V1`, fixed before the run** — keyed on `skill_vs_repeat_pct` of the
+**Decision rule `T30_RULE_V2`, fixed before the run** — the version
+`cluster/discoverer/63_eval_t30_flow_head.sbatch` actually runs; V1 is superseded **unrun**, no arm
+of it was ever executed, and its three defects are kept in that file's header. Keyed on
+`skill_vs_repeat_pct` of the
 **mean-of-k** arm against A, with `BAND = max(3·σ̂, 10 pp)` and σ̂ the *measured* `|seed0 − seed1|`
 spread (a second `--flow-seed` arm, the same construction I-8 uses; a bare literal band would be a
 threshold nobody had tested). B_mean beats A by more than BAND *and* clears 0 → the mean-seeking
@@ -415,13 +418,26 @@ in, both using the checkpoint directly:
 python scripts/rollout.py --robot mock --policy joint \
     --checkpoint runs/t16-lora-seed0/checkpoints/step-020000/model.safetensors \
     --backbone-source /path/to/Wan2.2-TI2V-5B \
+    --contract-from-dataset datasets/gr00t-apple-full \
+    --instruction "move the apple to the plate" \
     --policy-device cuda --rollouts 5
 
 # MuJoCo G1 + Dex3 with rendered pixels (docs/sim.md)
 python scripts/rollout.py --robot mujoco_g1 --policy joint \
     --checkpoint <same> --backbone-source <same-weights> \
+    --contract-from-dataset datasets/gr00t-apple-full \
+    --instruction "move the apple to the plate" \
     --policy-device cuda --policy-camera head --image-hw 120 160
 ```
+
+**`--policy checkpoint|joint` refuses to start without a policy contract**, and nothing writes a
+`policy_contract.json` today, so contract discovery cannot rescue a command that omits it. The two
+flags above are what make these runnable: the contract declares which state groups training used
+(our converter wrote `ValidityMask(imu=False)` for all 402 episodes, every adapter here reports
+`imu=True`, and the encoder moves 2.011 against an embedding norm of 2.454 between the two), and
+the instruction is checked against the ones the run actually trained on. `--no-policy-contract`
+opts out and is recorded as `"contract": null` so an unchecked run cannot pass for a clean one.
+Full detail and the divergence table: `docs/sim.md`.
 
 Or serve it and drive from elsewhere on the network — this is how the Mac can sit in the loop
 without holding the weights:

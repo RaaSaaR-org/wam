@@ -10,10 +10,11 @@ that can hold a training run for hours. ZeroGPU cannot; Discoverer+ can. This cl
 compute half of OD-05.
 
 **Runnable form:** the job scripts in this document are checked in as `cluster/discoverer/`
-(sync script + six `sbatch` files, in order). This document is the *why* — machine facts,
+(sync script + eleven `sbatch` files, in execution order). This document is the *why* — machine facts,
 quotas, billing, gotchas; that directory is the *how*. Its README opens with the seven
 **never-do** rules and carries the full link table to the provider's documentation (24 pages,
-all checked reachable 2026-07-28). Nothing has run on the cluster yet.
+all checked reachable 2026-07-28). The environment build, the weight staging, the smoke job, the
+readout probe and T-16 itself have run; the T-29/T-30/I-8 batch is staged and unrun.
 
 | | |
 |---|---|
