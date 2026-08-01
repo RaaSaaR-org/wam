@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -10,8 +11,11 @@ import numpy as np
 import pytest
 
 from wam.evaluation import (
+    BENCH_SPEC_DEFAULT,
+    BENCH_SPECS,
     MAX_HORIZON_RATIO,
     MAX_SMOOTHNESS_RATIO,
+    MIN_SMOOTHNESS_RATIO,
     RUNG_NAMES,
     BenchReport,
     ChunkPrediction,
@@ -19,7 +23,7 @@ from wam.evaluation import (
     compare_bench,
     save_predictions_jsonl,
 )
-from wam.evaluation.benchmark import _causal_previous_action, _shift_tolerant_sq
+from wam.evaluation.benchmark import _causal_previous_action, _shift_tolerant_sq, _smoothness_rung
 from wam.interfaces import ActionChunk, ActionMode
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "run_bench.py"
@@ -64,14 +68,17 @@ def constant(value: float, steps: int = STEPS, dim: int = DIM) -> np.ndarray:
     return np.full((steps, dim), value, dtype=np.float32)
 
 
-def test_perfect_prediction_tops_the_accuracy_rungs() -> None:
+@pytest.mark.parametrize("spec_version", sorted(BENCH_SPECS))
+def test_perfect_prediction_tops_the_accuracy_rungs(spec_version: str) -> None:
+    """Must hold under EVERY spec: it is the guard that a rule change did not move the anchor."""
     targets = [constant(0.1), constant(0.2), constant(0.3)]
-    report = bench_metrics(episode(targets, targets))
+    report = bench_metrics(episode(targets, targets), spec_version=spec_version)
 
     assert report.mse == pytest.approx(0.0)
     assert report.skill_vs_zero_pct == pytest.approx(100.0)
     assert report.skill_vs_repeat_pct == pytest.approx(100.0)
     assert [r.passed for r in report.rungs[:3]] == [True, True, True]
+    assert report.score == pytest.approx(100.0)
 
 
 def test_zero_prediction_scores_zero_skill_and_fails_l0() -> None:
@@ -163,7 +170,243 @@ def test_degenerate_gripper_channel_is_flagged() -> None:
 
     assert report.gripper_dynamic_range == pytest.approx(0.0)
     assert any("degenerate" in w.lower() for w in report.warnings)
-    assert any("NOT a grasp-success proxy" in w for w in report.warnings)
+    assert any("grasp-success proxy" in w for w in report.warnings)
+
+
+# --- gripper admissibility (T-31) ----------------------------------------------------------------
+
+
+def gripper_episode(values: np.ndarray, episode_id: str = "ep0") -> list[ChunkPrediction]:
+    """One episode whose demonstrated AND predicted gripper follow ``values``, 8 steps per chunk."""
+    dt_ns = int(DT * 1e9)
+    n_chunks = values.shape[0] // STEPS
+    return [
+        ChunkPrediction(
+            predicted=chunk(constant(0.1), values[i * STEPS : (i + 1) * STEPS]),
+            target=chunk(constant(0.1), values[i * STEPS : (i + 1) * STEPS]),
+            episode_id=episode_id,
+            t_ns=i * STEPS * dt_ns,
+        )
+        for i in range(n_chunks)
+    ]
+
+
+def test_gripper_accuracy_is_withheld_below_the_dynamic_range_floor() -> None:
+    """A number that cannot be believed must not be renderable as a number."""
+    targets = [constant(0.1) for _ in range(4)]
+    report = bench_metrics(episode(targets, targets, gripper=0.48))
+
+    assert report.gripper_accuracy is None
+    assert "0.25" in report.gripper_accuracy_withheld_reason
+    markdown = report.render_markdown()
+    assert "| gripper_accuracy | n/a — withheld" in markdown
+    assert "| gripper_accuracy | 1 |" not in markdown
+
+
+def test_gripper_majority_baseline_is_reported_even_when_accuracy_is_withheld() -> None:
+    """Withholding must not lose information — the majority rate IS what the accuracy measured."""
+    values = np.full(STEPS * 10, 0.48, dtype=np.float32)
+    values[: STEPS * 2] = 0.52  # 20% above the binarization threshold, all within 0.04 p2p
+    report = bench_metrics(gripper_episode(values))
+
+    assert report.gripper_accuracy is None
+    assert report.gripper_majority_pct == pytest.approx(80.0)
+    assert "80.0%" in report.gripper_accuracy_withheld_reason
+    assert "| gripper_majority_pct | 80.0% |" in report.render_markdown()
+
+
+def test_gripper_transitions_are_debounced_and_counted_per_episode() -> None:
+    """A channel with real open/close events keeps its accuracy and reports the event count."""
+    values = np.where((np.arange(STEPS * 8) // STEPS) % 2 == 0, 0.05, 0.95).astype(np.float32)
+    report = bench_metrics(gripper_episode(values))
+
+    assert report.gripper_accuracy == pytest.approx(1.0)
+    assert report.gripper_accuracy_withheld_reason == ""
+    assert report.gripper_dynamic_range == pytest.approx(0.9)
+    assert report.gripper_transitions_per_episode == pytest.approx(7.0)
+
+
+def test_withholding_the_gripper_number_moves_no_rung_points() -> None:
+    """The claim that justifies NOT spec-versioning the withholding change.
+
+    The gripper is a diagnostic and earns no rung credit, so suppressing it cannot move a score
+    or a level — and the degenerate-vs-live pair is the only way to check that rather than assert
+    it. Every scored quantity is built from ``targets``, which is identical in both runs.
+    """
+    dead = np.full(STEPS * 8, 0.48, dtype=np.float32)
+    live = np.where((np.arange(STEPS * 8) // STEPS) % 2 == 0, 0.05, 0.95).astype(np.float32)
+    withheld = bench_metrics(gripper_episode(dead))
+    reported = bench_metrics(gripper_episode(live))
+
+    assert withheld.gripper_accuracy is None and reported.gripper_accuracy is not None
+    assert withheld.score == pytest.approx(reported.score)
+    assert withheld.level == reported.level
+    for a, b in zip(withheld.rungs, reported.rungs):
+        assert (a.points, a.passed, a.value) == (b.points, b.passed, b.value)
+
+
+# --- versioned bench specs (I-10) ----------------------------------------------------------------
+
+
+def test_min_smoothness_ratio_is_the_reciprocal_of_the_max() -> None:
+    """Derived, never literal: the floor cannot be quietly tuned to flatter a run it scored."""
+    assert MIN_SMOOTHNESS_RATIO == 1.0 / MAX_SMOOTHNESS_RATIO
+    assert BENCH_SPECS["0.2.0"].min_smoothness_ratio == MIN_SMOOTHNESS_RATIO
+    assert BENCH_SPECS["0.1.0"].min_smoothness_ratio is None
+    assert BENCH_SPEC_DEFAULT == "0.1.0"
+
+
+def test_smoothness_band_is_one_sided_under_spec_0_1_0_and_two_sided_under_0_2_0() -> None:
+    """Archived runs stay reproducible; the new rule is a real change, not cosmetics."""
+    one, two = BENCH_SPECS["0.1.0"], BENCH_SPECS["0.2.0"]
+
+    # A prediction as smooth as the demonstrations tops the rung under BOTH — the anchor did
+    # not move, which is what makes 0.2.0 a completion of 0.1.0 rather than a new rule.
+    for spec in (one, two):
+        assert _smoothness_rung(1.0, spec)[2:] == (True, 20.0)
+
+    # T-16's 0.29: 3.4x SMOOTHER than a demonstration. Full marks under 0.1.0, a fail under 0.2.0.
+    assert _smoothness_rung(0.29, one)[2:] == (True, 20.0)
+    assert _smoothness_rung(0.29, two)[2:] == (False, 0.0)
+
+    # The one-sided failure is unchanged, and both band edges score zero points but pass.
+    assert _smoothness_rung(2.35, one)[2] is False
+    assert _smoothness_rung(2.35, two)[2] is False
+    assert _smoothness_rung(2.0, two)[2:] == (True, 0.0)
+    assert _smoothness_rung(0.5, two)[2:] == (True, 0.0)
+
+    # Degenerate ratios: inf is a diverging run, 0.0 a perfectly flat one. Neither is demo-like.
+    assert _smoothness_rung(float("inf"), two)[2:] == (False, 0.0)
+    assert _smoothness_rung(0.0, two)[2:] == (False, 0.0)
+
+
+def test_a_run_that_fails_l1_keeps_its_level_whatever_l4_says() -> None:
+    """Why "no archived run's level moves" was NOT a test of the 0.2.0 adoption.
+
+    ``level`` is the highest CONTIGUOUS rung passed, so a run that fails L1 is capped at L0 no
+    matter what L3 and L4 decide. All three archived runs fail L1 (skill_vs_repeat_pct −20.9 /
+    −129.0 / −32.4, tabulated in docs/benchmark.md before the rule was written), so an L4-only
+    change could not have moved any of their levels. This is the shape of that run: L4 flips from
+    PASS to FAIL and the level does not move a rung.
+    """
+    rng = np.random.default_rng(0)
+    targets = [
+        constant(0.5) + rng.normal(0, 0.01, (STEPS, DIM)).astype(np.float32) for _ in range(6)
+    ]
+    preds = [t * 0.5 for t in targets]  # beats zero-delta, loses to repeat-last-action
+
+    old = bench_metrics(episode(preds, targets), spec_version="0.1.0")
+    new = bench_metrics(episode(preds, targets), spec_version="0.2.0")
+
+    assert old.rungs[1].passed is False  # L1 fails, so L2-L4 cannot be reached
+    assert old.rungs[4].passed is True and new.rungs[4].passed is False
+    assert old.level == new.level == 0
+    assert new.score < old.score  # the score is the only thing that could have moved
+
+
+def test_no_ratio_scores_more_under_spec_0_2_0_than_under_0_1_0() -> None:
+    """Adoption rule for spec 0.2.0, restated so it could have failed: no score may INCREASE.
+
+    Unlike the level, an L4 rule change moves the score directly, and nothing about adding a
+    floor forces the move to be downward: two of the three archived runs score 0/20 on L4 under
+    the one-sided gate (t18 at r = 5.10, d1-full-gen at r = 2.35), so a 0.2.0 that re-anchored
+    the points function while adding the floor — a linear penalty on |r - 1|, or a wider ceiling
+    to make room for the new side — would have raised them. The shipped rule satisfies the
+    constraint for EVERY ratio and not only for the three archived ones, which is what makes it a
+    constraint on the rule change rather than an observation about three files.
+
+    "Every ratio" is swept on the same dense grid the sibling adoption test uses, plus the
+    archived ratios and the two band edges as named points. An earlier version of this test
+    checked 11 hand-picked ratios and the prose still said "every" — 11 points do not establish
+    a claim over the axis, and the grid was already available one test down.
+    """
+    grid = np.concatenate(
+        [
+            np.linspace(1e-6, 6.0, 6000),
+            np.geomspace(1e-6, 1e3, 2000),
+            np.array([0.29, 2.35, 5.098, MIN_SMOOTHNESS_RATIO, 2.0, 1.0]),
+        ]
+    )
+    for ratio in grid:
+        old_points = _smoothness_rung(float(ratio), BENCH_SPECS["0.1.0"])[3]
+        new_points = _smoothness_rung(float(ratio), BENCH_SPECS["0.2.0"])[3]
+        assert new_points <= old_points + 1e-12, ratio
+
+
+def test_the_two_specs_disagree_exactly_below_the_derived_floor() -> None:
+    """Second adoption rule: 0.2.0 may change an L4 verdict only where it intends to.
+
+    The intended change is "too bland is also a failure", i.e. r < MIN_SMOOTHNESS_RATIO. A
+    verdict that differed anywhere else — at the ceiling, or at r == 1.0 — would mean the band
+    moved rather than gained a second side, and that would be a re-litigation of the three
+    recorded L4 results rather than a completion of the rule.
+    """
+    one, two = BENCH_SPECS["0.1.0"], BENCH_SPECS["0.2.0"]
+    grid = np.linspace(1e-3, 6.0, 6000)
+    for ratio in grid:
+        differs = _smoothness_rung(ratio, one)[2] != _smoothness_rung(ratio, two)[2]
+        assert differs == (ratio < MIN_SMOOTHNESS_RATIO), ratio
+
+
+def test_a_bland_run_loses_points_without_gaining_a_rung_under_the_new_spec() -> None:
+    """The adoption rules end to end on a scored run, not only on the rung helper."""
+    rng = np.random.default_rng(7)
+    targets = [
+        constant(0.2) + rng.normal(0, 0.05, (STEPS, DIM)).astype(np.float32) for _ in range(4)
+    ]
+    # A prediction that follows the demo at 80% of its jerk: r = 0.64, inside 0.2.0's band, so
+    # BOTH specs pass L4 and only the points differ. The boundary case the second rule is about.
+    preds = [constant(0.2) + (t - constant(0.2)) * 0.8 for t in targets]
+    old = bench_metrics(episode(preds, targets), spec_version="0.1.0")
+    new = bench_metrics(episode(preds, targets), spec_version="0.2.0")
+
+    assert MIN_SMOOTHNESS_RATIO < new.smoothness_ratio < 1.0
+    assert old.rungs[4].passed is new.rungs[4].passed is True
+    assert new.rungs[4].points < old.rungs[4].points
+    assert new.score < old.score
+    assert new.level == old.level
+
+
+def test_scoring_a_run_under_a_newer_spec_leaves_the_default_untouched() -> None:
+    rng = np.random.default_rng(3)
+    smooth = [constant(0.2) for _ in range(4)]
+    jerky = [constant(0.2) + rng.normal(0, 0.05, (STEPS, DIM)).astype(np.float32) for _ in range(4)]
+    preds = episode(jerky, smooth)
+
+    default = bench_metrics(preds)
+    explicit = bench_metrics(preds, spec_version="0.1.0")
+    newer = bench_metrics(preds, spec_version="0.2.0")
+
+    assert default.spec_version == "0.1.0"
+    assert default.model_dump() == explicit.model_dump()
+    assert newer.spec_version == "0.2.0"
+    assert newer.smoothness_ratio == pytest.approx(default.smoothness_ratio)
+    assert "bench spec 0.2.0" in newer.render_markdown()
+    with pytest.raises(ValueError, match="unknown bench spec"):
+        bench_metrics(preds, spec_version="9.9.9")
+    with pytest.raises(ValueError, match="bench spec"):
+        compare_bench(default, newer)
+
+
+def test_archived_bench_json_parses_as_spec_0_1_0() -> None:
+    """Backward compatibility of runs/*/bench.json: no new field may be required."""
+    targets = [constant(0.1) for _ in range(4)]
+    report = bench_metrics(episode(targets, targets, gripper=0.48))
+    payload = json.loads(report.to_json())
+    for field in (
+        "spec_version",
+        "gripper_majority_pct",
+        "gripper_transitions_per_episode",
+        "gripper_accuracy_withheld_reason",
+    ):
+        payload.pop(field)
+    payload["gripper_accuracy"] = 0.8533653846153846  # what t18's archived report carries
+
+    restored = BenchReport.from_json(json.dumps(payload))
+    assert restored.spec_version == "0.1.0"
+    assert restored.gripper_accuracy == pytest.approx(0.8533653846153846)
+    assert restored.gripper_majority_pct == 0.0
+    assert restored.gripper_accuracy_withheld_reason == ""
 
 
 def test_shift_tolerant_error_rewards_a_pure_phase_offset() -> None:

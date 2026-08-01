@@ -25,11 +25,13 @@ Contracts:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
+from wam.evaluation.gripper import GRIPPER_MIN_DYNAMIC_RANGE, debounced_transitions
 from wam.evaluation.offline import (
     EVAL_VERSION,
     GRIPPER_BINARIZE_THRESHOLD,
@@ -38,7 +40,13 @@ from wam.evaluation.offline import (
     _fmt,
 )
 
-BENCH_VERSION = "0.1.0"
+BENCH_VERSION = "0.2.0"
+"""Version of the report PAYLOAD (which fields exist), not of the scoring rule.
+
+Bumped when ``BenchReport`` grew the gripper-admissibility fields. Which RULE a run was scored
+under is ``BenchReport.spec_version``; the two move independently on purpose, because adding a
+diagnostic field must never look like a re-scoring.
+"""
 
 CRITICAL_QUANTILE = 0.8
 """Timesteps at or above this quantile of demonstrated motion energy are 'task-critical'.
@@ -61,8 +69,23 @@ ANCHOR_CI_SKILL_VS_REPEAT_PCT = 25.0
 MAX_HORIZON_RATIO = 4.0
 MAX_SMOOTHNESS_RATIO = 2.0
 
-GRIPPER_MIN_DYNAMIC_RANGE = 0.25
-"""Below this peak-to-peak range the gripper channel carries no open/close event to score."""
+MIN_SMOOTHNESS_RATIO = 1.0 / MAX_SMOOTHNESS_RATIO
+"""Floor of L4's two-sided band (bench spec 0.2.0). DERIVED, never written as a literal.
+
+A jerk ratio is multiplicative: "twice as jerky" and "twice as smooth" are the same size of
+deviation from a demonstration and must cost the same. Writing the floor as ``1 / MAX`` makes it
+impossible to tune independently of the ceiling — which matters here because the number that
+motivated the two-sided band (T-16's 0.29) already exists, and a floor chosen with that number in
+view would be a threshold fitted to its own result.
+"""
+
+# The gripper admissibility gates (GRIPPER_MIN_DYNAMIC_RANGE plus the three per-episode transition
+# clauses of audit spec 0.2.0) live in wam.evaluation.gripper, next to the audit that measures
+# them — a gate and the tool that reports it drifting apart is exactly how T-27's warning ended up
+# next to a number that contradicted it. Only GRIPPER_MIN_DYNAMIC_RANGE is used here, because it
+# is the one clause computable from a `predictions.jsonl` alone; the withholding decision below is
+# deliberately weaker than the audit's verdict and must not be read as one.
+# GRIPPER_MIN_DYNAMIC_RANGE keeps its T-27 value and meaning and stays importable from here.
 
 RUNG_NAMES = (
     "L0 beats-doing-nothing",
@@ -71,6 +94,54 @@ RUNG_NAMES = (
     "L3 holds-the-horizon",
     "L4 moves-like-a-demo",
 )
+
+
+class BenchSpec(BaseModel):
+    """One versioned set of scoring RULES. Archived runs keep scoring under the spec they were
+    scored with, so a rule change can never silently rewrite a recorded verdict.
+
+    Only L4 differs between the shipped specs today; the other rungs are identical, which is why
+    the spec carries their gates too — a future change to any of them gets the same treatment
+    without inventing a second mechanism.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str
+    declared: str
+    max_horizon_ratio: float
+    max_smoothness_ratio: float
+    min_smoothness_ratio: float | None
+    summary: str
+
+
+BENCH_SPECS: dict[str, BenchSpec] = {
+    "0.1.0": BenchSpec(
+        version="0.1.0",
+        declared="2026-07-29",
+        max_horizon_ratio=MAX_HORIZON_RATIO,
+        max_smoothness_ratio=MAX_SMOOTHNESS_RATIO,
+        min_smoothness_ratio=None,
+        summary="L4 one-sided: smoothness_ratio <= 2.0",
+    ),
+    "0.2.0": BenchSpec(
+        version="0.2.0",
+        declared="2026-08-01",
+        max_horizon_ratio=MAX_HORIZON_RATIO,
+        max_smoothness_ratio=MAX_SMOOTHNESS_RATIO,
+        min_smoothness_ratio=MIN_SMOOTHNESS_RATIO,
+        summary="L4 two-sided band: 1/2.0 <= smoothness_ratio <= 2.0, anchored at 1.0",
+    ),
+}
+
+BENCH_SPEC_DEFAULT = "0.1.0"
+"""The spec ``bench.json`` means, forever.
+
+Every result recorded before 2026-08-01 was scored one-sided, and re-pointing the default would
+retroactively restate those numbers under a rule nobody applied to them. New runs report BOTH
+specs side by side (``scripts/run_bench.py --spec all``); 0.2.0 becomes the headline by being
+printed next to 0.1.0, not by overwriting the file 0.1.0 already owns.
+"""
 
 
 class RungResult(BaseModel):
@@ -113,13 +184,19 @@ class BenchReport(BaseModel):
     - ``shift_tolerant_mse`` / ``timing_gain_pct``: error when each step may match a neighbour
       within ``SHIFT_TOLERANCE_STEPS``. A large gain means the shape is right and the phase is
       wrong, which is a latency bug, not a capacity one.
+    - ``gripper_accuracy``: ``None`` when the demonstrated channel is inadmissible — see
+      ``gripper_accuracy_withheld_reason``. A number here always means the channel moved.
     - ``warnings``: conditions that make a headline metric unreadable rather than merely bad.
+
+    All fields added after 0.1.0 carry defaults so every archived ``runs/*/bench.json`` still
+    parses through ``from_json`` and re-scores identically.
     """
 
     model_config = ConfigDict(frozen=True, ser_json_inf_nan="constants")
 
     report_version: str = BENCH_VERSION
     eval_version: str = EVAL_VERSION
+    spec_version: str = "0.1.0"
     run_name: str
     num_predictions: int = Field(ge=1)
     num_episodes: int = Field(ge=1)
@@ -141,8 +218,11 @@ class BenchReport(BaseModel):
     smoothness_ratio: float
     shift_tolerant_mse: float
     timing_gain_pct: float
-    gripper_accuracy: float
+    gripper_accuracy: float | None
     gripper_dynamic_range: float
+    gripper_majority_pct: float = 0.0
+    gripper_transitions_per_episode: float = 0.0
+    gripper_accuracy_withheld_reason: str = ""
     baselines: BaselineScores
     warnings: tuple[str, ...]
 
@@ -157,7 +237,10 @@ class BenchReport(BaseModel):
         lines = [
             f"# WAM-Bench — `{self.run_name}`",
             "",
-            f"**Level {self.level_name} · score {self.score:.1f}/100**",
+            (
+                f"**Level {self.level_name} · score {self.score:.1f}/100** "
+                f"(bench spec {self.spec_version})"
+            ),
             "",
             f"- {self.num_predictions} chunks over {self.num_episodes} held-out episodes",
             (
@@ -219,18 +302,39 @@ class BenchReport(BaseModel):
                 f"error removed by allowing a +/-{SHIFT_TOLERANCE_STEPS}-step shift |"
             ),
             (
-                f"| gripper_accuracy | {_fmt(self.gripper_accuracy)} | "
+                f"| gripper_accuracy | {_gripper_cell(self)} | "
                 f"agreement after binarizing at {GRIPPER_BINARIZE_THRESHOLD} |"
             ),
             (
                 f"| gripper_dynamic_range | {_fmt(self.gripper_dynamic_range)} | "
                 f"peak-to-peak of the demonstrated gripper signal |"
             ),
+            (
+                f"| gripper_majority_pct | {self.gripper_majority_pct:.1f}% | "
+                f"accuracy of always predicting the demonstrated majority class |"
+            ),
+            (
+                f"| gripper_transitions_per_episode | "
+                f"{self.gripper_transitions_per_episode:.2f} | "
+                f"debounced open/close events in the demonstrations |"
+            ),
         ]
         if self.warnings:
             lines += ["", "## Warnings", ""]
             lines += [f"- {w}" for w in self.warnings]
         return "\n".join(lines) + "\n"
+
+
+def _gripper_cell(report: BenchReport) -> str:
+    """The gripper_accuracy cell. A withheld number must not be renderable as a number.
+
+    Printing it "for information" is how it got copied into TASKS.md T-18 as part of the AC-07
+    verdict, so the cell says why it is missing instead of showing the value it would have had.
+    """
+    if report.gripper_accuracy is None:
+        reason = report.gripper_accuracy_withheld_reason or "channel inadmissible"
+        return f"n/a — withheld ({reason})"
+    return _fmt(report.gripper_accuracy)
 
 
 def _ratio(numerator: float, denominator: float) -> float:
@@ -287,22 +391,80 @@ def _shift_tolerant_sq(pred: np.ndarray, target: np.ndarray, width: int) -> floa
     return float(best.mean())
 
 
+def _smoothness_rung(ratio: float, spec: BenchSpec) -> tuple[str, str, bool, float]:
+    """L4's question, gate string, pass flag and points under ``spec``.
+
+    Spec 0.1.0 is reproduced expression-for-expression, because every archived run was scored
+    with it and re-scoring must return the same number.
+
+    Spec 0.2.0 makes the band two-sided and scores it on ``|log ratio|``, which is the natural
+    metric for a ratio: 2x jerkier and 2x smoother are the same size of deviation from a
+    demonstration and now cost the same. The anchor stays ratio == 1.0 — the value 0.1.0 already
+    passed to ``_points`` as its anchor — so 0.2.0 completes 0.1.0's intent rather than replacing
+    it, and a run that matched the demonstrations still tops the rung under both.
+    """
+    if spec.min_smoothness_ratio is None:
+        return (
+            "As smooth as the demonstrations?",
+            f"<= {spec.max_smoothness_ratio:g}",
+            ratio <= spec.max_smoothness_ratio,
+            _points(-ratio, -spec.max_smoothness_ratio, -1.0),
+        )
+    question = "Moves like a demonstration — neither jerkier nor blander?"
+    gate = f"{spec.min_smoothness_ratio:g} <= r <= {spec.max_smoothness_ratio:g}"
+    passed = spec.min_smoothness_ratio <= ratio <= spec.max_smoothness_ratio
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        # ratio == 0 is a perfectly flat prediction and inf is a diverging one; neither is a
+        # demonstration-like trajectory, and log() is undefined at both ends anyway.
+        return question, gate, False, 0.0
+    points = _points(-abs(math.log(ratio)), -math.log(spec.max_smoothness_ratio), 0.0)
+    return question, gate, passed, points
+
+
+def _executed_gripper_series(chunks: Sequence[ChunkPrediction]) -> np.ndarray:
+    """One episode's demonstrated gripper signal, each chunk contributing its executed prefix.
+
+    Concatenating whole chunks would repeat every overlapped step whenever the emission stride is
+    shorter than the horizon — the regime FR-05's receding horizon runs in — and each duplicated
+    open/close edge would be counted as a second transition.
+    """
+    parts: list[np.ndarray] = []
+    for i, pred in enumerate(chunks):
+        g = np.asarray(pred.target.gripper_target, dtype=np.float64)
+        if i + 1 < len(chunks):
+            dt_ns = pred.target.dt_s * 1e9
+            stride = g.shape[0] if dt_ns <= 0 else round((chunks[i + 1].t_ns - pred.t_ns) / dt_ns)
+            g = g[: int(np.clip(stride, 1, g.shape[0]))]
+        parts.append(g)
+    return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float64)
+
+
 def bench_metrics(
     predictions: Sequence[ChunkPrediction],
     *,
     run_name: str = "run",
     critical_quantile: float = CRITICAL_QUANTILE,
+    spec_version: str = BENCH_SPEC_DEFAULT,
 ) -> BenchReport:
     """Score a set of chunk predictions on the WAM-Bench ladder.
 
     Predictions are grouped by episode and ordered by ``t_ns`` internally, so the caller may pass
     them in any order — but the repeat-last-action baseline is only causal if the predictions are
     the complete, contiguous chunk sequence of each episode.
+
+    ``spec_version`` selects the scoring rules (see ``BENCH_SPECS``). It defaults to the spec
+    ``bench.json`` has always meant, so calling this exactly as before returns exactly what it
+    returned before.
     """
     if len(predictions) == 0:
         raise ValueError("bench_metrics: no predictions given")
     if not 0.0 <= critical_quantile < 1.0:
         raise ValueError(f"critical_quantile must be in [0, 1), got {critical_quantile}")
+    spec = BENCH_SPECS.get(spec_version)
+    if spec is None:
+        raise ValueError(
+            f"unknown bench spec {spec_version!r}; have {sorted(BENCH_SPECS)}"
+        )
     for i, pred in enumerate(predictions):
         _check_pair(i, pred)
 
@@ -331,10 +493,13 @@ def bench_metrics(
     jerk_n = {"pred": 0, "target": 0}
     grip_match = 0
     grip_total = 0
+    grip_closed = 0
     grip_min = np.inf
     grip_max = -np.inf
+    grip_transitions: list[int] = []
 
     for chunks in by_episode.values():
+        grip_transitions.append(debounced_transitions(_executed_gripper_series(chunks)))
         for i, pred in enumerate(chunks):
             p = pred.predicted.targets.astype(np.float64)
             t = pred.target.targets.astype(np.float64)
@@ -380,6 +545,7 @@ def bench_metrics(
                 ((gp >= GRIPPER_BINARIZE_THRESHOLD) == (gt >= GRIPPER_BINARIZE_THRESHOLD)).sum()
             )
             grip_total += int(gt.shape[0])
+            grip_closed += int((gt >= GRIPPER_BINARIZE_THRESHOLD).sum())
             grip_min = min(grip_min, float(gt.min()))
             grip_max = max(grip_max, float(gt.max()))
 
@@ -406,6 +572,7 @@ def bench_metrics(
     ci_skill_zero = _skill(ci_zero, ci_mse)
     ci_skill_repeat = _skill(ci_repeat, ci_mse)
 
+    smooth_q, smooth_gate, smooth_passed, smooth_points = _smoothness_rung(smoothness_ratio, spec)
     rungs = (
         RungResult(
             name=RUNG_NAMES[0],
@@ -439,18 +606,18 @@ def bench_metrics(
             question="Does the chunk hold together to its last step?",
             metric="horizon_ratio",
             value=horizon_ratio,
-            gate=f"<= {MAX_HORIZON_RATIO:g}",
-            passed=horizon_ratio <= MAX_HORIZON_RATIO,
-            points=_points(-horizon_ratio, -MAX_HORIZON_RATIO, -1.0),
+            gate=f"<= {spec.max_horizon_ratio:g}",
+            passed=horizon_ratio <= spec.max_horizon_ratio,
+            points=_points(-horizon_ratio, -spec.max_horizon_ratio, -1.0),
         ),
         RungResult(
             name=RUNG_NAMES[4],
-            question="As smooth as the demonstrations?",
+            question=smooth_q,
             metric="smoothness_ratio",
             value=smoothness_ratio,
-            gate=f"<= {MAX_SMOOTHNESS_RATIO:g}",
-            passed=smoothness_ratio <= MAX_SMOOTHNESS_RATIO,
-            points=_points(-smoothness_ratio, -MAX_SMOOTHNESS_RATIO, -1.0),
+            gate=smooth_gate,
+            passed=smooth_passed,
+            points=smooth_points,
         ),
     )
 
@@ -469,13 +636,31 @@ def bench_metrics(
             "alongside any MSE improvement or the number reads as better than it is."
         )
     dynamic_range = float(grip_max - grip_min) if grip_total else 0.0
+    closed_frac = grip_closed / grip_total if grip_total else 0.0
+    majority_pct = max(closed_frac, 1.0 - closed_frac) * 100.0
+    transitions_per_episode = float(np.mean(grip_transitions)) if grip_transitions else 0.0
+    accuracy: float | None = (grip_match / grip_total) if grip_total else 0.0
+    withheld_reason = ""
     if dynamic_range < GRIPPER_MIN_DYNAMIC_RANGE:
+        # Withheld, not merely warned about. T-27 emitted the warning below and the number kept
+        # travelling anyway: the ablation harness scored it and it reached TASKS.md T-18 inside
+        # the AC-07 verdict, where it read as 0.85 "gripper accuracy" while being exactly the
+        # majority-class rate of a channel that never moved. A metric that cannot be believed
+        # must not be emitted as a number; the majority baseline goes in its place, because it
+        # is what the "accuracy" was actually measuring.
+        withheld_reason = (
+            f"gripper_dynamic_range {dynamic_range:.3f} < {GRIPPER_MIN_DYNAMIC_RANGE}; "
+            f"majority-class baseline {majority_pct:.1f}%"
+        )
         warnings.append(
             f"Gripper channel is degenerate (peak-to-peak {dynamic_range:.3f} < "
-            f"{GRIPPER_MIN_DYNAMIC_RANGE}): it never opens or closes in this data, so "
-            f"gripper_accuracy={grip_match / max(grip_total, 1):.3f} is thresholding noise "
-            "around the binarization point and is NOT a grasp-success proxy."
+            f"{GRIPPER_MIN_DYNAMIC_RANGE}, {transitions_per_episode:.2f} debounced "
+            "open/close transitions per episode): gripper_accuracy is WITHHELD because it "
+            f"would be thresholding noise against a {majority_pct:.1f}% majority class, not a "
+            "grasp-success proxy. Run scripts/audit_gripper.py on the dataset before reading "
+            "any grasping claim into this run."
         )
+        accuracy = None
     if n_crit < 30:
         warnings.append(
             f"Only {n_crit} task-critical chunks — CI-MSE is noisy below ~30 samples. "
@@ -483,6 +668,7 @@ def bench_metrics(
         )
 
     return BenchReport(
+        spec_version=spec.version,
         run_name=run_name,
         num_predictions=n_all,
         num_episodes=len(by_episode),
@@ -502,8 +688,11 @@ def bench_metrics(
         smoothness_ratio=smoothness_ratio,
         shift_tolerant_mse=shift_mse,
         timing_gain_pct=_skill(mse, shift_mse),
-        gripper_accuracy=(grip_match / grip_total) if grip_total else 0.0,
+        gripper_accuracy=accuracy,
         gripper_dynamic_range=dynamic_range,
+        gripper_majority_pct=majority_pct,
+        gripper_transitions_per_episode=transitions_per_episode,
+        gripper_accuracy_withheld_reason=withheld_reason,
         baselines=BaselineScores(
             zero_mse=zero_mse,
             repeat_mse=repeat_mse,
@@ -527,8 +716,19 @@ def _points(value: float, gate: float, anchor: float) -> float:
 
 
 def compare_bench(baseline: BenchReport, candidate: BenchReport) -> str:
-    """Side-by-side markdown for two runs scored on the identical holdout."""
+    """Side-by-side markdown for two runs scored on the identical holdout AND the same spec.
+
+    Refuses a cross-spec comparison rather than printing two levels that were decided by
+    different rules in adjacent columns — that is the shape of every accidental re-litigation.
+    """
+    if baseline.spec_version != candidate.spec_version:
+        raise ValueError(
+            f"compare_bench: {baseline.run_name} was scored under bench spec "
+            f"{baseline.spec_version} and {candidate.run_name} under "
+            f"{candidate.spec_version}; re-score both under one spec first"
+        )
     rows = [
+        ("bench spec", baseline.spec_version, candidate.spec_version),
         ("level", baseline.level_name, candidate.level_name),
         ("score", f"{baseline.score:.1f}", f"{candidate.score:.1f}"),
         ("mse", _fmt(baseline.mse), _fmt(candidate.mse)),
