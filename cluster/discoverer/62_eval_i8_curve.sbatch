@@ -517,6 +517,9 @@ print("  episodes' from 'needs more TASKS'. I-8 answers only the first.")
 PY
 
 echo
-echo "Copy back to the Mac with cluster/discoverer/sync.sh, then re-score on CPU forever:"
+echo "Copy back to the Mac (run this ON THE MAC), then re-score on CPU forever:"
+# This job writes three run dirs, so pull them all — a bare ${RUN_ID} here would be whatever
+# the scoring loop happened to exit with (i8-rung040-seed1), which is not what you want.
+echo "  ./cluster/discoverer/sync.sh --pull"
 echo "  python scripts/run_bench.py runs/i8-rung040-seed0/eval-i8-history \\"
 echo "                             runs/i8-rung120-seed0/eval-i8-history --compare"

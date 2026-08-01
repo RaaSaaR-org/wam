@@ -147,13 +147,14 @@ what was verified with `[✓]`.
 | Storage | [project folder](https://docs.discoverer.bg/projectfolder.html) · [scratch](https://docs.discoverer.bg/scratchfolder.html) · [disk usage](https://docs.discoverer.bg/calculating_the_disk_usage_basics.html) · [moving files / over quota](https://docs.discoverer.bg/storage_moving_files_overquota.html) · [file transfers](https://docs.discoverer.bg/filetransfers.html) |
 | Python + GPU | [pytorch](https://docs.discoverer.bg/pytorch_gpu.html) · [conda](https://docs.discoverer.bg/conda_gpu.html) · [virtualenvs](https://docs.discoverer.bg/python_virtual_environments_gpu.html) · [where to compile](https://docs.discoverer.bg/where_to_compile.html) |
 | Worked examples | [Kimi-K26 vLLM on H200](https://docs.discoverer.bg/kimi-k26-vllm-h200-guide.html) · [multinode](https://docs.discoverer.bg/kimi-multinode-discoverer.html) |
+| 10 | `sync.sh --pull` | — | — | rsync results + Slurm logs BACK to the Mac (run on the Mac) |
 | Support | [help](https://docs.discoverer.bg/help.html) — see rule 6 |
 
 ## Files here
 
 ```
 caches.sh              cache/scratch redirection — sourced by every job (rule 2)
-sync.sh                push repo + dataset from the Mac
+sync.sh                push repo + dataset from the Mac; --pull fetches results back
 10_build_env.sbatch    conda prefix env                    free
 20_stage_weights.sbatch Wan weights (+ --groot dataset)    free
 25_requeue_probe.sbatch proves --requeue/--signal          free

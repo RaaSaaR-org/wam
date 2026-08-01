@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Push repo + dataset + job scripts to Discoverer+. Runs on the Mac, not on the cluster.
+# Move code and artifacts between the Mac and Discoverer+. Runs on the Mac, not on the cluster.
 #
-#   ./cluster/discoverer/sync.sh          # repo + jobs + caches.sh
-#   ./cluster/discoverer/sync.sh --data   # also the 81 MB converted dataset
+#   ./cluster/discoverer/sync.sh              # push repo + jobs + caches.sh
+#   ./cluster/discoverer/sync.sh --data       # also push the 81 MB converted dataset
+#   ./cluster/discoverer/sync.sh --pull       # pull every run's artifacts back
+#   ./cluster/discoverer/sync.sh --pull t16-lora-seed0   # ...or just one run
+#
+# Push and pull are separate directions on purpose. The push excludes runs/ so a stale local
+# copy can never overwrite what the GPU just produced; the pull excludes checkpoints/ so a
+# routine artifact fetch can never drag 5B weights over the wire. Every eval job's epilogue
+# tells the operator to "copy back with sync.sh" — --pull is what makes that sentence true.
 #
 # Needs the key in the agent first:  ssh-add ~/.ssh/id_ed25519_eu_ai_hub
 set -euo pipefail
@@ -15,6 +22,33 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # the openrsync that ships as /usr/bin/rsync on macOS. --partial alone gives the resume, and
 # the delta algorithm gives the verification. -l because HF-style caches are symlink farms.
 RSYNC=(rsync -e ssh -rtl --progress --partial)
+
+if [[ "${1:-}" == "--pull" ]]; then
+  # Artifacts live at ${PROJ}/runs/<RUN_ID>/, NOT ${PROJ}/wam/runs/ — the job scripts set
+  # OUT=${PROJ}/runs/${RUN_ID} so results survive a repo re-sync. Slurm logs come too: the
+  # printed verdict exists nowhere else, and reading it straight off the login node is the
+  # only copy until it lands here.
+  RUN="${2:-}"
+  mkdir -p "${ROOT}/runs" "${ROOT}/runs/_slurm_logs"
+  echo "==> runs${RUN:+/${RUN}} <- ${PROJ}/runs"
+  # WHITELIST, not blacklist. ${PROJ}/runs is 140 GB and most of it is weights: 5B safetensors
+  # shards sitting at the top of a run dir, plus checkpoint-NNNN/ dirs that no single --exclude
+  # name catches. Naming what to *skip* is unbounded and gets it wrong the first time a run
+  # invents a new layout; naming what to *take* is four extensions that cover every scoring
+  # artifact we have ever read (predictions.jsonl, bench/e1/timing.json, the .md reports, DONE).
+  # `--include '*/'` lets rsync walk into subdirs; the trailing `--exclude '*'` drops the rest.
+  # --max-size is the belt: even a .json can't be a model, so anything above 256M is not ours.
+  "${RSYNC[@]}" --max-size=256m \
+    --include '*/' \
+    --include '*.json' --include '*.jsonl' --include '*.md' --include '*.txt' \
+    --include 'DONE' --include 'GIT_COMMIT' \
+    --exclude '*' \
+    "${HOST}:${PROJ}/runs/${RUN:+${RUN}/}" "${ROOT}/runs/${RUN:+${RUN}/}"
+  echo "==> runs/_slurm_logs <- ${PROJ}/logs"
+  "${RSYNC[@]}" "${HOST}:${PROJ}/logs/" "${ROOT}/runs/_slurm_logs/"
+  echo "done. Re-score on CPU forever:  python scripts/run_bench.py runs/<run>/<arm> --compare"
+  exit 0
+fi
 
 echo "==> repo -> ${PROJ}/wam"
 # The excludes mirror .gitignore: everything gitignored is either machine-local (.venv,

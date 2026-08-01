@@ -762,5 +762,6 @@ print("  branch' across training seeds needs runs/t16-lora-seed1 scored the same
 PY
 
 echo
-echo "Copy back to the Mac with cluster/discoverer/sync.sh, then re-score on CPU forever:"
+echo "Copy back to the Mac (run this ON THE MAC), then re-score on CPU forever:"
+echo "  ./cluster/discoverer/sync.sh --pull ${RUN_ID}"
 echo "  python scripts/run_bench.py runs/${RUN_ID}/${REG_DIR} runs/${RUN_ID}/${MEAN_DIR} --compare"

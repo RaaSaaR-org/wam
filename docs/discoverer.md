@@ -489,6 +489,10 @@ wait
 Each step below is a checked-in file in `cluster/discoverer/` — see its README for the table.
 
 0. `sync.sh --data` (on the Mac) — repo + 81 MB dataset + `caches.sh`.
+   Results come back the other way with `sync.sh --pull` (artifacts + Slurm logs only —
+   it whitelists `.json/.jsonl/.md/.txt`, so it can never drag the 140 GB of weights in
+   `$PROJ/runs` over the wire). The printed verdict lives only in the Slurm log, so pull
+   before you reason about a run.
 1. **Env + weight staging** — `10_build_env.sbatch`, `20_stage_weights.sbatch --groot`. Two
    `2cpu-single-host` jobs, costs no GPU hours.
 2. **Requeue probe** — `25_requeue_probe.sbatch`, also free. Proves `--requeue` + `--signal`

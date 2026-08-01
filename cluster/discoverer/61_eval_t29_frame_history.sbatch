@@ -134,5 +134,6 @@ else:
 PY
 
 echo
-echo "Copy back to the Mac with cluster/discoverer/sync.sh, then re-score on CPU forever:"
+echo "Copy back to the Mac (run this ON THE MAC), then re-score on CPU forever:"
+echo "  ./cluster/discoverer/sync.sh --pull ${RUN_ID}"
 echo "  python scripts/run_bench.py runs/${RUN_ID}/eval-t29-tiled runs/${RUN_ID}/eval-t29-history --compare"
