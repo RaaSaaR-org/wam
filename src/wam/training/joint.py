@@ -461,11 +461,26 @@ class JointWorldActionModel(nn.Module):
         integration bug. ``ActionVelocityHead`` takes t as ONE raw scalar beside 32 latent and
         3072 feature inputs (first-layer weight-block Frobenius norms on the archived checkpoint:
         1.68 for t, 23.3 for the latent, 51.0 for the features), and its measured d(v)/d(z) gain
-        comes out FLAT in t at every feature scale probed, where a straight path needs 1/(1-t)
-        (1 at t=0, 33 at t=0.97). A constant-gain linear field contracts noise by a fixed factor
-        and cannot reach zero at any step count, which is also why the sweep converges. Fixing
-        that is a head/objective change (timestep embedding, or a step index the head can read),
-        not a sampler one.
+        comes out FLAT in t at every feature scale probed (``scripts/probe_velocity_head.py``).
+        A constant-gain linear field contracts noise by a fixed factor and cannot reach zero at
+        any step count, which is also why the sweep converges.
+
+        **Corrected 2026-08-01: an earlier version of this paragraph said a straight path needs
+        1/(1-t), "1 at t=0, 33 at t=0.97".** That is the gain only for a POINT-MASS conditional.
+        For a residual posterior std s the Bayes gain is
+        ``((1-t) - t s^2) / ((1-t)^2 + t^2 s^2)``, which is bounded and non-monotone: at the
+        measured content scale (s ~ 0.049) it peaks at **10.2 around t=0.95** and falls back to
+        8.96 by the last grid point. There is no pole. The measured 1.4 is still far below the
+        ideal ~10, so the defect is real, but it is ~3x smaller than stated and a different shape
+        — and s=0 is the one assumption that cannot be granted, since a point-mass conditional is
+        exactly the case where this branch has no reason to exist.
+
+        Which fix follows is NOT settled. The gain also tracks feature MAGNITUDE (4.86 down to
+        0.61 as the probe's feature scale goes 0.1 -> 5) while ignoring the t column, which is
+        what a head would learn if it read the noise level off the features — available in
+        training, where ``co_denoise`` shares one t across both branches, and frozen at t=1 here.
+        That is the confound documented below, and it explains the flat gain with no
+        architectural defect at all. Nothing measured so far separates the two.
 
         **The conditioning mismatch this sampler runs on, and the arm that measures it.**
         Training only ever paired (features from video noised to t, action latent noised to the

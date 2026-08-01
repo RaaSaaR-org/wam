@@ -608,17 +608,48 @@ All measured on CPU against archived artifacts. No GPU, no allocation. `GAIN_RUL
 down before any of it was measured.
 
 **D3 — the head's gain is flat in `t`. CONFIRMED, and this is the defect already in this file.**
-The field the sampler needs is `v* = (x1 − z_t)/(1−t)`: a gain of `1/(1−t)`, running 1 → 32 over
-the deployed grid. `scripts/probe_velocity_head.py` on `step-020000` measures the Jacobian
-`−∂v/∂z` at 4.8590 (t=0), 4.8584 (t=0.5), 4.8527 (t=0.9375) — **constant to four significant
-figures, moving −0.13 % where the truth demands +1500 %.**
+`scripts/probe_velocity_head.py` on `step-020000` measures the Jacobian `−∂v/∂z` at 4.8590 (t=0),
+4.8584 (t=0.5), 4.8527 (t=0.9375) — **constant to four significant figures.**
 
-The cause is sharper than "no timestep embedding", and it corrects what this file said. Per-column
-first-layer norms are latent 4.12, **t 1.68**, feats 0.92 — the `t` column carries *more* weight
-than an average feature column, so `t` is not underweighted. It is **concatenated**, which is
-additive conditioning, and the required gain is **multiplicative**. That is exactly why the
-recorded prior negative (a Fourier embedding alone, at tiny scale) failed: it improved the
-*resolution* of `t`, not the *form* of the conditioning.
+> **CORRECTION, same day.** An earlier version of this section — and the `1 at t=0, 33 at t=0.97`
+> in `sample_action_chunk`'s docstring (`joint.py:464`) — said the required gain is `1/(1−t)`,
+> running 1 → 32 over the grid. **That holds only if `p(x1|c)` is a point mass.** For a residual
+> posterior std σ the Bayes gain is `((1−t) − tσ²) / ((1−t)² + t²σ²)`, which is bounded and
+> **non-monotone** — it peaks and then falls. At the measured content scale:
+>
+> | t | `1/(1−t)` (as claimed) | σ=0.049 | σ=0.0454 |
+> |---|---|---|---|
+> | 0.875 | 8.00 | 7.04 | 7.16 |
+> | 0.9375 | 16.00 | 10.01 | 10.59 |
+> | 0.96875 | **32.00** | **8.96** | **10.05** |
+>
+> Max ideal gain is **10.2 at t≈0.949**, not 32, and there is **no pole**. The defect is real —
+> 1.4 measured against ~10 ideal — but roughly 3× less extreme than this file claimed, and a
+> different shape. σ=0 is also the one assumption that cannot be granted here, since a
+> point-mass conditional is precisely the case in which the flow branch has no reason to exist.
+
+Per-column first-layer norms are latent 4.12, **t 1.68**, feats 0.92 — the `t` column carries
+*more* weight than an average feature column, so `t` is not underweighted.
+
+**A competing explanation fits the same data better, and it is not an architectural defect.**
+The probe holds the features fixed and sweeps the explicit `t` input: the gain does not move. But
+sweep the *feature scale* instead and it moves a great deal — 4.859 / 3.683 / 2.501 / 1.434 /
+0.605 at scales 0.1 / 0.5 / 1 / 2 / 5. So the head's gain is set by **feature magnitude**, not by
+its `t` column.
+
+That is exactly what a head would learn if it read the noise level off the features rather than
+off `t` — and during training it could, because `co_denoise` noises video and action at a
+**shared** `t`, so the 3 072-dim feature vector carries `t`. At inference `sample_action_chunk`
+computes **one** backbone pass at `t=1` on the clean observation and reuses it at every `t_k`
+(`joint.py:470-480`), so the head sees "t=1 features" at every step and emits a constant gain.
+
+**This confound was already documented in that docstring as the sampler's known weakness; what is
+new is that it now also explains the flat gain, with no architectural defect required.** The two
+explanations are not distinguished by anything measured so far, and the probe cannot separate them
+by construction — it varies `t` with features held fixed, which is the inference condition, not
+the training one. Distinguishing them needs the faithful sampler (features recomputed per `t_k`),
+which costs n backbone passes and destroys the observation, or a head trained with features whose
+`t` content is ablated.
 
 The flat-gain model then predicts the archived step sweep. One free parameter, fitted on the n=64
 arm alone, mapping latent error to action MSE via `k = 1.68201e-05 / 0.05583²`:
