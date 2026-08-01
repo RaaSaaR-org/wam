@@ -13,12 +13,23 @@ run so the two runs differ only in the ablated component (the video/world branch
   episode ids it was actually scored on), and the dataset content hash must match the
   baseline's dataset_snapshot_ref, or the run aborts (same-split contract of compare_runs).
 
-Inference for E1 mirrors the baseline policy path: the single observation frame is tiled to
-the backbone's num_frames context and features are taken from forward_flow at t=1 (the clean
-end of the rectified flow — the same feature pathway the action head was trained behind).
+Inference for E1 mirrors the baseline policy path exactly, because both sides now go through
+their model's own ``predict()``: features from forward_flow at t=1 (the clean end of the
+rectified flow — the same feature pathway the action head was trained behind), and the frame
+context from ``resolve_frame_context``.
+
+``--frame-history`` decides that context. OFF is one observation frame tiled to num_frames,
+which is what the archived ``runs/t18-real-ablation-seed0`` (skill_vs_repeat_pct −129.0 %) was
+measured with and what this script reproduces by default. ON is the real num_frames window
+ending at the chunk — the window ``EpisodeDataset`` fed during training. T-29 (2026-08-01, job
+184648) measured that difference on ``t16-lora-seed0`` at +10.65 pp of skill_vs_repeat_pct, so
+a tiled number and a windowed one are NOT comparable and the flag has to be recorded next to
+whatever it produces. Note that re-running this script retrains; to re-score the archived
+checkpoint without retraining, use ``scripts/rescore_archived.py``.
 
 Usage: .venv/bin/python scripts/run_ablation.py [--baseline-run runs/d1-full-gen-seed0]
                                                 [--dataset datasets/gr00t-apple-full]
+                                                [--frame-history]
 """
 
 from __future__ import annotations
@@ -55,11 +66,21 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class JointPolicy:
-    """Policy-protocol wrapper for a trained JointWorldActionModel.
+    """Policy-protocol wrapper for a trained ``JointWorldActionModel``.
 
-    Mirrors ActionOnlyModel.predict: one observation frame tiled to num_frames. Features come
-    from forward_flow at t=1 — video_t == the clean tiled context there, and the action head
-    was trained on pooled forward_flow features, so this stays on the training pathway.
+    Nothing but ``torch.no_grad()`` around :meth:`JointWorldActionModel.predict`. It used to be a
+    third, hand-written copy of the predict path — its own tiling, its own ``forward_flow`` call,
+    its own pooling — which is how it survived T-29 unchanged while both real ``predict()``
+    implementations moved to :func:`~wam.training._utils.resolve_frame_context`. That made the
+    "single definition of the frame window" claim false for exactly the script that produced the
+    T-18 number, so the copy is gone rather than fixed.
+
+    The two paths were verified equivalent on the tiny backbone before deleting: ``forward_flow``
+    normalizes through ``_to_video_tensor`` itself, so skipping ``encode_video`` was harmless
+    there (it is NOT harmless on a real VAE backbone, which is the second reason to delete), and
+    ``ActionHead.decode`` mean-pools leading dims internally, so ``decode(features[0])`` and
+    ``decode(feats.mean(dim=1)[0])`` are the same reduction. ``tests/test_run_ablation.py`` pins
+    that equality so the deletion cannot silently change a recorded number.
     """
 
     def __init__(self, model: JointWorldActionModel) -> None:
@@ -67,21 +88,7 @@ class JointPolicy:
 
     @torch.no_grad()
     def predict(self, observation: Observation) -> ActionChunk:
-        cfg = self.model.config
-        camera = cfg.camera
-        if camera not in observation.images:
-            raise KeyError(
-                f"observation has no camera {camera!r}; have {sorted(observation.images)}"
-            )
-        image = torch.as_tensor(observation.images[camera])
-        frames = image.unsqueeze(0).expand(cfg.backbone.num_frames, -1, -1, -1)
-        state_emb = self.model.state_encoder.encode(observation.state)
-        text_ctx = self.model.backbone.condition_text(observation.instruction)
-        state_ctx = self.model.backbone.condition_state(state_emb)
-        t = torch.ones(1)
-        _, feats = self.model.backbone.forward_flow(frames.unsqueeze(0), t, text_ctx, state_ctx)
-        pooled = feats.mean(dim=1)  # same pooling as co_denoise -> action_head
-        return self.model.action_head.decode(pooled[0])
+        return self.model.predict(observation)
 
 
 def build_joint_config(base_cfg: dict, args: argparse.Namespace) -> JointTrainingConfig:
@@ -137,6 +144,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=None, help="override baseline step count")
     parser.add_argument("--device", type=str, default=None, help="override baseline device")
     parser.add_argument("--threshold-pct", type=float, default=DEFAULT_THRESHOLD_PCT)
+    parser.add_argument(
+        "--frame-history",
+        action="store_true",
+        help="show the policy the real num_frames window ending at each chunk instead of one "
+        "frame tiled num_frames times. OFF by default so this reproduces the archived "
+        "t18-real-ablation-seed0 run; the two modes are not comparable (T-29, +10.65 pp on "
+        "t16-lora-seed0 — docs/improvements.md I-7).",
+    )
     return parser.parse_args(argv)
 
 
@@ -224,9 +239,23 @@ def main(argv: list[str] | None = None) -> int:
     from wam.data import EpisodeReader
 
     spec = EpisodeReader(first).manifest.spec
+    # None reproduces the archived tiled run; num_frames is the in-distribution mode (T-29).
+    num_frames = config.backbone.num_frames if args.frame_history else None
     pairs = []
     for eid in holdout_ids:
-        pairs.extend(build_eval_pairs(args.dataset / eid, config.camera, config.head.num_steps))
+        pairs.extend(
+            build_eval_pairs(
+                args.dataset / eid, config.camera, config.head.num_steps, num_frames=num_frames
+            )
+        )
+    print(
+        "frame mode: "
+        + (
+            f"real {num_frames}-frame window (T-29)"
+            if num_frames
+            else f"1 frame tiled to {config.backbone.num_frames} (archived default)"
+        )
+    )
     trainer.model.eval()
     predictions = evaluate_policy(JointPolicy(trainer.model), pairs)
     e1 = e1_metrics(predictions, spec)
