@@ -337,6 +337,81 @@ rejects that topic without a weight, since a missing weight silently voids every
 Full detail, the 8-point "does not prove" list, the Docker-Desktop multicast caveat and 9 ordered
 hardware bring-up steps: `docker/dds/README.md`.
 
+## The policy contract: what the checkpoint was trained on
+
+A sim run is the first place a trained checkpoint meets a robot, and two of its inputs travelled
+from training to deployment with nothing comparing them. Both are silent — the predicted chunk
+stays finite, in-bounds and on time either way, so no gate, no log line and no metric moves.
+
+**1. The validity mask.** `scripts/convert_lerobot_g1.py` writes `ValidityMask(imu=False)` with a
+zero IMU payload for every converted gr00t state. Verified: all 590 states of
+`datasets/gr00t-apple-full/gr00t-apple-000000` carry exactly one distinct mask
+`{q:T, dq:T, imu:F, gripper:T}` and one distinct IMU row `[1,0,0,0,0,0,0,0,0,0]`. `StateMLP`
+substitutes the learned `missing['imu']` vector wherever the mask says invalid, so all 20 000
+T-16 training steps fed a constant learned vector into those 10 input columns and their
+first-layer weights are unconstrained.
+
+Every adapter here reports `imu=True` — and each is *right* to. `G1Adapter.read_state` passes the
+DDS IMU through, `MujocoG1Robot` delegates to it verbatim over a scene that carries real gyro and
+accelerometer sensors, and even `FakeG1Transport` supplies `acc = (0, 0, 9.81)`.
+
+Measured on the shipped `runs/t16-lora-seed0` state encoder over all 590 states:
+
+| | ‖Δ‖ mean | ‖Δ‖ max |
+|---|---|---|
+| flip `validity.imu` to True, transport gravity payload | **2.011** | **2.270** |
+| flip `validity.imu` to True, zero payload (MockRobot) | 0.147 | 0.191 |
+
+against an embedding norm of **2.454**, a per-dimension spread of **0.203** and a maximum distance
+between two *training* states of **3.549**. So the deployed G1/MuJoCo state sits ~1.75× the RMS
+radius of the training cloud away from where it should, along a direction the encoder was never
+trained on. The 52-d state-only ridge beats 12288-d frozen video features (T-15/T-24/T-26), so
+state is where all of this model's measured predictive power lives.
+
+The fix is **not** to flip the flag — in the converter that would feed training real zeros where
+deployment feeds gravity (the same bug with the mask removed), and in the adapter it would lie
+about the robot. `wam.runtime.executor.PolicyContract` declares which groups training used, and
+the executor masks the observation down to that mask before the policy sees it while the safety
+layer keeps judging the raw state (FR-07). Masking down is an exact reproduction of the training
+input, not an approximation, which is why it is a repair and not a compromise.
+
+**2. The instruction.** Every gr00t manifest says `"move the apple to the plate"` (412
+occurrences, one unique string), so those checkpoints conditioned on ONE frozen umT5 context.
+`ExecutorConfig.instruction` defaults to `"Greife die rote Tasse."`, a genuine `datasets/mock-d1`
+instruction — right for D1 checkpoints, wrong for gr00t-trained ones. The repo's own probe
+(`runs/wan_ablation/2026-07-26-zerogpu-5b.json`, real 5B) puts an instruction swap at relative L2
+**0.021** at block 2 and **0.034** at block 10 — exactly the readout blocks
+`configs/training/joint_wan_gr00t.yaml` uses — against 0.010/0.013 for the *entire* state input
+and 0.279/0.373 for reversing frame order. Roughly 2.5× the influence of all proprioception, well
+under a tenth of the motion signal: a real distribution shift on the readout the `ActionHead` was
+fitted to, not an output-destroying failure. There is no repair for it, so it is a hard stop.
+
+### Using it
+
+```bash
+# derive the contract from the episodes the run actually trained on
+python scripts/rollout.py --robot mujoco_g1 --policy joint \
+    --checkpoint runs/t16-lora-seed0/checkpoints/step-020000/model.safetensors \
+    --backbone-source /path/to/Wan2.2-TI2V-5B --policy-device cuda \
+    --policy-camera head --image-hw 120 160 \
+    --contract-from-dataset datasets/gr00t-apple-full \
+    --instruction "move the apple to the plate"
+```
+
+`--policy checkpoint|joint` **refuses to start** without a contract. Alternatives: save one as
+`policy_contract.json` next to the checkpoint (or beside it as `<name>.contract.json`) and it is
+discovered automatically; point at one with `--policy-contract`; or say `--no-policy-contract` to
+run unchecked on purpose — which is recorded as a `kind="policy_contract"` line with
+`"contract": null`, so an archived unchecked run can never be mistaken for a clean one.
+
+| divergence | what happens | how to override |
+|---|---|---|
+| group trained never-valid, deployed valid (`imu`) | masked down to the trained mask, warned in the E2 report and logged | nothing to override; it is the repair |
+| group trained always-valid, deployed invalid | E2 gate `policy_state_groups` **fails** (no repair exists) | `--skip-e2` only |
+| instruction never trained on | **refuses to start** before any read_state | `--allow-unseen-instruction`, recorded in `config_hash` |
+| contract bound to a different `config_hash` | **refuses to start** | re-derive the contract |
+| camera trained ≠ camera deployed | printed note only | none — `--policy-camera head` on this scene is deliberate |
+
 ## What this does **not** prove
 
 Read this before quoting any number above.
@@ -372,6 +447,11 @@ Read this before quoting any number above.
    (renders are not bit-portable across GL backends), and the detailed numbers in this document
    (gain sweeps, reach distances, damping curves, throughput) come from ad-hoc verification
    scripts, not from the suite. Nothing automatically re-measures them.
+9. **The policy contract checks the two inputs it names, and nothing else.** It compares the
+   instruction and the validity mask, and notes the camera. It does **not** check image
+   resolution (`--image-hw 120 160` against a backbone trained at 128×160 is a mismatch nobody
+   here has verified either way), normalization, chunk `dt_s`, or whether the *pixels* are in
+   distribution — item 1 above is not something a contract can gate.
 
 ## Test coverage
 

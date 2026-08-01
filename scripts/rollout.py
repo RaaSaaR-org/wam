@@ -40,6 +40,27 @@ THE ``sim:reach`` SUCCESS PROXY (MockRobot only, ``--task sim:reach``):
   rollouts + D2 data (grasp/contact outcomes are not simulated by MockRobot), which is why
   the acceptance harness reports the ``sim:``-prefixed task as pending_hardware for AC-01.
 
+THE POLICY CONTRACT (T-31), and why a trained checkpoint cannot roll out without one:
+two inputs travel from training to deployment unchecked, and both are silent — the predicted
+chunk stays finite, in-bounds and on time either way.
+  1. The VALIDITY MASK. Every converted gr00t state carries ``imu=False`` with a zero IMU
+     payload, so the T-16 encoder only ever saw the learned ``missing['imu']`` vector there.
+     Every adapter here declares ``imu=True`` — honestly, a G1 has an IMU — and
+     ``FakeG1Transport`` even supplies ``acc=(0, 0, 9.81)``. Measured on the shipped
+     ``runs/t16-lora-seed0`` encoder: that flip moves the state embedding by 2.01 mean /
+     2.27 max against a 2.45 embedding norm and a 3.55 maximum distance between two TRAINING
+     states — ~1.75x the RMS radius of the training cloud.
+  2. The INSTRUCTION. ``--instruction`` defaults to a ``datasets/mock-d1`` string, right for
+     D1 checkpoints and wrong for the gr00t-trained ones (one unique training string == one
+     frozen text context). The repo's own probe puts the swap at relative L2 0.021 / 0.034 on
+     readout blocks 2 / 10, ~2.5x the influence of the entire state input.
+``--policy checkpoint|joint`` therefore REFUSES to start without a ``PolicyContract`` — derive
+one with ``--contract-from-dataset``, point at a saved one with ``--policy-contract``, or say
+``--no-policy-contract`` to run unchecked on purpose. State-group divergence is repaired (the
+observation is masked down to the trained mask, exactly reproducing training) and announced;
+an unseen instruction is a hard stop that only ``--allow-unseen-instruction`` clears, because
+there is no repair for it.
+
 SAFETY LIMITS: per-joint safety arrays (q/dq/ddq) come from the ROBOT'S DECLARED envelope
 (robot config / adapter — FR-06: robot specifics live in the HAL), while scalar EE /
 gripper-rate / watchdog parameters come from ``--safety-config``. The demo margins in
@@ -56,6 +77,16 @@ are labeled ``task="sim:fault_injection"`` — EVERY supported robot runs simula
 on MuJoCo contact physics), and the acceptance harness detects sim evidence solely via the
 ``sim:`` task prefix — so AC-03 excludes them and AC-06 reports pending_hardware instead of
 claiming real-robot safe-stop evidence.
+
+AC-04 TRACEABILITY AND THE 2026-08-01 KEY-SET CHANGE (``ROLLOUT_CONFIG_VERSION``): the
+``config_hash`` stamped on every log line is the traceability link, and T-31 changed what goes
+into it — ``config_record`` gained ``policy_contract`` and ``ExecutorConfig`` gained
+``allow_unseen_instruction``. A hash is over a key SET, so that silently made every archived
+rollout's hash unreproducible by current code. The same batch's bench-spec work versioned its
+equivalent rule change instead of applying it retroactively; this gets the same treatment. See
+:data:`ROLLOUT_CONFIG_VERSION` for what each version covers. Re-running an archived rollout and
+getting a different ``config_hash`` across a version boundary is EXPECTED, not evidence of
+config drift; within one version it is drift and must be investigated.
 
 Exit codes: 0 = rollouts completed; 1 = usage/config error; 2 = E2 static gate failed.
 """
@@ -92,11 +123,38 @@ from wam.runtime import (
     ExecutorConfig,
     RolloutResult,
 )
+from wam.runtime.executor import PolicyContract, policy_contract_record
 from wam.safety import SafetyConfig, SafetyLayer, Watchdog
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SIM_REACH_TASK = "sim:reach"
+
+ROLLOUT_CONFIG_VERSION = "0.2.0"
+"""Which KEY SET ``config_hash`` was computed over. Recorded IN the hashed config on purpose.
+
+``config_hash`` is a digest of a key set, so adding a key changes every hash a run would
+produce even when nothing about the run changed. That happened once already, silently:
+
+- **0.1.0** — every rollout log archived before 2026-08-01, e.g.
+  ``runs/mujoco-smoke/smokeA-default-simtime.jsonl`` (``9830319897b1e897…``) and
+  ``runs/rollouts/acceptance-sim-reach.jsonl`` (``a9dd234628bba232…``). No
+  ``policy_contract`` key, no ``executor.allow_unseen_instruction`` key, and no
+  ``rollout_config_version`` key. Those hashes CANNOT be reproduced by this code and are not
+  meant to be — the record they anchor is the log they are stamped on.
+- **0.2.0** — current. Adds T-31's ``policy_contract`` and ``executor.allow_unseen_instruction``
+  (so a run that skipped the train/deploy checks can never be mistaken for one that passed
+  them) and this field.
+
+The version is recorded twice, on purpose. It goes INTO the hashed config, so a future key-set
+change cannot happen without the version moving with it; and it is written to the log as a
+``kind="rollout_config_version"`` line, because the log stores only the DIGEST and never the
+config it digested — a version living solely in the preimage would be invisible to exactly the
+reader it exists for. Its absence from a log identifies that log as 0.1.0.
+
+Bump it in the same commit as any future change to which keys are hashed, and add a bullet.
+Never edit an existing bullet, and never change a key set without one.
+"""
 
 # Fixed sim:reach target pose [rad] for the 6-joint mock space (see module docstring):
 # the pose the D1-overfit checkpoint reaches after ~1.0-1.4 s of closed-loop tracking.
@@ -106,6 +164,17 @@ DEFAULT_REACH_TOLERANCE_RAD = 0.05
 # Conservative accel placeholder for robots that do not declare ddq_max (matches the
 # MVP caps in configs/robot/g1.yaml — OD-08 pending vendor verification).
 FALLBACK_DDQ_MAX = 4.0
+
+#: Policy-kinds whose weights have a training distribution this process can be held to. A
+#: 'dummy' policy has none, and a 'remote' one's contract lives on the server (the client
+#: never sees the checkpoint), so neither is required to carry one.
+CONTRACT_REQUIRED_POLICIES = ("checkpoint", "joint")
+
+#: Where a contract is looked for next to a checkpoint, in order. The last entries walk up
+#: from ``runs/<id>/checkpoints/step-NNNNNN/model.safetensors`` to ``runs/<id>/``, which is
+#: where a run's artifacts live.
+POLICY_CONTRACT_FILENAME = "policy_contract.json"
+_CONTRACT_SEARCH_PARENTS = 3
 
 
 class FaultInjectionPolicy:
@@ -185,6 +254,137 @@ def build_safety_config(
     return SafetyConfig.model_validate(data)
 
 
+def find_policy_contract(checkpoint: Path) -> Path | None:
+    """First contract file that exists next to (or above) ``checkpoint``, else None.
+
+    Auto-discovery exists so the contract travels with the artifact instead of living in a
+    command line somebody has to remember to retype. It is deliberately a SEPARATE file
+    rather than something read out of the checkpoint: the trainers do not record the
+    training instruction set or validity masks, and nothing in this task may change them.
+    """
+    candidates = [checkpoint.with_suffix(".contract.json")]
+    directory = checkpoint.parent
+    for _ in range(_CONTRACT_SEARCH_PARENTS + 1):
+        candidates.append(directory / POLICY_CONTRACT_FILENAME)
+        directory = directory.parent
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def resolve_policy_contract(
+    args: argparse.Namespace, policy: Policy
+) -> tuple[PolicyContract | None, list[str]]:
+    """(contract, lines to print). Refuses via ``SystemExit`` when one is required but absent.
+
+    Resolution order: ``--policy-contract`` > ``--contract-from-dataset`` > auto-discovery
+    next to the checkpoint. A contract that declares a ``checkpoint_config_hash`` differing
+    from the loaded checkpoint's is a HARD refusal, not a warning: a contract paired with the
+    wrong checkpoint is worse than none, because it makes the gates report on a model that is
+    not in the loop.
+    """
+    notes: list[str] = []
+    contract: PolicyContract | None = None
+    metadata = getattr(policy, "metadata", None)
+
+    if args.policy_contract is not None:
+        contract = PolicyContract.from_json(Path(args.policy_contract).read_text())
+        notes.append(f"[contract] loaded {args.policy_contract}")
+    elif args.contract_from_dataset is not None:
+        contract = PolicyContract.from_dataset(
+            args.contract_from_dataset,
+            camera=getattr(policy, "camera", None),
+            checkpoint_config_hash=getattr(metadata, "config_hash", None),
+        )
+        notes.append(f"[contract] derived from {contract.source}")
+    elif args.policy in CONTRACT_REQUIRED_POLICIES:
+        found = find_policy_contract(Path(args.checkpoint))
+        if found is not None:
+            contract = PolicyContract.from_json(found.read_text())
+            notes.append(f"[contract] discovered {found}")
+
+    if contract is None:
+        if args.policy in CONTRACT_REQUIRED_POLICIES and not args.no_policy_contract:
+            raise SystemExit(
+                f"--policy {args.policy} has no PolicyContract, so nothing checks that this "
+                "rollout feeds the checkpoint the instruction and validity mask it was "
+                "trained with (see this script's module docstring for what that costs). "
+                "Supply one with --contract-from-dataset <training dataset root> or "
+                f"--policy-contract <json>, drop a {POLICY_CONTRACT_FILENAME} next to the "
+                "checkpoint, or pass --no-policy-contract to run unchecked on purpose."
+            )
+        if args.no_policy_contract:
+            notes.append(
+                "[contract] DISABLED by --no-policy-contract: the instruction and "
+                "validity-mask train/deploy checks are NOT running"
+            )
+        return None, notes
+
+    declared_hash = contract.checkpoint_config_hash
+    actual_hash = getattr(metadata, "config_hash", None)
+    if declared_hash and actual_hash and declared_hash != actual_hash:
+        raise SystemExit(
+            f"policy contract is bound to checkpoint config_hash {declared_hash[:12]} but the "
+            f"loaded checkpoint is {actual_hash[:12]}. Re-derive the contract from the "
+            "dataset this checkpoint was actually trained on."
+        )
+    declared_ref = contract.dataset_snapshot_ref
+    actual_ref = getattr(metadata, "dataset_snapshot_ref", None)
+    if declared_ref and actual_ref and declared_ref != actual_ref:
+        # A warning, not a refusal: the trainer hashes the TRAINING split, so a contract
+        # derived from the whole root legitimately differs whenever a holdout was excluded.
+        # A superset can only add instructions and soften a group to 'mixed', so it never
+        # invents a divergence — it can only miss one, which is why this still gets said.
+        notes.append(
+            f"[contract] WARNING dataset_snapshot_ref {declared_ref[:19]} != the checkpoint's "
+            f"{actual_ref[:19]}: derived from a different episode set than the run trained on "
+            "(a holdout split does this), so the checks below may be weaker than they look"
+        )
+    if not contract.instruction_seen(args.instruction):
+        if not args.allow_unseen_instruction:
+            # Duplicated on purpose: ClosedLoopExecutor raises the same refusal for library
+            # callers, but --skip-e2 would otherwise turn this into a traceback thrown after
+            # the robot was already built. Refuse here, with the flag that clears it.
+            raise SystemExit(
+                f"--instruction {args.instruction!r} is not one the checkpoint trained on "
+                f"({list(contract.instructions)}). Pass a trained instruction or "
+                "--allow-unseen-instruction to accept the shift deliberately."
+            )
+        notes.append(
+            f"[contract] OVERRIDE --instruction {args.instruction!r} was never trained on "
+            f"(trained: {list(contract.instructions)})"
+        )
+    deployed_camera = getattr(policy, "camera", None)
+    if contract.camera and deployed_camera and contract.camera != deployed_camera:
+        # Not a gate: the MuJoCo scene renders 'head' while the gr00t episodes trained on
+        # 'ego', and docs/sim.md tells you to override it deliberately. Said out loud anyway,
+        # because the camera is the original member of this family of invisible-when-wrong
+        # inputs and it has never had anything but a config_hash entry nobody reads.
+        notes.append(
+            f"[contract] NOTE camera trained={contract.camera} deployed={deployed_camera}"
+        )
+    return contract, notes
+
+
+def policy_period_note(policy: Policy, robot_dt_s: float) -> str | None:
+    """A note when the head's trained control period differs from the robot's configured one.
+
+    The third member of the camera's family — a checkpoint field that reaches the robot with
+    nothing comparing it. ``ActionHeadConfig.dt_s`` is what the chunk claims each step lasts
+    (T-16: 0.0333 s, the gr00t capture rate); ``configs/robot/{g1,mujoco_g1}.yaml`` declare
+    0.02 s. It is a NOTE, not a gate, because the loop is self-consistent either way —
+    ``G1Adapter.execute`` paces on ``chunk.dt_s`` and the safety layer derives its accel
+    limits from the same number — but the sim then advances a different amount of time per
+    step than the scene was tuned for (docs/sim.md, "Keep chunk.dt_s == control_dt_s").
+    """
+    head = getattr(getattr(getattr(policy, "model", None), "config", None), "head", None)
+    trained_dt_s = getattr(head, "dt_s", None)
+    if trained_dt_s is None or abs(float(trained_dt_s) - robot_dt_s) < 1e-6:
+        return None
+    return (
+        f"[policy] NOTE chunk dt_s trained={float(trained_dt_s):.4f} s but the robot config "
+        f"declares control dt_s={robot_dt_s:.4f} s; pacing follows the chunk"
+    )
+
+
 def make_reach_success_fn(
     target_rad: Sequence[float], tolerance_rad: float
 ) -> Callable[[RobotState], bool]:
@@ -254,6 +454,37 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--policy-deadline-ms", type=float, default=500.0)
     parser.add_argument("--min-policy-rate-hz", type=float, default=2.0)
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
+    parser.add_argument(
+        "--policy-contract",
+        type=Path,
+        default=None,
+        help="PolicyContract json declaring what the checkpoint was trained on (T-31)",
+    )
+    parser.add_argument(
+        "--contract-from-dataset",
+        type=Path,
+        default=None,
+        help=(
+            "derive the PolicyContract from this training dataset root — instructions and "
+            "validity masks come from the episodes themselves, so they cannot drift"
+        ),
+    )
+    parser.add_argument(
+        "--no-policy-contract",
+        action="store_true",
+        help=(
+            "run a trained checkpoint with NO train/deploy checks. The explicit way to say "
+            "'I know this policy may be fed inputs it never saw'"
+        ),
+    )
+    parser.add_argument(
+        "--allow-unseen-instruction",
+        action="store_true",
+        help=(
+            "accept an --instruction the checkpoint never trained on (recorded in "
+            "config_hash, so the run stays distinguishable)"
+        ),
+    )
     parser.add_argument(
         "--robot-config",
         type=Path,
@@ -512,6 +743,7 @@ def main(argv: list[str] | None = None) -> int:
         instruction=args.instruction,
         task=task,
         stop_on_estop=True,
+        allow_unseen_instruction=args.allow_unseen_instruction,
     )
 
     # sim:reach success proxy — 6-joint mock space only (see module docstring).
@@ -525,6 +757,14 @@ def main(argv: list[str] | None = None) -> int:
         success_fn = make_reach_success_fn(REACH_TARGET_RAD, args.reach_tolerance_rad)
 
     try:
+        # ---- T-31: what the checkpoint was trained on, before anything moves --------------
+        # Resolved BEFORE the E2 gate so the gate can use it, and before the executor so an
+        # unseen instruction refuses at construction rather than mid-rollout.
+        contract, contract_notes = resolve_policy_contract(args, base_policy)
+        period_note = policy_period_note(base_policy, dt_s)
+        for note in contract_notes + ([period_note] if period_note else []):
+            print(note)
+
         # ---- T-22: E2 static release gate (on the UNWRAPPED policy) ----------------------
         if not args.skip_e2:
             e2 = e2_static_checks(
@@ -536,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
                 seed=args.seed,
                 max_mean_latency_ms=args.policy_deadline_ms,
                 instruction=args.instruction,
+                contract=contract,
             )
             status = "PASS" if e2.passed else f"FAIL ({', '.join(e2.failed_gates())})"
             print(f"[e2] static checks: {status} ({e2.n} probes)")
@@ -554,6 +795,10 @@ def main(argv: list[str] | None = None) -> int:
             f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
         )
         config_record: dict[str, Any] = {
+            # First key on purpose: it says which key set the rest of this dict is, so a hash
+            # that fails to reproduce is attributable without guessing (see
+            # ROLLOUT_CONFIG_VERSION).
+            "rollout_config_version": ROLLOUT_CONFIG_VERSION,
             "robot": args.robot,
             "policy": args.policy,
             "task": task,
@@ -563,6 +808,10 @@ def main(argv: list[str] | None = None) -> int:
             "safety": safety_cfg.model_dump(),
             "start_jitter_rad": args.start_jitter_rad,
             "provenance": provenance_extra,
+            # In config_hash so two runs that differ only in what the policy was held to are
+            # different artifacts, and an unchecked run can never be mistaken for a checked
+            # one after the fact.
+            "policy_contract": contract.model_dump(mode="json") if contract else None,
         }
         if success_fn is not None:
             config_record["sim_reach"] = {
@@ -588,6 +837,22 @@ def main(argv: list[str] | None = None) -> int:
         results: list[RolloutResult] = []
         with JsonlRunLogger(log_path, metadata) as logger:
             logger.log_metadata()
+            # The key-set version has to be READABLE from the archive, not merely hashed into
+            # it: the log stores config_hash but never the config it digested, so a version
+            # that only lived inside the preimage would be invisible to exactly the reader it
+            # exists for. Its ABSENCE identifies a pre-2026-08-01 (0.1.0) log.
+            logger.log({"kind": "rollout_config_version", "version": ROLLOUT_CONFIG_VERSION})
+            if contract is None:
+                # An unchecked run must SAY it was unchecked. The config reaches the log only
+                # as a hash, so without this line an archive reader cannot tell a run that
+                # skipped the train/deploy checks from one that passed them.
+                logger.log(
+                    policy_contract_record(
+                        None,
+                        instruction=args.instruction,
+                        allow_unseen_instruction=args.allow_unseen_instruction,
+                    )
+                )
             for i in range(args.rollouts):
                 policy: Policy = base_policy
                 if args.fault_injection:
@@ -604,6 +869,7 @@ def main(argv: list[str] | None = None) -> int:
                     watchdog=Watchdog.from_config(safety_cfg),
                     logger=logger,
                     config=exec_cfg,
+                    contract=contract,
                 )
                 results.append(executor.run_rollout(f"{run_id}-{i:04d}", success_fn=success_fn))
 
@@ -625,6 +891,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"[rollout] task={task} robot={args.robot} policy={args.policy} "
                 + (f"camera={camera} " if camera else "")
+                + f"contract={'yes' if contract is not None else 'NONE'} "
                 + f"n={len(results)} success={n_success} estops={n_estop} "
                 f"watchdog_timeouts={wd} deadline_misses={misses} "
                 f"interventions={kinds} min_rate_hz={min(rates):.1f}"
@@ -632,6 +899,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("[rollout] no rollouts requested")
         print(f"[log] {log_path}")
+        # The AC-04 link, said out loud. config_hash reaches the archive only as a 64-char
+        # field nobody reads by eye, and the version next to it is what turns "this hash does
+        # not match the archived run" into "of course it does not, the key set moved".
+        print(
+            f"[provenance] rollout_config_version={ROLLOUT_CONFIG_VERSION} "
+            f"config_hash={metadata.config_hash[:12]}"
+        )
         return 0
     finally:
         close = getattr(base_policy, "close", None)

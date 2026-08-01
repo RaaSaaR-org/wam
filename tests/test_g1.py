@@ -212,6 +212,45 @@ def test_forget_tick_clears_the_staleness_memory_for_a_deliberate_clock_rewind()
     assert not any(adapter.read_state().validity.as_dict().values())
 
 
+def test_read_state_reports_a_fresh_imu_as_valid_carrying_the_transports_gravity_vector(
+) -> None:
+    """The DEPLOY half of the T-31 validity divergence, pinned so it cannot be "fixed" here.
+
+    ``FakeG1Transport`` defaults to ``acc = (0, 0, 9.81)`` and a real G1 publishes a real IMU,
+    so ``imu=True`` with a gravity payload is the honest answer for this adapter. The T-16
+    checkpoints trained on gr00t episodes that mark ``imu=False`` in every state, so their
+    encoder only ever saw the learned ``missing['imu']`` vector — but reconciling those two
+    facts belongs to ``PolicyContract``, not to a flag flipped here. Lying in this adapter
+    would break every consumer that is not that one checkpoint.
+    """
+    adapter, _fake = connected_adapter()
+    state = adapter.read_state()
+
+    assert state.validity.imu is True
+    np.testing.assert_allclose(state.imu.linear_acceleration, [0.0, 0.0, 9.81], atol=1e-6)
+
+
+def test_a_policy_contract_masks_the_g1_imu_group_down_for_a_checkpoint_trained_without_it(
+) -> None:
+    """The repair, end to end on the real adapter: the policy sees the mask training used
+    while the raw state — the one the safety layer judges — is left alone."""
+    from wam.runtime.executor import PolicyContract, StateGroupUse
+
+    adapter, _fake = connected_adapter()
+    state = adapter.read_state()
+    contract = PolicyContract(state_groups={"imu": StateGroupUse.NEVER})
+
+    conformed, divergences = contract.conform(state)
+
+    assert conformed.validity.imu is False
+    assert state.validity.imu is True
+    assert [d.group for d in divergences] == ["imu"]
+    # The payload is untouched; only the mask the encoder reads changed.
+    np.testing.assert_array_equal(
+        conformed.imu.linear_acceleration, state.imu.linear_acceleration
+    )
+
+
 def test_read_state_missing_gripper_degrades_only_gripper() -> None:
     class NoGripperTransport(FakeG1Transport):
         def read_low_state(self) -> dict:

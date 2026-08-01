@@ -405,3 +405,80 @@ def test_tiled_and_windowed_reach_the_policy_as_different_clips(
         _HISTORY_FRAMES,
     )
     assert not np.array_equal(np.asarray(windowed[0]), np.asarray(windowed[-1]))
+
+
+# -- 6. T-31: the contract derived from the recorded set matches what was recorded -----------
+#
+# The two silent train/deploy divergences (validity mask, instruction) can only be caught if
+# the contract is derived from the episodes the weights actually saw. These pin that the
+# derivation reads the real recording rather than a declared spec — a contract that agreed with
+# a manifest but not with the rows would mask the wrong groups and check the wrong prompts.
+
+
+def test_policy_contract_derived_from_the_recording_matches_its_manifests_and_state_rows(
+    dataset_root: Path,
+) -> None:
+    from wam.data.episode import EpisodeReader
+    from wam.runtime.executor import PolicyContract, StateGroupUse
+
+    contract = PolicyContract.from_dataset(dataset_root)
+
+    recorded_instructions = set()
+    recorded_masks = set()
+    for episode_dir in list_episodes(dataset_root):
+        reader = EpisodeReader(episode_dir)
+        recorded_instructions.add(reader.manifest.instruction)
+        for state in reader.read_states():
+            recorded_masks.add(tuple(sorted(state.validity.as_dict().items())))
+
+    assert set(contract.instructions) == recorded_instructions
+    # MockRobot reports all four groups valid, so a D1 checkpoint trained here expects them
+    # all present — the exact opposite of the gr00t-converted set, which is why the contract
+    # has to be per-checkpoint rather than a repo-wide constant.
+    assert recorded_masks == {(("dq", True), ("gripper", True), ("imu", True), ("q", True))}
+    assert all(use is StateGroupUse.ALWAYS for use in contract.state_groups.values())
+
+
+def test_policy_contract_state_groups_track_the_rows_not_the_manifest_spec(
+    dataset_root: Path, tmp_path: Path
+) -> None:
+    """Rewriting one episode's states with imu invalid must flip the group to MIXED: the mask
+    is per-row, and only a per-row scan can tell 'the encoder saw both' from 'it saw one'."""
+    import shutil
+
+    from wam.data.episode import EpisodeWriter
+    from wam.interfaces.schema import RobotState, ValidityMask
+    from wam.runtime.executor import PolicyContract, StateGroupUse
+
+    root = tmp_path / "mixed"
+    shutil.copytree(dataset_root / "d1-0000", root / "d1-0000")
+    spec = CanonicalSpaceSpec(joint_names=("a", "b"), gripper_dims=1)
+    with EpisodeWriter(
+        root / "no-imu", episode_id="no-imu", spec=spec, fps=10.0, instruction="another task"
+    ) as writer:
+        writer.add_state(
+            RobotState(
+                timestamp_ns=0,
+                q=np.zeros(2, dtype=np.float32),
+                dq=np.zeros(2, dtype=np.float32),
+                imu=_zero_imu(),
+                gripper_state=np.zeros(1, dtype=np.float32),
+                validity=ValidityMask(q=True, dq=True, imu=False, gripper=True),
+            )
+        )
+
+    contract = PolicyContract.from_dataset(root)
+
+    assert contract.state_groups["imu"] is StateGroupUse.MIXED
+    assert contract.state_groups["q"] is StateGroupUse.ALWAYS
+    assert "another task" in contract.instructions
+
+
+def _zero_imu():
+    from wam.interfaces.schema import IMUState
+
+    return IMUState(
+        orientation_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        angular_velocity=np.zeros(3, dtype=np.float32),
+        linear_acceleration=np.zeros(3, dtype=np.float32),
+    )

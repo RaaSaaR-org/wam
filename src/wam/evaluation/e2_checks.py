@@ -5,7 +5,8 @@ Two entry points, both torch-free:
 - :func:`e2_static_checks` probes a live ``Policy`` against synthetic observations derived
   from a ``RobotAdapter`` (no execution, nothing is sent to the robot): chunk schema
   validity, finiteness, PRD duration band (warn-only), safety-filter intervention rate,
-  determinism and policy latency.
+  determinism, policy latency and — when a ``PolicyContract`` is supplied — whether this
+  deployment feeds the policy inputs it was never trained on.
 - :func:`e2_sim_rollout_checks` gates aggregated sim rollouts using the shared rollout-log
   contract (``kind == 'rollout_summary'`` dicts): zero e-stops, zero watchdog timeouts,
   policy rate >= 2 Hz (FR-05) and a bounded intervention rate.
@@ -36,6 +37,8 @@ from wam.interfaces import (
     RobotAdapter,
     SafetyFilter,
 )
+from wam.runtime.executor import PolicyContract
+from wam.runtime.mock_loop import DEFAULT_INSTRUCTION
 
 E2_VERSION = "0.1.0"
 
@@ -59,6 +62,13 @@ E2_STATIC_GATES = (
     E2_GATE_LATENCY,
 )
 
+# Contract gates. Conditional on a PolicyContract being supplied, hence NOT in
+# E2_STATIC_GATES: a report without a contract is missing them, and that absence is itself
+# reported (a warning) rather than silently reading as "checked and fine".
+E2_GATE_INSTRUCTION = "policy_instruction_seen"
+E2_GATE_STATE_GROUPS = "policy_state_groups"
+E2_CONTRACT_GATES = (E2_GATE_INSTRUCTION, E2_GATE_STATE_GROUPS)
+
 E2_GATE_ROLLOUTS = "rollouts_present"
 E2_GATE_ZERO_ESTOPS = "zero_estops"
 E2_GATE_ZERO_WATCHDOG = "zero_watchdog_timeouts"
@@ -72,13 +82,16 @@ E2_SIM_GATES = (
 )
 
 __all__ = [
+    "E2_CONTRACT_GATES",
     "E2_GATE_CHUNK_VALID",
     "E2_GATE_DETERMINISM",
     "E2_GATE_DURATION_BAND",
+    "E2_GATE_INSTRUCTION",
     "E2_GATE_INTERVENTION_RATE",
     "E2_GATE_LATENCY",
     "E2_GATE_POLICY_RATE",
     "E2_GATE_ROLLOUTS",
+    "E2_GATE_STATE_GROUPS",
     "E2_GATE_TARGETS_FINITE",
     "E2_GATE_ZERO_ESTOPS",
     "E2_GATE_ZERO_WATCHDOG",
@@ -104,6 +117,15 @@ class E2Report(BaseModel):
     n: int
     policy: str = ""
     robot: str = ""
+    #: The instruction the probes carried. Defaulted so archived reports keep parsing; it is
+    #: recorded because latency and determinism were measured under THIS text conditioning,
+    #: and until the contract gates existed nothing said which string that was.
+    instruction: str = ""
+    #: Whether the train/deploy gates ran at all. A passing report with this False says
+    #: "nobody looked", which is a different claim from "no divergence" — and the difference
+    #: is invisible if it has to be inferred from the gate list. False in archived reports,
+    #: which is the truth: they predate the check.
+    contract_checked: bool = False
     gates: list[GateResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -162,7 +184,8 @@ def e2_static_checks(
     max_intervention_rate: float = 0.1,
     max_mean_latency_ms: float = 1000.0 / MIN_POLICY_RATE_HZ,
     determinism_probes: int = 3,
-    instruction: str = "Greife den Würfel und lege ihn ab.",
+    instruction: str = DEFAULT_INSTRUCTION,
+    contract: PolicyContract | None = None,
 ) -> E2Report:
     """Probe ``policy`` on ``n_probes`` synthetic observations; nothing is executed.
 
@@ -170,6 +193,34 @@ def e2_static_checks(
     (seeded, clipped to the adapter's position limits) and monotonic timestamps, so the
     whole check is reproducible. The safety filter runs on every predicted chunk but its
     output is discarded — this is a read-only gate.
+
+    ``instruction`` defaults to the closed loop's :data:`DEFAULT_INSTRUCTION`. It used to
+    default to a THIRD string ("Greife den Würfel und lege ihn ab.") that appears in no
+    dataset in this repo, which meant the gate's latency, determinism and intervention
+    numbers were measured under text conditioning no checkpoint had ever seen. Who that
+    default change reached, stated precisely rather than waved at — an earlier revision of
+    this docstring claimed "every caller in-tree passes the argument", which is false:
+
+    - **No archived report changes.** ``scripts/rollout.py`` is the only in-tree writer of a
+      persisted :class:`E2Report`, and it has always passed ``instruction=args.instruction``.
+      Everything under ``runs/`` was therefore measured under a string somebody chose.
+    - **Six test call sites DID change what they probe with**: ``tests/test_acceptance.py``
+      lines 536, 549, 551, 558, 567 and 579 call this without ``instruction=`` (line 586 does
+      too but raises on ``n_probes=0`` before reaching it). Their policies — ``DummyPolicy``,
+      ``NaNPolicy``, ``DriftingPolicy`` — ignore ``Observation.instruction`` entirely, so no
+      measured value there moves; what moves is the ``instruction`` field those reports carry,
+      which is the point. ``tests/test_e2e_m4.py`` and ``tests/test_runtime.py`` pass it.
+
+    The default is now honest rather than quietly novel, and the change is visible rather than
+    silent because :attr:`E2Report.instruction` records the resolved string. If a future caller
+    needs the gate to prove which text it conditioned on, make this parameter required — that
+    turns a defaulted probe into a compile-time event instead of a docstring promise.
+
+    ``contract`` adds the train/deploy gates (:data:`E2_CONTRACT_GATES`). Probe states come
+    from the real adapter, so the state-group gate is testing exactly what a rollout would
+    feed the policy. States are contract-conformed before probing, matching what
+    :class:`wam.runtime.executor.ClosedLoopExecutor` does, so the latency and determinism
+    numbers are measured on the inputs the rollout will actually use.
     """
     if n_probes < 1:
         raise ValueError(f"e2_static_checks: n_probes must be >= 1, got {n_probes}")
@@ -182,10 +233,14 @@ def e2_static_checks(
     rng = np.random.default_rng(seed)
 
     observations: list[Observation] = []
+    raw_states = []
     for i in range(n_probes):
         delta = rng.uniform(-perturbation_rad, perturbation_rad, size=base_state.q.shape)
         q = np.clip(base_state.q.astype(np.float64) + delta, q_min, q_max).astype(np.float32)
         state = replace(base_state, timestamp_ns=base_state.timestamp_ns + i * 50_000_000, q=q)
+        raw_states.append(state)
+        if contract is not None:
+            state, _ = contract.conform(state)
         observations.append(Observation(images=images, state=state, instruction=instruction))
 
     latencies_ms: list[float] = []
@@ -208,7 +263,10 @@ def e2_static_checks(
             nonfinite += 1
         durations.append(float(chunk.duration))
 
-        _, interventions = safety.filter(obs.state, chunk)
+        # The RAW state, not the conformed one: the safety layer judges what the robot
+        # reported. Contract masking is an input-distribution repair for the policy and must
+        # never change what a limit check looks at (FR-07).
+        _, interventions = safety.filter(raw_states[i], chunk)
         if interventions:
             intervention_hits += 1
             for intervention in interventions:
@@ -310,14 +368,95 @@ def e2_static_checks(
         )
     )
 
+    if contract is not None:
+        gates.extend(_contract_gates(contract, instruction, raw_states, warnings))
+
     return E2Report(
         check="static",
         n=n_probes,
         policy=type(policy).__name__,
         robot=type(robot).__name__,
+        instruction=instruction,
+        contract_checked=contract is not None,
         gates=gates,
         warnings=warnings,
     )
+
+
+def _contract_gates(
+    contract: PolicyContract,
+    instruction: str,
+    states: Sequence[Any],
+    warnings: list[str],
+) -> list[GateResult]:
+    """The two train/deploy gates. Split out so the probe loop stays about the policy.
+
+    Failure policy, decided per divergence direction rather than uniformly:
+
+    - **Instruction — FAIL.** There is no repair the runtime can apply and no reading of the
+      run that is still valid: the checkpoint conditioned on one frozen text context, and a
+      different string moves the readout blocks the ActionHead was fitted to. The operator
+      overrides it deliberately (``ExecutorConfig.allow_unseen_instruction``), not by
+      ignoring a warning.
+    - **State groups — FAIL only where no repair exists.** A group trained NEVER-valid but
+      deployed valid IS repairable (mask it down and the encoder sees the exact training
+      input), so it is a loud warning, not a gate failure — failing would block a run that
+      the executor has already made correct. A group trained ALWAYS-valid but deployed
+      invalid has no repair: the encoder's ``missing`` vector for it is untrained, so the
+      policy is reading an unlearned input and the gate fails.
+    """
+    gates: list[GateResult] = []
+
+    seen = contract.instruction_seen(instruction)
+    if not contract.declares_instructions:
+        warnings.append(
+            "PolicyContract declares no instructions: the deployed instruction "
+            f"{instruction!r} could NOT be checked against training"
+        )
+    gates.append(
+        GateResult(
+            name=E2_GATE_INSTRUCTION,
+            passed=seen,
+            detail=(
+                ""
+                if seen
+                else (
+                    f"deployed instruction {instruction!r} is not one of the "
+                    f"{len(contract.instructions)} the checkpoint trained on "
+                    f"(e.g. {contract.instructions[0]!r})"
+                )
+            ),
+            metrics={
+                "declared": contract.declares_instructions,
+                "num_trained_instructions": len(contract.instructions),
+            },
+        )
+    )
+
+    repairable: dict[str, str] = {}
+    unrepairable: dict[str, str] = {}
+    for state in states:
+        for divergence in contract.state_divergences(state):
+            target = repairable if divergence.repaired else unrepairable
+            target[divergence.group] = divergence.detail
+    if repairable:
+        warnings.append(
+            "validity-mask divergence repaired by masking down to the trained mask: "
+            + "; ".join(repairable.values())
+        )
+    gates.append(
+        GateResult(
+            name=E2_GATE_STATE_GROUPS,
+            passed=not unrepairable,
+            detail="; ".join(unrepairable.values()),
+            metrics={
+                "repaired_groups": sorted(repairable),
+                "unrepairable_groups": sorted(unrepairable),
+                "trained": {k: v.value for k, v in contract.state_groups.items()},
+            },
+        )
+    )
+    return gates
 
 
 def e2_sim_rollout_checks(

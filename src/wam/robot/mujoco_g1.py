@@ -394,7 +394,13 @@ class MujocoG1Robot:
     def read_state(self) -> RobotState:
         """Canonical state from MuJoCo. Two consecutive reads with no physics step in
         between are STALE (the tick did not advance) and come back with cleared validity
-        flags — exactly as a stalled vendor controller would look."""
+        flags — exactly as a stalled vendor controller would look.
+
+        The IMU is genuine here too (the scene carries gyro + accelerometer sensors and the
+        torso body's world orientation), so a fresh sample reports ``imu=True``. A T-16
+        checkpoint trained on gr00t episodes never saw a valid IMU group; reconciling that
+        is :class:`wam.runtime.executor.PolicyContract`'s job, not this adapter's — see
+        ``G1Adapter.read_state`` for why the flag must keep describing the sensor."""
         return self._adapter.read_state()
 
     def execute(self, chunk: ActionChunk, prefix_steps: int) -> None:

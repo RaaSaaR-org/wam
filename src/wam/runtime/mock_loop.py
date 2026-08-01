@@ -39,6 +39,14 @@ from wam.safety import Watchdog, WatchdogAction
 
 _NS_PER_S = 1_000_000_000
 
+#: Default closed-loop instruction. NOT arbitrary: it is one of the four instructions in
+#: ``datasets/mock-d1`` (see ``scripts/record_mock_dataset.py``), so it is exactly right for
+#: the D1 / mock checkpoints this loop was built for — and exactly wrong for the gr00t-trained
+#: ones, whose every episode manifest says "move the apple to the plate". A single unique
+#: training string means those checkpoints conditioned on ONE frozen umT5 context, so any other
+#: string is a live distribution shift on the readout the ActionHead was fitted to.
+#: :class:`wam.runtime.executor.PolicyContract` is what catches that before a rollout starts;
+#: this constant stays put because changing it would just move the mismatch onto D1.
 DEFAULT_INSTRUCTION = "Greife die rote Tasse."
 
 

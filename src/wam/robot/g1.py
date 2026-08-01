@@ -222,6 +222,18 @@ class G1Adapter:
         - timestamp: the transport tick. A tick UNCHANGED since the previous read means
           the sample is stale — ALL validity flags are degraded so the upstream safety
           layer rejects the state (state_reject) and the watchdog is not fed fresh data.
+
+        ``validity`` describes THE SENSOR, not any policy's training distribution. A G1 has
+        an IMU, so a fresh sample reports ``imu=True`` and the payload is real (the DDS
+        passthrough; even ``FakeG1Transport`` supplies ``acc=(0, 0, 9.81)``). That is the
+        honest answer and it must stay the honest answer: the T-16 checkpoints were trained
+        on converted gr00t episodes whose every state carries ``imu=False``, so their
+        encoder only ever saw the learned ``missing['imu']`` vector — but the fix for that
+        is NOT to lie here about what the robot has. Matching a checkpoint's expectations to
+        a robot's sensors belongs to :class:`wam.runtime.executor.PolicyContract`, which
+        masks the observation down for the policy while the safety layer keeps seeing what
+        the robot actually reported. Flipping this flag would instead break every adapter
+        consumer that is not that one checkpoint.
         """
         transport = self._require_connected("read_state")
         low = transport.read_low_state()

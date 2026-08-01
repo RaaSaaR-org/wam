@@ -26,6 +26,7 @@ from wam.interfaces.schema import (
     CanonicalSpaceSpec,
     IMUState,
     RobotState,
+    ValidityMask,
 )
 
 _DOT_HALF = 1  # rendered dot is (2*_DOT_HALF+1)^2 pixels
@@ -133,7 +134,18 @@ class MockRobot:
 
     def read_state(self) -> RobotState:
         """Current canonical state. Noise (if configured) is applied per read; internal
-        state is untouched. After ``estop()``/``hold()``, ``dq`` reads zero."""
+        state is untouched. After ``estop()``/``hold()``, ``dq`` reads zero.
+
+        The all-valid mask is SPELLED OUT rather than left to the schema default because it
+        is load-bearing: ``datasets/mock-d1`` was recorded through this adapter and carries
+        all-True masks in every row, so every D1 checkpoint's state encoder was fitted with
+        all four groups present. Flipping ``imu`` here — the IMU payload is a placeholder
+        identity quaternion, not a measurement, so the temptation exists — would hand those
+        checkpoints a learned ``missing['imu']`` vector at deploy time that they never saw
+        during training, i.e. it would CREATE the train/deploy divergence that
+        :class:`wam.runtime.executor.PolicyContract` exists to catch, in the opposite
+        direction. The mask must keep matching the datasets recorded from this adapter.
+        """
         q = self._q.copy()
         dq = self._dq.copy()
         if self._noise_std > 0.0:
@@ -149,6 +161,7 @@ class MockRobot:
                 linear_acceleration=np.zeros(3, dtype=np.float32),
             ),
             gripper_state=self._gripper.astype(np.float32),
+            validity=ValidityMask(q=True, dq=True, imu=True, gripper=True),
         )
 
     def execute(self, chunk: ActionChunk, prefix_steps: int) -> None:
