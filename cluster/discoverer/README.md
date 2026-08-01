@@ -60,6 +60,14 @@ Checkpoints belong in `${PROJ}/runs` ([scratch](https://docs.discoverer.bg/scrat
 | 4 | `30_smoke_wan.sbatch` | project | ~0.25 GPU-h | 13/13 adapter checks on one H200, peak VRAM |
 | 5 | `40_readout_probe.sbatch` | project | ~1.5 GPU-h | re-measure feature blocks `[2, 10]` on this stack |
 | 6 | `50_train_t16.sbatch` | project | the budget | the LoRA fine-tune |
+| 7 | `60_eval_t16.sbatch` | project | ~0.2 GPU-h | score the checkpoint on the proven holdout |
+| 8 | `61_eval_t29_frame_history.sbatch` | project | ~0.4 GPU-h | T-29 / I-7: tiled frame vs. the real window |
+| 9 | `63_eval_t30_flow_head.sbatch` | project | ~1 GPU-h | T-30 / I-3: regression head vs. the flow sampler |
+| 10 | `55_train_i8_rung.sbatch` | project | ~36 GPU-h ×3 | I-8 / T-32 rungs 040 / 120 (+ a seed-1 replicate) |
+| 11 | `62_eval_i8_curve.sbatch` | project | ~1 GPU-h | both frame modes × 3 rungs, then the pre-registered verdict |
+
+The `#` column is execution order, not the filename number: `55_` sorts before `60_` because it
+is a *training* script, but it runs after step 8.
 
 Steps 1–3 cost nothing. Run them first — they catch every environment problem before a single
 GPU-hour is spent.
@@ -97,6 +105,27 @@ completion, not bitwise.
 The queue is full of 4/7/8-GPU jobs on a 15-GPU machine, so `--gres=gpu:1` is also the biggest
 throughput lever we have — and a 5B LoRA needs exactly one H200.
 
+**Step 10 reuses that mechanism unchanged and is deliberately NOT a job array.** `55_train_i8_rung`
+is `50_train_t16` with the rung block and two extra trainer flags; the requeue machinery
+(`--signal=B:USR1@300`, python in the background with `PY=$!`, `MAX_RESTARTS`, the four exit
+branches) is copied verbatim rather than re-derived, because that block is what protects a
+20 000-step run. An array would be the obvious "simplification" and is the one thing not to do:
+job arrays are an open question on this cluster (`docs/discoverer.md`, open questions item 8 —
+"Arrays appear in `squeue`, so probably yes", against a provider whose docs this file already
+marks contested), and an array task's interaction with `scontrol requeue` / `SLURM_RESTART_COUNT`
+is exactly the unknown that, if wrong, produces the unbounded requeue loop `MAX_RESTARTS` exists
+to stop. Three plain submissions sit inside the 4-running cap and give each rung its own `DONE`,
+its own restart counter and its own blast radius.
+
+Step 10 also refuses to start until `runs/t16-lora-seed0/eval-t29-history/bench.json` exists:
+rung 362 of the I-8 curve *is* step 8's output, so a T-29 verdict nobody has read yet means I-8's
+premise is unknown. `SKIP_T29_CHECK=1` overrides it — only after reading that verdict.
+
+Step 11 is the **pre-registration**: every threshold in the I-8 decision rule is a literal in
+`62_eval_i8_curve.sbatch`, and the file is committed before the first rung is submitted. If a
+constant has to change, add a new rule version next to it; never edit a number in place, or the
+runs already scored stop being re-derivable.
+
 ## Provider docs
 
 Treat these as *contested*: several pages were wrong when checked against the live machine on
@@ -126,4 +155,9 @@ sync.sh                push repo + dataset from the Mac
 30_smoke_wan.sbatch    Wan adapter on one H200             ~0.25 GPU-h
 40_readout_probe.sbatch re-measure feature blocks          ~1.5 GPU-h
 50_train_t16.sbatch    the LoRA fine-tune                  the budget
+55_train_i8_rung.sbatch one I-8 data-scaling rung          ~36 GPU-h each
+60_eval_t16.sbatch     score the checkpoint (the verdict)  ~0.2 GPU-h
+61_eval_t29_frame_history.sbatch  T-29 frame-mode A/B      ~0.4 GPU-h
+62_eval_i8_curve.sbatch the I-8 curve + its decision rule  ~1 GPU-h
+63_eval_t30_flow_head.sbatch      T-30 readout A/B         ~1 GPU-h
 ```
