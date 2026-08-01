@@ -72,11 +72,19 @@ fi
 # evaluator recomputes the dataset hash over (dataset - holdout) and refuses to score unless
 # it matches the hash the checkpoint recorded. Pointing these at two different files is
 # exactly the drift that guard exists to catch.
+#
+# --train-episodes is passed UNCONDITIONALLY, and i8_train_362.txt is the complement of the
+# holdout above (402 - 40 = 362, set-equal — configs/splits/README). Why it is here at all:
+# train_t16_lora.py records train_episode_ids on EVERY run, so any checkpoint retrained after
+# 2026-08-01 takes eval_t16's disjointness path, which needs an external witness. The archived
+# runs/t16-lora-seed0/checkpoints/step-020000 predates the field and takes the complement path,
+# where this file is checked as a redundant cross-check instead. One command line, both proofs.
 python "${EVAL}" \
     --run-dir "${OUT}" \
     --checkpoint "${CKPT}" \
     --dataset "${PROJ}/data/gr00t-apple-full" \
     --holdout "${PROJ}/wam/configs/splits/t18_holdout_episodes.txt" \
+    --train-episodes "${PROJ}/wam/configs/splits/i8_train_362.txt" \
     --camera ego \
     --device cuda \
     --out "${OUT}/eval-${CKPT}"

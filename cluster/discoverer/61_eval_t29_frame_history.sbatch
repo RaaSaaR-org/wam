@@ -66,6 +66,15 @@ CKPT=${CKPT:-latest}
 OUT=${PROJ}/runs/${RUN_ID}
 DATASET=${PROJ}/data/gr00t-apple-full
 HOLDOUT=${PROJ}/wam/configs/splits/t18_holdout_episodes.txt
+# The external witness for the split proof. i8_train_362.txt IS the complement of the holdout
+# above (402 - 40 = 362, set-equal), so it is both the right witness for a run trained on the
+# full training set AND the value eval_t16 cross-checks the complement proof against. Pass it
+# unconditionally: train_t16_lora.py records train_episode_ids on every run, so a RETRAINED
+# t16 takes the disjointness path and REFUSES without a witness, while the archived
+# t16-lora-seed0 checkpoint predates the field and takes the complement path.
+# Scoring an I-8 RUNG here means overriding this to that rung's own split file:
+#   TRAIN_SPLIT=${PROJ}/wam/configs/splits/i8_train_040.txt RUN_ID=i8-rung040-seed0 sbatch ...
+TRAIN_SPLIT=${TRAIN_SPLIT:-${PROJ}/wam/configs/splits/i8_train_362.txt}
 
 if [[ ! -d "${OUT}" ]]; then
   echo "FATAL: ${OUT} does not exist — nothing to score."
@@ -79,6 +88,7 @@ common=(
   --checkpoint "${CKPT}"
   --dataset "${DATASET}"
   --holdout "${HOLDOUT}"
+  --train-episodes "${TRAIN_SPLIT}"
   --camera ego
   --device cuda
 )
