@@ -13,6 +13,15 @@ Writes into ``--out`` (default: the run dir):
   predictions.jsonl   the only artifact the scorers need — re-scorable forever, no GPU
   e1.json / e1.md     E1 action metrics (T-14 format, comparable to the baseline's)
   bench.json/.md      the WAM-Bench ladder (T-27), including the L1 bar this run has to clear
+  timing.json         wall time of the GPU pass — the one number that is NOT recomputable later
+
+One ``--out`` holds exactly one readout. The four names above are fixed and ``--out`` defaults to
+``--run-dir``, so an A/B that forgets to vary it overwrites its own A arm with its B arm; the
+script refuses that now instead of leaving two identical halves and no record (see
+``guard_out_dir``). How the policy was driven is written into every report as a suffix on
+``run_name`` — ``+frame_history`` (T-29), ``+flow32s0`` (T-30), plus ``k``/``t`` for T-30's two
+control arms — because several prediction files from one checkpoint otherwise look like several
+checkpoints.
 
 The whole point is a verdict you can trust, so the split is *proven*, not assumed. The trainer
 hashes the manifests of the episodes it actually trained on into ``dataset_snapshot_ref``, and
@@ -52,6 +61,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 from collections import Counter
 from collections.abc import Collection, Sequence
 from pathlib import Path
@@ -73,6 +83,44 @@ CHECKPOINT_DIRNAME = "checkpoints"
 MODEL_FILENAME = "model.safetensors"
 LATEST_LINK = "latest"
 DEFAULT_HOLDOUT = _REPO_ROOT / "configs" / "splits" / "t18_holdout_episodes.txt"
+
+DEFAULT_FLOW_STEPS = 32
+"""Euler steps for ``--flow-sampler``, fixed before the T-30 A/B was run.
+
+The field the sampler integrates was never rectified — nothing in the joint objective straightens
+it — so the "rectified flow needs one step" reading of the literature does not transfer, and a
+1-step sampler measures the straightness of the field rather than what the action branch learned.
+Steps are also nearly free next to the backbone: a step is one 3105->256->32 MLP at batch 1
+against a measured 79 ms Wan pass (``runs/wan_probe/2026-07-29-zerogpu-5b-readouts.json``), so the
+default is set high enough that the integrator is not the suspect. ``63_eval_t30_flow_head.sbatch``
+sweeps {1, 4, 16, 32, 64} to show the verdict does not hinge on this number; changing the default
+afterwards means a NEW constant, not an edit to this one, or old runs stop being re-derivable.
+"""
+
+DEFAULT_FLOW_SEED = 0
+
+DEFAULT_FLOW_MEAN_K = 1
+"""Draws averaged per chunk by ``--flow-mean-k``; 1 == one draw, the deployable readout.
+
+Above 1 this is the T-30 rule's MSE-fair arm. ``skill_vs_repeat_pct`` is MSE-derived, and for any
+calibrated conditional ``E‖a - draw‖² = E‖a - mean‖² + E‖draw - mean‖²``: a single unbiased draw
+scores worse than the conditional mean by exactly the conditional variance, so comparing one draw
+against a mean-seeking regression head charges the sampler for sampling. Averaging k draws leaves
+1/k of that penalty. It is a MEASUREMENT arm, never a deployment candidate — averaging draws is
+the mean-seeking the flow branch exists to avoid.
+"""
+
+DEFAULT_FLOW_T0 = 0.0
+"""Start of the Euler integration for ``--flow-t0``; 0.0 == from pure noise, the plain readout.
+
+Above 0 this is the T-30 rule's conditioning-mismatch control. Training paired (features from
+video noised to t, action latent noised to the same t); the sampler computes one backbone pass at
+t=1 on the clean observation and reuses it at every t_k, so near t=0 the velocity head is
+evaluated on a combination it never saw. Starting at t0 from the regression chunk re-encoded and
+noised to t0 restricts the integration to the region where the two timesteps roughly agree — see
+``JointWorldActionModel.sample_action_chunk``. Also a measurement arm: it reads the regression
+head first, so it is two readouts per cycle, not one.
+"""
 
 
 def dataset_snapshot_hash(root: Path, episodes: list[Path]) -> str:
@@ -287,7 +335,57 @@ def verify_split(
     return holdout_dirs
 
 
-def build_policy(model_path: Path, device: str, camera: str | None, backbone_source: str | None):
+class ControlArmPolicy:
+    """A loaded policy driven through the two T-30 control arms (``--flow-mean-k``/``--flow-t0``).
+
+    ``load_joint_policy`` owns the **deployable** readout surface — the regression head and the
+    plain flow sampler — because ``rollout.py`` and ``serve_policy.py`` load through it too, and a
+    readout that could ship has to be reachable from all three without a second implementation.
+    These two arms are deliberately kept off that surface, because neither is a thing to deploy:
+    averaging k draws re-introduces the mean-seeking the flow branch exists to avoid, and the warm
+    start runs the regression head first, so a robot on it would pay for both readouts per cycle.
+    They exist to make the T-30 comparison readable, and they stop at this script.
+
+    It **wraps**, it does not reimplement: :meth:`predict` calls the same
+    ``JointWorldActionModel.predict`` the policy itself would call, with two more keywords. There
+    is no second decode path for the arms to disagree with the deployed one about.
+    """
+
+    def __init__(self, policy, *, mean_k: int, t0: float) -> None:
+        self._policy = policy
+        self._mean_k = mean_k
+        self._t0 = t0
+
+    def __getattr__(self, name: str):
+        """Everything that is not :meth:`predict` — ``camera``, ``device``, ``metadata``,
+        ``model``, ``flow_steps`` — is the wrapped policy's, unchanged. Delegating instead of
+        re-declaring keeps this from going stale when ``JointCheckpointPolicy`` grows a field."""
+        return getattr(self._policy, name)
+
+    def predict(self, observation):
+        """Policy protocol. ``model.predict`` is already ``@torch.no_grad()`` (so is
+        ``sample_action_chunk``), which is why this wrapper needs no torch of its own."""
+        return self._policy.model.predict(
+            observation,
+            camera=self._policy.camera,
+            flow_steps=self._policy.flow_steps,
+            flow_seed=self._policy.flow_seed,
+            flow_mean_k=self._mean_k,
+            flow_t0=self._t0,
+        )
+
+
+def build_policy(
+    model_path: Path,
+    device: str,
+    camera: str | None,
+    backbone_source: str | None,
+    *,
+    flow_steps: int | None = None,
+    flow_seed: int = DEFAULT_FLOW_SEED,
+    flow_mean_k: int = DEFAULT_FLOW_MEAN_K,
+    flow_t0: float = DEFAULT_FLOW_T0,
+):
     """``(policy, config, metadata)`` for the checkpoint, via the shared runtime loader."""
     from wam.runtime.policies import load_joint_policy
     from wam.training._utils import load_checkpoint_raw
@@ -303,9 +401,101 @@ def build_policy(model_path: Path, device: str, camera: str | None, backbone_sou
         # below came from should not be something you have to infer.
         print(f"  base weights: {backbone_source or recorded} (recorded: {recorded})")
     policy = load_joint_policy(
-        model_path, device=device, camera=camera, backbone_source=backbone_source
+        model_path,
+        device=device,
+        camera=camera,
+        backbone_source=backbone_source,
+        flow_steps=flow_steps,
+        flow_seed=flow_seed,
     )
+    if flow_mean_k != DEFAULT_FLOW_MEAN_K or flow_t0 != DEFAULT_FLOW_T0:
+        policy = ControlArmPolicy(policy, mean_k=flow_mean_k, t0=flow_t0)
     return policy, config, metadata
+
+
+def readout_tag(
+    *,
+    frame_history: bool,
+    flow_steps: int | None,
+    flow_seed: int = DEFAULT_FLOW_SEED,
+    flow_mean_k: int = DEFAULT_FLOW_MEAN_K,
+    flow_t0: float = DEFAULT_FLOW_T0,
+) -> str:
+    """The suffix naming HOW the policy was driven: ``+frame_history+flow32s0k8t0.6``.
+
+    One function, three consumers — ``bench.json``'s ``run_name``, ``timing.json``, and
+    :func:`guard_out_dir` below. Several prediction files from one checkpoint differ only in how
+    the policy was driven, so this tag is the only thing that keeps a comparison between two of
+    them from silently reading as a comparison between two checkpoints.
+
+    An arm left at its default appends nothing, which is what keeps archived artifacts parsing
+    and re-scoring identically: ``+frame_history`` and ``+flow32s0`` still mean exactly what they
+    meant before the control arms existed.
+    """
+    tag = "+frame_history" if frame_history else ""
+    if flow_steps is not None:
+        tag += f"+flow{flow_steps}s{flow_seed}"
+        if flow_mean_k != DEFAULT_FLOW_MEAN_K:
+            tag += f"k{flow_mean_k}"
+        if flow_t0 != DEFAULT_FLOW_T0:
+            tag += f"t{flow_t0:g}"
+    return tag
+
+
+def archived_readout_tag(out_dir: Path) -> str | None:
+    """The tag of the artifacts already in ``out_dir``, or ``None`` if there are none to read.
+
+    ``timing.json`` records the tag verbatim since the control arms landed and the individual
+    fields before that; ``bench.json``'s ``run_name`` carries it for every artifact ever written,
+    including those from before ``timing.json`` existed. Both are read so the guard works on an
+    archive as well as on a fresh run.
+    """
+    timing_path = out_dir / "timing.json"
+    if timing_path.is_file():
+        record = json.loads(timing_path.read_text())
+        if "readout_tag" in record:
+            return str(record["readout_tag"])
+        return readout_tag(
+            frame_history=bool(record.get("frame_history")),
+            flow_steps=record.get("flow_steps"),
+            flow_seed=record.get("flow_seed") or DEFAULT_FLOW_SEED,
+            flow_mean_k=record.get("flow_mean_k") or DEFAULT_FLOW_MEAN_K,
+            flow_t0=record.get("flow_t0") or DEFAULT_FLOW_T0,
+        )
+    bench_path = out_dir / "bench.json"
+    if bench_path.is_file():
+        run_name = str(json.loads(bench_path.read_text()).get("run_name", ""))
+        _, plus, rest = run_name.partition("+")
+        return f"+{rest}" if plus else ""
+    return None
+
+
+def guard_out_dir(out_dir: Path, tag: str) -> None:
+    """Refuse to write one readout's artifacts over another's in the same ``--out``.
+
+    ``predictions.jsonl``, ``e1.*``, ``bench.*`` and ``timing.json`` have fixed names and ``--out``
+    defaults to ``--run-dir``, so scoring the regression head and then the flow sampler without
+    passing ``--out`` twice replaced the A arm of the A/B with the B arm — leaving an A/B of B
+    against itself, with nothing on disk to show it. Two help strings said "use a separate --out
+    per mode"; that is the whole of what enforced it until now.
+
+    Re-running the SAME arm is allowed and stays idempotent: a re-score after an interrupted pass
+    has to work, and it reproduces the same four files. The one hole left is a pass that died
+    between writing ``predictions.jsonl`` and writing the reports — that directory identifies as
+    empty and the next arm may overwrite it, which is right: a pass with no report is not an arm.
+    """
+    archived = archived_readout_tag(out_dir)
+    if archived is None or archived == tag:
+        return
+    raise SystemExit(
+        f"REFUSING TO SCORE — {out_dir} already holds artifacts from a different readout.\n"
+        f"  on disk:      run_name ...{archived or '(no suffix: tiled frames, regression head)'}\n"
+        f"  this command: run_name ...{tag or '(no suffix: tiled frames, regression head)'}\n"
+        "Every file this script writes has a fixed name, so continuing would overwrite one arm "
+        "of the A/B with the other and leave no trace that it happened. Pass a separate --out "
+        "per readout (that is what 63_eval_t30_flow_head.sbatch does), or delete the directory "
+        "if the old arm is genuinely dead."
+    )
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -341,7 +531,50 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="show the policy the real num_frames window ending at each chunk — the same window "
         "EpisodeDataset fed during training — instead of one frame tiled num_frames times. OFF "
         "by default so this reproduces the runs recorded before 2026-07-30; the A/B between the "
-        "two modes is T-29 (docs/improvements.md I-7). Use a separate --out per mode.",
+        "two modes is T-29 (docs/improvements.md I-7). Needs a separate --out per mode, which "
+        "this script now refuses to run without.",
+    )
+    parser.add_argument(
+        "--flow-sampler",
+        action="store_true",
+        help="read the action chunk out of the trained rectified-flow branch (velocity_head + "
+        "action_recon) instead of the single-shot regression head. OFF by default so this "
+        "reproduces every run recorded before the flag existed; the A/B against the regression "
+        "head is T-30 (docs/improvements.md I-3). Needs a separate --out per readout, which this "
+        "script now refuses to run without.",
+    )
+    # default=None rather than the constant so "given but without --flow-sampler" is detectable:
+    # a half-typed command that silently scored the regression head into a flow-named --out dir
+    # would be indistinguishable from the real thing months later.
+    parser.add_argument(
+        "--flow-steps",
+        type=int,
+        default=None,
+        help=f"Euler steps for --flow-sampler (default: {DEFAULT_FLOW_STEPS})",
+    )
+    parser.add_argument(
+        "--flow-seed",
+        type=int,
+        default=None,
+        help=f"noise seed for --flow-sampler (default: {DEFAULT_FLOW_SEED})",
+    )
+    parser.add_argument(
+        "--flow-mean-k",
+        type=int,
+        default=None,
+        help="average k independent draws (seeds --flow-seed .. +k-1) per chunk. The MSE-fair "
+        "arm of the T-30 rule: one draw scores worse than the conditional mean by exactly the "
+        "conditional variance, so a single-draw MSE comparison against a mean-seeking regression "
+        f"head is rigged against the sampler (default: {DEFAULT_FLOW_MEAN_K}, one draw)",
+    )
+    parser.add_argument(
+        "--flow-t0",
+        type=float,
+        default=None,
+        help="start the Euler integration at t0 from the regression chunk re-encoded and noised "
+        "to t0, instead of at t=0 from pure noise. The conditioning-mismatch control of the T-30 "
+        "rule: the velocity head was trained on features noised to the same t, and the sampler "
+        f"feeds it t=1 features at every step (default: {DEFAULT_FLOW_T0}, from noise)",
     )
     parser.add_argument(
         "--train-episodes",
@@ -367,13 +600,68 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    given = [
+        name
+        for name, value in (
+            ("--flow-steps", args.flow_steps),
+            ("--flow-seed", args.flow_seed),
+            ("--flow-mean-k", args.flow_mean_k),
+            ("--flow-t0", args.flow_t0),
+        )
+        if value is not None
+    ]
+    if not args.flow_sampler and given:
+        raise SystemExit(
+            f"{', '.join(given)}: the --flow-steps family only means something with "
+            "--flow-sampler. Without it the regression head is scored, and an output dir named "
+            "after a flow run would be indistinguishable from one."
+        )
+    flow_steps = None
+    flow_seed = args.flow_seed if args.flow_seed is not None else DEFAULT_FLOW_SEED
+    flow_mean_k = DEFAULT_FLOW_MEAN_K
+    flow_t0 = DEFAULT_FLOW_T0
+    if args.flow_sampler:
+        flow_steps = args.flow_steps if args.flow_steps is not None else DEFAULT_FLOW_STEPS
+        flow_mean_k = args.flow_mean_k if args.flow_mean_k is not None else DEFAULT_FLOW_MEAN_K
+        flow_t0 = args.flow_t0 if args.flow_t0 is not None else DEFAULT_FLOW_T0
+        # Refused here rather than downstream: JointCheckpointPolicy does reject flow_steps < 1,
+        # but on the Wan path load_joint_policy has already spent minutes building the frozen
+        # multi-GB base by the time its constructor runs — and the control arms are not checked
+        # until the first predict() at all.
+        if flow_steps < 1:
+            raise SystemExit(f"--flow-steps must be >= 1, got {flow_steps}")
+        if flow_mean_k < 1:
+            raise SystemExit(f"--flow-mean-k must be >= 1, got {flow_mean_k}")
+        if not 0.0 <= flow_t0 < 1.0:
+            raise SystemExit(
+                f"--flow-t0 must be in [0, 1), got {flow_t0}: t0=1 integrates zero steps and "
+                "returns the warm start unchanged, which is the regression chunk laundered "
+                "through action_recon and reported as a flow arm."
+            )
+    tag = readout_tag(
+        frame_history=args.frame_history,
+        flow_steps=flow_steps,
+        flow_seed=flow_seed,
+        flow_mean_k=flow_mean_k,
+        flow_t0=flow_t0,
+    )
     out_dir = args.out or args.run_dir
+    # Before anything expensive: --out defaults to --run-dir and every artifact name is fixed,
+    # so a second readout into the same directory silently overwrites the first one's A/B half.
+    guard_out_dir(out_dir, tag)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = resolve_checkpoint(args.run_dir, args.checkpoint)
     print(f"checkpoint {model_path}")
     policy, config, metadata = build_policy(
-        model_path, args.device, args.camera, args.backbone_source
+        model_path,
+        args.device,
+        args.camera,
+        args.backbone_source,
+        flow_steps=flow_steps,
+        flow_seed=flow_seed,
+        flow_mean_k=flow_mean_k,
+        flow_t0=flow_t0,
     )
     print(
         f"run {metadata.run_id} | config {metadata.config_hash[:12]} | "
@@ -415,9 +703,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.frame_history
         else f"1 frame tiled to {config.backbone.num_frames} (historical default)"
     )
+    if flow_steps is None:
+        head_note = "single-shot regression (historical default)"
+    else:
+        arms = "".join(
+            (
+                f", mean of {flow_mean_k} draws" if flow_mean_k != DEFAULT_FLOW_MEAN_K else "",
+                f", warm start at t0={flow_t0:g}" if flow_t0 != DEFAULT_FLOW_T0 else "",
+            )
+        )
+        head_note = f"rectified-flow sampler, {flow_steps} steps, seed {flow_seed}{arms} (T-30)"
     print(f"scoring {len(pairs)} chunks over {len(holdout)} episodes | frames: {frames_note}")
+    print(f"action head: {head_note}")
 
+    # Wall time is the one number in this script that cannot be recovered from the archived
+    # artifacts, and the T-30 A/B runs both readouts on one GPU — so the ms/chunk delta IS the
+    # measured sampler cost, and collecting it costs a perf_counter call.
+    started = time.perf_counter()
     predictions = evaluate_policy(policy, pairs)
+    elapsed_s = time.perf_counter() - started
+    ms_per_chunk = 1000.0 * elapsed_s / len(pairs)
     save_predictions_jsonl(predictions, out_dir / "predictions.jsonl")
 
     from wam.data.episode import EpisodeReader
@@ -432,18 +737,44 @@ def main(argv: list[str] | None = None) -> int:
     # The frame mode goes into run_name, not just the log: two predictions.jsonl from the same
     # checkpoint differ only in what the policy was shown, and a report that does not say which
     # is a report that will eventually be compared against the wrong one.
-    run_name = metadata.run_id + ("+frame_history" if args.frame_history else "")
+    run_name = metadata.run_id + tag
     bench = bench_metrics(predictions, run_name=run_name)
     (out_dir / "bench.json").write_text(bench.to_json() + "\n")
     (out_dir / "bench.md").write_text(bench.render_markdown())
 
-    print(f"\nE1 action mse {e1.mse:.6g}")
+    # Separate file rather than a bench.json field: bench.json is re-derived from
+    # predictions.jsonl by run_bench.py, and a timing recorded there would be silently dropped
+    # on the first re-score — which is exactly when someone would trust it.
+    (out_dir / "timing.json").write_text(
+        json.dumps(
+            {
+                "run_name": run_name,
+                # The tag verbatim, so the --out guard reads it back instead of reconstructing
+                # it from four fields that a later arm could add a fifth to.
+                "readout_tag": tag,
+                "num_chunks": len(pairs),
+                "seconds": elapsed_s,
+                "ms_per_chunk": ms_per_chunk,
+                "device": policy.device,
+                "frame_history": bool(args.frame_history),
+                "flow_steps": flow_steps,
+                "flow_seed": flow_seed if flow_steps is not None else None,
+                "flow_mean_k": flow_mean_k if flow_steps is not None else None,
+                "flow_t0": flow_t0 if flow_steps is not None else None,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+    print(f"\nscored {len(pairs)} chunks in {elapsed_s:.1f}s ({ms_per_chunk:.1f} ms/chunk)")
+    print(f"E1 action mse {e1.mse:.6g}")
     print(f"WAM-Bench {bench.level_name} — score {bench.score:.1f}/100")
     print(f"  vs zero-delta   {bench.skill_vs_zero_pct:+.1f}%")
     print(f"  vs repeat-last  {bench.skill_vs_repeat_pct:+.1f}%   <- the L1 bar (must be > 0)")
     for warning in bench.warnings:
         print(f"  warning: {warning}")
-    print(f"\nwrote predictions.jsonl, e1.*, bench.* to {out_dir}")
+    print(f"\nwrote predictions.jsonl, e1.*, bench.*, timing.json to {out_dir}")
     if args.skip_split_check:
         (out_dir / "UNPROVEN_SPLIT").write_text(
             "Scored with --skip-split-check: the holdout was not proven unseen.\n"

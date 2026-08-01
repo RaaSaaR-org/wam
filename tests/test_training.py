@@ -451,6 +451,474 @@ class TestJointWorldActionModel:
         assert enc_norm > 0.0  # reconstruction anchor reaches the encoder
 
 
+class _StraightPathField(nn.Module):
+    """Velocity-head stub: the exact field of the straight path from any z to a fixed ``x1``.
+
+    ``v(z, t) = (x1 - z) / (1 - t)`` is the analytic velocity of a rectified-flow trajectory that
+    ends at ``x1``. On the sampler's grid it makes forward Euler EXACT, so the direction test has
+    no tolerance to tune and cannot go flaky.
+    """
+
+    def __init__(self, x1: torch.Tensor) -> None:
+        super().__init__()
+        self.x1 = x1
+
+    def forward(self, z_t: torch.Tensor, pooled: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        return (self.x1 - z_t) / (1.0 - float(t[0]))
+
+
+class _RecordingRecon(nn.Module):
+    """``action_recon`` stub that captures the sampled latent and returns a well-formed chunk."""
+
+    def __init__(self, out_dim: int) -> None:
+        super().__init__()
+        self.out_dim = out_dim
+        self.last: torch.Tensor | None = None
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        self.last = latent.detach().clone()
+        return torch.zeros(*latent.shape[:-1], self.out_dim)
+
+
+class TestFlowSampler:
+    """T-30 / I-3: reading the chunk out of the trained flow branch instead of regressing it.
+
+    Everything here runs on the velocity head and ``action_recon`` alone — no backbone weights,
+    no GPU. That is the claim under test as much as it is a convenience: the sampler has to work
+    on an ARCHIVED checkpoint, without retraining and without touching the frozen base.
+    """
+
+    def _model(self) -> JointWorldActionModel:
+        torch.manual_seed(0)
+        model = JointWorldActionModel(joint_config())
+        model.eval()
+        return model
+
+    def _obs(self) -> Observation:
+        rng = np.random.default_rng(3)
+        return Observation(
+            images={"front": rng.integers(0, 256, (IMAGE_HW, IMAGE_HW, 3), dtype=np.uint8)},
+            state=make_state(rng, ts=0),
+            instruction="pick",
+        )
+
+    def _pooled(self, model: JointWorldActionModel, seed: int = 7) -> torch.Tensor:
+        return torch.randn(1, FEATURE_DIM, generator=torch.Generator().manual_seed(seed))
+
+    def _initial_noise(self, model: JointWorldActionModel, seed: int) -> torch.Tensor:
+        """The exact draw ``sample_action_chunk`` starts from, so a test can integrate alongside."""
+        return torch.randn(
+            1,
+            model.config.head.num_steps,
+            model.config.action_encoder.latent_dim,
+            generator=torch.Generator().manual_seed(seed),
+            dtype=torch.float32,
+        )
+
+    def test_euler_integration_lands_exactly_on_the_clean_latent(self) -> None:
+        """Pins the convention: in WAM t=0 is NOISE and t=1 is CLEAN (losses.make_flow_targets),
+        so the sampler integrates forward. With the closed-form straight-path field substituted
+        for the velocity head, forward Euler on the grid {k/n} reaches x1 to the last bit."""
+        model = self._model()
+        latent_dim = model.config.action_encoder.latent_dim
+        x1 = torch.full((1, model.config.head.num_steps, latent_dim), 0.25)
+        model.velocity_head = _StraightPathField(x1)
+        recon = _RecordingRecon(TARGET_DIM + model.config.action_encoder.gripper_dims)
+        model.action_recon = recon
+
+        model.sample_action_chunk(self._pooled(model), steps=8, seed=0)
+
+        assert recon.last is not None
+        assert torch.allclose(recon.last, x1, atol=1e-6, rtol=0)
+
+    def test_flipping_the_velocity_sign_walks_away_from_the_clean_latent(self) -> None:
+        """The anti-test, and the reason the one above exists. Integrating ``z -= v*dt`` — what
+        the diffusers/SD3 convention (t=1 noise) would suggest — still returns a finite chunk that
+        decodes to plausible-looking numbers; only the latent shows it went the wrong way. With
+        this field the error grows by exactly (n+1), so the wrong direction fails loudly."""
+        model = self._model()
+        latent_dim = model.config.action_encoder.latent_dim
+        steps = 8
+        x1 = torch.full((1, model.config.head.num_steps, latent_dim), 0.25)
+        field = _StraightPathField(x1)
+
+        z = self._initial_noise(model, seed=0)
+        start_error = float((z - x1).norm())
+        dt = 1.0 / steps
+        for k in range(steps):
+            t = torch.full((1,), k * dt)
+            z = z - field(z, self._pooled(model), t) * dt
+
+        assert float((z - x1).norm()) == pytest.approx(start_error * (steps + 1), rel=1e-4)
+
+    def test_the_timestep_grid_stays_inside_the_training_support(self) -> None:
+        """``compute_losses`` draws t from ``torch.rand``, support [0, 1). Evaluating the head at
+        t=1.0 asks it for a timestep it was never once trained at — and it would not error, it
+        would just answer badly."""
+        model = self._model()
+        seen: list[float] = []
+
+        class _Recorder(nn.Module):
+            def forward(self, z_t: torch.Tensor, pooled: torch.Tensor, t: torch.Tensor):
+                seen.append(float(t[0]))
+                return torch.zeros_like(z_t)
+
+        model.velocity_head = _Recorder()
+        model.sample_action_chunk(self._pooled(model), steps=4, seed=0)
+
+        assert seen == [0.0, 0.25, 0.5, 0.75]
+
+    def test_flow_steps_none_is_byte_identical_to_the_regression_head(self) -> None:
+        """The archived-run guarantee: adding the flow branch must not move a single bit of the
+        default path, or every world-action number on record silently changes meaning."""
+        model = self._model()
+        obs = self._obs()
+
+        # The pre-T-30 body of predict(), spelled out, run against the same model instance.
+        device = next(model.parameters()).device
+        frames = resolve_frame_context(obs, model.config.camera, NUM_FRAMES).to(device)
+        with torch.no_grad():
+            video_latents = model.backbone.encode_video(frames.unsqueeze(0))
+            state_ctx = model.backbone.condition_state(model.state_encoder.encode(obs.state))
+            _, features = model.backbone.forward_flow(
+                video_latents,
+                torch.ones(1, dtype=torch.float32, device=device),
+                model.backbone.condition_text(obs.instruction),
+                state_ctx,
+            )
+            historical = model.action_head.decode(features[0])
+
+        for chunk in (model.predict(obs), model.predict(obs, flow_steps=None)):
+            assert np.array_equal(chunk.targets, historical.targets)
+            assert np.array_equal(chunk.gripper_target, historical.gripper_target)
+            assert chunk.dt_s == historical.dt_s and chunk.mode == historical.mode
+
+    def test_the_flow_readout_actually_differs_from_the_regression_head(self) -> None:
+        """The complement: if the two readouts returned the same chunk the A/B would measure
+        nothing, and a mis-wired flag would look exactly like a null result."""
+        model = self._model()
+        obs = self._obs()
+        assert not np.array_equal(
+            model.predict(obs).targets, model.predict(obs, flow_steps=4).targets
+        )
+
+    def test_the_flow_path_decodes_through_action_recon_not_the_action_head(self) -> None:
+        """``action_recon`` is documented as a training-only anchor; the flow readout promotes it
+        to the deployed decoder. Perturbing it must move the chunk and perturbing ``ActionHead``
+        must not — otherwise the 'flow branch' is the regression head wearing a flag."""
+        model = self._model()
+        obs = self._obs()
+        before = model.predict(obs, flow_steps=4).targets
+
+        with torch.no_grad():
+            model.action_head.target_head.weight.add_(1.0)
+        assert np.array_equal(model.predict(obs, flow_steps=4).targets, before)
+
+        with torch.no_grad():
+            model.action_recon[-1].weight.add_(1.0)
+        assert not np.array_equal(model.predict(obs, flow_steps=4).targets, before)
+
+    def test_identical_observations_give_identical_chunks(self) -> None:
+        """The determinism contract runtime/policies.py:12 promises and T-25's bit-identical
+        MuJoCo rollouts rest on: the seed is re-drawn per call, never advanced across calls."""
+        model = self._model()
+        obs = self._obs()
+        first = model.predict(obs, flow_steps=6, flow_seed=3)
+        second = model.predict(obs, flow_steps=6, flow_seed=3)
+        assert np.array_equal(first.targets, second.targets)
+        assert np.array_equal(first.gripper_target, second.gripper_target)
+
+    def test_different_seeds_give_different_chunks(self) -> None:
+        """It has to be a sampler over a distribution, not a deterministic map wearing a seed —
+        which is precisely what a mode-collapsed velocity head would quietly decay into."""
+        model = self._model()
+        obs = self._obs()
+        assert not np.array_equal(
+            model.predict(obs, flow_steps=6, flow_seed=0).targets,
+            model.predict(obs, flow_steps=6, flow_seed=1).targets,
+        )
+
+    def test_gripper_is_clamped_into_the_schema_range(self) -> None:
+        """``action_recon`` ends in a bare Linear where ``ActionHead`` has a sigmoid, so nothing
+        bounds the gripper. An out-of-range command fails ActionChunk.validate and the
+        deterministic safety layer rejects the chunk — the clamp is what keeps it deployable."""
+        model = self._model()
+        with torch.no_grad():
+            model.action_recon[-1].bias.add_(50.0)
+        chunk = model.sample_action_chunk(self._pooled(model), steps=4, seed=0)
+        assert chunk.validate(SPEC) == []
+
+        with torch.no_grad():
+            model.action_recon[-1].bias.sub_(100.0)
+        assert model.sample_action_chunk(self._pooled(model), steps=4, seed=0).validate(SPEC) == []
+
+    def test_targets_are_left_unsquashed_for_the_safety_layer(self) -> None:
+        """Deliberately NOT clamped: squashing would apply a nonlinearity the model never trained
+        through, and hard limits are the deterministic safety layer's job (FR-07). A large
+        magnitude must reach the caller as a large magnitude."""
+        model = self._model()
+        with torch.no_grad():
+            model.action_recon[-1].bias.add_(50.0)
+        chunk = model.sample_action_chunk(self._pooled(model), steps=4, seed=0)
+        assert np.abs(chunk.targets).max() > 1.0
+
+    def test_sampling_needs_only_the_velocity_head_and_action_recon(self) -> None:
+        """The 'works on an archived checkpoint, no retraining' claim as a regression guard: the
+        sampler must not reach for the backbone, which for T-16 means tens of GB of frozen Wan."""
+        model = self._model()
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("sample_action_chunk ran a backbone pass")
+
+        model.backbone.forward_flow = _forbidden  # type: ignore[method-assign]
+        chunk = model.sample_action_chunk(self._pooled(model), steps=4, seed=0)
+        assert chunk.targets.shape == (NUM_STEPS, TARGET_DIM)
+        assert chunk.validate(SPEC) == []
+
+    def test_a_saved_checkpoint_carries_every_module_the_sampler_needs(self) -> None:
+        """T-16 wrote adapters only (``trainable_state_dict``). If a future freezing change drops
+        ``action_recon`` from the trainable set, the flow readout silently becomes a retrain —
+        this fails first instead."""
+        model = self._model()
+        keys = set(model.trainable_state_dict())
+        for prefix in ("velocity_head.", "action_recon.", "action_encoder."):
+            assert any(k.startswith(prefix) for k in keys), prefix
+        # The layout every archived checkpoint's state dict is keyed by — renaming strands them.
+        assert {"action_recon.0.weight", "action_recon.2.weight"} <= keys
+
+    def test_zero_or_negative_steps_are_rejected(self) -> None:
+        model = self._model()
+        for steps in (0, -1):
+            with pytest.raises(ValueError, match="flow steps"):
+                model.sample_action_chunk(self._pooled(model), steps=steps, seed=0)
+
+    def test_a_wrongly_shaped_pooled_vector_is_rejected(self) -> None:
+        """Feeding the token axis in un-pooled would broadcast into a batch of chunks and return
+        the first one, which is a wrong answer rather than an error."""
+        model = self._model()
+        with pytest.raises(ValueError, match="pooled"):
+            model.sample_action_chunk(torch.zeros(3, FEATURE_DIM), steps=4, seed=0)
+
+
+class TestFlowSamplerControlArms:
+    """T-30's two control arms: ``mean_of`` (k draws averaged) and ``t0`` (warm start).
+
+    Both exist because of how the T-30 verdict would otherwise be misread. ``mean_of`` is there
+    because ``skill_vs_repeat_pct`` is MSE-derived and one unbiased draw is worth exactly the
+    conditional variance MORE error than the conditional mean — the metric charges a sampler for
+    sampling, which is the property the regression head is on trial for lacking. ``t0`` is there
+    because the sampler feeds the velocity head t=1 features at every timestep, a pairing it was
+    never trained on, so a from-noise negative cannot distinguish "the branch is dead" from "we
+    sampled it outside its training region".
+    """
+
+    def _model(self) -> JointWorldActionModel:
+        torch.manual_seed(0)
+        model = JointWorldActionModel(joint_config())
+        model.eval()
+        return model
+
+    def _obs(self) -> Observation:
+        rng = np.random.default_rng(3)
+        return Observation(
+            images={"front": rng.integers(0, 256, (IMAGE_HW, IMAGE_HW, 3), dtype=np.uint8)},
+            state=make_state(rng, ts=0),
+            instruction="pick",
+        )
+
+    def _pooled(self, seed: int = 7) -> torch.Tensor:
+        return torch.randn(1, FEATURE_DIM, generator=torch.Generator().manual_seed(seed))
+
+    def _latent(self, model: JointWorldActionModel, value: float) -> torch.Tensor:
+        return torch.full(
+            (1, model.config.head.num_steps, model.config.action_encoder.latent_dim), value
+        )
+
+    def test_the_default_arms_reproduce_the_sampler_that_existed_before_them(self) -> None:
+        """The archived-run guarantee, one level below ``flow_steps=None``: adding the arms must
+        not move a single bit of the plain sampler either, or every ``+flow32s0`` number recorded
+        before they existed silently changes meaning. The pre-arm loop is spelled out here rather
+        than trusted, because ``t0 + k*dt`` and ``(1-t0)/steps`` are new arithmetic on that path.
+        """
+        model = self._model()
+        steps, seed = 5, 3
+        pooled = self._pooled()
+
+        z = torch.randn(
+            1,
+            model.config.head.num_steps,
+            model.config.action_encoder.latent_dim,
+            generator=torch.Generator().manual_seed(seed),
+            dtype=torch.float32,
+        )
+        dt = 1.0 / steps
+        with torch.no_grad():
+            for k in range(steps):
+                t = torch.full((1,), k * dt, dtype=torch.float32)
+                z = z + model.velocity_head(z, pooled.float(), t) * dt
+            decoded = model.action_recon(z)[0]
+        target_dim = model.config.action_encoder.target_dim
+
+        chunk = model.sample_action_chunk(pooled, steps=steps, seed=seed)
+
+        assert np.array_equal(chunk.targets, decoded[:, :target_dim].numpy())
+
+    def test_averaging_k_draws_returns_the_mean_of_those_k_chunks(self) -> None:
+        """The arm's whole claim is an arithmetic one: E‖a-draw‖² = E‖a-mean‖² + Var, so the
+        MSE-fair comparison against a mean-seeking head is the MEAN of k draws. If this returned
+        anything else — a mean of latents, or k copies of one draw — the T-30 table would compare
+        two different estimators and call the difference a readout difference."""
+        model = self._model()
+        pooled = self._pooled()
+        singles = [
+            model.sample_action_chunk(pooled, steps=4, seed=11 + i).targets for i in range(3)
+        ]
+
+        averaged = model.sample_action_chunk(pooled, steps=4, seed=11, mean_of=3).targets
+
+        assert np.allclose(averaged, np.mean(singles, axis=0), atol=1e-6, rtol=0)
+
+    def test_the_k_draws_use_k_distinct_seeds(self) -> None:
+        """k copies of one draw would average to that draw, leave the conditional variance in the
+        score untouched, and look exactly like a working arm on every shape assertion."""
+        model = self._model()
+        pooled = self._pooled()
+
+        single = model.sample_action_chunk(pooled, steps=4, seed=0).targets
+        averaged = model.sample_action_chunk(pooled, steps=4, seed=0, mean_of=4).targets
+
+        assert not np.array_equal(single, averaged)
+
+    def test_averaging_stays_deterministic_across_calls(self) -> None:
+        """The determinism contract has to survive the arm: seeds ``seed..seed+k-1`` are re-drawn
+        per call, never advanced, or two evaluations of one checkpoint stop being comparable."""
+        model = self._model()
+        pooled = self._pooled()
+        first = model.sample_action_chunk(pooled, steps=4, seed=2, mean_of=3)
+        second = model.sample_action_chunk(pooled, steps=4, seed=2, mean_of=3)
+        assert np.array_equal(first.targets, second.targets)
+        assert np.array_equal(first.gripper_target, second.gripper_target)
+
+    def test_a_warm_start_evaluates_the_head_only_at_and_above_t0(self) -> None:
+        """The point of the arm: the head is asked ONLY about the region where its own t and the
+        features' t=1 roughly agree. A grid that still visited t≈0 would re-introduce the exact
+        confound the arm exists to measure, while looking like it had removed it."""
+        model = self._model()
+        seen: list[float] = []
+
+        class _Recorder(nn.Module):
+            def forward(self, z_t: torch.Tensor, pooled: torch.Tensor, t: torch.Tensor):
+                seen.append(float(t[0]))
+                return torch.zeros_like(z_t)
+
+        model.velocity_head = _Recorder()
+        model.sample_action_chunk(
+            self._pooled(), steps=4, seed=0, t0=0.6, init_latent=self._latent(model, 0.25)
+        )
+
+        assert seen == pytest.approx([0.6, 0.7, 0.8, 0.9])
+        assert max(seen) < 1.0  # torch.rand's support is [0, 1); t=1 was never trained
+
+    def test_a_warm_start_begins_from_the_init_latent_noised_to_t0(self) -> None:
+        """``z_t0`` must be ``(1-t0)*noise + t0*init``. Starting at t0 from PURE noise would be
+        off the probability path in a second way rather than fixing the first, and the arm would
+        quietly measure nothing while reporting a number."""
+        model = self._model()
+        recon = _RecordingRecon(TARGET_DIM + model.config.action_encoder.gripper_dims)
+        model.action_recon = recon
+
+        class _Zero(nn.Module):
+            def forward(self, z_t: torch.Tensor, pooled: torch.Tensor, t: torch.Tensor):
+                return torch.zeros_like(z_t)
+
+        model.velocity_head = _Zero()
+        init = self._latent(model, 0.25)
+        noise = torch.randn(
+            *init.shape, generator=torch.Generator().manual_seed(0), dtype=torch.float32
+        )
+
+        model.sample_action_chunk(self._pooled(), steps=4, seed=0, t0=0.6, init_latent=init)
+
+        assert recon.last is not None
+        assert torch.allclose(recon.last, 0.4 * noise + 0.6 * init, atol=1e-6, rtol=0)
+
+    def test_predict_warm_starts_from_the_regression_head_so_it_inherits_that_mean(self) -> None:
+        """The honesty test for the arm's interpretation. ``predict`` has no clean action latent
+        at inference, so it re-encodes the REGRESSION chunk — which means a warm-started score
+        cannot be read as 'the flow branch models the conditional'. Perturbing ``ActionHead`` must
+        move this readout (it does not move the from-noise one, pinned in TestFlowSampler)."""
+        model = self._model()
+        obs = self._obs()
+        before = model.predict(obs, flow_steps=4, flow_t0=0.6).targets
+
+        with torch.no_grad():
+            model.action_head.target_head.weight.add_(1.0)
+
+        assert not np.array_equal(model.predict(obs, flow_steps=4, flow_t0=0.6).targets, before)
+
+    def test_the_arms_at_their_defaults_leave_predict_byte_identical(self) -> None:
+        """``mean_of=1``/``t0=0`` are the recorded path. ``total / 1`` and ``0.0 + k*dt`` are
+        exact in IEEE-754 and this is what says so out loud."""
+        model = self._model()
+        obs = self._obs()
+        plain = model.predict(obs, flow_steps=6, flow_seed=1)
+        explicit = model.predict(obs, flow_steps=6, flow_seed=1, flow_mean_k=1, flow_t0=0.0)
+        assert np.array_equal(plain.targets, explicit.targets)
+        assert np.array_equal(plain.gripper_target, explicit.gripper_target)
+
+    def test_a_warm_start_without_an_init_latent_is_rejected(self) -> None:
+        model = self._model()
+        with pytest.raises(ValueError, match="init_latent"):
+            model.sample_action_chunk(self._pooled(), steps=4, seed=0, t0=0.6)
+
+    def test_an_init_latent_that_would_never_be_read_is_rejected(self) -> None:
+        """Same rule as ``--flow-steps`` without ``--flow-sampler``: an argument that silently
+        does nothing makes an archived command line unreadable."""
+        model = self._model()
+        with pytest.raises(ValueError, match="never read"):
+            model.sample_action_chunk(
+                self._pooled(), steps=4, seed=0, init_latent=self._latent(model, 0.25)
+            )
+
+    def test_a_wrongly_shaped_init_latent_is_rejected(self) -> None:
+        """It would broadcast against the noise instead of failing, warm-starting from something
+        that is not a chunk latent at all."""
+        model = self._model()
+        with pytest.raises(ValueError, match="init_latent"):
+            model.sample_action_chunk(
+                self._pooled(),
+                steps=4,
+                seed=0,
+                t0=0.5,
+                init_latent=torch.zeros(1, model.config.head.num_steps + 1, 3),
+            )
+
+    def test_t0_outside_zero_to_one_is_rejected(self) -> None:
+        """t0=1 integrates zero steps and hands back the warm start unchanged — the regression
+        chunk laundered through ``action_recon`` and reported as a flow arm."""
+        model = self._model()
+        for t0 in (1.0, 1.5, -0.1):
+            with pytest.raises(ValueError, match="t0"):
+                model.sample_action_chunk(
+                    self._pooled(), steps=4, seed=0, t0=t0, init_latent=self._latent(model, 0.25)
+                )
+
+    def test_fewer_than_one_draw_is_rejected(self) -> None:
+        model = self._model()
+        for mean_of in (0, -2):
+            with pytest.raises(ValueError, match="mean_of"):
+                model.sample_action_chunk(self._pooled(), steps=4, seed=0, mean_of=mean_of)
+
+    def test_the_arms_are_rejected_when_the_flow_readout_is_off(self) -> None:
+        """Ignoring them silently would let an arm be recorded under the name of a run that never
+        happened — the regression head's chunk filed as ``+flow32s0k8``."""
+        model = self._model()
+        obs = self._obs()
+        for kwargs in ({"flow_mean_k": 4}, {"flow_t0": 0.5}):
+            with pytest.raises(ValueError, match="flow_mean_k|flow_t0"):
+                model.predict(obs, **kwargs)
+
+
 class TestJointTrainer:
     def test_loss_dict_keys_and_decrease(self) -> None:
         trainer = JointTrainer(joint_config())
@@ -995,9 +1463,7 @@ class TestResolveFrameContext:
         )
 
     def _window(self, n: int) -> np.ndarray:
-        return np.stack(
-            [np.full((IMAGE_HW, IMAGE_HW, 3), i, dtype=np.uint8) for i in range(n)]
-        )
+        return np.stack([np.full((IMAGE_HW, IMAGE_HW, 3), i, dtype=np.uint8) for i in range(n)])
 
     def test_without_history_the_single_frame_is_tiled(self) -> None:
         frames = resolve_frame_context(self._obs(), "front", self.NUM_FRAMES)
@@ -1064,8 +1530,6 @@ class TestResolveFrameContext:
         checkpoint on real chunks (bit-identical) and pinned here for the general case."""
         obs = self._obs()
         tiled = resolve_frame_context(obs, "front", self.NUM_FRAMES)
-        obs.image_history = {
-            "front": np.repeat(obs.images["front"][None], self.NUM_FRAMES, axis=0)
-        }
+        obs.image_history = {"front": np.repeat(obs.images["front"][None], self.NUM_FRAMES, axis=0)}
         explicit = resolve_frame_context(obs, "front", self.NUM_FRAMES)
         assert torch.equal(tiled, explicit)

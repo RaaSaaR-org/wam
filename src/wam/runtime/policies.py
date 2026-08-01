@@ -11,7 +11,10 @@ Contracts:
   file fails loudly at load rather than quietly mispredicting.
 - Deterministic inference: the model is restored bit-exact in eval mode and every
   prediction runs under ``torch.no_grad()`` — identical observations yield identical
-  chunks (no dropout, no autograd graph, no RNG).
+  chunks (no dropout, no autograd graph, no RNG). This survives the T-30 flow sampler
+  because that sampler re-seeds a CPU generator per call instead of advancing a shared
+  stream: a stream would make chunk N depend on how many predictions preceded it, and
+  T-25's two bit-identical MuJoCo rollouts rest on exactly that not being the case.
 - Traceability (AC-04): the checkpoint's embedded :class:`RunMetadata` (run_id,
   config_hash, checkpoint_ref, dataset_snapshot_ref) is exposed so every rollout can be
   tied to checkpoint + dataset snapshot + config hash.
@@ -81,6 +84,8 @@ def load_joint_policy(
     device: str = "cpu",
     camera: str | None = None,
     backbone_source: str | Path | None = None,
+    flow_steps: int | None = None,
+    flow_seed: int = 0,
 ) -> JointCheckpointPolicy:
     """Load a joint checkpoint of EITHER kind, building the frozen base only when required.
 
@@ -99,6 +104,12 @@ def load_joint_policy(
 
     Building the base is the expensive step (weights off disk, tens of GB for Wan), which is why
     it happens only on the branch that needs it.
+
+    ``flow_steps``/``flow_seed`` select the T-30 flow readout (``None`` = the regression head, the
+    historical default). They are wired HERE rather than in each caller because this one function
+    is what ``scripts/eval_t16.py``, ``scripts/rollout.py`` and ``scripts/serve_policy.py`` all
+    load through: an offline A/B that concluded in favour of the sampler would otherwise need a
+    second, subtly different implementation before it could be closed-loop tested.
     """
     from wam.backbones.registry import build_backbone
     from wam.training._utils import load_checkpoint_raw
@@ -112,12 +123,24 @@ def load_joint_policy(
                 f"backbone kind {config.backbone.kind!r} is self-contained: its weights are in "
                 "the checkpoint, so there is no external source to point at"
             )
-        return JointCheckpointPolicy(checkpoint_path, device=device, camera=camera)
+        return JointCheckpointPolicy(
+            checkpoint_path,
+            device=device,
+            camera=camera,
+            flow_steps=flow_steps,
+            flow_seed=flow_seed,
+        )
     backbone = build_backbone(
         _relocate_backbone(config.backbone, source=backbone_source, device=device), load=True
     )
     return JointCheckpointPolicy(
-        checkpoint_path, device=device, backbone=backbone, strict=False, camera=camera
+        checkpoint_path,
+        device=device,
+        backbone=backbone,
+        strict=False,
+        camera=camera,
+        flow_steps=flow_steps,
+        flow_seed=flow_seed,
     )
 
 
@@ -187,6 +210,13 @@ class JointCheckpointPolicy:
     GR00T episodes trained on ``ego``), and the alternative — silently falling back to some
     other camera — would put a policy on a robot looking through the wrong lens. The override
     is explicit, exposed as :attr:`camera`, and folded into the rollout's ``config_hash``.
+
+    ``flow_steps`` swaps the action readout for the T-30 flow sampler
+    (:meth:`~wam.training.joint.JointWorldActionModel.sample_action_chunk`); ``None``, the
+    default, keeps the regression head every recorded run was produced with. A policy that
+    decodes its chunks differently is a different policy, so the setting is exposed as
+    :attr:`flow_steps`/:attr:`flow_seed` for the same reason ``camera`` is — a rollout has to be
+    able to say which readout produced it.
     """
 
     def __init__(
@@ -197,7 +227,13 @@ class JointCheckpointPolicy:
         backbone: nn.Module | None = None,
         strict: bool = True,
         camera: str | None = None,
+        flow_steps: int | None = None,
+        flow_seed: int = 0,
     ) -> None:
+        # Rejected at construction rather than at the first predict(): a Wan-backed policy has
+        # already spent minutes building a multi-GB base by the time predict() is reached.
+        if flow_steps is not None and flow_steps < 1:
+            raise ValueError(f"flow_steps must be >= 1 or None, got {flow_steps}")
         model, metadata = load_joint_checkpoint(checkpoint_path, backbone=backbone, strict=strict)
         self._model: JointWorldActionModel = model.to(torch.device(device))
         self._model.eval()
@@ -205,6 +241,8 @@ class JointCheckpointPolicy:
         self._checkpoint_path = Path(checkpoint_path)
         self._device = str(device)
         self._camera = camera
+        self._flow_steps = flow_steps
+        self._flow_seed = flow_seed
 
     @property
     def model(self) -> JointWorldActionModel:
@@ -228,7 +266,27 @@ class JointCheckpointPolicy:
         """The ``Observation.images`` key actually read (the override, or the trained one)."""
         return self._camera if self._camera is not None else self._model.config.camera
 
+    @property
+    def flow_steps(self) -> int | None:
+        """Euler steps of the T-30 flow readout, or ``None`` for the regression head."""
+        return self._flow_steps
+
+    @property
+    def flow_seed(self) -> int:
+        """Seed of the flow readout's noise draw (ignored when :attr:`flow_steps` is ``None``)."""
+        return self._flow_seed
+
     def predict(self, observation: Observation) -> ActionChunk:
-        """Policy protocol: Observation -> ActionChunk, deterministic, gradient-free."""
+        """Policy protocol: Observation -> ActionChunk, deterministic, gradient-free.
+
+        Deterministic with the flow readout too: the seed is passed through unchanged on every
+        call, so the sampler re-draws the same noise rather than walking a stream (see the module
+        docstring's determinism contract).
+        """
         with torch.no_grad():
-            return self._model.predict(observation, camera=self._camera)
+            return self._model.predict(
+                observation,
+                camera=self._camera,
+                flow_steps=self._flow_steps,
+                flow_seed=self._flow_seed,
+            )

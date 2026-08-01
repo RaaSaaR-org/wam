@@ -585,3 +585,245 @@ def test_default_stays_the_historical_tiled_path(
 
     assert _run_eval(run_dir, holdout, out) == 0
     assert "+frame_history" not in BenchReport.from_json((out / "bench.json").read_text()).run_name
+
+
+# -- T-30 / I-3: --flow-sampler -------------------------------------------------------------
+
+
+def test_flow_sampler_runs_end_to_end_and_names_itself_in_the_report(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Two predictions.jsonl from ONE checkpoint can now differ in the readout as well as in the
+    frames, so the report has to carry both or the T-30 A/B is unreadable after the fact."""
+    from wam.evaluation import BenchReport
+
+    run_dir, holdout = trained
+    out = tmp_path / "flow"
+
+    assert _run_eval(run_dir, holdout, out, "--flow-sampler", "--flow-steps", "8") == 0
+
+    bench = BenchReport.from_json((out / "bench.json").read_text())
+    assert bench.run_name.endswith("+flow8s0")
+    assert bench.num_predictions > 0
+
+
+def test_the_default_stays_the_regression_head(trained: tuple[Path, Path], tmp_path: Path) -> None:
+    """OFF by default: re-scoring an archived run reproduces it rather than silently swapping in
+    a different decoder and calling the result the same run."""
+    from wam.evaluation import BenchReport
+
+    run_dir, holdout = trained
+    out = tmp_path / "regression"
+
+    assert _run_eval(run_dir, holdout, out) == 0
+    assert "+flow" not in BenchReport.from_json((out / "bench.json").read_text()).run_name
+
+
+def test_flow_steps_without_the_sampler_flag_is_refused(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """A half-typed command must not score the regression head into a flow-named --out dir —
+    that produces an artifact whose filename and contents disagree, months before anyone looks."""
+    run_dir, holdout = trained
+
+    for flag, value in (
+        ("--flow-steps", "16"),
+        ("--flow-seed", "1"),
+        ("--flow-mean-k", "8"),
+        ("--flow-t0", "0.6"),
+    ):
+        with pytest.raises(SystemExit, match="--flow-steps"):
+            _run_eval(run_dir, holdout, tmp_path / "nope", flag, value)
+
+
+def test_the_flow_flag_actually_changes_the_predictions(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The flag has to reach the model, not just the run name. A wiring break here would make the
+    A/B report 'no difference' — the most expensive possible false negative."""
+    run_dir, holdout = trained
+    regression, flow = tmp_path / "a", tmp_path / "b"
+
+    assert _run_eval(run_dir, holdout, regression) == 0
+    assert _run_eval(run_dir, holdout, flow, "--flow-sampler", "--flow-steps", "4") == 0
+
+    assert _first_chunk(regression) != _first_chunk(flow)
+
+
+def test_timing_json_records_which_readout_it_timed(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Wall time is the only number here that cannot be recomputed from the archived artifacts,
+    and the sbatch A/B reads it to check the sampler against the executor's 500 ms deadline."""
+    run_dir, holdout = trained
+    out = tmp_path / "timed"
+
+    assert _run_eval(run_dir, holdout, out, "--flow-sampler", "--flow-steps", "8") == 0
+
+    timing = json.loads((out / "timing.json").read_text())
+    assert timing["flow_steps"] == 8
+    assert timing["flow_seed"] == 0
+    assert timing["num_chunks"] > 0
+    assert timing["ms_per_chunk"] > 0.0
+
+
+# -- T-30 control arms: --flow-mean-k and --flow-t0 ------------------------------------------
+
+
+def test_the_mean_of_k_arm_names_itself_and_reaches_the_sampler(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The MSE-fair arm of the T-30 rule. It has to be distinguishable from the single-draw arm
+    in the archive (or the two get compared as if they were one readout twice) AND it has to
+    actually average — a flag that only reached the run name would report the single-draw
+    penalty under the mean's name, which is the branch the rule keys on."""
+    from wam.evaluation import BenchReport
+
+    run_dir, holdout = trained
+    single, averaged = tmp_path / "k1", tmp_path / "k4"
+
+    assert _run_eval(run_dir, holdout, single, "--flow-sampler", "--flow-steps", "8") == 0
+    assert (
+        _run_eval(
+            run_dir, holdout, averaged, "--flow-sampler", "--flow-steps", "8", "--flow-mean-k", "4"
+        )
+        == 0
+    )
+
+    assert BenchReport.from_json((averaged / "bench.json").read_text()).run_name.endswith(
+        "+flow8s0k4"
+    )
+    assert _first_chunk(single) != _first_chunk(averaged)
+
+
+def test_the_warm_start_arm_names_itself_and_reaches_the_sampler(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The conditioning-mismatch control. Same two requirements, and the tag has to carry the t0
+    value: a warm start at 0.6 and one at 0.9 are different measurements of the same question."""
+    from wam.evaluation import BenchReport
+
+    run_dir, holdout = trained
+    plain, warm = tmp_path / "t0", tmp_path / "t06"
+
+    assert _run_eval(run_dir, holdout, plain, "--flow-sampler", "--flow-steps", "8") == 0
+    assert (
+        _run_eval(run_dir, holdout, warm, "--flow-sampler", "--flow-steps", "8", "--flow-t0", "0.6")
+        == 0
+    )
+
+    assert BenchReport.from_json((warm / "bench.json").read_text()).run_name.endswith(
+        "+flow8s0t0.6"
+    )
+    assert _first_chunk(plain) != _first_chunk(warm)
+
+
+def test_timing_json_records_the_control_arms_and_the_tag(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """``timing.json`` is what the --out guard reads back, and the sbatch verdict reads its
+    ms/chunk against the executor's deadline — for THIS arm, not for whichever one ran last."""
+    run_dir, holdout = trained
+    out = tmp_path / "armed"
+
+    arms = ("--flow-sampler", "--flow-steps", "8", "--flow-mean-k", "2", "--flow-t0", "0.5")
+    assert _run_eval(run_dir, holdout, out, *arms) == 0
+
+    timing = json.loads((out / "timing.json").read_text())
+    assert timing["flow_mean_k"] == 2
+    assert timing["flow_t0"] == 0.5
+    assert timing["readout_tag"] == "+flow8s0k2t0.5"
+    assert timing["run_name"].endswith(timing["readout_tag"])
+
+
+def test_the_control_arms_are_refused_before_the_checkpoint_is_loaded(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Out-of-range values must not be found by the first predict(): for a Wan checkpoint that is
+    minutes of base-weight loading later, and the run has already booked the GPU."""
+    run_dir, holdout = trained
+
+    with pytest.raises(SystemExit, match="--flow-steps must be >= 1"):
+        _run_eval(run_dir, holdout, tmp_path / "nope", "--flow-sampler", "--flow-steps", "0")
+    with pytest.raises(SystemExit, match="--flow-mean-k must be >= 1"):
+        _run_eval(run_dir, holdout, tmp_path / "nope", "--flow-sampler", "--flow-mean-k", "0")
+    with pytest.raises(SystemExit, match=r"--flow-t0 must be in \[0, 1\)"):
+        _run_eval(run_dir, holdout, tmp_path / "nope", "--flow-sampler", "--flow-t0", "1.0")
+    assert not (tmp_path / "nope").exists()
+
+
+# -- one --out per readout -------------------------------------------------------------------
+
+
+def test_a_second_readout_refuses_to_overwrite_the_first_ones_artifacts(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The A/B's own failure mode: every artifact name is fixed and --out defaults to --run-dir,
+    so scoring B into A's directory replaced A with B and left an A/B of B against itself, with
+    nothing on disk to show it had happened. Two help strings asked for a separate --out; that
+    was the whole enforcement."""
+    run_dir, holdout = trained
+    out = tmp_path / "one-dir"
+
+    assert _run_eval(run_dir, holdout, out) == 0
+    first = (out / "bench.json").read_text()
+
+    with pytest.raises(SystemExit, match="already holds artifacts from a different readout"):
+        _run_eval(run_dir, holdout, out, "--flow-sampler", "--flow-steps", "8")
+    with pytest.raises(SystemExit, match="already holds artifacts from a different readout"):
+        _run_eval(run_dir, holdout, out, "--frame-history")
+
+    assert (out / "bench.json").read_text() == first  # refused before anything was rewritten
+
+
+def test_re_running_the_same_readout_into_the_same_out_stays_allowed(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The guard must not break a re-score after an interrupted pass: the same arm reproduces the
+    same four files, and refusing that would push people toward --skip-split-check-shaped
+    workarounds."""
+    run_dir, holdout = trained
+    out = tmp_path / "same-arm"
+
+    assert _run_eval(run_dir, holdout, out, "--flow-sampler", "--flow-steps", "8") == 0
+    assert _run_eval(run_dir, holdout, out, "--flow-sampler", "--flow-steps", "8") == 0
+
+    assert json.loads((out / "timing.json").read_text())["readout_tag"] == "+flow8s0"
+
+
+def test_the_out_guard_identifies_an_arm_that_predates_timing_json(
+    trained: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Archived runs are the ones this protects: they were written before ``timing.json`` existed,
+    so the guard has to fall back to ``bench.json``'s run_name — which has carried the readout
+    suffix since the day there was more than one readout."""
+    run_dir, holdout = trained
+    out = tmp_path / "archived-arm"
+
+    assert _run_eval(run_dir, holdout, out, "--frame-history") == 0
+    (out / "timing.json").unlink()
+
+    with pytest.raises(SystemExit, match="already holds artifacts from a different readout"):
+        _run_eval(run_dir, holdout, out)
+    assert _run_eval(run_dir, holdout, out, "--frame-history") == 0
+
+
+def test_the_shared_loader_carries_the_flow_readout_into_the_policy(
+    trained: tuple[Path, Path],
+) -> None:
+    """``load_joint_policy`` is the one entry point eval_t16, rollout.py and serve_policy.py all
+    load through, so wiring it there is what lets the closed loop inherit this without a second
+    implementation. Pinned here because nothing else exercises the keyword end to end."""
+    from wam.runtime.policies import load_joint_policy
+
+    run_dir, _ = trained
+    model_path = ev.resolve_checkpoint(run_dir, "latest")
+
+    regression = load_joint_policy(model_path, device="cpu")
+    sampled = load_joint_policy(model_path, device="cpu", flow_steps=4, flow_seed=2)
+
+    assert regression.flow_steps is None
+    assert sampled.flow_steps == 4 and sampled.flow_seed == 2
+
+    with pytest.raises(ValueError, match="flow_steps"):
+        load_joint_policy(model_path, device="cpu", flow_steps=0)

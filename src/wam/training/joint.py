@@ -18,6 +18,19 @@
 - decoder branch: ``ActionHead`` regresses the clean chunk from the shared features (inverse
   dynamics, PRD §8.2) so smoothness/limit regularizers act in normalized action space.
 
+Two readouts, one deployed by default (T-30, ``docs/improvements.md`` I-3). ``predict`` uses the
+regression branch (``ActionHead``); ``predict(..., flow_steps=n)`` instead integrates the trained
+flow branch from noise and decodes the sampled latent through ``action_recon``. That promotes
+``action_recon`` from "the encoder's collapse anchor" to "the only latent->action decoder that
+exists", which is why its attribute name and its ``nn.Sequential`` layout are frozen: every
+archived checkpoint carries the state-dict keys ``action_recon.0.*`` / ``action_recon.2.*``, and
+renaming or reshaping the module strands ``runs/t16-lora-seed0`` rather than merely breaking a
+test. The flow readout is OFF by default so every number recorded before it existed reproduces.
+Sampling it from pure noise evaluates the velocity head outside the (features, t) pairing it was
+trained on, so ``sample_action_chunk`` also carries the two control arms the T-30 rule is keyed
+on — ``mean_of`` (k draws averaged, the MSE-fair comparison against a mean-seeking head) and
+``t0`` (start the integration inside the region where the two branches' timesteps agree).
+
 The model is backbone-agnostic (FR-09): it depends on the ``FlowBackbone`` protocol and never
 on a concrete class. The backbone is either built from ``config.backbone`` — a discriminated
 union tagged by ``kind`` — or injected ready-made, which is how a multi-GB adapted DiT is
@@ -79,6 +92,7 @@ __all__ = [
     "JointTrainer",
     "JointTrainingConfig",
     "JointWorldActionModel",
+    "build_action_recon",
     "load_joint_checkpoint",
 ]
 
@@ -179,6 +193,27 @@ class JointTrainingConfig(BaseModel):
         return cls.model_validate(data["training"])
 
 
+def build_action_recon(config: ActionChunkEncoderConfig) -> nn.Sequential:
+    """The latent -> (targets, gripper) decoder: ``[B, T, L] -> [B, T, D + G]``.
+
+    A free function, not an inline block in ``__init__``, because two places need the identical
+    module: the model, and ``scripts/check_action_latent.py``, which rebuilds it from a
+    checkpoint's embedded config WITHOUT constructing a backbone (that would mean loading tens of
+    GB of Wan weights to run an MLP). Two hand-copied definitions would drift, and the drift would
+    show up as a mysteriously wrong reconstruction rather than as a load error.
+
+    The layout is frozen: ``Linear -> GELU -> Linear`` gives every archived checkpoint the
+    state-dict keys ``action_recon.0.*`` and ``action_recon.2.*``. Inserting a layer renumbers
+    them and strands every checkpoint written before the change.
+    """
+    hidden = config.hidden_dims[-1]
+    return nn.Sequential(
+        nn.Linear(config.latent_dim, hidden),
+        nn.GELU(),
+        nn.Linear(hidden, config.target_dim + config.gripper_dims),
+    )
+
+
 class ActionVelocityHead(nn.Module):
     """Per-step MLP: ``[z_t | pooled features | t] -> action-latent velocity`` [B, T, L]."""
 
@@ -242,14 +277,9 @@ class JointWorldActionModel(nn.Module):
         self.align_proj = nn.Linear(config.action_encoder.latent_dim, config.backbone.feature_dim)
         # Reconstruction anchor for the action encoder: latent [B, T, L] -> (targets, gripper)
         # per step. Without it (and with detached flow targets) nothing would prevent the
-        # encoder latent from collapsing to an input-independent constant.
-        enc = config.action_encoder
-        recon_hidden = enc.hidden_dims[-1]
-        self.action_recon = nn.Sequential(
-            nn.Linear(enc.latent_dim, recon_hidden),
-            nn.GELU(),
-            nn.Linear(recon_hidden, enc.target_dim + enc.gripper_dims),
-        )
+        # encoder latent from collapsing to an input-independent constant. Since T-30 it is also
+        # the decoder of the optional flow readout (see sample_action_chunk).
+        self.action_recon = build_action_recon(config.action_encoder)
         # Frozen-parts registry: name -> parameter-bearing module/parameter, frozen in place.
         # The BACKBONE names its own frozen parts (tiny: text tables; Wan: VAE + text tower) —
         # the model must not know which those are (FR-09). An empty tuple is legitimate: a
@@ -360,7 +390,188 @@ class JointWorldActionModel(nn.Module):
         }
 
     @torch.no_grad()
-    def predict(self, observation: Observation, *, camera: str | None = None) -> ActionChunk:
+    def sample_action_chunk(
+        self,
+        pooled: Tensor,
+        *,
+        steps: int,
+        seed: int = 0,
+        mean_of: int = 1,
+        t0: float = 0.0,
+        init_latent: Tensor | None = None,
+    ) -> ActionChunk:
+        """Sample a chunk from the trained FLOW branch instead of regressing it (T-30, I-3).
+
+        The deployed readout regresses the whole chunk in one shot from the pooled features, and
+        a single-shot L2 regressor under a one-to-many conditional is mean-seeking: it emits the
+        average of the futures compatible with the observation, which is smoother and smaller
+        than any of them. Measured on ``runs/t16-lora-seed0/checkpoints/step-020000`` over the
+        1 040 archived holdout chunks: the regression head's chunks have RMS 0.00226 against the
+        demonstrations' 0.00404 (a 44 % magnitude shortfall) and ``smoothness_ratio`` 0.29.
+
+        That pair is **consistent with** mean-seeking. It is not a signature of it, and an earlier
+        version of this docstring said it was. What the numbers actually rule out is a
+        bounded-output artifact: max |target| is 0.0192 against a ``tanh``, and ``limit_penalty``
+        only bites outside ±0.95, so neither bound is active. Two alternatives survive, and each
+        produces small, smooth chunks on its own:
+
+        * **the one-sided jerk regulariser.** ``configs/training/joint_wan_gr00t.yaml`` sets
+          ``weights.smoothness = 0.01`` and :meth:`JointTrainer.compute_losses` applies
+          ``smoothness_loss`` to ``decoded_targets`` — the regression head's output — and to
+          nothing else. The flow branch is never charged for jerk. A smoothness gap between the
+          two readouts is therefore the expected consequence of the objective, whether or not
+          either head models the conditional.
+        * **L2 shrinkage.** ``action_reg`` is an MSE against targets whose own RMS is 0.004 and
+          AdamW runs with ``weight_decay``; a head that under-shoots magnitude uniformly is
+          indistinguishable, on RMS and jerk alone, from one that averages modes.
+
+        Telling those apart needs an intervention (drop ``weights.smoothness`` to 0 and retrain,
+        or score a multi-modal task), not this readout swap. What this readout swap can do is ask
+        whether the branch that was trained as a distribution carries anything the regression
+        head does not: integrate ``velocity_head``, decode through ``action_recon``.
+
+        **Integration direction — get this wrong and the sampler silently emits noise that still
+        decodes to a finite, plausible-looking chunk.** WAM's convention lives in one place,
+        :func:`~wam.training.losses.make_flow_targets`: ``x_t = (1-t) x0 + t x1`` with ``x0`` the
+        NOISE and ``x1`` the clean latent, so **t=0 is noise and t=1 is clean** (the inverse of
+        the diffusers/SD3 convention). Sampling therefore starts at ``z ~ N(0, I)`` and steps
+        FORWARD, ``z <- z + v * dt``, with t ascending.
+
+        The t-grid is ``{t0, t0 + dt, ..., 1 - dt}`` for ``dt = (1 - t0)/n`` and deliberately
+        never reaches 1.0: :meth:`JointTrainer.compute_losses` draws t from ``torch.rand``, whose
+        support is [0, 1), so t=1.0 is a timestep the head has never once been evaluated at.
+
+        **The conditioning mismatch this sampler runs on, and the arm that measures it.**
+        Training only ever paired (features from video noised to t, action latent noised to the
+        SAME t) — :meth:`co_denoise` shares one ``t`` across both branches. :meth:`predict`
+        computes ONE backbone pass at t=1 on the CLEAN observation and this loop reuses those
+        features at every t_k, so at small t_k the head is asked about (near-pure-noise z,
+        clean-video features, t≈0) — a combination it was never trained on. The faithful
+        alternative costs n backbone passes AND requires noising the observed frame, which
+        destroys the observation the readout exists to read. It is therefore not run, and a
+        negative result from the default ``t0=0`` path is a statement about the flow branch **as
+        sampled this way**, never about the flow branch as trained (same shape of confound as
+        I-7, which is why the T-30 pre-registration names it as its own branch).
+
+        ``t0`` is the control for exactly that. With ``t0 > 0`` and ``init_latent`` the
+        integration starts at t0 from ``(1-t0)·noise + t0·init_latent``, i.e. only in the region
+        where the head's ``t`` and the features' ``t=1`` roughly agree. :meth:`predict` builds
+        ``init_latent`` by encoding the REGRESSION head's own chunk through ``action_encoder`` —
+        the only clean-latent estimate available at inference (the demonstrated chunk is not, and
+        starting from it would make this an oracle, not a readout). The warm-started arm
+        therefore INHERITS the regression mean and cannot on its own show that the flow branch
+        models the conditional; what it can do is separate "the branch is dead" from "the branch
+        was sampled outside its training region", which a ``t0=0`` negative cannot tell apart.
+
+        ``mean_of`` averages k independent draws (seeds ``seed .. seed+k-1``) in ACTION space
+        before the chunk is returned. It exists because the headline metric is MSE-derived and
+        MSE structurally penalises sampling: for any calibrated conditional,
+        ``E‖a - draw‖² = E‖a - mean‖² + E‖draw - mean‖²``, so a single unbiased draw scores worse
+        than the conditional mean by exactly the conditional variance — the metric would charge
+        the sampler for the one property the regression head is suspected of lacking. k draws
+        leave 1/k of that penalty, which makes ``mean_of=k`` the apples-to-apples MSE comparison
+        against the regression head, while ``mean_of=1`` stays the arm that measures what a
+        deployed sampler would emit (magnitude, jerk, draw-to-draw spread).
+
+        Two range decisions, both deliberate. The gripper is clamped into [0, 1] **after** the
+        draws are averaged, because ``action_recon`` ends in a bare ``nn.Linear`` where
+        ``ActionHead`` has a sigmoid, and :meth:`ActionChunk.validate` rejects a gripper outside
+        the schema range — an unclamped chunk would be refused downstream rather than merely
+        being slightly wrong. The targets are NOT clamped: squashing them would apply a
+        nonlinearity the model never trained through, and hard limits belong to the deterministic
+        safety layer (FR-07), not here.
+
+        Seeding re-creates a CPU generator per draw rather than advancing a stream, so the same
+        (checkpoint, observation, seed) yields the same chunk on every call and on every device —
+        a CUDA generator draws a different sequence for the same seed, which would make a cluster
+        rollout and a workstation rollout incomparable. This is what keeps T-25's bit-identical
+        rollouts valid with the sampler switched on.
+
+        The price is worth naming: because the stream is not advanced, an eval pass integrates
+        EVERY observation from the same noise vector (or, with ``mean_of``, the same k of them).
+        Per chunk that is still a fair draw — the noise does not depend on the observation — but
+        the errors across a holdout are correlated through it, so an aggregate is conditioned on
+        that one vector and its spread is not the iid spread. The T-30 rule handles this by
+        measuring rather than assuming: a second arm at ``flow_seed=1`` re-runs the whole holdout
+        from a different vector, and the band the verdict uses is that measured difference.
+
+        ``pooled`` is ``[feature_dim]`` or ``[1, feature_dim]``: the mean over the token axis of
+        the shared features, i.e. exactly the reduction :meth:`co_denoise` applies before the
+        action branch.
+        """
+        if steps < 1:
+            raise ValueError(f"flow steps must be >= 1, got {steps}")
+        if mean_of < 1:
+            raise ValueError(f"flow mean_of must be >= 1, got {mean_of}")
+        if not 0.0 <= t0 < 1.0:
+            # t0=1 would integrate zero steps and return the warm start unchanged, which is the
+            # regression chunk laundered through action_recon and reported as a flow arm.
+            raise ValueError(f"flow t0 must be in [0, 1), got {t0}")
+        if t0 > 0.0 and init_latent is None:
+            raise ValueError(
+                "flow t0 > 0 needs init_latent: starting at t0 from PURE noise is off the "
+                "probability path in a second way rather than fixing the first one — z_t0 has to "
+                "be (1-t0)*noise + t0*(a clean-latent estimate) for the arm to mean anything"
+            )
+        if t0 == 0.0 and init_latent is not None:
+            # Same rule as --flow-steps without --flow-sampler: an argument that silently does
+            # nothing makes an archived command line unreadable.
+            raise ValueError("init_latent was given with t0 = 0, where it is never read")
+        feature_dim = self.config.backbone.feature_dim
+        feats = pooled.unsqueeze(0) if pooled.ndim == 1 else pooled
+        if feats.ndim != 2 or feats.shape[0] != 1 or feats.shape[-1] != feature_dim:
+            raise ValueError(
+                f"pooled: expected [{feature_dim}] or [1, {feature_dim}], got {tuple(pooled.shape)}"
+            )
+        feats = feats.float()
+        enc = self.config.action_encoder
+        shape = (1, self.config.head.num_steps, enc.latent_dim)
+        init: Tensor | None = None
+        if init_latent is not None:
+            init = init_latent.unsqueeze(0) if init_latent.ndim == 2 else init_latent
+            if tuple(init.shape) != shape:
+                raise ValueError(
+                    f"init_latent: expected {shape[1:]} or {shape}, got {tuple(init_latent.shape)}"
+                )
+            init = init.to(dtype=torch.float32, device=feats.device)
+        dt = (1.0 - t0) / steps
+        total: Tensor | None = None
+        for draw in range(mean_of):
+            # CPU generator then .to(device) — the same pattern co_denoise uses for its flow
+            # noise, and the reason a seed means the same draw on CPU, CUDA and MPS alike.
+            generator = torch.Generator().manual_seed(int(seed) + draw)
+            noise = torch.randn(*shape, generator=generator, dtype=torch.float32).to(feats.device)
+            z = noise if init is None else (1.0 - t0) * noise + t0 * init
+            for k in range(steps):
+                t = torch.full((1,), t0 + k * dt, dtype=torch.float32, device=feats.device)
+                z = z + self.velocity_head(z, feats, t) * dt
+            # Averaged in ACTION space, not latent space: the MSE identity that justifies this
+            # arm holds for the quantity being scored, and action_recon is not linear, so a mean
+            # of latents is not the mean of the chunks they decode to.
+            step = self.action_recon(z)[0]  # [T, D + G]
+            total = step if total is None else total + step
+        assert total is not None  # mean_of >= 1 is enforced above
+        decoded = total / mean_of  # exact for mean_of=1, so that path stays bit-identical
+        targets = decoded[:, : enc.target_dim].float().cpu().numpy()
+        gripper = decoded[:, enc.target_dim :].mean(dim=-1).clamp(0.0, 1.0).float().cpu().numpy()
+        return ActionChunk(
+            mode=self.config.head.mode,
+            targets=targets,
+            gripper_target=gripper,
+            dt_s=self.config.head.dt_s,
+        )
+
+    @torch.no_grad()
+    def predict(
+        self,
+        observation: Observation,
+        *,
+        camera: str | None = None,
+        flow_steps: int | None = None,
+        flow_seed: int = 0,
+        flow_mean_k: int = 1,
+        flow_t0: float = 0.0,
+    ) -> ActionChunk:
         """Policy protocol: one :class:`Observation` -> one canonical :class:`ActionChunk`.
 
         This is the **representation-only** readout of the joint model, and it is the reason a
@@ -381,7 +592,27 @@ class JointWorldActionModel(nn.Module):
         2026-07-30 was measured with (T-29, ``docs/improvements.md`` I-7). ``camera`` overrides
         the trained ``config.camera``, for the case where the deployment names the same view
         differently (sim: ``head``); it changes which key is read, never what the model expects.
+
+        ``flow_steps`` switches the ACTION readout — not the backbone pass, which is unchanged —
+        from the regression head to :meth:`sample_action_chunk` with that many Euler steps
+        (T-30, ``docs/improvements.md`` I-3). ``None`` is the default and leaves the regression
+        branch byte-identical, so re-running an archived evaluation reproduces it instead of
+        quietly redefining what every number before this flag existed meant.
+
+        ``flow_mean_k`` and ``flow_t0`` select the two T-30 control arms and both default to the
+        plain single draw from noise, so they too change nothing on any recorded path.
+        ``flow_mean_k`` averages k draws (the MSE-fair comparison against a mean-seeking head —
+        see :meth:`sample_action_chunk`). ``flow_t0`` warm-starts the integration at t0 from the
+        regression chunk re-encoded by ``action_encoder``, which is the only clean-latent
+        estimate available at inference; that is the arm which measures whether a t0=0 negative
+        is about the branch or about sampling it outside the region it was trained in.
         """
+        if flow_steps is None and (flow_mean_k != 1 or flow_t0 != 0.0):
+            raise ValueError(
+                f"flow_mean_k={flow_mean_k}/flow_t0={flow_t0} only apply to the flow readout, "
+                "and flow_steps is None (the regression head). Silently ignoring them would let "
+                "an arm be recorded under a name for something that never ran."
+            )
         key = camera if camera is not None else self.config.camera
         device = next(self.parameters()).device
         frames = resolve_frame_context(observation, key, self.config.backbone.num_frames).to(device)
@@ -391,6 +622,26 @@ class JointWorldActionModel(nn.Module):
         text_ctx = self.backbone.condition_text(observation.instruction)
         state_ctx = self.backbone.condition_state(state_emb)
         _, features = self.backbone.forward_flow(video_latents, t, text_ctx, state_ctx)
+        if flow_steps is not None:
+            init_latent = None
+            if flow_t0 > 0.0:
+                # The warm start's clean-latent estimate: the regression head's own chunk, put
+                # back through the encoder the flow branch was trained against. It is the same
+                # backbone pass, so this arm costs one ActionHead + one encoder call, not a
+                # second observation — and it deliberately does NOT use the demonstrated chunk,
+                # which is available in an offline eval and would turn the arm into an oracle.
+                init_latent = self.action_encoder.encode(self.action_head.decode(features[0]))
+            # mean over the token axis, the reduction co_denoise feeds the velocity head — the
+            # same vector action_head.decode() forms internally, so the two readouts differ in
+            # how they turn features into a chunk and in nothing else.
+            return self.sample_action_chunk(
+                features.float().mean(dim=1),
+                steps=flow_steps,
+                seed=flow_seed,
+                mean_of=flow_mean_k,
+                t0=flow_t0,
+                init_latent=init_latent,
+            )
         # decode() mean-pools the token axis in fp32 — same reduction co_denoise applies before
         # the action branch, so a chunk predicted here matches the one trained against.
         return self.action_head.decode(features[0])
