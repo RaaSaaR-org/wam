@@ -65,7 +65,12 @@ class E1Report(BaseModel):
     - ``per_step_*``: error per horizon step (index 0 = first step) — shows error growth over
       the chunk. With variable chunk lengths each step averages the predictions that reach it.
     - ``gripper_accuracy``: fraction of steps where predicted and target gripper agree after
-      binarization at ``GRIPPER_BINARIZE_THRESHOLD``.
+      binarization at ``GRIPPER_BINARIZE_THRESHOLD``. Only readable against the two measurements
+      below — on a channel that never opens it is the majority-class rate and nothing else.
+    - ``gripper_dynamic_range``: peak-to-peak of the DEMONSTRATED gripper signal.
+    - ``gripper_majority_pct``: accuracy a constant predictor of the demonstrated majority class
+      would score. Both default to 0.0 so archived ``runs/*/e1*.json`` still parses; no threshold
+      lives here, the admissibility gate has exactly one home (``wam.evaluation.gripper``).
     - ``smoothness_*``: mean squared second temporal difference of the targets (lower =
       smoother); predicted vs. target shows whether the policy is jerkier than the demos.
       0.0 when no chunk has >= 3 steps.
@@ -86,6 +91,8 @@ class E1Report(BaseModel):
     per_step_mse: tuple[float, ...]
     per_step_mae: tuple[float, ...]
     gripper_accuracy: float
+    gripper_dynamic_range: float = 0.0
+    gripper_majority_pct: float = 0.0
     smoothness_pred: float
     smoothness_target: float
     per_episode: dict[str, EpisodeMetrics]
@@ -114,7 +121,9 @@ class E1Report(BaseModel):
             "| --- | --- |",
             f"| MSE | {_fmt(self.mse)} |",
             f"| MAE | {_fmt(self.mae)} |",
-            f"| gripper accuracy | {_fmt(self.gripper_accuracy)} |",
+            f"| gripper accuracy | {self._gripper_cell(self.gripper_accuracy)} |",
+            f"| gripper dynamic range | {_fmt(self.gripper_dynamic_range)} |",
+            f"| gripper majority-class baseline | {self.gripper_majority_pct:.1f}% |",
             f"| smoothness (predicted) | {_fmt(self.smoothness_pred)} |",
             f"| smoothness (target) | {_fmt(self.smoothness_target)} |",
             "",
@@ -146,9 +155,38 @@ class E1Report(BaseModel):
         for ep_id, ep in self.per_episode.items():
             lines.append(
                 f"| {ep_id} | {ep.num_chunks} | {_fmt(ep.mse)} | {_fmt(ep.mae)} | "
-                f"{_fmt(ep.gripper_accuracy)} |"
+                f"{self._gripper_cell(ep.gripper_accuracy)} |"
             )
         return "\n".join(lines) + "\n"
+
+    @property
+    def gripper_withheld_reason(self) -> str:
+        """Why ``gripper_accuracy`` is not a number worth rendering, or "" if it is.
+
+        The SAME admissibility rule ``bench.json`` applies, evaluated here so the two artifacts
+        of one run cannot disagree. They did: ``bench.json`` returned ``gripper_accuracy=None``
+        with a reason while ``e1.md`` rendered ``| gripper accuracy | 0.89351 |`` for the same
+        predictions, because T-27 added the diagnostics NEXT to the number instead of in front
+        of it — which is the exact failure the withholding change was made to fix.
+        """
+        from wam.evaluation.gripper import GRIPPER_MIN_DYNAMIC_RANGE
+
+        if self.gripper_dynamic_range < GRIPPER_MIN_DYNAMIC_RANGE:
+            return (
+                f"gripper_dynamic_range {self.gripper_dynamic_range:.3f} < "
+                f"{GRIPPER_MIN_DYNAMIC_RANGE}; majority-class baseline "
+                f"{self.gripper_majority_pct:.1f}%"
+            )
+        return ""
+
+    def _gripper_cell(self, value: float) -> str:
+        """A withheld number must not be renderable as a number — including per episode.
+
+        Per episode especially: a reader scanning that column for "which episodes did the
+        gripper work on" is asking precisely the question a majority-class rate cannot answer.
+        """
+        reason = self.gripper_withheld_reason
+        return f"n/a — withheld ({reason})" if reason else _fmt(value)
 
 
 def _fmt(value: float) -> str:
@@ -225,6 +263,9 @@ def e1_metrics(
     step_cnt = np.zeros(max_t, dtype=np.float64)
     grip_match = 0
     grip_total = 0
+    grip_closed = 0
+    grip_min = np.inf
+    grip_max = -np.inf
     smooth_sq = {"pred": 0.0, "target": 0.0}
     smooth_cnt = {"pred": 0, "target": 0}
     per_ep: dict[str, dict[str, float]] = {}
@@ -254,6 +295,9 @@ def e1_metrics(
         )
         grip_match += matches
         grip_total += int(gp.shape[0])
+        grip_closed += int((gt >= GRIPPER_BINARIZE_THRESHOLD).sum())
+        grip_min = min(grip_min, float(gt.min()))
+        grip_max = max(grip_max, float(gt.max()))
 
         for key, x in (("pred", p), ("target", t)):
             if x.shape[0] >= 3:
@@ -272,6 +316,7 @@ def e1_metrics(
         ep["gmatch"] += float(matches)
         ep["gtotal"] += float(gp.shape[0])
 
+    closed_frac = grip_closed / grip_total if grip_total else 0.0
     labels = _dim_labels(mode, dim, spec)
     per_episode = {
         ep_id: EpisodeMetrics(
@@ -295,6 +340,8 @@ def e1_metrics(
         per_step_mse=tuple(float(v) for v in step_sq / step_cnt),
         per_step_mae=tuple(float(v) for v in step_abs / step_cnt),
         gripper_accuracy=(grip_match / grip_total) if grip_total else 0.0,
+        gripper_dynamic_range=float(grip_max - grip_min) if grip_total else 0.0,
+        gripper_majority_pct=max(closed_frac, 1.0 - closed_frac) * 100.0 if grip_total else 0.0,
         smoothness_pred=(smooth_sq["pred"] / smooth_cnt["pred"]) if smooth_cnt["pred"] else 0.0,
         smoothness_target=(
             (smooth_sq["target"] / smooth_cnt["target"]) if smooth_cnt["target"] else 0.0

@@ -46,6 +46,33 @@ def test_hand_synergy_is_bounded_and_monotone() -> None:
     assert conv.hand_synergy(np.full(7, 99.0, dtype=np.float32)) == 1.0  # clipped
 
 
+def test_legacy_clipped_frac_measures_the_rail_the_legacy_mapping_hides() -> None:
+    """The legacy mapping's clip had no compensating gate, unlike the pinned affine's.
+
+    Clipping is silent in the written dataset and moves EVERY downstream admissibility clause in
+    the passing direction: a railed channel reads as a wide, decisive, two-state gripper. The
+    audit cannot see it either — by the time it reads gripper_target, the rail IS the data. So it
+    has to be caught where the unclipped values still exist.
+    """
+    in_range = [np.zeros((4, 43), dtype=np.float32)]
+    assert conv.legacy_clipped_frac(in_range) == 0.0
+
+    off_scale = np.zeros((4, 43), dtype=np.float32)
+    off_scale[:, conv.LEFT_HAND] = 1.8  # (1.8 + 1) / 2 = 1.4, railed to 1.0
+    assert conv.legacy_clipped_frac([off_scale]) == pytest.approx(0.5)  # one hand of two
+
+
+def test_hand_synergy_rails_an_off_scale_source_without_saying_so() -> None:
+    """Why the check above lives outside hand_synergy: the function itself cannot report it.
+
+    Two physically different hands map to the same stored value, so the information is gone
+    before anything downstream could gate on it.
+    """
+    assert conv.hand_synergy(np.full(7, 1.8, dtype=np.float32)) == 1.0
+    assert conv.hand_synergy(np.full(7, 99.0, dtype=np.float32)) == 1.0
+    assert conv.LEGACY_MAX_CLIPPED_FRAC == 0.0  # same bar pinned_hand_affine already held
+
+
 def test_relabel_chunks_are_executed_state_deltas() -> None:
     rng = np.random.default_rng(0)
     q = np.cumsum(rng.uniform(-0.01, 0.01, size=(21, 15)), axis=0).astype(np.float32)

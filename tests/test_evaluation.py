@@ -14,6 +14,7 @@ from wam.evaluation import (
     VERDICT_HELPS,
     VERDICT_HURTS,
     VERDICT_NO_DIFF,
+    AblationReport,
     ChunkPrediction,
     compare_runs,
     e1_metrics,
@@ -134,6 +135,22 @@ def test_e1_metrics_gripper_accuracy() -> None:
     prd_grip = np.array([0.4, 0.6, 0.4, 0.2], dtype=np.float32)  # binarized: 0,1,0,0
     report = e1_metrics([make_pred(prd, tgt, pred_grip=prd_grip, tgt_grip=tgt_grip)])
     assert report.gripper_accuracy == pytest.approx(0.75)
+    # The two measurements that say whether the 0.75 means anything: the DEMONSTRATED channel's
+    # range, and what a constant predictor of its majority class would have scored (T-31).
+    assert report.gripper_dynamic_range == pytest.approx(1.0)
+    assert report.gripper_majority_pct == pytest.approx(50.0)
+
+
+def test_e1_gripper_majority_baseline_exposes_a_channel_that_never_opens() -> None:
+    """On a constant channel the 'accuracy' IS the majority rate — that has to be visible here."""
+    tgt = np.zeros((4, 1), dtype=np.float32)
+    tgt_grip = np.full(4, 0.48, dtype=np.float32)
+    prd_grip = np.full(4, 0.49, dtype=np.float32)
+    report = e1_metrics([make_pred(tgt, tgt, pred_grip=prd_grip, tgt_grip=tgt_grip)])
+
+    assert report.gripper_accuracy == pytest.approx(1.0)
+    assert report.gripper_dynamic_range == pytest.approx(0.0)
+    assert report.gripper_majority_pct == pytest.approx(100.0)
 
 
 def test_e1_metrics_smoothness_second_diff() -> None:
@@ -273,12 +290,22 @@ def test_holdout_split_edges() -> None:
 # --- ablation (T-18, AC-07) ---------------------------------------------------------------------
 
 
-def _report_with_error(error: float, grip_acc_bad_steps: int = 0):
+def _report_with_error(error: float, grip_acc_bad_steps: int = 0, gripper_moves: bool = True):
+    """E1 report with a controlled action error and gripper accuracy.
+
+    ``gripper_moves`` controls whether the DEMONSTRATED channel opens and closes at all. It has
+    to be a knob rather than a constant, because the ablation now refuses to compare
+    ``gripper_accuracy`` across a channel that never moves (T-31).
+    """
     tgt = np.zeros((4, 2), dtype=np.float32)
     prd = np.full((4, 2), error, dtype=np.float32)
-    tgt_grip = np.ones(4, dtype=np.float32)
-    prd_grip = np.ones(4, dtype=np.float32)
-    prd_grip[:grip_acc_bad_steps] = 0.0
+    tgt_grip = (
+        np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32)
+        if gripper_moves
+        else np.full(4, 0.9, dtype=np.float32)
+    )
+    prd_grip = tgt_grip.copy()
+    prd_grip[:grip_acc_bad_steps] = 1.0 - tgt_grip[:grip_acc_bad_steps]
     return e1_metrics([make_pred(prd, tgt, pred_grip=prd_grip, tgt_grip=tgt_grip)])
 
 
@@ -342,6 +369,47 @@ def test_ablation_explicit_names_and_errors() -> None:
     assert "**Verdict: video branch helps**" in md and "| mse |" in md
 
 
+def test_ablation_refuses_to_compare_a_degenerate_gripper_channel() -> None:
+    """The hole that put t18's 0.8534 into the AC-07 verdict.
+
+    A warning on the bench report did not stop the number travelling — the ablation scored it
+    with no admissibility check at all, and on that holdout the 0.8534 was EXACTLY the
+    majority-class rate. Omission, not annotation, is what makes it uncopyable.
+    """
+    reports = {
+        "action_only": _report_with_error(0.2, gripper_moves=False),
+        "world_action": _report_with_error(0.1, gripper_moves=False),
+    }
+    ablation = compare_runs(reports)
+
+    assert "gripper_accuracy" not in ablation.metrics
+    assert "gripper_accuracy" in ablation.omitted_metrics
+    assert "majority-class rate (100.0%)" in ablation.omitted_metrics["gripper_accuracy"]
+    assert ablation.verdict == VERDICT_HELPS  # the MSE verdict is unaffected
+    md = ablation.render_markdown()
+    assert "| gripper_accuracy | — | — | — | — | not comparable" in md
+    assert AblationReport.from_json(ablation.to_json()) == ablation
+
+
+def test_ablation_omits_the_gripper_when_only_one_side_is_degenerate() -> None:
+    """One unreadable channel is enough: the delta needs both sides to mean something."""
+    reports = {
+        "action_only": _report_with_error(0.2, gripper_moves=True),
+        "world_action": _report_with_error(0.1, gripper_moves=False),
+    }
+    assert "gripper_accuracy" in compare_runs(reports).omitted_metrics
+
+
+def test_archived_ablation_json_parses_without_the_omission_field() -> None:
+    """Backward compatibility of runs/*/ablation.json: the new field must be optional."""
+    reference = compare_runs(
+        {"action_only": _report_with_error(0.2), "world_action": _report_with_error(0.1)}
+    )
+    payload = json.loads(reference.to_json())
+    payload.pop("omitted_metrics")
+    assert AblationReport.from_json(json.dumps(payload)).omitted_metrics == {}
+
+
 # --- serialization + CLI wiring -----------------------------------------------------------------
 
 
@@ -397,3 +465,24 @@ def test_eval_offline_script_dashboard_and_compare(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert "**Verdict: video branch helps**" in proc.stdout
+
+
+def test_e1_markdown_withholds_gripper_accuracy_on_an_inadmissible_channel() -> None:
+    """The two artifacts of one run must not disagree about whether a number exists.
+
+    ``bench.json`` withholds ``gripper_accuracy`` on a channel that barely moves and gives a
+    reason; ``e1.md`` used to render the same run's number as a plain cell, because T-31 added
+    the diagnostics NEXT to it rather than in front of it. A reader who opens e1.md sees a
+    published accuracy on a channel the benchmark refused to score.
+    """
+    moving = _report_with_error(0.1, gripper_moves=True)
+    frozen = _report_with_error(0.1, gripper_moves=False)
+
+    assert moving.gripper_withheld_reason == ""
+    assert "| gripper accuracy | 1" in moving.render_markdown()
+
+    assert frozen.gripper_withheld_reason != ""
+    body = frozen.render_markdown()
+    assert "n/a — withheld" in body
+    # and not only in the summary table: the per-episode column asks the same question.
+    assert body.count("n/a — withheld") >= 2

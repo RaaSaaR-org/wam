@@ -13,6 +13,10 @@ Contracts:
   Default threshold is 5% — offline action-MSE on small holdout sets fluctuates a few percent
   between reruns/seeds (PRD 10.4: MSE is diagnostic only), so smaller gaps are treated as
   noise. AC-07 asks for a MEASURABLE advantage; tighten/loosen via ``threshold_pct``.
+- A compared metric that is not admissible on the given data is OMITTED, not reported with a
+  caveat. ``gripper_accuracy`` is the case that forced this: on a channel that never opens it
+  equals the majority-class rate exactly, and comparing two such numbers produced a
+  gripper column in the T-18 AC-07 verdict that carried no information at all.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from wam.evaluation.gripper import GRIPPER_MIN_DYNAMIC_RANGE
 from wam.evaluation.offline import EVAL_VERSION, E1Report, _fmt
 
 VERDICT_HELPS = "video branch helps"
@@ -61,7 +66,11 @@ class MetricDelta(BaseModel):
 
 
 class AblationReport(BaseModel):
-    """AC-07 comparison of a world-action candidate against the action-only baseline."""
+    """AC-07 comparison of a world-action candidate against the action-only baseline.
+
+    ``omitted_metrics`` maps a metric name to why it was not compared. Defaulted so archived
+    ``runs/*/ablation.json`` still parses; an empty mapping means every metric was admissible.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -70,6 +79,7 @@ class AblationReport(BaseModel):
     candidate_name: str
     threshold_pct: float = Field(gt=0.0)
     metrics: dict[str, MetricDelta]
+    omitted_metrics: dict[str, str] = Field(default_factory=dict)
     verdict: Literal["video branch helps", "no significant difference", "hurts"]
 
     def to_json(self) -> str:
@@ -97,6 +107,8 @@ class AblationReport(BaseModel):
                 f"| {name} | {direction} | {_fmt(m.baseline)} | {_fmt(m.candidate)} | "
                 f"{_fmt(m.delta)} | {imp} |"
             )
+        for name, reason in sorted(self.omitted_metrics.items()):
+            lines.append(f"| {name} | — | — | — | — | not comparable ({reason}) |")
         mse = self.metrics["mse"]
         basis = (
             "undefined MSE improvement (baseline MSE == 0)"
@@ -173,8 +185,21 @@ def compare_runs(
     baseline_name, candidate_name = _resolve_pair(reports, baseline, candidate)
     base, cand = reports[baseline_name], reports[candidate_name]
 
+    omitted: dict[str, str] = {}
+    worst_range = min(base.gripper_dynamic_range, cand.gripper_dynamic_range)
+    if worst_range < GRIPPER_MIN_DYNAMIC_RANGE:
+        # An E1Report archived before this field existed defaults to 0.0 and lands here. That is
+        # the safe direction: "unknown" must read as "do not compare", never as "fine".
+        omitted["gripper_accuracy"] = (
+            f"channel degenerate, demonstrated p2p {worst_range:.3f} < "
+            f"{GRIPPER_MIN_DYNAMIC_RANGE} — the accuracy is the majority-class rate "
+            f"({max(base.gripper_majority_pct, cand.gripper_majority_pct):.1f}%)"
+        )
+
     metrics: dict[str, MetricDelta] = {}
     for name, higher_is_better in _COMPARED_METRICS.items():
+        if name in omitted:
+            continue
         b = float(getattr(base, name))
         c = float(getattr(cand, name))
         metrics[name] = MetricDelta(
@@ -201,5 +226,6 @@ def compare_runs(
         candidate_name=candidate_name,
         threshold_pct=threshold_pct,
         metrics=metrics,
+        omitted_metrics=omitted,
         verdict=verdict,
     )
