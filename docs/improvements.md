@@ -423,6 +423,80 @@ intuition.
 >
 > **Cost:** 0.56 GPU-h against ~6 budgeted. The arms are cheap; it was the interpretation that was
 > expensive, and the guard is what made it survivable.
+>
+> ---
+>
+> **CORRECTION, same day, after the audit: there is no integration bug. The guard's ACTION was
+> right and its DIAGNOSIS was wrong, and the two have to be scored separately.**
+>
+> The block above reasons its way to "direction, scale or time parameterisation" and calls the warm
+> start the strongest clue. That inference was wrong, and the mistake is instructive: I compared
+> `warm0.6` (1.454e-04) against the regression head's 1.11e-05 and concluded the integrator degrades
+> a good estimate 13-fold. But `warm0.6` does not start from a good estimate — it starts from
+> `(1-t0)·noise + t0·init`, i.e. the regression chunk with **40 % noise re-injected**. Against the
+> arm it should be compared with, the plain single draw at 3.130e-04, the warm start is **better**,
+> not worse. The integration was helping the whole time. I read a control arm against the wrong
+> reference and got a sign out of it.
+>
+> All three suspects the verdict block named are provably clean, each checked against the *training
+> path* rather than against a restatement of it:
+>
+> | suspect | check | result |
+> |---|---|---|
+> | direction | sampler's `z` at each `t_k` vs `make_flow_targets(noise, clean, t_k)` | max abs diff **2.98e-07** (fp32 rounding); final `z` == `x1` |
+> | pooled conditioning | tensor reaching `velocity_head` from `predict` vs from `co_denoise` at t=1 | **bit-identical**, max diff 0.0 |
+> | warm start | `(1-t0)·noise + t0·init` vs `make_flow_targets(noise, init, t0)` | identical |
+> | decode side | `action_recon(action_encoder(chunk))` on the real checkpoint | mse **8.1037e-07** — exactly the pre-registered ceiling 8.104e-07 |
+>
+> **The real cause is the velocity field, and it is architectural.** `ActionVelocityHead`
+> (`joint.py:217-235`) takes the timestep as **one raw scalar** concatenated beside 32 latent and
+> 3 072 feature inputs — `in_dim = latent_dim + feature_dim + 1`, no sinusoidal embedding, no step
+> index. First-layer weight-block Frobenius norms on the trained checkpoint: **t 1.68, latent 23.3,
+> features 51.0**. The measured `−∂v/∂z` is **flat in t** at every feature scale probed, where a
+> straight-path flow needs a gain of `1/(1-t)` — 1 at t=0, 33 at t=0.97. A constant-gain linear
+> field contracts by a fixed factor per step and **cannot reach zero at any step count**.
+>
+> That single fact predicts all four observations, which is why it is the explanation and the
+> integration story was not: the sweep converges (fixed contraction has a fixed fixed-point), the
+> scale is wrong by a constant, the residual is zero-mean (so `mean_of` averages it down ~2.5×), and
+> more steps buy nothing. Quantitatively: a chunk latent's *content* has per-element std 0.049 while
+> the flow starts from `N(0, I)`, so the sampler must delete ~95 % of a unit-variance vector to
+> reach the demonstrations' RMS. It deletes ~90 %. The guard's `RMS > 3 × demos` line sits at ~91.5 %
+> removal. **T-30 failed its guard by about one and a half percentage points of noise removal.**
+>
+> So the guard was right to refuse — a run where the sampler cannot reach the data manifold says
+> nothing about whether the flow readout beats the regression head — and wrong about why. Its
+> instruction ("check the direction, the conditioning, the warm start") sent the audit at three
+> things that were already correct. A guard that names a cause is doing more than a guard should;
+> the condition earned its keep, the diagnosis did not, and the fix is to have it say *broken* and
+> stop there.
+>
+> **This is a better outcome than the verdict would have been.** I-3 asked whether the flow branch
+> is a better readout. The answer is that, as built, it cannot be *sampled* — the head has no way to
+> know what time it is. That is a concrete defect with a concrete fix, found for 0.56 GPU-h.
+> One caveat carried forward, because it is the part that is not yet solved: at tiny scale, adding a
+> Fourier timestep embedding does **not** fix it — the head still learns the flat, L2-optimal
+> time-blind gain. So this is a head *and objective* problem, not a missing-embedding problem, and
+> the next move (retrain the head alone on the frozen encoder/recon, with both a timestep embedding
+> and a readable step index) is a hypothesis, not a known fix.
+>
+> **The tests were green and blind, and that is named.** `TestFlowSampler` and
+> `TestFlowSamplerControlArms` never call `co_denoise` or `make_flow_targets`; they check the
+> sampler against `_StraightPathField`, a copy of the convention re-written as a literal in the test
+> file, and against a hand-rolled copy of the sampler's own loop. Verified by mutation:
+>
+> | mutation | old 28 tests | new class |
+> |---|---|---|
+> | `co_denoise`'s flow convention **inverted** | **28 passed** | 2 failed |
+> | head trained on `1 − t` | **28 passed** | 1 failed |
+> | `co_denoise` pools `features[:, 0]` not `.mean(dim=1)` | **28 passed** | 2 failed |
+> | sampler integrates backward | 2 failed | 1 failed |
+> | warm-start mix flipped | 1 failed | 1 failed |
+>
+> The three failure modes the verdict block named as suspects are exactly the three the old tests
+> cannot see. They passed because the sampler is correct — but they would have passed had it not
+> been. `TestFlowSamplerAgainstTheTrainingPath` computes every expectation *from* the training path
+> and catches all five.
 
 We already train two action paths:
 
@@ -771,8 +845,9 @@ existing checkpoint and need no retraining at all.
 | ~~—~~ | ~~I-7 frame history at inference~~ (T-29) — **✅ ran 2026-08-01: +10.65 pp, still fails L1** | done | 0.2 GPU-h, no retrain |
 | ~~—~~ | ~~I-7 re-score T-18 + `d1-full-gen-seed0`~~ — **✅ ran 2026-08-01 on a laptop CPU: both moved <0.05 pp, ladder is single-mode, AC-07 readable again** | done | **zero GPU**, no retrain |
 | ~~—~~ | ~~I-3 flow branch deployed~~ (T-30) — **ran 2026-08-01, job 184670: every arm SUSPECT, pre-registered refusal, question still open** | ran, no verdict | 0.56 GPU-h spent |
-| **1** | **Fix the flow sampler** — direction / scale / conditioning in `sample_action_chunk`, plus whichever of `TestFlowSampler`/`TestFlowSamplerControlArms` was green while it was broken. Local, no GPU. **I-3 cannot be re-run until this lands** | now | hours, no GPU |
-| **2** | **Re-run T-30** once the sampler passes its own guard — the arms are unchanged, `63_...sbatch` is unchanged | after 1 | ~0.6 GPU-h, no retrain |
+| ~~—~~ | ~~Fix the flow sampler~~ — **audited 2026-08-01: no bug. All three suspects clean against the training path; the old tests were green *and blind* (mutation-proven), now fixed** | done | hours, no GPU |
+| **1** | **Give `ActionVelocityHead` a sense of time** — it takes `t` as one raw scalar beside 3 072 features and learns a t-flat gain, so the field cannot contract to zero at any step count. Timestep embedding **and** a readable step index, retrained head-only on the frozen encoder/recon (which already hits the 8.10e-07 ceiling). **Not a known fix** — a Fourier embedding alone did not work at tiny scale | now | hours + head-only retrain |
+| **2** | **Re-run T-30** once a flow arm clears the guard on its own — arms and `63_...sbatch` unchanged | after 1 | ~0.6 GPU-h |
 | 3 | I-9 re-score the ladder on the rescaled gripper (T-31) | after the converter's audit passes | ~0.2 GPU-h, no retrain |
 | 4 | I-8 data-scaling curve (T-32) | after 2 — a readout swap moves every rung at once | 3 runs, existing allocation |
 | 5 | I-2 cross-attention head | after 1–4 say whether the readout was the problem | days + retrain |

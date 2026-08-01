@@ -47,6 +47,7 @@ from wam.training import (
     load_joint_checkpoint,
 )
 from wam.training._utils import resolve_frame_context
+from wam.training.losses import make_flow_targets
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -917,6 +918,190 @@ class TestFlowSamplerControlArms:
         for kwargs in ({"flow_mean_k": 4}, {"flow_t0": 0.5}):
             with pytest.raises(ValueError, match="flow_mean_k|flow_t0"):
                 model.predict(obs, **kwargs)
+
+
+class TestFlowSamplerAgainstTheTrainingPath:
+    """The invariant the two classes above do NOT pin: sampler-vs-TRAINING, not sampler-vs-itself.
+
+    ``TestFlowSampler`` checks the integration against ``_StraightPathField`` — a formula written
+    out a second time in this file — and ``TestFlowSamplerControlArms`` checks it against a
+    hand-rolled copy of the sampler's own loop. Neither one ever calls ``co_denoise`` or
+    ``make_flow_targets``, so both are satisfied by a sampler that is internally consistent and
+    inverted relative to the head it reads. Measured by mutation on 2026-08-01: swapping
+    ``co_denoise``'s ``make_flow_targets(action_noise, action_latent, t)`` arguments (t=0 clean,
+    t=1 noise — the exact convention error the sampler's docstring warns about), training the head
+    on ``1 - t``, or changing ``co_denoise``'s pooling from ``features.mean(dim=1)`` to
+    ``features[:, 0]`` each leave all 28 of those tests green. Every test below fails on at least
+    one of those three, because every expectation below is COMPUTED from the training path
+    instead of restated.
+    """
+
+    def _model(self) -> JointWorldActionModel:
+        torch.manual_seed(0)
+        model = JointWorldActionModel(joint_config())
+        model.eval()
+        return model
+
+    def _obs(self) -> Observation:
+        rng = np.random.default_rng(3)
+        image = rng.integers(0, 256, (IMAGE_HW, IMAGE_HW, 3), dtype=np.uint8)
+        return Observation(
+            images={"front": image},
+            image_history={"front": np.stack([image] * NUM_FRAMES)},
+            state=make_state(rng, ts=0),
+            instruction="pick",
+        )
+
+    def _batch_from(self, obs: Observation) -> dict:
+        """The training batch that shows ``co_denoise`` exactly the observation ``predict`` reads."""
+        batch = make_batch(batch_size=1)
+        batch["frames"] = resolve_frame_context(obs, "front", NUM_FRAMES).unsqueeze(0)
+        batch["q"] = torch.as_tensor(obs.state.q).unsqueeze(0)
+        batch["dq"] = torch.as_tensor(obs.state.dq).unsqueeze(0)
+        batch["imu"] = torch.as_tensor(
+            np.concatenate(
+                [
+                    obs.state.imu.orientation_wxyz,
+                    obs.state.imu.angular_velocity,
+                    obs.state.imu.linear_acceleration,
+                ]
+            )
+        ).unsqueeze(0)
+        batch["gripper"] = torch.as_tensor(obs.state.gripper_state).unsqueeze(0)
+        batch["instruction"] = obs.instruction
+        return batch
+
+    def _sampler_noise(self, model: JointWorldActionModel, seed: int) -> torch.Tensor:
+        """The exact draw ``sample_action_chunk`` starts from — fed to ``co_denoise`` as well, so
+        both paths are built on one noise vector and a disagreement can only be a convention."""
+        return torch.randn(
+            1,
+            model.config.head.num_steps,
+            model.config.action_encoder.latent_dim,
+            generator=torch.Generator().manual_seed(seed),
+            dtype=torch.float32,
+        )
+
+    def _clean_latent(self, model: JointWorldActionModel, batch: dict) -> torch.Tensor:
+        targets = torch.as_tensor(batch["targets"], dtype=torch.float32)
+        gripper = torch.as_tensor(batch["gripper_target"], dtype=torch.float32)
+        gripper = gripper.unsqueeze(-1).expand(-1, -1, model.config.action_encoder.gripper_dims)
+        with torch.no_grad():
+            return model.action_encoder(targets, gripper)
+
+    def test_co_denoise_pairs_the_head_with_the_flow_targets_it_builds(self) -> None:
+        """The training end of the contract, stated in terms of ``make_flow_targets``.
+
+        The velocity head must be shown ``(x_t at t, pooled features, that same t)``. Restating
+        the interpolation here would test nothing; it is recomputed from the same function
+        ``co_denoise`` calls, so a convention change moves both sides only if it moves them
+        together — which a swapped-argument or ``1 - t`` bug does not."""
+        model = self._model()
+        batch = self._batch_from(self._obs())
+        noise = self._sampler_noise(model, seed=0)
+        clean = self._clean_latent(model, batch)
+        t = torch.full((1,), 0.3)
+        seen: dict[str, torch.Tensor] = {}
+        inner = model.velocity_head
+
+        class _Recorder(nn.Module):
+            def forward(self, z_t: torch.Tensor, pooled: torch.Tensor, ts: torch.Tensor):
+                seen["z"], seen["pooled"], seen["t"] = z_t.clone(), pooled.clone(), ts.clone()
+                return inner(z_t, pooled, ts)
+
+        model.velocity_head = _Recorder()
+        with torch.no_grad():
+            out = model.co_denoise(batch, t, action_noise=noise)
+
+        expected_z, expected_v = make_flow_targets(noise, clean, t)
+        assert torch.allclose(seen["z"], expected_z, atol=1e-6, rtol=0)
+        assert torch.allclose(seen["t"], t, atol=0, rtol=0)
+        assert torch.allclose(out["action_velocity_target"], expected_v, atol=1e-6, rtol=0)
+        # …and the conditioning is the token-axis mean, which is what predict() hands the sampler.
+        assert torch.allclose(seen["pooled"], out["features"].float().mean(dim=1), atol=0, rtol=0)
+
+    def test_the_sampler_lands_on_the_latent_co_denoise_calls_clean(self) -> None:
+        """The whole contract in one assertion: a head that predicts ``co_denoise``'s OWN action
+        flow target perfectly must make ``sample_action_chunk`` return the demonstrated chunk.
+
+        The field is not written out here — it is the tensor the trainer regresses against, taken
+        straight off ``co_denoise``. So if the training path's notion of "clean" and the sampler's
+        direction of travel ever disagree, the integration ends at ``2*noise - clean`` (or at the
+        noise it started from) and this fails, where every test above still passes."""
+        model = self._model()
+        batch = self._batch_from(self._obs())
+        noise = self._sampler_noise(model, seed=0)
+        clean = self._clean_latent(model, batch)
+        with torch.no_grad():
+            out = model.co_denoise(batch, torch.full((1,), 0.3), action_noise=noise)
+        target_velocity = out["action_velocity_target"]
+
+        class _TrainedPerfectly(nn.Module):
+            """The rectified-flow target is constant along the path, so this IS the exact field."""
+
+            def forward(self, z_t: torch.Tensor, pooled: torch.Tensor, t: torch.Tensor):
+                return target_velocity
+
+        model.velocity_head = _TrainedPerfectly()
+        recon = _RecordingRecon(TARGET_DIM + model.config.action_encoder.gripper_dims)
+        model.action_recon = recon
+
+        model.sample_action_chunk(out["features"].float().mean(dim=1), steps=8, seed=0)
+
+        assert recon.last is not None
+        assert torch.allclose(recon.last, clean, atol=1e-5, rtol=0)
+
+    def test_predict_hands_the_sampler_the_pooled_vector_co_denoise_trained_on(self) -> None:
+        """Bit-identical, not merely same-shaped. Both paths reduce the token axis, and the two
+        reductions are written out separately (``co_denoise`` before the action branch,
+        ``predict`` at the call site), so nothing but a test keeps them the same reduction of the
+        same tensor. A drift here conditions the sampler on a vector the head never saw and looks
+        exactly like a dead flow branch."""
+        model = self._model()
+        obs = self._obs()
+        batch = self._batch_from(obs)
+        pooled: list[torch.Tensor] = []
+        inner = model.velocity_head
+
+        class _Recorder(nn.Module):
+            def forward(self, z_t: torch.Tensor, feats: torch.Tensor, t: torch.Tensor):
+                pooled.append(feats.clone())
+                return inner(z_t, feats, t)
+
+        model.velocity_head = _Recorder()
+        model.predict(obs, flow_steps=1)
+        with torch.no_grad():
+            model.co_denoise(batch, torch.ones(1))
+
+        assert len(pooled) == 2
+        assert torch.equal(pooled[0], pooled[1])
+
+    def test_the_warm_start_is_the_training_paths_own_point_on_the_path(self) -> None:
+        """``z_t0`` has to be the point the trainer would have built at t0 — i.e.
+        ``make_flow_targets(noise, init, t0)[0]``, recomputed rather than respelled as
+        ``0.4*noise + 0.6*init``. The literal version passes for a sampler that mixes the two the
+        wrong way round the moment the convention it was copied from changes."""
+        model = self._model()
+        t0 = 0.6
+        noise = self._sampler_noise(model, seed=0)
+        init = torch.full(
+            (1, model.config.head.num_steps, model.config.action_encoder.latent_dim), 0.25
+        )
+        recon = _RecordingRecon(TARGET_DIM + model.config.action_encoder.gripper_dims)
+        model.action_recon = recon
+
+        class _Zero(nn.Module):
+            def forward(self, z_t: torch.Tensor, pooled: torch.Tensor, t: torch.Tensor):
+                return torch.zeros_like(z_t)
+
+        model.velocity_head = _Zero()
+        model.sample_action_chunk(
+            torch.zeros(1, FEATURE_DIM), steps=4, seed=0, t0=t0, init_latent=init
+        )
+
+        expected, _ = make_flow_targets(noise, init, torch.full((1,), t0))
+        assert recon.last is not None
+        assert torch.allclose(recon.last, expected, atol=1e-6, rtol=0)
 
 
 class TestJointTrainer:

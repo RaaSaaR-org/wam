@@ -441,6 +441,32 @@ class JointWorldActionModel(nn.Module):
         never reaches 1.0: :meth:`JointTrainer.compute_losses` draws t from ``torch.rand``, whose
         support is [0, 1), so t=1.0 is a timestep the head has never once been evaluated at.
 
+        **T-30 job 184670 tripped the sampler-broken guard on every arm; the guard was wrong.**
+        Audited 2026-08-01 against the training path, and this loop is faithful to it — the
+        invariants are now pinned by ``TestFlowSamplerAgainstTheTrainingPath`` rather than argued:
+        the z it hands the head at each t_k is bit-for-bit ``make_flow_targets(noise, clean,
+        t_k)[0]``, the pooled vector :meth:`predict` passes is bit-for-bit the one
+        :meth:`co_denoise` builds, and a head that returns ``co_denoise``'s own
+        ``action_velocity_target`` drives this loop onto the demonstrated latent. On the archived
+        checkpoint ``action_recon(action_encoder(chunk))`` scores 8.10e-07 — the pre-registered
+        ceiling — so the decode side is exact too. What the arms measured is the FIELD, and the
+        budget it has to work against. A chunk latent has RMS 1.42, but essentially all of it is
+        the step-index positional embedding, identical for every chunk; the part that varies with
+        the demonstrated chunk — the whole content the sampler has to hit — has per-element std
+        0.049, against the N(0, I) the flow starts from. Fitting the archived seed0-vs-seed1
+        spread back through ``action_recon`` puts the noise surviving 32 steps at ~0.10: the
+        integration removes ~90 % of it, and what is left is still 2x the content, which is where
+        RMS/demo 4.38 comes from. The guard's "RMS > 3x the demonstrations'" crosses at a residual
+        of ~0.085 — it demands >91.5 % noise removal and reads the missing 1.5 points as an
+        integration bug. ``ActionVelocityHead`` takes t as ONE raw scalar beside 32 latent and
+        3072 feature inputs (first-layer weight-block Frobenius norms on the archived checkpoint:
+        1.68 for t, 23.3 for the latent, 51.0 for the features), and its measured d(v)/d(z) gain
+        comes out FLAT in t at every feature scale probed, where a straight path needs 1/(1-t)
+        (1 at t=0, 33 at t=0.97). A constant-gain linear field contracts noise by a fixed factor
+        and cannot reach zero at any step count, which is also why the sweep converges. Fixing
+        that is a head/objective change (timestep embedding, or a step index the head can read),
+        not a sampler one.
+
         **The conditioning mismatch this sampler runs on, and the arm that measures it.**
         Training only ever paired (features from video noised to t, action latent noised to the
         SAME t) — :meth:`co_denoise` shares one ``t`` across both branches. :meth:`predict`
