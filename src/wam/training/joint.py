@@ -589,7 +589,12 @@ class JointWorldActionModel(nn.Module):
         when ``observation.image_history`` carries one, otherwise the single frame **tiled** to
         ``num_frames``. Training always fed a real window, so the tiled path is a train/inference
         mismatch and not a neutral default — it is what every world-action number recorded before
-        2026-07-30 was measured with (T-29, ``docs/improvements.md`` I-7). ``camera`` overrides
+        2026-08-01 was measured with. T-29 has since put a size on the mismatch, on one
+        checkpoint: 10.65 pp of ``skill_vs_repeat_pct`` (−32.45 % tiled, −21.80 % windowed), and
+        27.64 pp on L2's task-critical chunks, which is where deleting the motion should hurt
+        most. Neither crosses a gate; L1 still fails. Only ``t16-lora-seed0`` has been scored both
+        ways, so a tiled number and a windowed one are not comparable (T-29,
+        ``docs/improvements.md`` I-7). ``camera`` overrides
         the trained ``config.camera``, for the case where the deployment names the same view
         differently (sim: ``head``); it changes which key is read, never what the model expects.
 

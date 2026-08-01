@@ -196,16 +196,47 @@ Reference points on the identical 40-episode holdout, including the first T-16 c
 
 | | `d1-full-gen-seed0` (action-only) | `t18-real-ablation-seed0` (world-action) | `t16-lora-seed0` (Wan 5B LoRA) |
 |---|---|---|---|
+| frame mode | tiled ⚠ | tiled ⚠ | tiled ⚠ (re-scored — §3b) |
 | level | **L0** beats-doing-nothing | **below L0** | **L0** beats-doing-nothing |
 | score | 28.6/100 | 19.9/100 | 48.4/100 |
 | `skill_vs_repeat_pct` | −20.9 % | −129.0 % | **−32.4 %** |
 
-The bar is still unbeaten: the highest score in that table is the run that loses hardest to inertia
-after the tiny one. Read the level. `docs/benchmark.md` has the full column and the diagnosis.
+⚠ **tiled** = one frame repeated 9×, which is how every number recorded before 2026-08-01 was
+measured (§3b). Only `t16-lora-seed0` has since been re-scored in the mode it was trained in, where
+it is **−21.80 %**; the other two columns have never been measured that way.
+
+The bar is unbeaten in every column — all three lose to inertia, and the levels say so. What this
+table does **not** support is a ranking: reading `skill_vs_repeat_pct` across columns now compares
+one in-distribution number against two freeze-frame ones. Read the level. `docs/benchmark.md` has
+the full column and the diagnosis.
 
 ### 3b. T-29 — re-score with the frames training actually used
 
-**Do this before treating the numbers above as settled.** Every one of them was produced with
+> **Ran 2026-08-01 (Slurm job 184648). The verdict survives; the published figure does not.**
+> Both arms on one H200 from one checkpoint (`runs/t16-lora-seed0/checkpoints/step-020000`), the
+> same proven 40-episode holdout, the same 1 040 chunks, differing in exactly one flag. Artifacts:
+> `runs/t16-lora-seed0/eval-t29-{tiled,history}/`.
+>
+> | metric | tiled (as published) | real window (`--frame-history`) | delta |
+> |---|---|---|---|
+> | **`skill_vs_repeat_pct`** (the L1 gate) | **−32.45 %** | **−21.80 %** | **+10.65 pp** |
+> | `ci_skill_vs_repeat_pct` (L2, critical chunks) | −50.74 % | −23.11 % | +27.64 pp |
+> | `skill_vs_zero_pct` (L0) | +25.88 % | +31.83 % | +5.96 pp |
+> | `mse` | 1.21027e-05 | 1.11298e-05 | −8.0 % |
+> | `horizon_ratio` | 1.30 | 1.32 | |
+> | `smoothness_ratio` | 0.29 | 0.32 | |
+> | level | L0 | **L0** | unchanged |
+> | score, bench spec 0.1.0 | 48.4 | 50.6 | +2.2 |
+> | score, bench spec 0.2.0 | 28.4 | 30.6 | +2.2 |
+>
+> The confound below was real and was worth 10.65 pp — about a third of the 32.45 pp gap — and did
+> not come close to closing it. L1 still fails, by 21.80 pp. The tiled arm reproduces the archived
+> `eval-latest/bench.json` to every digit, so the published −32.4 % is confirmed to be the
+> freeze-frame measurement and the A/B is clean. **Only `t16-lora-seed0` was re-measured** — the
+> other two columns in §3 are still tiled-only. The runbook below is unchanged and is still how you
+> reproduce this locally.
+
+**Why this was worth a job.** Every number in the §3 reference table was produced with
 `predict()` tiling a single camera frame to the backbone's 9-frame context, while training fed the
 real 9-frame window ending at the chunk (`docs/improvements.md` I-7). A video backbone trained on a
 moving clip was graded on a freeze-frame — and repeat-last-action, the baseline it loses to, is
@@ -215,7 +246,7 @@ nothing but motion continuity.
 `frame_window_indices`. No retraining; the checkpoint is untouched and only the input changes.
 
 ```bash
-# A: how everything before 2026-07-30 was measured
+# A: how everything before 2026-08-01 was measured
 python scripts/eval_t16.py --run-dir runs/t16-lora-seed0 \
     --dataset datasets/gr00t-apple-full \
     --holdout configs/splits/t18_holdout_episodes.txt \
@@ -247,6 +278,20 @@ addendum, and AC-07 reopens (re-run the T-18 ablation the same way before conclu
 Essentially unchanged → the model had the motion and still lost to inertia, the negative is about
 the model rather than the harness, and I-8 (the data-scaling curve) is next.
 
+**Resolution, 2026-08-01 — the rule text above is left as it was written; this is what it
+resolved to.** The result landed between its two branches, and both fired in part. Toward-0: yes,
+by 10.65 pp, so `docs/benchmark.md` took a correction rather than an addendum and **AC-07 is back
+to OPEN** — undetermined, not answered. The old claim that the fine-tune is worse than the
+action-only baseline rested on −32.4 % vs −20.9 %; in distribution it is −21.80 % vs an unknown.
+Past 0: no, so the second branch also holds — the model had the motion and still lost to inertia
+by 21.80 pp, and that part of the negative is about the model rather than the harness.
+
+The parenthetical is the one instruction still **OUTSTANDING**: `t18-real-ablation-seed0` and
+`d1-full-gen-seed0` have not been re-run this way, so any table carrying all three is mixed-mode
+and is not a comparison. It costs ~0.4 GPU-h and no retraining, and it is item 2 in
+`docs/improvements.md`. The rule's closing "I-8 is next" is superseded by that queue: T-30 (§3c)
+is item 1 and running, the re-score is item 2, I-8 follows.
+
 `--compare` refuses two runs whose holdouts differ, so the columns always mean the same thing.
 
 Because scoring only reads `predictions.jsonl`, a **new rung costs no retrain** — every past run is
@@ -259,8 +304,9 @@ chunk in one shot from the pooled features; a rectified-flow branch (`velocity_h
 `action_recon`, `weights.action_flow = 1.0`) models the same chunk as a distribution and is never
 touched at inference. A single-shot L2 regressor under a one-to-many conditional is mean-seeking,
 and `t16-lora-seed0` is **consistent with** one: chunk RMS **0.00226** against the demonstrations'
-**0.00404**, `smoothness_ratio` **0.29**. `--flow-sampler` reads the chunk out of the flow branch
-instead. No retraining; the checkpoint is untouched and only the decode step changes
+**0.00404**, `smoothness_ratio` **0.29** tiled and **0.32** in the `--frame-history` mode the arms
+below run in (§3b) — the diagnosis does not turn on which. `--flow-sampler` reads the chunk out of
+the flow branch instead. No retraining; the checkpoint is untouched and only the decode step changes
 (`docs/improvements.md` I-3).
 
 **"Consistent with", not "the signature of"** — an earlier version of this section said the
@@ -294,7 +340,7 @@ It prints two bounds on everything the A/B can win, both measured on 2026-08-01 
 | | target MSE | what it is |
 |---|---|---|
 | ceiling | **8.10e-07** | encode the demonstrated chunks, decode straight back through `action_recon` — a perfect sampler |
-| this run | 1.21e-05 | the deployed regression head |
+| this run | 1.21e-05 | the deployed regression head, tiled (1.11e-05 in `--frame-history`, §3b) |
 | L1 bar | 9.14e-06 | repeat-last-action |
 | zero-delta | 1.63e-05 | hold still |
 | floor | **1.68e-05** | decode the per-step latent *centroids* — a sampler that recovers only *which step* |
@@ -335,8 +381,9 @@ python scripts/run_bench.py runs/t16-lora-seed0/eval-t30-{regression,flow32-mean
     --compare --no-write
 ```
 
-Both arms carry `--frame-history` (or neither): run this **after** T-29 reports, inside whichever
-frame mode it leaves standing, or the two A/Bs collapse into a 2×2 nobody pre-registered. The
+Both arms carry `--frame-history`, and that is now fixed rather than conditional: T-29 reported on
+2026-08-01 (§3b) and `--frame-history` is the mode left standing, so every T-30 arm runs inside it.
+Mixing the two modes here would collapse the two A/Bs into a 2×2 nobody pre-registered. The
 readout goes into `bench.json`'s `run_name` as `…+flow32s0k8`, for the same reason the frame mode
 does, and **one `--out` holds exactly one readout** — the script refuses to write a second arm's
 artifacts over a first one's, because every filename is fixed and `--out` defaults to `--run-dir`.
@@ -345,7 +392,8 @@ scoring the regression head into a flow-named output dir. Sweep `--flow-steps 1 
 separate runs to show the verdict does not hinge on the integrator — **n=1 is the control**: one
 Euler step from noise is what "rectified flow needs one step" would deploy, and it measures how
 far from straight this field actually is. On Discoverer+ the whole sweep plus the verdict is one
-job: `sbatch cluster/discoverer/63_eval_t30_flow_head.sbatch`.
+job: `sbatch cluster/discoverer/63_eval_t30_flow_head.sbatch` — **submitted 2026-08-01 as job
+184670 and running**, now item 1 in `docs/improvements.md`.
 
 #### Why the headline arm averages k draws
 

@@ -4,9 +4,12 @@ Ready-to-`sbatch` files for the EuroHPC H200 partition (PetaSC / Sofia Tech Park
 `ehpc-aif-2026pg01-905`. Machine facts, quotas, billing and gotchas: **`docs/discoverer.md`** —
 that is the *why*, this is the *how*.
 
-**Steps 1–6 and 7 have run** — the environment build, the weight staging, the Wan smoke job, the
-readout probe, and T-16 itself (20 000 LoRA steps, `runs/t16-lora-seed0`, negative: WAM-Bench L0,
-`skill_vs_repeat_pct` −32.4 %). Steps 8–11 are staged and unrun.
+**Steps 1–8 have run** — the environment build, the weight staging, the Wan smoke job, the
+readout probe, T-16 itself (20 000 LoRA steps, `runs/t16-lora-seed0`, negative: WAM-Bench L0,
+`skill_vs_repeat_pct` −32.4 %, a *tiled* number), and T-29, which re-measured that same
+checkpoint through the real frame window: −21.80 % (+10.65 pp). L1 is still failed by 21.80 pp,
+so the verdict survives and the published figure does not. Step 9 (T-30) is running as job
+184670. Steps 10–11 are staged and unrun.
 
 **No document here asserts how much of the allocation is left** — that number moves every job and a
 stale copy of it is worse than none. Read it live with `accountcheck` (`docs/discoverer.md` §9).
@@ -66,8 +69,8 @@ Checkpoints belong in `${PROJ}/runs` ([scratch](https://docs.discoverer.bg/scrat
 | 5 | `40_readout_probe.sbatch` | project | ~1.5 GPU-h | re-measure feature blocks `[2, 10]` on this stack |
 | 6 | `50_train_t16.sbatch` | project | the budget | the LoRA fine-tune |
 | 7 | `60_eval_t16.sbatch` | project | ~0.2 GPU-h | score the checkpoint on the proven holdout |
-| 8 | `61_eval_t29_frame_history.sbatch` | project | ~0.4 GPU-h | T-29 / I-7: tiled frame vs. the real window |
-| 9 | `63_eval_t30_flow_head.sbatch` | project | ~4 GPU-h ×1–2 | T-30 / I-3: regression head vs. the flow sampler |
+| 8 | `61_eval_t29_frame_history.sbatch` | project | ~0.4 GPU-h | T-29 / I-7: tiled frame vs. the real window — **ran** 2026-08-01 (job 184648): −32.45 % → −21.80 %, L1 still failed |
+| 9 | `63_eval_t30_flow_head.sbatch` | project | ~4 GPU-h ×1–2 | T-30 / I-3: regression head vs. the flow sampler — **running** (submitted 2026-08-01, job 184670) |
 | 10 | `55_train_i8_rung.sbatch` | project | ~36 GPU-h ×3 | I-8 / T-32 rungs 040 / 120 (+ a seed-1 replicate) |
 | 11 | `62_eval_i8_curve.sbatch` | project | ~1 GPU-h | both frame modes × 3 rungs, then the pre-registered verdict |
 
@@ -124,7 +127,9 @@ its own restart counter and its own blast radius.
 
 Step 10 also refuses to start until `runs/t16-lora-seed0/eval-t29-history/bench.json` exists:
 rung 362 of the I-8 curve *is* step 8's output, so a T-29 verdict nobody has read yet means I-8's
-premise is unknown. `SKIP_T29_CHECK=1` overrides it — only after reading that verdict.
+premise is unknown. `SKIP_T29_CHECK=1` overrides it — only after reading that verdict. That
+verdict has been read (2026-08-01): the real window did not clear L1, so I-8's premise stands,
+the gate passes on its own, and rung 362 contributes −21.80 %, not the published −32.4 %.
 
 Step 11 is the **pre-registration**: every threshold in the I-8 decision rule is a literal in
 `62_eval_i8_curve.sbatch`, and the file is committed before the first rung is submitted. If a
@@ -163,7 +168,7 @@ sync.sh                push repo + dataset from the Mac; --pull fetches results 
 50_train_t16.sbatch    the LoRA fine-tune                  the budget
 55_train_i8_rung.sbatch one I-8 data-scaling rung          ~36 GPU-h each
 60_eval_t16.sbatch     score the checkpoint (the verdict)  ~0.2 GPU-h
-61_eval_t29_frame_history.sbatch  T-29 frame-mode A/B      ~0.4 GPU-h
+61_eval_t29_frame_history.sbatch  T-29 frame-mode A/B      ~0.4 GPU-h, ran 2026-08-01
 62_eval_i8_curve.sbatch the I-8 curve + its decision rule  ~1 GPU-h
 63_eval_t30_flow_head.sbatch      T-30 readout A/B         ~4 GPU-h, resubmit to continue
 ```

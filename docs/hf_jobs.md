@@ -403,9 +403,10 @@ progress:
 - the DiT trained with **proprioception tokens concatenated onto the text context**
   (`wan_i2v.py:605`), which a diffusers pipeline cannot supply, so this runs without them.
 
-And the action branch is not in the file at all. On WAM-Bench the full checkpoint reaches L0
-(48.4/100) and loses to repeat-last-action by 32 % — a plausible-looking video is not evidence
-the policy works. This is a diagnostic, not a demo; `runs/presentation/` remains the
+And the action branch is not in the file at all. On WAM-Bench the full checkpoint reaches L0 and
+loses to repeat-last-action: 48.4/100 and −32.4 % as published (tiled, i.e. one frame repeated
+nine times), 50.6/100 and −21.8 % once T-29 re-scored it with a real frame window. Either way a
+plausible-looking video is not evidence the policy works. This is a diagnostic, not a demo; `runs/presentation/` remains the
 presentation material.
 
 ### Measured (2026-07-30): the fine-tune is geometry-bound, and it learned to stand still

@@ -36,7 +36,10 @@ def resolve_frame_context(observation: Any, camera: str, num_frames: int) -> Ten
     - the single ``observation.images[camera]``, **tiled** ``num_frames`` times, when it does not.
       N copies of one still carry no motion, so a video backbone is being asked to read a clip
       that stands still. It is what ``ClosedLoopExecutor`` can supply today (one render per cycle)
-      and it is the confound T-29 exists to measure; see ``docs/improvements.md`` I-7.
+      and it is the confound T-29 measured on 2026-08-01: on T-16 it costs 10.65 pp of
+      ``skill_vs_repeat_pct`` (−32.45 % tiled, −21.80 % with the real window), which is about a
+      third of the gap to repeat-last-action and does not close it. See ``docs/improvements.md``
+      I-7.
 
     The history is validated rather than trusted: wrong length is an error, and its last frame
     must be ``images[camera]`` — the invariant documented on :class:`~wam.interfaces.Observation`

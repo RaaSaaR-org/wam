@@ -608,7 +608,7 @@ def test_default_stays_the_historical_tiled_path(
     trained: tuple[Path, Path], tmp_path: Path
 ) -> None:
     """Off by default, so re-scoring an archived run reproduces it instead of quietly
-    redefining what every number before 2026-07-30 meant."""
+    redefining what every number before 2026-08-01 meant."""
     from wam.evaluation import BenchReport
 
     run_dir, holdout = trained

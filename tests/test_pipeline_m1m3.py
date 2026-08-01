@@ -375,7 +375,7 @@ def test_eval_history_is_the_frames_ending_at_the_observation_clamped_at_the_sta
 
 
 def test_history_off_by_default_so_archived_runs_stay_reproducible(dataset_root: Path) -> None:
-    """Every result recorded before 2026-07-30 was measured on the tiled path. The default keeps
+    """Every result recorded before 2026-08-01 was measured on the tiled path. The default keeps
     reproducing them; the real window is opt-in and the A/B between the two is the experiment."""
     pairs = build_eval_pairs(dataset_root / "d1-0001", "front", CHUNK_STEPS)
     assert all(obs.image_history is None for obs, _t, _e in pairs)

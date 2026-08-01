@@ -220,8 +220,14 @@ and tested before a robot existed.
 
 It does not buy correctness of the *idea*. The open claim is AC-07 — that predicting video helps the
 action head at all — and the LoRA fine-tune it rested on has now run and come back **negative**:
-WAM-Bench L0, `skill_vs_repeat_pct` −32.4 %, i.e. losing to repeat-last-action. That verdict is not
-yet final, because three confounds under it are staged and unrun (T-29 frame history, T-30 flow
-readout, T-32 data scaling), so the honest reading is "negative, measured out of distribution and
-through a readout training never deployed". See `docs/benchmark.md` and the "Not proven" table in
-`README.md` before quoting anything from here as evidence.
+WAM-Bench L0, `skill_vs_repeat_pct` −32.4 % **tiled** — measured on one frame repeated nine times —
+i.e. losing to repeat-last-action. One of the three confounds under that verdict has since been
+measured: T-29 re-scored the same checkpoint with a real frame window and the gap narrows to
+**−21.80 %**, +10.65 pp. The confound was real and worth about a third of the gap, and it did not
+come close to closing it: the verdict survives, the published figure does not. Two confounds remain
+open — T-30 (flow readout) is running now, T-32 (data scaling) is unrun — and only
+`t16-lora-seed0` has been re-scored, so the baselines it is held against are still tiled-only
+numbers and AC-07 is back to *undetermined* rather than answered. The honest reading is now
+"negative in distribution, and still through a readout training never deployed". See
+`docs/benchmark.md` and the "Not proven" table in `README.md` before quoting anything from here as
+evidence.

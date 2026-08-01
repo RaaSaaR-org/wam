@@ -67,6 +67,8 @@ HOLDOUT=${PROJ}/wam/configs/splits/t18_holdout_episodes.txt
 
 # Rung 362 is runs/t16-lora-seed0, already scored in both modes by
 # 61_eval_t29_frame_history.sbatch. Its bench.json files are consumed, not recomputed.
+# That job reported on 2026-08-01 (Slurm 184648), so both files exist and this gate passes; it
+# stays because a fresh clone or a partial sync.sh --pull is the case it was written for.
 for f in "${RUNS}/t16-lora-seed0/eval-t29-tiled/bench.json" \
          "${RUNS}/t16-lora-seed0/eval-t29-history/bench.json"; do
   if [[ ! -f "${f}" ]]; then
@@ -128,7 +130,7 @@ for RUN_ID in i8-rung040-seed0 i8-rung120-seed0 i8-rung040-seed1; do
     --camera ego
     --device cuda
   )
-  echo "=== ${RUN_ID} · A: tiled single frame (how everything before 2026-07-30 was measured)"
+  echo "=== ${RUN_ID} · A: tiled single frame (how everything before 2026-08-01 was measured)"
   python "${EVAL}" "${common[@]}" --out "${OUT}/eval-i8-tiled"
   echo "=== ${RUN_ID} · B: real frame window (what training fed the model) — THE HEADLINE"
   python "${EVAL}" "${common[@]}" --frame-history --out "${OUT}/eval-i8-history"
@@ -246,6 +248,13 @@ def final_action_reg(run_id):
     return None
 
 
+# Which mode is the headline was an assumption when this file was committed; T-29 measured it
+# (2026-08-01). On t16-lora-seed0 — one checkpoint, the same 40-episode holdout, the same 1 040
+# chunks, differing in exactly one flag — the real window scores -21.80 % against tiled's
+# -32.45 %, and the tiled arm reproduces the archived eval-latest/bench.json to every digit. So
+# --frame-history is the in-distribution mode, the one training actually fed the model, and the
+# rule below reads it; the tiled column stays as the bridge to every number recorded before
+# 2026-08-01, all of which are tiled numbers.
 for mode in ("history", "tiled"):
     label = "--frame-history (HEADLINE)" if mode == "history" else "tiled (cross-check only)"
     print(f"\n-- {label}")

@@ -530,9 +530,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="show the policy the real num_frames window ending at each chunk — the same window "
         "EpisodeDataset fed during training — instead of one frame tiled num_frames times. OFF "
-        "by default so this reproduces the runs recorded before 2026-07-30; the A/B between the "
-        "two modes is T-29 (docs/improvements.md I-7). Needs a separate --out per mode, which "
-        "this script now refuses to run without.",
+        "by default so this reproduces the runs recorded before 2026-08-01, all of which are "
+        "'tiled' numbers; T-29 (job 184648) ran the A/B and measured the difference at +10.65 pp "
+        "on skill_vs_repeat_pct, not enough to clear L1. This flag is the in-distribution mode — "
+        "prefer it for new runs. Needs a separate --out per mode, which this script refuses to "
+        "run without.",
     )
     parser.add_argument(
         "--flow-sampler",
@@ -687,7 +689,10 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # T-29: which frames the policy sees. OFF reproduces every result recorded before
-    # 2026-07-30 (one frame, tiled by predict()); ON feeds the window training actually used.
+    # 2026-08-01 (one frame, tiled by predict()); ON feeds the window training actually used,
+    # which is the in-distribution mode. Only t16-lora-seed0 has been scored both ways so far
+    # (+10.65 pp on skill_vs_repeat_pct, still failing L1), so a run's frame mode belongs next to
+    # its numbers wherever tiled and windowed results meet.
     num_frames = config.backbone.num_frames if args.frame_history else None
     pairs = []
     for episode_dir in holdout:

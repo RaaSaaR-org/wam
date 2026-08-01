@@ -421,9 +421,12 @@ def build_eval_pairs(
     ``num_frames`` fills ``Observation.image_history`` with the window ending at that frame — the
     **same** window ``EpisodeDataset`` selected during training, via the same
     :func:`~wam.data.episode.frame_window_indices`. Left ``None`` the observation carries a single
-    frame and a video policy tiles it, which is what every result recorded before 2026-07-30 was
+    frame and a video policy tiles it, which is what every result recorded before 2026-08-01 was
     measured with; the default therefore reproduces those runs rather than silently redefining
-    them (T-29, ``docs/improvements.md`` I-7).
+    them (T-29, ``docs/improvements.md`` I-7). Passing ``num_frames`` is the in-distribution mode,
+    but so far only ``t16-lora-seed0`` has been re-scored that way — the tiled arm of that A/B
+    reproduced the archived ``eval-latest`` to every digit, every other archived number is still
+    tiled-only, and the two modes have to be labelled wherever they end up in one table.
 
     Memory: the window is a *view* into the episode's frame array whenever it does not need
     clamping, so history costs nothing beyond the array already held by the single-frame path.

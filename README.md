@@ -31,9 +31,9 @@ The backbone is swappable by contract (FR-09): anything satisfying `BackboneAdap
 `FlowBackbone` for joint training — drops in. Wan2.2-TI2V-5B (Apache 2.0) is the decided MVP
 backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and never bypassed.
 
-## Status (2026-07-29)
+## Status (2026-08-01)
 
-**858 tests green.** M0–M4 are code-complete. What that does and does not mean:
+**861 tests green.** M0–M4 are code-complete. What that does and does not mean:
 
 | Proven | How |
 |--------|-----|
@@ -46,8 +46,8 @@ backbone; FLUX 3 Dev is deferred to M5. The safety layer is never learned and ne
 
 | Not proven | Why it matters |
 |------------|----------------|
-| **That the action-only policy learned anything a heuristic cannot do** | A causal repeat-last-action baseline scores mse 9.14e-6 — 17 % *better* than the trained model. The −32 % above is real, but it is the demonstration's own inertia. WAM-Bench puts the run at **L0, 28.6/100** (T-27, `docs/benchmark.md`). |
-| **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge — including with the spatial readout that could have explained it away (T-26) — and at tiny scale the video branch *hurts*. The T-16 LoRA fine-tune has now run and is **negative** — WAM-Bench L0, `skill_vs_repeat_pct` −32.4 %, losing to repeat-last-action. Three confounds under that verdict are staged and unrun (T-29/T-30/T-32), so it is "negative, measured out of distribution", not "no". |
+| **That the action-only policy learned anything a heuristic cannot do** | A causal repeat-last-action baseline scores mse 9.14e-6 — 17 % *better* than the trained model. The −32 % above is real, but it is the demonstration's own inertia. WAM-Bench puts the run at **L0, 28.6/100** (T-27, `docs/benchmark.md`) — a tiled-mode number, not yet re-scored (see the row below). |
+| **"Video helps"** (AC-07) | Frozen features from *both* Wan and Cosmos3 lose to a state-only ridge — including with the spatial readout that could have explained it away (T-26) — and at tiny scale the video branch *hurts*. The T-16 LoRA fine-tune has run and is **negative** — WAM-Bench L0, losing to repeat-last-action. The "measured out of distribution" hedge has since been priced on the frame axis: T-29 re-scored the same checkpoint on the same holdout in the mode it was trained in (`--frame-history`) and got `skill_vs_repeat_pct` **−21.80 %** against **−32.4 %** tiled. The confound was real, worth 10.65 pp — about a third of the gap — and nowhere near enough. **The verdict survives; the published figure does not.** Two confounds remain (T-30 running, T-32). Whether the fine-tune is also *worse than the action-only baseline* is back to open: that baseline is still a tiled-only number. |
 | Anything on a physical robot | No G1 yet. Vendor conformance, E-stop chain, real limits and the Dex3 mapping are asserted, not measured. |
 | Real teleop data (D1/D2) | Everything so far is synthetic or converted from `nvidia/GR00T-N1.7-AppleToPlate`. |
 
@@ -116,15 +116,21 @@ scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 
 ## Next step
 
-T-16 has run and lost to repeat-last-action. Three confounds under that verdict are staged on
-Discoverer+ (`cluster/discoverer/README.md`), in this order, and none of them needs a robot:
+T-16 has run and lost to repeat-last-action. The first of the three confounds under that verdict is
+now answered: T-29 (`61_eval_t29_frame_history.sbatch`, run 2026-08-01) graded the checkpoint on the
+real `num_frames` window instead of one frame tiled, and the gap went from −32.4 % to −21.80 % —
+real, worth 10.65 pp, not enough. Of the two left, one is running and one is still staged on
+Discoverer+ (`cluster/discoverer/README.md`), in this order, and neither needs a robot:
 
-1. `61_eval_t29_frame_history.sbatch` — T-29. Training fed the real `num_frames` window; `predict()`
-   fed one frame tiled. A backbone trained on a moving clip was graded on a freeze-frame.
-2. `63_eval_t30_flow_head.sbatch` — T-30. We train two action readouts and deploy the cheaper one.
-   The action *latent* reconstructs the holdout 15× better than the readout that was scored.
-3. `55_train_i8_rung.sbatch` ×3, then `62_eval_i8_curve.sbatch` — T-32. "Not enough data" has
+1. `63_eval_t30_flow_head.sbatch` — T-30, **running** (job 184670). We train two action readouts and
+   deploy the cheaper one. The action *latent* reconstructs the holdout 15× better than the readout
+   that was scored.
+2. `55_train_i8_rung.sbatch` ×3, then `62_eval_i8_curve.sbatch` — T-32. "Not enough data" has
    explained every negative in this project and has never been tested.
+
+Cheap and outstanding either way (~0.4 GPU-h, no retraining): re-score the `action-only` and
+`world-action (tiny)` runs with `--frame-history`. Only T-16 was re-measured, so any table putting
+the three side by side is mixed-mode and is not a comparison — which is why AC-07 is open again.
 
 The bar any of them has to clear is `skill_vs_repeat_pct > 0` on WAM-Bench, not "beats the
 action-only baseline" — that baseline itself loses to a one-line heuristic.

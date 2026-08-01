@@ -688,7 +688,9 @@ def frame_window_indices(frame_idx: int, num_frames: int, num_available: int) ->
     because it used to exist as two: the training dataset selected the real window ending at the
     chunk while ``predict()`` tiled a single frame, and nobody noticed until a world-action model
     had been scored on freeze-frames (T-29, ``docs/improvements.md`` I-7). Training and evaluation
-    now call this, so the two cannot drift apart again without changing one line.
+    now call this, so the two cannot drift apart again without changing one line. Re-scoring that
+    model through this window recovered 10.65 pp of ``skill_vs_repeat_pct`` and left the verdict
+    where it was: still short of the repeat-last-action baseline, so still L0.
 
     The window ends **at** ``frame_idx`` (inclusive) and reaches backwards. Near the start of an
     episode it is clamped, i.e. the earliest frame repeats — a real observation stream has no

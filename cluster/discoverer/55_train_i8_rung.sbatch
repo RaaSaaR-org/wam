@@ -87,6 +87,12 @@ fi
 # so a T-29 verdict that has not been read yet means this experiment's premise is unknown —
 # and if T-29 comes back "L1 CLEARED" the T-16 negative is retracted and I-8 asks a different
 # question. 36 GPU-h is cheap; 36 GPU-h spent answering a question that moved is not.
+#
+# RESOLVED 2026-08-01 (T-29, Slurm job 184648) — NOT "L1 CLEARED". The real frame window moves
+# t16-lora-seed0's headline from -32.45 % to -21.80 % (+10.65 pp), so L1 is still failed by
+# 21.80 pp and the T-16 negative stands. I-8's premise is intact and the question is unchanged.
+# What the verdict DID change is which number rung 362 contributes: the history-mode -21.80 %,
+# not the published tiled -32.45 %. The guard below is unchanged; it now simply passes.
 T29=${PROJ}/runs/t16-lora-seed0/eval-t29-history/bench.json
 if [[ ! -f "${T29}" && "${SKIP_T29_CHECK:-0}" != "1" ]]; then
   echo "FATAL: ${T29} missing — 61_eval_t29_frame_history.sbatch has not reported."

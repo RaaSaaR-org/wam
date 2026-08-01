@@ -14,14 +14,16 @@ compute half of OD-05.
 quotas, billing, gotchas; that directory is the *how*. Its README opens with the seven
 **never-do** rules and carries the full link table to the provider's documentation (24 pages,
 all checked reachable 2026-07-28). The environment build, the weight staging, the smoke job, the
-readout probe and T-16 itself have run; the T-29/T-30/I-8 batch is staged and unrun.
+readout probe, T-16 itself and the T-29 frame-mode A/B (job 184648, 2026-08-01) have run; T-30
+(the flow-head eval, job 184670) was submitted 2026-08-01 and is running; the I-8 rung remains
+staged and unrun.
 
 | | |
 |---|---|
 | Login node | `login-plus.discoverer.bg` (port 22, public Internet, no VPN) |
 | Username | `ffromm` · key `~/.ssh/id_ed25519_eu_ai_hub` (passphrase-protected) |
 | Slurm account / QoS | `ehpc-aif-2026pg01-905` · partition `common` |
-| **Budget** | **5 000 GPU-hours + 330 900 billing-hours, 0 used** |
+| **Budget** | **5 000 GPU-hours + 330 900 billing-hours** — in use since 2026-07-28 (T-16, T-29, T-30); consumed figure not tracked here, read it off `sacct` |
 | **Max walltime** | **4 h per job**, max 4 running / 8 submitted jobs, ≤16 GPU + 416 CPU at once |
 | Project storage | `/valhalla/projects/ehpc-aif-2026pg01-905` — 5 TiB, setgid |
 | Home | `/home/ffromm` — 2 GB quota, 100 k inodes |
@@ -609,5 +611,6 @@ count (2), CUDA module (`nvidia/cuda/12/12.8`), setgid (yes), budget (5 000 GPU-
 ---
 
 *Written 2026-07-27 from `docs.discoverer.bg` and the EuroHPC AI-Factory Terms of Reference, then
-verified in a live session on `login-plus` the same day. No job has been submitted yet — the
-allocation is at 0 % used.*
+verified in a live session on `login-plus` the same day. Status as of 2026-08-01: the allocation is
+in use — T-16 trained for ~20 000 steps, T-29 (job 184648) evaluated, T-30 (job 184670) is running.
+How much of the budget that consumed is not recorded here; `sacct` on the cluster is the source.*

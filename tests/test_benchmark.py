@@ -311,9 +311,10 @@ def test_a_run_that_fails_l1_keeps_its_level_whatever_l4_says() -> None:
 
     ``level`` is the highest CONTIGUOUS rung passed, so a run that fails L1 is capped at L0 no
     matter what L3 and L4 decide. All three archived runs fail L1 (skill_vs_repeat_pct −20.9 /
-    −129.0 / −32.4, tabulated in docs/benchmark.md before the rule was written), so an L4-only
-    change could not have moved any of their levels. This is the shape of that run: L4 flips from
-    PASS to FAIL and the level does not move a rung.
+    −129.0 / −32.4, all three tiled, tabulated in docs/benchmark.md before the rule was written;
+    T-16's −21.8 in its real window fails L1 too, so the re-score does not disturb this either),
+    so an L4-only change could not have moved any of their levels. This is the shape of that run:
+    L4 flips from PASS to FAIL and the level does not move a rung.
     """
     rng = np.random.default_rng(0)
     targets = [

@@ -11,7 +11,9 @@
 # `action_recon`) models the same chunk as a distribution and is never read at inference. A
 # single-shot L2 regressor under a one-to-many conditional is mean-seeking, and on
 # runs/t16-lora-seed0 the numbers are CONSISTENT WITH one: chunk RMS 0.00226 against the
-# demonstrations' 0.00404 (a 44 % shortfall) and smoothness_ratio 0.29.
+# demonstrations' 0.00404 (a 44 % shortfall) and smoothness_ratio 0.29. Both of those are TILED-mode
+# numbers, measured before 2026-08-01; in the real window every arm below runs in, T-29 read
+# smoothness_ratio 0.32 for the same checkpoint.
 #
 # "Consistent with", not "the signature of" — an earlier version of this header said the latter
 # and it overstated the evidence. What is actually ruled out is a bounded-output artifact: max
@@ -46,15 +48,22 @@
 #   FLOW_STEPS_LIST="1 32" sbatch 63_eval_t30_flow_head.sbatch      # the quick version
 #   FRAME_HISTORY= sbatch 63_eval_t30_flow_head.sbatch              # score the tiled mode instead
 #
-# RUN THIS AFTER T-29 REPORTS, not alongside it. Every arm here runs with --frame-history because
-# T-29 establishes the real window as the in-distribution mode; running both A/Bs at once turns
-# two 1-D questions into a 2x2 nobody pre-registered (docs/improvements.md, "Suggested order").
+# T-29 HAS REPORTED (2026-08-01, job 184648), so the gate on this job — "run this after T-29, not
+# alongside it" — is CLEARED, and this job is now priority item 1. It was submitted 2026-08-01 as
+# job 184670. Every arm here runs with --frame-history because T-29 established the real window as
+# the in-distribution mode with a number, on this same checkpoint: skill_vs_repeat_pct -32.45 %
+# tiled -> -21.80 % real window, +10.65 pp, L1 still failed. Running both A/Bs at once would have
+# turned two 1-D questions into a 2x2 nobody pre-registered (docs/improvements.md, "Suggested
+# order"); the frame mode is now a settled constant here rather than a second variable.
 #
 # PRE-FLIGHT, measured on CPU 2026-08-01 (scripts/check_action_latent.py, no GPU, seconds):
 #   ceiling  encode the demonstrated chunks and decode them straight back through action_recon:
 #            target MSE 8.10372e-07, jerk ratio 1.375. 14.9x below this run's own 1.21027e-05 and
-#            11.3x below repeat-last-action's 9.13766e-06. The latent carries the chunk; whatever
-#            this job scores is a statement about the velocity head, not the representation.
+#            11.3x below repeat-last-action's 9.13766e-06. That 1.21027e-05 is a TILED-mode number;
+#            T-29 read 1.11298e-05 for the same checkpoint in the real window every arm below runs
+#            in, so the headroom over the ceiling is a little smaller than 14.9x says and the
+#            reading is unchanged. The latent carries the chunk; whatever this job scores is a
+#            statement about the velocity head, not the representation.
 #   floor    decode the per-step latent CENTROIDS — "the sampler knew which step, and nothing
 #            else": 1.68201e-05, WORSE than zero-delta's 1.63276e-05. Step index is recoverable
 #            from the latent at 100 % accuracy (within-step std 0.056 vs between-step 1.42), and
@@ -260,8 +269,10 @@ FLOW_MEAN_K=${FLOW_MEAN_K:-8}
 # chunk. A t0 near 1 would return the warm start almost unchanged and measure nothing.
 FLOW_T0=${FLOW_T0:-0.6}
 REPLICATE_SEED=${REPLICATE_SEED:-1}  # the second draw the band is measured from
-# Set FRAME_HISTORY="" to score the pre-T-29 tiled mode instead. ${VAR-default}, not ${VAR:-...},
-# so an explicitly empty value survives.
+# Set FRAME_HISTORY="" to score the pre-T-29 tiled mode instead — the mode every WAM number before
+# 2026-08-01 was measured in, worth 10.65 pp of skill_vs_repeat_pct on this checkpoint, so the
+# default below is now a MEASURED choice and the empty value is a comparison against the archive
+# rather than a fallback. ${VAR-default}, not ${VAR:-...}, so an explicitly empty value survives.
 FRAME_HISTORY=${FRAME_HISTORY-"--frame-history"}
 
 # The rule keys on the primary arm, so it must exist even if someone trims the sweep.
@@ -328,7 +339,7 @@ common=(
   # ${STEP_DIR}, not ${CKPT}: eval_t16.py's resolve_checkpoint does `step_dir = Path(which)` for
   # any non-"latest" value, with NO join against --run-dir, so a bare `CKPT=step-016251` would
   # resolve against the job's CWD and die with "step-016251/model.safetensors missing" — after
-  # the node is allocated, and after line 302 has echoed a correct-looking absolute path. STEP_DIR
+  # the node is allocated, and after line 324 has echoed a correct-looking absolute path. STEP_DIR
   # is already absolute for every branch above, so this is right for `latest` and for a step name.
   --checkpoint "${STEP_DIR}"
   --dataset "${DATASET}"
@@ -340,6 +351,9 @@ common=(
 if [[ -n "${FRAME_HISTORY}" ]]; then
   common+=("${FRAME_HISTORY}")
 fi
+# "pre-T-29 default" in the fallback label below is a historical name, not a recommendation: T-29
+# ran 2026-08-01 and settled the real window as the in-distribution mode. Left as printed so the
+# log line stays byte-comparable with the runs already on disk.
 echo "frame mode: ${FRAME_HISTORY:-tiled single frame (pre-T-29 default)}"
 
 # One arm = one python pass into one --out. `arm` makes the whole sweep RESUMABLE, which the 4 h

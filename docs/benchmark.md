@@ -113,8 +113,9 @@ cannot be tuned against the value that motivated it. The anchor stays `r == 1.0`
 **Withdrawn (2026-08-01), it was vacuous.** The rule first written down here was *"spec 0.2.0
 ships only if re-scoring all three archived runs moves no run's level"*, and the table below was
 presented as the test it passed. It was not a test. `level` is the highest **contiguous** rung
-passed, and all three archived runs fail L1 — `skill_vs_repeat_pct` −20.9 % / −129.0 % / −32.4 %,
-tabulated in this same file before the rule was authored. L4 is therefore unreachable for all
+passed, and all three archived runs fail L1 — `skill_vs_repeat_pct` −20.9 % / −129.0 % / −32.4 %
+(all three tiled; T-16 is −21.8 % in its real window, which also fails L1), tabulated in this same
+file before the rule was authored. L4 is therefore unreachable for all
 three under any L4 rule whatsoever, so the rule could not have failed. Recording it as a passed
 pre-registration inside a change that is *about* pre-registration discipline is the failure mode
 this repo keeps a docs section for; it is retracted rather than quietly deleted.
@@ -157,14 +158,17 @@ constrain.
 **What re-scoring the three archived runs actually shows** — a description of the change, not a
 test it passed:
 
-| run | `smoothness_ratio` | score 0.1.0 | score 0.2.0 | level 0.1.0 | level 0.2.0 | L1 |
-|---|---|---|---|---|---|---|
-| `d1-full-gen-seed0` | 2.3469 | 28.6 | 28.6 | L0 | L0 | fails (−20.9%) |
-| `t18-real-ablation-seed0` | 5.0980 | 19.9 | 19.9 | below L0 | below L0 | fails (−129.0%) |
-| `t16-lora-seed0` | 0.2932 | **48.4** | **28.4** | L0 | L0 | fails (−32.4%) |
+| run | frame mode | `smoothness_ratio` | score 0.1.0 | score 0.2.0 | level 0.1.0 | level 0.2.0 | L1 |
+|---|---|---|---|---|---|---|---|
+| `d1-full-gen-seed0` | tiled | 2.3469 | 28.6 | 28.6 | L0 | L0 | fails (−20.9%) |
+| `t18-real-ablation-seed0` | tiled | 5.0980 | 19.9 | 19.9 | below L0 | below L0 | fails (−129.0%) |
+| `t16-lora-seed0` | tiled | 0.2932 | **48.4** | **28.4** | L0 | L0 | fails (−32.4%) |
+| `t16-lora-seed0` | `--frame-history` | 0.3198 | **50.6** | **30.6** | L0 | L0 | fails (−21.8%) |
 
-Only T-16's score changes, by exactly the 20 points L4 should never have awarded it. The level
-column is constant for the reason given above and carries no information about the change.
+Only T-16's score changes under the spec change, by exactly the 20 points L4 should never have
+awarded it. The level column is constant for the reason given above and carries no information
+about the change. The fourth row is a **different measurement**, not a different spec — added
+2026-08-01 by T-29; the +2.2 it carries under both specs is the frame mode, not the rule.
 
 ---
 
@@ -332,36 +336,59 @@ Point 1 is the load-bearing one: **the bar T-16 has to clear is `skill_vs_repeat
 "beats the action-only baseline". Beating a model that itself loses to a one-line heuristic is not
 evidence that video helps.
 
-## The T-16 result (2026-07-30) — the bar was not cleared
+## The T-16 result (2026-07-30, corrected 2026-08-01) — the bar was not cleared
+
+> **Correction, 2026-08-01 (T-29 / `docs/improvements.md` I-7).** Every number in the T-16 column
+> below was produced with `predict()` tiling **one** camera frame to the backbone's 9-frame
+> context, while training fed the real 9-frame window ending at the chunk. Re-scored in the mode it
+> was trained in, the same checkpoint on the same holdout is **`skill_vs_repeat_pct` −21.80 %, score
+> 50.6** — not −32.4 % / 48.4. **The verdict is unchanged (L1 still fails, by 21.8 pp) and the
+> figure is not.** This is a correction rather than an addendum, per the rule fixed before the run.
+>
+> **The `action-only` and `world-action (tiny)` columns were NOT re-scored** and remain freeze-frame
+> numbers, so the table below is **mixed-mode and no longer a comparison**. Re-scoring them is
+> ~0.4 GPU-h and is item 2 in `docs/improvements.md`. Until it lands, do not read the
+> `skill_vs_repeat_pct` row across columns — in particular, the claim that the fine-tune is "worse
+> than the action-only baseline" rests on −32.4 % vs −20.9 %, and the in-distribution figure is
+> −21.80 % vs an unknown.
 
 `runs/t16-lora-seed0`, 20 000 steps of Wan2.2-TI2V-5B LoRA on the 362 training episodes, scored on
 the same 40-episode holdout by `scripts/eval_t16.py` (split proven against the trainer's
 `dataset_snapshot_ref`, not asserted):
 
-| metric | action-only | world-action (tiny) | **T-16 LoRA (Wan 5B)** |
-|---|---|---|---|
-| **level** | L0 | below L0 | **L0** beats-doing-nothing |
-| **score** | 28.6 / 100 | 19.9 / 100 | **48.4 / 100** |
-| mse | 1.10439e-05 | 2.09285e-05 | 1.21027e-05 |
-| ci_mse | 2.30187e-05 | 5.26316e-05 | 3.24412e-05 |
-| skill_vs_zero_pct | +32.4% | −28.2% | +25.9% |
-| **skill_vs_repeat_pct** | −20.9% | −129.0% | **−32.4%** |
-| ci_skill_vs_repeat_pct | −7.0% | −144.6% | −50.7% |
-| horizon_ratio | 1.66 | 1.02 | 1.30 |
-| smoothness_ratio | 2.35 | 5.10 | 0.29 |
-| gripper_accuracy | ~~0.87~~ withheld † | ~~0.85~~ withheld † | ~~0.89~~ withheld † |
-| **score, bench spec 0.2.0** | 28.6 | 19.9 | **28.4** |
+| metric | action-only | world-action (tiny) | **T-16 LoRA (Wan 5B)** | **T-16, real window** |
+|---|---|---|---|---|
+| frame mode | tiled ⚠ | tiled ⚠ | tiled ⚠ | **`--frame-history`** |
+| **level** | L0 | below L0 | **L0** beats-doing-nothing | **L0** beats-doing-nothing |
+| **score** | 28.6 / 100 | 19.9 / 100 | **48.4 / 100** | **50.6 / 100** |
+| mse | 1.10439e-05 | 2.09285e-05 | 1.21027e-05 | 1.11298e-05 |
+| ci_mse | 2.30187e-05 | 5.26316e-05 | 3.24412e-05 | 2.64932e-05 |
+| skill_vs_zero_pct | +32.4% | −28.2% | +25.9% | +31.8% |
+| **skill_vs_repeat_pct** | −20.9% | −129.0% | **−32.4%** | **−21.8%** |
+| ci_skill_vs_repeat_pct | −7.0% | −144.6% | −50.7% | −23.1% |
+| horizon_ratio | 1.66 | 1.02 | 1.30 | 1.32 |
+| smoothness_ratio | 2.35 | 5.10 | 0.29 | 0.32 |
+| gripper_accuracy | ~~0.87~~ withheld † | ~~0.85~~ withheld † | ~~0.89~~ withheld † | withheld † |
+| **score, bench spec 0.2.0** | 28.6 | 19.9 | **28.4** | **30.6** |
+
+⚠ **tiled** = one frame repeated 9×, the mode every result recorded before 2026-08-01 was measured
+in. It is a train/inference mismatch, not a neutral default. Columns in different frame modes are
+not comparable; see the correction above.
 
 † Majority-class baseline on this holdout is 85.34 %; see
 [What the bench refuses to report](#what-the-bench-refuses-to-report). No archived score rises
 under spec 0.2.0 (the adoption rule); the levels are unchanged for a reason that is not evidence
 about the change — see [Bench spec versions](#bench-spec-versions).
 
-**Read the level, not the score.** 48.4 is the highest number any WAM run has produced and it is the
-least informative column in the table: L1 and L2 both fail, so the 48.4 is L0's points plus the two
-diagnostic rungs, which measure *shape* and not *skill*. On the one pre-registered bar — beat causal
-repeat-last-action — the fine-tune is **worse than the action-only baseline** it was supposed to
-improve on, on the full holdout and by more than double on the task-critical chunks.
+**Read the level, not the score.** 48.4 is the highest number any WAM run has produced *among runs
+measured the same way* — every other score in the table is a tiled number, and T-16's real-window
+50.6 is higher still but belongs to a column of one, so it ranks against nothing. Either way the
+score is the least informative column in the table: L1 and L2 both fail in both modes, so it is
+L0's points plus the two diagnostic rungs, which measure *shape* and not *skill*. On the one pre-registered bar — beat causal
+repeat-last-action — the fine-tune loses by 21.8 pp in the mode it was trained in, and by 32.4 pp in
+the mode it was published in. **Whether it is also worse than the action-only baseline is now an
+open question**, not the settled fact this section previously asserted: that comparison needs the
+baseline re-scored in the same mode.
 
 `smoothness_ratio` **0.29** is the diagnosis and it is worth two points of care. Under spec 0.1.0
 it scored 20/20, because that gate was "no jerkier than the demos" (≤ 2) — but 0.29 means the
@@ -385,7 +412,8 @@ distribution. Separating any of the three needs an intervention — retrain at
 what a readout swap *can* settle and states in its own pre-registration what it cannot.
 
 Under **bench spec 0.2.0** the two-sided band scores it **0/20** and T-16's score is **28.4**, not
-48.4. The level is unchanged — L0 — but that is not evidence of anything: L4 is only reachable
+48.4 (tiled), or **30.6**, not 50.6, in its real window — the spec change costs the same 20 points
+in either frame mode. The level is unchanged — L0 — but that is not evidence of anything: L4 is only reachable
 through L1 and L2, both of which fail, so no L4 rule could have moved it (see
 [Bench spec versions](#bench-spec-versions) for the withdrawn adoption rule that mistook this for
 a test). The ladder got the verdict right under both rules; what changes is that the headline

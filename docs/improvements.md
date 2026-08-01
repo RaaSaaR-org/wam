@@ -1,15 +1,19 @@
 # Improvements — state encoder, action head, backbone readout
 
-**Status 2026-07-30.** M0–M4 code-complete (681 tests green). T-16 has run: the Wan2.2-TI2V-5B
-LoRA scores WAM-Bench **L0, 48.4/100** with `skill_vs_repeat_pct` **−32.4 %**, so the pretrained
-prior does not clear the bar either (`docs/benchmark.md`, `TASKS.md` T-16). Every route to
-"video helps" has now returned a negative on the same 402 success-only episodes of one task.
+**Status 2026-08-01.** M0–M4 code-complete (861 tests green). T-16 has run: the Wan2.2-TI2V-5B
+LoRA scores WAM-Bench **L0**, and against the causal repeat-last-action baseline it is
+**`skill_vs_repeat_pct` −21.8 %** measured the way training fed it (50.6/100) — the widely quoted
+**−32.4 % / 48.4** is the same checkpoint scored on a freeze-frame (I-7 below, run 2026-08-01).
+Either way the pretrained prior does not clear the bar (`docs/benchmark.md`, `TASKS.md` T-16), and
+every route to "video helps" has returned a negative on the same 402 success-only episodes of one
+task.
 
 That makes this document's job different from a week ago. It is no longer a list of things to do
 after D1 — **it is the list of reasons the negative might not mean what it looks like**, ordered
 by how cheaply each can be ruled out. Two of them (I-7, I-3) are deviations between the trained
-path and the deployed path, found by reading the code *after* the result came in, and one of them
-(I-7) sits directly under the verdict.
+path and the deployed path, found by reading the code *after* the result came in. **I-7 is now
+measured: it was real, worth 10.65 pp, and not enough** — which is the strongest thing this
+document has said, because it is the first time one of these hypotheses has been priced.
 
 Each item carries an evidence label:
 
@@ -49,18 +53,20 @@ everywhere; each row now has to earn its own evidence.
 Found while reading the code after the T-16 verdict. In **two** places, `predict()` does
 something training never did — and both deviations point at the same measured failure signature.
 
-| # | Trained on | Deployed / evaluated on | Item |
-|---|---|---|---|
-| 1 | a real 9-frame window, `frames[indices]` (`training/datasets.py:156`) | **one** frame tiled 9×, `image.expand(num_frames, …)` (`training/joint.py:388`) | **I-7** |
-| 2 | both `velocity_head` (flow) and `action_head` (regression) (`joint.py:338-339`) | `action_head` only — the flow branch is never sampled | **I-3** |
+| # | Trained on | Deployed / evaluated on | Item | Priced? |
+|---|---|---|---|---|
+| 1 | a real 9-frame window, `frames[indices]` (`training/datasets.py:156`) | **one** frame tiled 9×, `image.expand(num_frames, …)` (`training/joint.py:388`) | **I-7** | **yes — +10.65 pp, still fails** |
+| 2 | both `velocity_head` (flow) and `action_head` (regression) (`joint.py:338-339`) | `action_head` only — the flow branch is never sampled | **I-3** | T-30, running |
 
-The T-16 result is `skill_vs_zero` **+25.9 %**, `skill_vs_repeat` **−32.4 %**, `smoothness_ratio`
-**0.29**. Read as a symptom rather than a score, that is: *moves in roughly the right direction,
-far too smoothly, and loses to motion continuity.* Deviation 1 removes motion from the visual
-input, which is what a model would need to beat motion continuity. Deviation 2 is a mean-seeking
-regressor, which is what produces a trajectory 3.4× smoother than a demonstration. Neither is
-proof of anything, and this ordering is post-hoc — the symptom was known before the causes were
-looked for, so both need their own falsifiable run and both get one below.
+The T-16 result, on the freeze-frame it was published from, is `skill_vs_zero` **+25.9 %**,
+`skill_vs_repeat` **−32.4 %**, `smoothness_ratio` **0.29**. Read as a symptom rather than a score,
+that is: *moves in roughly the right direction, far too smoothly, and loses to motion continuity.*
+Deviation 1 removes motion from the visual input, which is what a model would need to beat motion
+continuity. Deviation 2 is a mean-seeking regressor, which is what produces a trajectory 3.4×
+smoother than a demonstration. This ordering was post-hoc — the symptom was known before the causes
+were looked for — so both got their own falsifiable run. **Deviation 1's came back: restoring the
+motion recovered 10.65 pp of the 32.45 pp gap, about a third, and left the model losing to inertia
+by 21.80 pp.** The symptom was real and partly explained by the harness; the remainder is not.
 
 **Neither deviation affects T-15 / T-24 / T-26.** The frozen-feature probes build their own real
 multi-frame windows and use a ridge, not `predict()`. "Frozen features carry no action signal past
@@ -175,16 +181,32 @@ readout moving the number, and it did not.
 
 ## I-7 · Give the policy a frame history at inference — the T-16 eval measured a still
 
-**Evidence: the mismatch is measured (it is in the code, both sides quoted below); its effect on
-the verdict is hypothesis.** Cheapest item in this document and the only one that can retract a
-recorded conclusion. **Run it before acting on the T-16 result.**
+**Evidence: measured, both the mismatch and its effect.** The mismatch is in the code (both sides
+quoted below); its effect on the verdict was hypothesis until 2026-08-01 and is now **+10.65 pp of
+`skill_vs_repeat_pct`, which does not reach the gate**. Cheapest item in this document, and the
+only one that has moved a recorded number.
 
-> **Status 2026-08-01: built, tested, not yet run.** The offline path is implemented (T-29,
-> 700 tests green) and waits only for a GPU:
+> **Status 2026-08-01: RUN. The mismatch was worth 10.6 pp and the bar is still not cleared.**
+> `cluster/discoverer/61_eval_t29_frame_history.sbatch`, job 184648, both arms on one H200 from
+> one checkpoint (`runs/t16-lora-seed0/checkpoints/step-020000`), same 40-episode proven holdout,
+> same 1 040 chunks, differing in exactly one flag. Artifacts:
+> `runs/t16-lora-seed0/eval-t29-{tiled,history}/`.
 >
-> ```bash
-> sbatch cluster/discoverer/61_eval_t29_frame_history.sbatch    # both modes + the verdict
-> ```
+> | metric | tiled (as published) | real window | delta |
+> | --- | --- | --- | --- |
+> | **`skill_vs_repeat_pct`** (the L1 gate) | **−32.45 %** | **−21.80 %** | **+10.65 pp** |
+> | `ci_skill_vs_repeat_pct` (L2, critical chunks) | −50.74 % | −23.11 % | **+27.64 pp** |
+> | `skill_vs_zero_pct` (L0) | +25.88 % | +31.83 % | +5.96 pp |
+> | `mse` | 1.21027e-05 | 1.11298e-05 | −8.0 % |
+> | level | L0 | **L0** | unchanged |
+> | score, spec 0.1.0 | 48.4 | 50.6 | +2.2 |
+> | score, spec 0.2.0 | 28.4 | 30.6 | +2.2 |
+>
+> The tiled arm reproduces `eval-latest` to every digit, so the published −32.4 % is confirmed to
+> be the freeze-frame measurement and the A/B is clean. **Everything moved in the direction I-7
+> predicted, and nothing crossed a gate.** The largest move is on L2's task-critical chunks
+> (+27.6 pp) — where the demonstration is actually moving is exactly where deleting the motion
+> hurt most, which is the mechanism I-7 describes rather than a generic improvement.
 >
 > Local equivalent and the full runbook: `docs/local_gpu.md` §3b. What shipped:
 > `Observation.image_history` (optional, `INTERFACES_VERSION` 0.3.0),
@@ -251,6 +273,47 @@ identical split, identical bench code:
 
 Either way the result is worth more than the run costs, which is why it is item 1.
 
+**The rule above is left exactly as it was written, because it was wrong in a way worth keeping.**
+It has two branches. The outcome had three. `skill_vs_repeat_pct` moved 10.65 pp toward 0 and
+stayed 21.80 pp short of it — "materially toward 0" *and* "still fails L1" at the same time, which
+the prose admits no verdict for. The executable copy in
+`cluster/discoverer/61_eval_t29_frame_history.sbatch:183-194` (`:143-154` before that file's own
+result block was prepended on 2026-08-01) was the only one of **six** written
+copies that anticipated this case: it splits on a numeric `b − a > 5.0` and routes the middle to
+"the negative stands but its size does not — re-state both runs with the real window, then go to
+I-8". The five prose copies (here, `61_`'s own header, `TASKS.md`, `docs/local_gpu.md`,
+and the if/then restatement at the foot of this file) all collapse the middle into the top branch
+and say **AC-07 reopens**.
+
+**Picking the executable copy after seeing the data is exactly the move pre-registration exists to
+stop**, so it is recorded here as a judgement call and not presented as the rule having spoken.
+What makes it safe to make: the two readings differ only in a *label*. Both agree L1 fails, both
+send the next GPU-hour to the same place, and the work below is the intersection of both — done
+regardless of which copy governs.
+
+**AC-07 is nevertheless back to open, for a reason no copy of the rule anticipated.** AC-07 is a
+comparison: does the world-action model beat the action-only baseline? That comparison now reads
+T-16 at −21.80 % (real window) against `d1-full-gen-seed0` at −20.9 % and `t18-real-ablation-seed0`
+at −129.0 % — **both still freeze-frame numbers.** Only `t16-lora-seed0` was re-measured. A
+three-run table with one run scored in a different mode from the other two is not a comparison, and
+the 11.5 pp gap that made T-16 look clearly worse than the action-only baseline is now 0.9 pp
+*across a mode boundary*, which is to say unknown. So AC-07 is undetermined pending the re-score,
+which is materially "open" — arrived at through the mixed-mode problem rather than through either
+branch.
+
+**Outstanding, and cheap (~0.4 GPU-h, no retraining):** re-score `t18-real-ablation-seed0` and
+`d1-full-gen-seed0` with `--frame-history` so the ladder table is single-mode. Every number in
+`docs/benchmark.md` is labelled with its frame mode until that lands, and no cross-mode row is to
+be read as a comparison.
+
+**One diagnostic that is not yet a claim.** `shift_tolerant_mse` is 8.33e-06 for the real-window
+arm, below repeat-last-action's 9.14e-06 `mse` — i.e. allowing a ±1-step shift takes the model
+past the baseline it otherwise loses to, which is what "right content, wrong placement in time"
+would look like and is the same shape as T-30's `FLOOR_MSE` hypothesis. **It is not evidence yet**:
+the ±1-step allowance is computed for the model only, and the baselines were never given it, so the
+two numbers are not comparable. Giving the baselines the same allowance is a bench-code change
+(and therefore a spec version), not a re-read of these artifacts.
+
 ---
 
 ## I-2 · Replace mean-pool with cross-attention in the action head
@@ -307,9 +370,13 @@ shows up at D1 scale, whether or not the cause is multimodality.
 
 **Cheap version first.** The velocity head is already trained in every T-16 checkpoint and simply
 never sampled. Adding a sampler and re-scoring `runs/t16-lora-seed0` needs **no retraining** — the
-same "re-score what we already have" move as I-7, and it can share that eval pass. Do it after
-I-7, since a static-clip conditioning signal would handicap both heads equally and confound the
-comparison.
+same "re-score what we already have" move as I-7, and it can share that eval pass. It was gated
+behind I-7, since a static-clip conditioning signal would handicap both heads equally and confound
+the comparison. **That gate is now cleared** (I-7 ran 2026-08-01), and it settled which mode the
+comparison happens in: every T-30 arm runs with `--frame-history`, because that is the mode the
+model was trained in and the mode in which its remaining deficit is 21.80 pp rather than 32.45 pp.
+Running the readout experiment inside the freeze-frame would have handed the flow branch a
+harness defect to overcome as well as a readout one.
 
 **Then the latency question**, which decides whether it can ship: the executor floor is ≥2 Hz
 (`ExecutorConfig.min_policy_rate_hz`, PRD §11.1) with a 500 ms deadline, so n denoising steps must
@@ -618,8 +685,9 @@ existing checkpoint and need no retraining at all.
 |---|---|---|---|
 | ~~—~~ | ~~I-1 spatial-readout probe~~ — **✅ ran 2026-07-29, verdict unchanged** | done | 7.6 s GPU, free |
 | ~~—~~ | ~~I-9 converter (the gripper we destroyed)~~ — **✅ built 2026-08-01, needs no GPU** | done | hours, no GPU |
-| **1** | **I-7 frame history at inference** (T-29) — may retract the T-16/T-18 verdict | **submitted, waiting on the GPU** | ~0.2 GPU-h, no retrain |
-| **2** | **I-3 flow branch deployed** (T-30) — sampler on the existing velocity head | right after T-29 reports | ~6 GPU-h, no retrain |
+| ~~—~~ | ~~I-7 frame history at inference~~ (T-29) — **✅ ran 2026-08-01: +10.65 pp, still fails L1** | done | 0.2 GPU-h, no retrain |
+| **1** | **I-3 flow branch deployed** (T-30) — sampler on the existing velocity head | **submitted 2026-08-01, job 184670** | ~6 GPU-h, no retrain |
+| **2** | **I-7 re-score T-18 + `d1-full-gen-seed0` with `--frame-history`** — the ladder is mixed-mode until this lands, so AC-07 cannot be read | next cheap GPU slot | ~0.4 GPU-h, no retrain |
 | 3 | I-9 re-score the ladder on the rescaled gripper (T-31) | after the converter's audit passes | ~0.2 GPU-h, no retrain |
 | 4 | I-8 data-scaling curve (T-32) | after T-30 — a readout swap moves every rung at once | 3 runs, existing allocation |
 | 5 | I-2 cross-attention head | after 1–4 say whether the readout was the problem | days + retrain |
@@ -641,11 +709,26 @@ I-1 jumped the queue because it tested a claim we had already written into `TASK
 It came back negative, which is the cheapest possible outcome: nothing downstream has to change,
 and the claim is now one we have earned rather than one we inherited from a pooling choice.
 
-I-7 is now in the same position, one level more serious: I-1 questioned how we *probed* the
-backbone, I-7 questions what we *showed* it. If the answer is "nothing changes", the T-16 negative
+I-7 was in the same position, one level more serious: I-1 questioned how we *probed* the backbone,
+I-7 questioned what we *showed* it. If the answer is "nothing changes", the T-16 negative
 becomes one of the better-supported results in the project. If the answer is "it moves", then two
 recorded verdicts were measured out of distribution and the cost of finding that out was one eval
 pass. The asymmetry is why it is item 1 despite being the smallest item in the file.
+
+**Resolution, 2026-08-01 — the sixth copy, restored.** The two sentences above are the
+pre-registered text, put back verbatim after a propagation pass had rewritten them in place into
+past-tense narration. They are a copy of the I-7 rule and are covered by the same "annotate, never
+edit" instruction as the other five; the count of **six** at `:282` is only true if this one still
+says what it said before the run. **The answer was neither.** `skill_vs_repeat_pct` moved by a
+third of the gap and still lost, so the T-16 negative survives while the number it was published as
+does not, and only one of the two affected verdicts was actually re-measured. The asymmetry held
+and it paid: 0.2 GPU-h bought a correction to a published figure and the discovery that the ladder
+table is mixed-mode.
+
+**What it cost to learn nothing would have been higher.** Had this stayed unrun, every downstream
+decision — I-8's N\*, the D1/D2 collection commitment, the "bottleneck is data" claim in
+`TASKS.md` — would have rested on a number that was 10.65 pp wrong in the flattering direction for
+the harness and the unflattering direction for the model.
 
 ---
 

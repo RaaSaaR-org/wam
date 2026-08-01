@@ -1,7 +1,35 @@
 #!/bin/bash
 # Step 8 — T-29 / I-7: does the verdict survive being measured in distribution?
 #
-# 60_eval_t16.sbatch scored the checkpoint the way every WAM result before 2026-07-30 was
+# RAN 2026-08-01, job 184648. ANSWER: the verdict survives, the published figure does not.
+# Both arms on one H200, one checkpoint (runs/t16-lora-seed0/checkpoints/step-020000), the same
+# proven 40-episode holdout, the same 1 040 chunks, differing in exactly one flag. Artifacts:
+# runs/t16-lora-seed0/eval-t29-tiled/ and runs/t16-lora-seed0/eval-t29-history/.
+#
+#                                tiled (as published)   real window (--frame-history)      delta
+#   skill_vs_repeat_pct   (L1)         -32.45 %                 -21.80 %               +10.65 pp
+#   ci_skill_vs_repeat_pct (L2)        -50.74 %                 -23.11 %               +27.64 pp
+#   skill_vs_zero_pct     (L0)         +25.88 %                 +31.83 %                +5.96 pp
+#   mse                              1.21027e-05              1.11298e-05                 -8.0 %
+#   horizon_ratio                         1.30                     1.32
+#   smoothness_ratio                      0.29                     0.32
+#   level                                   L0                       L0               unchanged
+#   score, bench spec 0.1.0               48.4                     50.6                   +2.2
+#   score, bench spec 0.2.0               28.4                     30.6                   +2.2
+#
+# L1 is still failed, by 21.80 pp. The confound this job was built to test was real and was worth
+# 10.65 pp — about a third of the 32.45 pp gap — and did not come close to closing it. The tiled
+# arm reproduces the archived runs/t16-lora-seed0/eval-latest/bench.json to every digit, so the
+# published -32.4 % is confirmed to be the freeze-frame measurement and the A/B is clean.
+#
+# ONLY t16-lora-seed0 was re-measured. t18-real-ablation-seed0 (-129.0 %) and d1-full-gen-seed0
+# (-20.9 %) are still tiled-only numbers, so any table carrying all three is MIXED-MODE and is not
+# a comparison. AC-07 rested on -32.4 % against -20.9 %; in distribution it reads -21.80 % against
+# an unknown, so AC-07 is back to OPEN — undetermined pending that re-score, which is this same
+# file with RUN_ID pointed at those runs, ~0.4 GPU-h and no retraining. From here on, --frame-history
+# is the in-distribution mode and every number recorded before 2026-08-01 is a "tiled" number.
+#
+# 60_eval_t16.sbatch scored the checkpoint the way every WAM result before 2026-08-01 was
 # scored: predict() tiles ONE camera frame to the backbone's 9-frame context, while training
 # fed the real 9-frame window ending at the chunk. A backbone trained on a moving clip was
 # therefore graded on a freeze-frame — and the baseline it lost to, repeat-last-action, is
@@ -23,6 +51,18 @@
 #       distribution; docs/benchmark.md needs a correction, not an addendum, and AC-07 reopens.
 #   essentially unchanged                                  -> the negative is real and much
 #       stronger: the model had the motion and still lost to inertia. Data (I-8) is next.
+#
+# NOTE ON THE RULE ABOVE, added after the run and deliberately NOT applied to it: the rule has two
+# branches and the outcome had three. skill_vs_repeat_pct moved materially toward 0 AND stayed
+# 21.80 pp short of it, which this prose admits no verdict for. The executable copy below — the
+# `if b > 0:` block at :183-194, which docs/improvements.md cited as :143-154, its numbering before
+# this result block was prepended — splits on a numeric b - a > 5.0 and routes that middle case to
+# "the negative stands but its size does not". The two copies disagree about the label, and the
+# disagreement is a finding. BOTH ARE LEFT EXACTLY AS WRITTEN, text and
+# code: choosing between pre-registered copies after seeing the number is the move pre-registration
+# exists to stop. Which reading was taken, why it was safe to take (the two differ only in a label;
+# both agree L1 fails and both send the next GPU-hour to the same place), and the separate reason
+# AC-07 reopened, are written up in docs/improvements.md I-7.
 #
 #SBATCH --job-name=wam-eval-t29
 #SBATCH --partition=common
@@ -83,7 +123,7 @@ fi
 
 # Resolve CKPT to an absolute step dir BEFORE it reaches eval_t16.py. resolve_checkpoint does
 # `step_dir = Path(which)` for any non-"latest" value, with no join against --run-dir, so the
-# `CKPT=step-010696` invocation this file's own header advertises (line 15) would resolve against
+# `CKPT=step-010696` invocation this file's own header advertises (line 43) would resolve against
 # the job's CWD and die on "step-010696/model.safetensors missing" — after the node is allocated.
 # CKPT=latest is unaffected either way; this makes the documented override work too.
 if [[ "${CKPT}" == "latest" && -e "${OUT}/latest" ]]; then
@@ -114,7 +154,7 @@ common=(
   --device cuda
 )
 
-echo "=== A: tiled single frame (how every result before 2026-07-30 was measured)"
+echo "=== A: tiled single frame (how every result before 2026-08-01 was measured)"
 python "${EVAL}" "${common[@]}" --out "${OUT}/eval-t29-tiled"
 
 echo
