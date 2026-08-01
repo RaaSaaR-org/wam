@@ -505,13 +505,16 @@ Each step below is a checked-in file in `cluster/discoverer/` — see its README
 4. **Re-run the readout probe** — `40_readout_probe.sbatch` so the blocks-`(2, 10)` pick in
    `configs/model/wan22_ti2v_5b.yaml` is re-measured on this stack.
 5. **T-16 LoRA** on the 402 converted GR00T episodes — `50_train_t16.sbatch`, the actual
-   deliverable. **Blocked on T-16a** (local code work, no cluster needed): the joint model
-   hard-wires `TinyVideoBackbone`, `WanI2VAdapter` has no LoRA injection, and
-   `scripts/train_t16_lora.py` does not exist. The job refuses to start without it rather than
-   burning GPU hours. Details in `cluster/discoverer/README.md`.
+   deliverable. **Done**: T-16a landed 2026-07-27 (the joint model no longer hard-wires
+   `TinyVideoBackbone`, `WanI2VAdapter` got LoRA injection, `scripts/train_t16_lora.py` exists),
+   and the fine-tune itself ran to ~20 000 steps (`runs/t16-lora-seed0`). It lost to
+   repeat-last-action. Details in `cluster/discoverer/README.md`.
 6. **Re-run T-18** (`scripts/run_ablation.py`, identical 362/40 split) against the fine-tuned
-   backbone. That is the real AC-07 verdict; the current one ("video hurts") was measured with the
-   `tiny` backbone and explicitly attributed to the missing pretrained prior.
+   backbone. Still the real AC-07 verdict, and still unrun — the recorded one ("video hurts")
+   was measured with the `tiny` backbone and explicitly attributed to the missing pretrained
+   prior. Since 2026-08-01 it also needs the *frame mode* stated: that number is tiled-only,
+   T-16's is not, and the two do not compare (T-29 / I-7). Re-scoring the archived checkpoint
+   in history mode costs no allocation and is the cheaper half of this — `scripts/rescore_archived.py`.
 
 If we ever pre-extract latents: Lustre punishes many-small-files dataloaders — pack shards, don't
 decode MP4s per step.

@@ -113,6 +113,16 @@ Ordered bring-up checklist: `docker/dds/README.md` § "Remaining steps for real-
   2.09e-05 vs. 1.10e-05, gripper acc −2%. The tiny video loss plateaus (~0.72), so the
   shared trunk pays a multi-task tax; a measurable AC-07 advantage must come from the
   pretrained prior. Rerun after the Wan LoRA fine-tune (`runs/t18-real-ablation-seed0`).
+- **AC-07 is back to OPEN as of 2026-08-01, and not because a rerun happened.** T-16 (the Wan
+  LoRA) ran and lost to repeat-last-action, which looked like the answer. T-29 (Slurm 184648)
+  then found that every number above was measured with one camera frame tiled to the backbone's
+  context while training fed the real window. Re-scoring T-16 in the mode it was trained in
+  moved `skill_vs_repeat_pct` from −32.45 % to −21.80 % — real, +10.65 pp, and still a failed
+  L1 gate, so the verdict survives. What does not survive is the *comparison*: only T-16 was
+  re-measured, so the numbers in this bullet and the action-only baseline (−20.9 %) are still
+  tiled-only and a table carrying both modes is not a comparison at all. Re-scoring the two
+  archived checkpoints costs no allocation (`scripts/rescore_archived.py`). Full result:
+  `docs/improvements.md` I-7, `docs/benchmark.md` "The T-16 result".
 
 ## 6. Real rollouts (M4 / E3)
 

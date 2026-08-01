@@ -242,17 +242,24 @@ a pinned `--gripper-affine` that clips a single sample.
 
 Both existing real-data runs, identical 40-episode holdout:
 
+Both columns were re-scored in the real frame window on 2026-08-01 (`scripts/rescore_archived.py`,
+CPU, no retraining) and **neither moved**: `skill_vs_repeat_pct` went −20.86 % → −20.88 % and
+−129.04 % → −129.00 %. The frame-mode confound that cost T-16 10.65 pp costs these two nothing,
+because the `tiny` backbone does not use the frame axis. The figures below are therefore valid in
+**both** modes, and this table is comparable with T-16's real-window numbers.
+
 | metric | `d1-full-gen-seed0` (action-only) | `t18-real-ablation-seed0` (world-action) |
 |---|---|---|
+| frame mode | tiled ≡ real window | tiled ≡ real window |
 | **level** | **L0** beats-doing-nothing | **none — below L0** |
 | **score** | **28.6 / 100** | **19.9 / 100** |
-| mse | 1.10439e-05 | 2.09285e-05 |
+| mse | 1.10458e-05 | 2.09254e-05 |
 | ci_mse | 2.30187e-05 | 5.26316e-05 |
-| skill_vs_zero_pct | +32.4% | −28.2% |
+| skill_vs_zero_pct | +32.3% | −28.2% |
 | skill_vs_repeat_pct | **−20.9%** | **−129.0%** |
-| ci_skill_vs_repeat_pct | −7.0% | −144.6% |
+| ci_skill_vs_repeat_pct | −7.0% | −144.5% |
 | horizon_ratio | 1.66 | 1.02 |
-| smoothness_ratio | 2.35 | 5.10 |
+| smoothness_ratio | 2.35 | 5.09 |
 | gripper_accuracy | ~~0.87~~ withheld † | ~~0.85~~ withheld † |
 
 † Both were withdrawn on 2026-08-01: the demonstrated channel's majority class on this holdout is

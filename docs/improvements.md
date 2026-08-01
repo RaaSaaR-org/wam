@@ -301,10 +301,47 @@ the 11.5 pp gap that made T-16 look clearly worse than the action-only baseline 
 which is materially "open" — arrived at through the mixed-mode problem rather than through either
 branch.
 
-**Outstanding, and cheap (~0.4 GPU-h, no retraining):** re-score `t18-real-ablation-seed0` and
-`d1-full-gen-seed0` with `--frame-history` so the ladder table is single-mode. Every number in
-`docs/benchmark.md` is labelled with its frame mode until that lands, and no cross-mode row is to
-be read as a comparison.
+**RESOLVED 2026-08-01 — the re-score ran, on a laptop CPU, for zero allocation.** It needed no GPU
+slot at all: both archived checkpoints are ~0.9 MB (the 16 MB in that directory is
+`predictions.jsonl`, not the weights), and a full 1 040-chunk pass takes about 7 s.
+`scripts/rescore_archived.py` does it without retraining. The ladder is single-mode again:
+
+| run | backbone / branch | tiled | real window | delta | level |
+|---|---|---|---|---|---|
+| `t16-lora-seed0` | Wan2.2 LoRA, world-action | −32.45 % | **−21.80 %** | **+10.65 pp** | L0 |
+| `d1-full-gen-seed0` | tiny, action-only | −20.86 % | **−20.88 %** | −0.02 pp | L0 |
+| `t18-real-ablation-seed0` | tiny, world-action | −129.04 % | **−129.00 %** | +0.03 pp | below L0 |
+
+**The confound is backbone-specific, and that is the finding.** Showing the model a frozen frame
+instead of the real window costs the Wan fine-tune 10.65 pp and costs the two `tiny` runs
+**nothing** — 0.02 and 0.03 pp, which is noise. Both directions, so not even a consistent bias. The
+`tiny` backbone does not use the frame axis at all; whether it sees motion or a still is invisible
+in its output. The Wan backbone does. That is the first *positive* evidence in this project that
+the pretrained video prior carries temporal information the action head can reach — arrived at
+sideways, as a control for a measurement error, which is where it is worth the least to have
+guessed and the most to have measured.
+
+**It also means the I-7 correction never threatened the tiled AC-07 numbers.** They were re-measured
+and did not move. The verdict below stands on in-distribution numbers now, not on freeze-frames.
+
+The trustworthy part is the control: run in tiled mode, `rescore_archived.py` reproduces the
+archived `predictions.jsonl` at max |Δ| = 0 (bit-identical) for `d1-full-gen-seed0` and 8.94e-08 for
+`t18-real-ablation-seed0`, and returns −20.86 % and −129.04 % — the archived values to every printed
+digit. A re-score that could not reproduce the old number would not be evidence about the new one.
+
+**What AC-07 now reads, in one mode.** The clean ablation is the *same-backbone* pair, which is what
+`run_ablation.py` was built to produce: `t18-real-ablation-seed0` (tiny, world-action) at −129.00 %
+against `d1-full-gen-seed0` (tiny, action-only) at −20.88 %. Adding the world branch to the tiny
+backbone costs **108 pp** and drops the run below L0 entirely. That verdict is now measured in
+distribution and is not a harness artifact.
+
+T-16 against that baseline — −21.80 % vs −20.88 %, a 0.92 pp gap — is **not** a clean ablation and
+must not be read as one: it differs from the baseline in the backbone *and* in the world branch at
+once. What it does support is a weaker, still useful statement: the pretrained prior recovers
+essentially all of the 108 pp the world branch costs on `tiny`, landing back level with the
+action-only baseline — and buys no advantage over it. On AC-07's actual question, *no measurable
+world-action advantage*, the answer is unchanged. What changed is that it is now an answer about
+models rather than about frame windows.
 
 **One diagnostic that is not yet a claim.** `shift_tolerant_mse` is 8.33e-06 for the real-window
 arm, below repeat-last-action's 9.14e-06 `mse` — i.e. allowing a ±1-step shift takes the model
@@ -340,6 +377,52 @@ intuition.
 ## I-3 · Make the flow branch the deployed path
 
 **Evidence: literature — plus, since T-16, a symptom of our own.** Promoted from "not urgent".
+
+> **RAN 2026-08-01, Slurm 184670, 33 min, exit 0 — and returned NO RESULT, by pre-registered
+> refusal.** Nine arms on one H200, one checkpoint, the proven 40-episode holdout, 1 040 chunks
+> each, all in `--frame-history`. **Every flow arm tripped the sampler-broken guard**, including
+> `B_mean` at n=32, the arm `T30_RULE_V2` keys on. The rule's consequence is explicit: *record
+> nothing, this is an integration bug and not a result.* So I-3's question — does reading the
+> action out of the flow branch beat the regression head — remains **unanswered**. What the job
+> established is that the sampler is broken, which is a different and cheaper thing to fix.
+>
+> | readout | mse | `skill_vs_repeat_pct` | RMS / demo | |
+> |---|---|---|---|---|
+> | regression (deployed) | 1.113e-05 | −21.80 % | 0.74 | |
+> | flow n=1 | 0.1529 | −1 673 733 % | 96.79 | `[SUSPECT]` |
+> | flow n=4 | 0.00122 | −13 253 % | 8.64 | `[SUSPECT]` |
+> | flow n=16 | 3.154e-04 | −3 352 % | 4.40 | `[SUSPECT]` |
+> | flow n=32 | 3.130e-04 | −3 326 % | 4.38 | `[SUSPECT]` |
+> | flow n=64 | 3.124e-04 | −3 319 % | 4.38 | `[SUSPECT]` |
+> | flow mean8 (**keyed arm**) | 1.240e-04 | −1 257 % | 2.75 | `[SUSPECT]` |
+> | flow warm0.6 | 1.454e-04 | −1 492 % | 2.97 | `[SUSPECT]` |
+> | flow warm+mean8 | 1.459e-04 | −1 496 % | 2.97 | `[SUSPECT]` |
+>
+> guard: `mse > 5 × zero-delta (1.633e-05)` or `RMS > 3 × demos' 0.004041`.
+>
+> **Three things point at the same cause, and none of them is step size.** The sweep has
+> *converged* — n=16/32/64 give 3.1542e-04 / 3.1305e-04 / 3.1245e-04, so doubling the steps twice
+> moves the fourth significant figure. The converged RMS is **4.38× the demonstrations'**, so it
+> lands on the wrong scale, not merely in the wrong place. And the warm start, which begins
+> integration at t0 = 0.6 from the regression head's own chunk — a 1.11e-05 estimate — comes out at
+> 1.454e-04, i.e. **13× worse than where it started**. An integrator handed a good estimate that
+> actively degrades it is applying the velocity field with the wrong sign, scale, or time
+> parameterisation. That is a direction/scale bug, and it converges perfectly well to a wrong
+> answer, which is exactly why the converged sweep is not the reassurance it first looks like.
+>
+> **The guard earned its place here.** Without it the honest-looking reading of −1 257 % is "the
+> flow branch is catastrophically worse than the regression head", which would have retired I-3 and
+> sent the next months to I-2 (a new cross-attention head, days plus a retrain) on the strength of
+> a sampler bug. Pre-registering "this pattern means broken, not worse" before seeing the pattern
+> is what stopped that.
+>
+> `tests/test_training.py::TestFlowSampler` and `::TestFlowSamplerControlArms` claim to pin the
+> direction, the conditioning and the warm start. They pass. At least one of them therefore pins
+> the sampler against itself rather than against the training path — a test that is green while the
+> thing it covers is broken is its own finding, and it is being chased down now.
+>
+> **Cost:** 0.56 GPU-h against ~6 budgeted. The arms are cheap; it was the interpretation that was
+> expensive, and the guard is what made it survivable.
 
 We already train two action paths:
 
@@ -686,10 +769,12 @@ existing checkpoint and need no retraining at all.
 | ~~—~~ | ~~I-1 spatial-readout probe~~ — **✅ ran 2026-07-29, verdict unchanged** | done | 7.6 s GPU, free |
 | ~~—~~ | ~~I-9 converter (the gripper we destroyed)~~ — **✅ built 2026-08-01, needs no GPU** | done | hours, no GPU |
 | ~~—~~ | ~~I-7 frame history at inference~~ (T-29) — **✅ ran 2026-08-01: +10.65 pp, still fails L1** | done | 0.2 GPU-h, no retrain |
-| **1** | **I-3 flow branch deployed** (T-30) — sampler on the existing velocity head | **submitted 2026-08-01, job 184670** | ~6 GPU-h, no retrain |
-| **2** | **I-7 re-score T-18 + `d1-full-gen-seed0` with `--frame-history`** — the ladder is mixed-mode until this lands, so AC-07 cannot be read | next cheap GPU slot | ~0.4 GPU-h, no retrain |
+| ~~—~~ | ~~I-7 re-score T-18 + `d1-full-gen-seed0`~~ — **✅ ran 2026-08-01 on a laptop CPU: both moved <0.05 pp, ladder is single-mode, AC-07 readable again** | done | **zero GPU**, no retrain |
+| ~~—~~ | ~~I-3 flow branch deployed~~ (T-30) — **ran 2026-08-01, job 184670: every arm SUSPECT, pre-registered refusal, question still open** | ran, no verdict | 0.56 GPU-h spent |
+| **1** | **Fix the flow sampler** — direction / scale / conditioning in `sample_action_chunk`, plus whichever of `TestFlowSampler`/`TestFlowSamplerControlArms` was green while it was broken. Local, no GPU. **I-3 cannot be re-run until this lands** | now | hours, no GPU |
+| **2** | **Re-run T-30** once the sampler passes its own guard — the arms are unchanged, `63_...sbatch` is unchanged | after 1 | ~0.6 GPU-h, no retrain |
 | 3 | I-9 re-score the ladder on the rescaled gripper (T-31) | after the converter's audit passes | ~0.2 GPU-h, no retrain |
-| 4 | I-8 data-scaling curve (T-32) | after T-30 — a readout swap moves every rung at once | 3 runs, existing allocation |
+| 4 | I-8 data-scaling curve (T-32) | after 2 — a readout swap moves every rung at once | 3 runs, existing allocation |
 | 5 | I-2 cross-attention head | after 1–4 say whether the readout was the problem | days + retrain |
 | 6 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
 | 7 | I-4 state history | only if memory tasks become a target | days |
