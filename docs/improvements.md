@@ -316,6 +316,68 @@ comparison.
 fit alongside the backbone pass. AHA-WAM reaches ~57 Hz with a comparable structure, so this is a
 budget to measure, not an obvious wall.
 
+**Measured 2026-08-01 on the real checkpoint, before writing any sampler.** On
+`runs/t16-lora-seed0/checkpoints/step-020000` against the 1 040 archived holdout chunks:
+
+| path | chunk MSE | RMS \|targets\| |
+|---|---|---|
+| deployed regression head | 1.21027e-05 | 0.00226 |
+| `action_encoder` → `action_recon` round-trip | **8.10372e-07** | 0.00412 |
+| the demonstrations | — | 0.00404 |
+| repeat-last-action (the L1 bar) | 9.14e-06 | — |
+
+The action **latent** carries the chunk to within 8.1e-07 — 15× better than the deployed readout
+and 11× better than the bar T-16 failed. Whatever T-16 measured, it was not an encoder that cannot
+represent these actions. The single-shot readout discards it and under-shoots magnitude by 44 %.
+That is what makes I-3 a *readout* experiment rather than a retrain, and it also sets the two
+pre-registered anchors in `63_eval_t30_flow_head.sbatch`: `CEILING_MSE` (the round-trip, what a
+perfect sampler would reach) and `FLOOR_MSE` **1.68201e-05** — the score of a chunk with the right
+content and no position, because step index is recoverable from the latent at ~100 % accuracy and
+`ActionVelocityHead` takes no step index. Landing near the floor is the *expected* outcome of an
+order-blind sampler, not a bug, which is why the rule reads it as a mechanism only when the number
+actually lands there.
+
+**"Consistent with mean-seeking", not "the signature of it."** An earlier version of this entry,
+and of `docs/benchmark.md`, claimed the smoothness/magnitude pair diagnosed a mean-seeking head.
+It does not. Ruled out: a bounded-output artifact (max `|target|` 0.0192 against a `tanh`;
+`limit_penalty` bites only outside ±0.95). **Not** ruled out, each sufficient on its own:
+
+- **the one-sided jerk regulariser.** `configs/training/joint_wan_gr00t.yaml` sets
+  `weights.smoothness = 0.01`, and `JointTrainer.compute_losses` applies `smoothness_loss` to
+  `decoded_targets` — the *regression* head's output — and to nothing else. The flow branch is
+  never charged for jerk, so a smoothness gap between the readouts is the objective's own
+  consequence. This confound applies to the **positive** branches of T-30 as much as the negative
+  ones, which is a correction to the first draft of that rule: it held the negatives to an
+  alternative reading and the positives to none.
+- **plain L2 shrinkage** toward zero under a small-target distribution, with weight decay on top.
+
+Separating any of these from mean-seeking needs an intervention — retrain at
+`weights.smoothness = 0`, or a genuinely multi-modal task — not a readout swap. T-30 answers the
+narrower question a readout swap *can* answer: does the branch trained as a distribution carry
+anything the regression head does not?
+
+**The sampler's own confound, named in the rule rather than discovered afterwards.** Training
+co-noises video and action at a **shared** `t` (`co_denoise`). `sample_action_chunk` computes
+**one** backbone pass at `t=1` on the clean observation and reuses those features at every `t_k`,
+so near `t_k=0` the velocity head is asked about (near-pure-noise latent, clean-video features,
+t≈0) — a combination it never saw. That is I-7's structure again, one level down. The faithful
+sampler (n backbone passes, observation noised to each `t_k`) is deliberately **not** run: it costs
+n backbone passes and destroys the observation the readout exists to read. So **no branch of T-30
+refutes the flow branch as trained** — it is bounded by a warm-start arm (`--flow-t0`, integrating
+only where the head's `t` and the features' `t=1` roughly agree) rather than removed.
+
+**And the metric penalises the thing under test.** `skill_vs_repeat_pct` is MSE-derived, and for
+any calibrated conditional `E‖a − draw‖² = E‖a − mean‖² + E‖draw − mean‖²`: a single *unbiased*
+draw scores worse than the conditional mean by exactly the conditional variance. Scoring one draw
+against a mean-seeking regressor would reward the defect under test. The rule therefore keys on a
+mean-of-8 arm — a **measurement**, never a deployment candidate — and gates deployment separately
+on the single-draw arm, since averaging draws re-introduces the mean-seeking the flow branch
+exists to avoid.
+
+**Ready to run:** `sbatch cluster/discoverer/63_eval_t30_flow_head.sbatch` (T-30). Ten arms, one
+GPU, ~6 h; the rule is `T30_RULE_V2`, in git before any arm ran, with V1's three defects recorded
+in the file rather than silently edited out.
+
 ---
 
 ## I-4 · State history window
@@ -430,6 +492,37 @@ Weakness to state up front: three points on one task cannot distinguish "needs m
 "needs more *tasks*". A useful variant, at the same cost, is holding episode count fixed and
 varying task diversity across public LeRobot sets.
 
+**Staged 2026-08-01, rule `I8_RULE_V3` in git before the first rung is submitted**
+(`cluster/discoverer/55_train_i8_rung.sbatch` trains, `62_eval_i8_curve.sbatch` scores and prints
+the verdict). Splits are nested and committed — `configs/splits/i8_train_{040,120,362}.txt`, with
+40 ⊂ 120 ⊂ 362, zero overlap with the 40-episode holdout, and a seeded shuffle rather than a
+sorted prefix, so a rung is a random sample of the corpus and not its alphabetical head. Rung 362
+is `runs/t16-lora-seed0`, already scored; its `bench.json` is consumed rather than recomputed.
+
+Three things the rule had to be taught, all of them before seeing a number:
+
+- **The confound is symmetric.** Equal STEPS means rung 40 runs 147.5 epochs against rung 362's
+  16.9, and that gap manufactures a flat curve exactly as readily as a steep one. The first draft
+  held verdict A (*build the dataset*) provisional for it and let verdict C (*not data-limited*)
+  through free — so the confound could produce the cheap conclusion at no cost. **All three**
+  verdicts are now gated on the same equal-EPOCH control (`EPOCH_INFLATED`, read from the run log's
+  final `action_reg`). A rule that holds only the expensive conclusion to a standard is a
+  preference, not a decision rule.
+- **N\* is an extrapolation, not a measurement.** It is OLS through three points, 2.8 doublings
+  past the largest measured N, with one residual degree of freedom. Verdict A now requires the
+  whole bootstrapped interval — propagated from the *measured* seed spread, via the
+  `i8-rung040-seed1` replicate — to sit inside what a collection campaign could deliver, not just
+  the point estimate.
+- **"C" was two different worlds sharing one sentence.** C fires on `not (MONOTONE and SPAN ≥
+  MATERIAL)`, so three noisy rungs landing out of order while spanning materially printed "more of
+  this data did not move the headline" when the headline had moved by more than a seed does. Split
+  out as **C-NOISY**, which claims no readable curve, routes to a seed replicate rather than to
+  I-9, and licenses no recording campaign either way.
+
+Sequencing: run this **after** T-30. A readout swap changes the headline metric for every rung at
+once, and fitting a scaling curve through numbers that a pending decode change may move is fitting
+a curve to a moving target.
+
 ---
 
 ## I-9 · Score on a dataset whose gripper actually opens
@@ -444,10 +537,45 @@ The consequence is larger than one bad number: **the benchmark is structurally b
 which is the entire point of pick-and-place and the thing AC-01/02 are about. Every verdict we have
 is a verdict about arm trajectories only.
 
-**Fix:** select a public LeRobot dataset with real open/close transitions and re-run the ladder
-there. No robot, no new code — `convert_lerobot_g1.py` already exists and the bench thresholds are
-dataset-independent module constants. Until then, no offline result should be described as evidence
-about manipulation, only about reaching.
+**The prescription above was wrong, and the correction is the whole point of this entry
+(2026-08-01).** "Select a public dataset with real transitions" assumed the grasp was missing from
+the data. It is not. Measured on `data/raw/gr00t_apple`, parquet only, no decode:
+
+- the **left** hand's joints span up to **0.826 rad** peak-to-peak, and the commanded
+  `action[29:36]` spans the full range;
+- the **right** hand is frozen — 0.0007 rad across all 402 episodes;
+- `hand_synergy`'s `clip((mean + 1) / 2, 0, 1)` assumes source joints in `[-1, 1]`, a range the
+  Dex3 hand never uses, and squashes 0.826 → **0.157**;
+- `relabel_chunks` then averages **both** hands into `gripper_target`, so the dead right hand
+  halves it again → **0.0785**, which is the 0.120 T-27 measured, centred on the 0.5 threshold.
+
+Rescale the same recordings and **30/30 episodes show exactly two debounced open/close
+transitions** — one grasp, one release, which is what "move the apple to the plate" should look
+like. The grasp was always on disk. We destroyed it in the converter and then read the flat
+channel as a property of the task.
+
+**Fix, as it actually shipped:** `--gripper-mapping active-hand` fits one **dataset-level** affine
+over the raw synergy of the hand that moves and takes `gripper_target` from that hand alone.
+Dataset-level rather than per-episode on purpose — a per-episode min-max makes the same physical
+aperture a different number in every episode, which is unlearnable. Because the fit depends on
+which episodes are in the conversion (30 eps → offset −0.39980/span 0.41004; 402 eps →
+−0.43865/0.46675), two conversions are comparable only if they share an affine: `--gripper-affine
+OFFSET SPAN` pins it, and a pinned affine that would clip **any** sample is refused, because
+clipping is silent in the output and moves every admissibility clause in the *passing* direction.
+The legacy mapping is now held to the same bar (`legacy_clipped_frac`); until 2026-08-01 the one
+mapping that *assumes* a scale was the only one allowed to be silently wrong about it.
+
+`scripts/audit_gripper.py` is the gate: four clauses (dynamic range, debounced transitions per
+episode, fraction of episodes with a transition, fraction of episodes with a full
+close-**and**-reopen **cycle**). The cycle clause exists because a monotone ramp from 0 to 1 clears
+a transition count and is not a grasp. Saturation is reported against
+`expected_saturated_frac` — a fitted affine rails exactly the two extremal samples it was fitted
+on, so a rate far above that is "clipped, not measured".
+
+**What this does not retract:** T-16 and T-18 are arm-trajectory verdicts and stay exactly as
+recorded — `skill_vs_repeat_pct` never touched the gripper channel. What it retracts is the
+*explanation*, and the size of the fix: this was hours of converter work on data already on disk,
+not a dataset acquisition.
 
 Related and cheap, in `docs/benchmark.md` rather than here: **L4's gate is one-sided.**
 `smoothness_ratio ≤ 2` scored T-16's 0.29 a full 20/20 while that value means the prediction is
@@ -489,14 +617,25 @@ existing checkpoint and need no retraining at all.
 | # | Item | When | Cost |
 |---|---|---|---|
 | ~~—~~ | ~~I-1 spatial-readout probe~~ — **✅ ran 2026-07-29, verdict unchanged** | done | 7.6 s GPU, free |
-| **1** | **I-7 frame history at inference** — may retract the T-16/T-18 verdict | **now, before acting on T-16** | ~0.2 GPU-h, no retrain |
-| 2 | I-3 flow branch deployed (sampler on the existing velocity head) | with or right after I-7 | days, no retrain |
-| 3 | I-9 dataset with a live gripper | before any claim about grasping | hours, no GPU |
-| 4 | I-8 data-scaling curve | before committing months to D1/D2 collection | 3 runs, existing allocation |
+| ~~—~~ | ~~I-9 converter (the gripper we destroyed)~~ — **✅ built 2026-08-01, needs no GPU** | done | hours, no GPU |
+| **1** | **I-7 frame history at inference** (T-29) — may retract the T-16/T-18 verdict | **submitted, waiting on the GPU** | ~0.2 GPU-h, no retrain |
+| **2** | **I-3 flow branch deployed** (T-30) — sampler on the existing velocity head | right after T-29 reports | ~6 GPU-h, no retrain |
+| 3 | I-9 re-score the ladder on the rescaled gripper (T-31) | after the converter's audit passes | ~0.2 GPU-h, no retrain |
+| 4 | I-8 data-scaling curve (T-32) | after T-30 — a readout swap moves every rung at once | 3 runs, existing allocation |
 | 5 | I-2 cross-attention head | after 1–4 say whether the readout was the problem | days + retrain |
 | 6 | I-6 FLUX.2 probe | M5, alongside the FLUX 3 decision | hours |
 | 7 | I-4 state history | only if memory tasks become a target | days |
 | 8 | I-5 state as latent frames | M6 | weeks |
+
+**Why I-9 moved but did not jump the queue.** Its *build* is done and cost no GPU, because the
+finding turned out to be a converter bug rather than a missing dataset. Its *re-score* still sits
+at 3, behind the two items that can change the meaning of a number already recorded. Nothing about
+a rescaled gripper channel changes what `skill_vs_repeat_pct` measured on arm trajectories.
+
+**Why I-8 slipped from 3 to 4.** T-30 changes the headline metric for every rung simultaneously.
+Fitting a scaling curve through numbers a pending decode change may move is fitting a curve to a
+moving target — and N\*, the number that would buy a robot and months of recording, is the most
+extrapolated quantity in the file.
 
 I-1 jumped the queue because it tested a claim we had already written into `TASKS.md` as settled.
 It came back negative, which is the cheapest possible outcome: nothing downstream has to change,

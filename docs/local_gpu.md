@@ -115,9 +115,20 @@ python scripts/eval_t16.py \
     --run-dir runs/t16-lora-seed0 \
     --dataset datasets/gr00t-apple-full \
     --holdout configs/splits/t18_holdout_episodes.txt \
+    --train-episodes configs/splits/i8_train_362.txt \
     --backbone-source /path/to/Wan2.2-TI2V-5B \
     --device cuda
 ```
+
+**`--train-episodes` is the split proof's external witness, and it is safe to pass on every
+call.** `train_t16_lora.py` records `train_episode_ids` on every run, so any checkpoint trained
+after 2026-08-01 is scored under the *disjointness* proof, where the witness is **mandatory** —
+without it the recorded ids and the recorded hash are two fields of one self-description and the
+check compares the checkpoint against itself. Checkpoints written before the field exists (the
+archived `t16-lora-seed0`) are scored under the *complement* proof, where the file is checked as a
+redundant cross-check instead of refused. `i8_train_362.txt` is the complement of the holdout above
+(402 − 40 = 362), so it is the right file for both. An I-8 rung needs its own
+`configs/splits/i8_train_0NN.txt`; passing the wrong one is refused, not scored.
 
 **`--backbone-source` is not optional for a checkpoint trained on Discoverer+**, which is every
 checkpoint this runbook is about. The frozen weight location is deliberately kept out of the
@@ -149,6 +160,13 @@ That means the holdout is not the complement of the training set, so those episo
 trained on and every number downstream would be meaningless in the one way that matters. Fix the
 `--dataset`/`--holdout` arguments rather than reaching for `--skip-split-check` (which scores
 anyway and drops an `UNPROVEN_SPLIT` marker next to the artifacts).
+
+The command above is the **complement** proof, which is what `runs/t16-lora-seed0` and every other
+pre-I-8 checkpoint is judged by. A checkpoint that records its own `train_episode_ids` (every
+fresh run does) is judged by the **disjointness** proof instead, and that one additionally
+requires `--train-episodes <the reviewed split file>`: without an external witness the recorded
+ids and the recorded hash are two fields of one self-description, and checking them against each
+other cannot fail. The evaluator picks the proof from the checkpoint, never from a flag.
 
 The checkpoint knows how to load itself: a Wan-backed one carries no base weights, and
 `load_joint_policy` branches on the embedded config's `requires_external_weights` to build the
@@ -234,6 +252,157 @@ the model rather than the harness, and I-8 (the data-scaling curve) is next.
 Because scoring only reads `predictions.jsonl`, a **new rung costs no retrain** — every past run is
 re-scorable.
 
+### 3c. T-30 — re-score through the action branch that was trained but never read
+
+The joint model trains **two** action readouts and deploys one. `ActionHead` regresses the whole
+chunk in one shot from the pooled features; a rectified-flow branch (`velocity_head` +
+`action_recon`, `weights.action_flow = 1.0`) models the same chunk as a distribution and is never
+touched at inference. A single-shot L2 regressor under a one-to-many conditional is mean-seeking,
+and `t16-lora-seed0` is **consistent with** one: chunk RMS **0.00226** against the demonstrations'
+**0.00404**, `smoothness_ratio` **0.29**. `--flow-sampler` reads the chunk out of the flow branch
+instead. No retraining; the checkpoint is untouched and only the decode step changes
+(`docs/improvements.md` I-3).
+
+**"Consistent with", not "the signature of"** — an earlier version of this section said the
+latter, and only one alternative had actually been ruled out. Ruled out: bounded-output
+saturation (max |target| 0.0192 against a `tanh`, and `limit_penalty` bites only outside ±0.95).
+Not ruled out, and each sufficient on its own to produce small smooth chunks:
+
+- **the one-sided jerk regulariser.** `configs/training/joint_wan_gr00t.yaml` sets
+  `weights.smoothness = 0.01`, and `JointTrainer.compute_losses` applies `smoothness_loss` to
+  `decoded_targets` — the *regression* head's output — and to nothing else. The flow branch is
+  never charged for jerk, so a `smoothness_ratio` gap between the two readouts is predicted by
+  the objective. That is why the smoothness clause of the rule below is **confounded** and reads
+  as descriptive rather than decisive.
+- **L2 shrinkage.** `action_reg` is an MSE against targets whose own RMS is 0.004, with AdamW
+  weight decay on top; a head that under-shoots magnitude uniformly is indistinguishable, on RMS
+  and jerk alone, from one that averages modes.
+
+Separating those from mean-seeking needs an intervention (`smoothness = 0` and retrain, or a
+multi-modal task), not a readout swap.
+
+**Run the CPU pre-flight first — it is seconds and it can cancel the GPU pass outright:**
+
+```bash
+python scripts/check_action_latent.py \
+    --checkpoint runs/t16-lora-seed0/checkpoints/step-020000 \
+    --predictions runs/t16-lora-seed0/eval-latest/predictions.jsonl
+```
+
+It prints two bounds on everything the A/B can win, both measured on 2026-08-01 for that pair:
+
+| | target MSE | what it is |
+|---|---|---|
+| ceiling | **8.10e-07** | encode the demonstrated chunks, decode straight back through `action_recon` — a perfect sampler |
+| this run | 1.21e-05 | the deployed regression head |
+| L1 bar | 9.14e-06 | repeat-last-action |
+| zero-delta | 1.63e-05 | hold still |
+| floor | **1.68e-05** | decode the per-step latent *centroids* — a sampler that recovers only *which step* |
+
+The ceiling says the latent carries the chunk almost perfectly, so a poor A/B result is about the
+velocity head and not about the representation. The floor is the one to read before booking GPU
+time: step index is recoverable from the latent at **100 %** accuracy (within-step std 0.056 vs
+between-step 1.42) and `ActionVelocityHead` takes **no step index** — it sees `[z_t | pooled | t]`
+and nothing else. So the per-chunk content the sampler has to hit is a small perturbation riding on
+a much larger positional signal, and landing near the floor is the *expected* outcome rather than
+evidence of a bug.
+
+```bash
+# A: the regression head (today's deployed readout)
+python scripts/eval_t16.py --run-dir runs/t16-lora-seed0 \
+    --dataset datasets/gr00t-apple-full \
+    --holdout configs/splits/t18_holdout_episodes.txt \
+    --backbone-source /path/to/Wan2.2-TI2V-5B --device cuda \
+    --frame-history --out runs/t16-lora-seed0/eval-t30-regression
+
+# B: the flow readout — one flag different
+python scripts/eval_t16.py --run-dir runs/t16-lora-seed0 \
+    --dataset datasets/gr00t-apple-full \
+    --holdout configs/splits/t18_holdout_episodes.txt \
+    --backbone-source /path/to/Wan2.2-TI2V-5B --device cuda \
+    --frame-history --flow-sampler --flow-steps 32 \
+    --out runs/t16-lora-seed0/eval-t30-flow32
+
+# B_mean: the same readout, 8 draws averaged — the arm the rule keys on (see below)
+python scripts/eval_t16.py --run-dir runs/t16-lora-seed0 \
+    --dataset datasets/gr00t-apple-full \
+    --holdout configs/splits/t18_holdout_episodes.txt \
+    --backbone-source /path/to/Wan2.2-TI2V-5B --device cuda \
+    --frame-history --flow-sampler --flow-steps 32 --flow-mean-k 8 \
+    --out runs/t16-lora-seed0/eval-t30-flow32-mean8
+
+python scripts/run_bench.py runs/t16-lora-seed0/eval-t30-{regression,flow32-mean8} \
+    --compare --no-write
+```
+
+Both arms carry `--frame-history` (or neither): run this **after** T-29 reports, inside whichever
+frame mode it leaves standing, or the two A/Bs collapse into a 2×2 nobody pre-registered. The
+readout goes into `bench.json`'s `run_name` as `…+flow32s0k8`, for the same reason the frame mode
+does, and **one `--out` holds exactly one readout** — the script refuses to write a second arm's
+artifacts over a first one's, because every filename is fixed and `--out` defaults to `--run-dir`.
+`--flow-steps` and its companions without `--flow-sampler` are refused rather than silently
+scoring the regression head into a flow-named output dir. Sweep `--flow-steps 1 4 16 32 64` as
+separate runs to show the verdict does not hinge on the integrator — **n=1 is the control**: one
+Euler step from noise is what "rectified flow needs one step" would deploy, and it measures how
+far from straight this field actually is. On Discoverer+ the whole sweep plus the verdict is one
+job: `sbatch cluster/discoverer/63_eval_t30_flow_head.sbatch`.
+
+#### Why the headline arm averages k draws
+
+`skill_vs_repeat_pct` is MSE-derived, and for any calibrated conditional
+`E‖a − draw‖² = E‖a − mean‖² + E‖draw − mean‖²`. A single unbiased draw therefore scores **worse**
+than the conditional mean by exactly the conditional variance — so comparing one draw against a
+head accused of being mean-seeking rewards the defect under test. `--flow-mean-k 8` leaves 1/8 of
+that penalty and makes the comparison apples-to-apples. It is a **measurement** arm, never a
+deployment candidate: averaging draws *is* the mean-seeking the flow branch exists to avoid. The
+single-draw arm stays, as the measurement of what a deployed sampler would emit — magnitude
+(`RMS/demo`) and jerk (`smoothness_ratio`), neither of which rewards mean-seeking.
+
+One consequence of the determinism contract belongs here too: the seed is re-drawn per call and
+never advanced (that is what keeps T-25's rollouts bit-identical), so **all 1 040 chunks of one
+arm are integrated from the same noise vector**. Per chunk that is a fair draw, but the errors
+across the holdout are correlated through it, so the arm's aggregate is conditioned on that one
+vector. That is measured, not assumed: the second `--flow-seed` arm re-runs the whole holdout from
+a different vector and its difference *is* the band.
+
+#### Why there is a warm-start arm
+
+Training always paired *(features from video noised to t, action latent noised to the same t)* —
+`co_denoise` shares one `t`. The sampler computes **one** backbone pass at `t=1` on the clean
+observation and reuses those features at every `t_k`, so near `t_k = 0` the velocity head is asked
+about a combination it never saw. That is the same shape of confound as I-7, and without an arm to
+measure it, a negative would be unreadable in exactly the way T-16's was. `--flow-t0 0.6` starts
+the integration at 0.6 from the regression chunk re-encoded by `action_encoder` and noised to
+`t0` — only in the region where the two timesteps roughly agree. It **inherits the regression
+mean** by construction (there is no clean action latent at inference; using the demonstrated chunk
+would make it an oracle rather than a readout), so it can never show that the flow branch models
+the conditional. What it can do is separate *"the branch is dead"* from *"we sampled it outside
+its training region"*. The faithful sampler — n backbone passes on an observation noised to each
+`t_k` — is not run at all, so **every negative below is about the flow branch AS SAMPLED THIS WAY,
+never about the flow branch as trained.**
+
+**Decision rule `T30_RULE_V1`, fixed before the run** — keyed on `skill_vs_repeat_pct` of the
+**mean-of-k** arm against A, with `BAND = max(3·σ̂, 10 pp)` and σ̂ the *measured* `|seed0 − seed1|`
+spread (a second `--flow-seed` arm, the same construction I-8 uses; a bare literal band would be a
+threshold nobody had tested). B_mean beats A by more than BAND *and* clears 0 → the mean-seeking
+head was the T-16 negative, the flow readout becomes the deployed path, and `docs/benchmark.md`
+needs a correction. Beats A but stays below the bar → the head cost real skill and was not the
+whole story; keep the regression head deployed until a closed-loop number exists, then I-8. Inside
+the band → **the two readouts score the same on this metric** — that sentence, and not "the flow
+branch is decorative", which additionally requires the measured draw-to-draw spread to be under
+10 % of the demonstrations' RMS. Worse than A by more than BAND → the mean was doing real work.
+Both negative branches then consult the **variance-matched warm arm** (`--flow-t0` with
+`--flow-mean-k`): if it clears the band against A or against B_mean, the negative belongs to the
+sampler's conditioning mismatch and the next step is the sampler, not I-2. `smoothness_ratio` is
+reported for every arm but gates nothing — the regression head carries a jerk penalty the flow
+branch does not. Checked *first*, on **every** arm: RMS |targets| above 3× the demos' 0.00404, or
+anything non-finite, or MSE above 5× zero-delta, is an integration bug — fix and re-run, record
+nothing. An MSE merely a little above zero-delta is **not** that case; that is the floor, and the
+floor is a result.
+
+`eval_t16.py` also writes `timing.json` (ms/chunk) now — the sampler's cost is the delta between
+the two arms, and it is the only number in the run that cannot be recomputed from the archive.
+
 ---
 
 ## 4. Run the closed loop
@@ -270,9 +439,17 @@ paths under real model timing, and whether predicted chunks survive the filter a
 **not** measure: task competence. MuJoCo renderings are not RealSense frames and no backbone here
 has seen one. Task success is E3 and needs the robot.
 
-Watch the `min_policy_rate_hz` line. One forward pass per cycle is the whole latency budget, so if
-the loop misses its deadline the fix is the two levers from the top of this page (truncate blocks
-23–29, evict the text tower), not a smaller batch.
+Watch the `min_policy_rate_hz` line. One backbone pass per cycle is essentially the whole latency
+budget — `policy_deadline_ms` is 500 ms and `min_policy_rate_hz` is 2 Hz (`ExecutorConfig`), against
+a measured 79 ms per window for the Wan pass — so if the loop misses its deadline the fix is the two
+levers from the top of this page (truncate blocks 23–29, evict the text tower), not a smaller batch.
+
+`--flow-sampler` (§3c) is not wired into `rollout.py` yet, deliberately: it is an offline
+question until the A/B answers it. When it is, it adds *n* MLP evaluations per cycle — at T-16's
+dimensions one step is roughly 13 M MAC at batch 1, so 32 steps is arithmetic noise next to one
+79 ms backbone pass, and `timing.json` from the two eval arms is the measured version of that
+claim. The variant that would blow the budget is the one this design rejects: re-running the
+backbone at every sampler timestep, where 79 ms/step leaves room for **n ≤ 5** inside 500 ms.
 
 ---
 
