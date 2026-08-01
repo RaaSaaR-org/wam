@@ -20,9 +20,15 @@ echo "==> repo -> ${PROJ}/wam"
 # The excludes mirror .gitignore: everything gitignored is either machine-local (.venv,
 # caches), fetched on the cluster instead (data/raw = 966 MB of raw LeRobot snapshot,
 # assets/ = the MuJoCo model, which no cluster job uses), or shipped separately below.
+#
+# The LEADING SLASHES are load-bearing. An rsync pattern without one matches the last path
+# component at ANY depth, so a bare `--exclude 'data'` silently drops src/wam/data/ as well —
+# episode.py, validation.py, the lot. There is no --delete either, so the cluster keeps a
+# stale copy and the jobs die on `cannot import name frame_window_indices` AFTER the H200 is
+# allocated. Anchored, each pattern means the one top-level directory it was written for.
 "${RSYNC[@]}" \
-  --exclude '.git' --exclude 'datasets' --exclude 'runs' --exclude 'data' \
-  --exclude 'assets' --exclude '__pycache__' --exclude '.venv' --exclude '*.egg-info' \
+  --exclude '.git' --exclude '/datasets' --exclude '/runs' --exclude '/data' \
+  --exclude '/assets' --exclude '__pycache__' --exclude '.venv' --exclude '*.egg-info' \
   --exclude '.pytest_cache' --exclude '.ruff_cache' --exclude '.mypy_cache' \
   "${ROOT}/" "${HOST}:${PROJ}/wam/"
 

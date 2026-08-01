@@ -330,18 +330,23 @@ echo "frame mode: ${FRAME_HISTORY:-tiled single frame (pre-T-29 default)}"
 # QoS cap requires: ten arms each rebuild the frozen 5B base from disk and do not reliably fit in
 # one pass, and this job has no in-python checkpointing to requeue into the way 50_/55_ do.
 #
-# Skipping on bench.json rather than on predictions.jsonl is deliberate. A pass killed between
-# writing predictions and writing the reports left an arm that is NOT finished, and bench.json is
-# the last of the four files eval_t16.py writes — so a half-written arm re-runs instead of being
-# counted. The skip also cannot silently accept the WRONG arm: eval_t16.py's own guard_out_dir
-# refuses to write one readout's artifacts into a directory holding another's, so a directory that
-# survives this check and matches the tag is the arm it claims to be.
+# Skipping on timing.json rather than on predictions.jsonl or bench.json is deliberate. A pass
+# killed between writing predictions and writing the reports left an arm that is NOT finished, and
+# timing.json is the LAST file eval_t16.py writes — after predictions.jsonl, e1.*, and bench.* —
+# so a half-written arm re-runs instead of being counted. Keying on bench.json would leave a
+# window, small but real, in which an arm is marked done with no timing record: the ms/chunk column
+# then prints nan and the latency line reports MISSES THE DEADLINE from an absent measurement.
+# The skip also cannot silently accept the WRONG arm: eval_t16.py's own guard_out_dir refuses to
+# write one readout's artifacts into a directory holding another's, so a directory that survives
+# this check and matches the tag is the arm it claims to be. That guard does NOT cover a rerun
+# under a different FRAME_HISTORY or CKPT — neither is in the arm directory name — so changing
+# either means clearing the eval-t30-* directories first.
 arm() {
   local label=$1 out=$2
   shift 2
   echo
-  if [[ -f "${out}/bench.json" ]]; then
-    echo "=== ${label} — already scored (${out##*/}/bench.json), skipping"
+  if [[ -f "${out}/timing.json" ]]; then
+    echo "=== ${label} — already scored (${out##*/}/timing.json), skipping"
     return 0
   fi
   echo "=== ${label}"
