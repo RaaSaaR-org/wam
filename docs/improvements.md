@@ -727,6 +727,21 @@ in this testbed the binding constraint is predicting the *content* from the cond
 all, not transporting onto it. A normalization null under those conditions is weak evidence;
 the `+pos` result, which moves 172×, is not.
 
+**A per-`(step, dim)` offset is a null in action space. Measured, so it does not get re-proposed.**
+A design panel recommended learning one constant per chunk step and joint dim as the *first*
+ticket, on the grounds that it beats anything the flow branch can reach. On the real holdout:
+
+    zero-delta               1.632760e-05
+    per-(step, dim) offset   1.629561e-05   <- 0.2 % better than emitting nothing
+    global scalar offset     1.632733e-05
+    model                    1.112983e-05
+
+The recommendation confuses two spaces. Per-step offsets *are* nearly the whole story in the
+**latent**, where the positional centroid has std 1.422 against content 0.05583 — which is exactly
+why `FLOOR_MSE` exists. In **action** space the mean chunk is ≈ 0 and the offsets buy nothing.
+`FLOOR_MSE = 1.68201e-05` is the order-blind anchor and is itself *worse* than zero-delta
+(1.632760e-05), so any fix whose whole content is "recover the step index" cannot clear zero.
+
 ### Why all three now sit behind I-10
 
 With a t-flat gain the sampler is `z ← z + g(x̂1 − z)dt`, which contracts onto the head's **own**
