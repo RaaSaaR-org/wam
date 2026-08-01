@@ -176,18 +176,24 @@ def test_degenerate_gripper_channel_is_flagged() -> None:
 # --- gripper admissibility (T-31) ----------------------------------------------------------------
 
 
-def gripper_episode(values: np.ndarray, episode_id: str = "ep0") -> list[ChunkPrediction]:
-    """One episode whose demonstrated AND predicted gripper follow ``values``, 8 steps per chunk."""
+def gripper_episode(
+    values: np.ndarray, episode_id: str = "ep0", stride: int = STEPS
+) -> list[ChunkPrediction]:
+    """One episode whose demonstrated AND predicted gripper follow ``values``, 8 steps per chunk.
+
+    ``stride`` is the emission cadence, as in :func:`episode`. At the default it equals the
+    horizon and the chunks tile the episode; below it they overlap, which is the regime the
+    closed loop actually runs in and the only one in which a step can be read twice.
+    """
     dt_ns = int(DT * 1e9)
-    n_chunks = values.shape[0] // STEPS
     return [
         ChunkPrediction(
-            predicted=chunk(constant(0.1), values[i * STEPS : (i + 1) * STEPS]),
-            target=chunk(constant(0.1), values[i * STEPS : (i + 1) * STEPS]),
+            predicted=chunk(constant(0.1), values[start : start + STEPS]),
+            target=chunk(constant(0.1), values[start : start + STEPS]),
             episode_id=episode_id,
-            t_ns=i * STEPS * dt_ns,
+            t_ns=start * dt_ns,
         )
-        for i in range(n_chunks)
+        for start in range(0, values.shape[0] - STEPS + 1, stride)
     ]
 
 
@@ -224,6 +230,26 @@ def test_gripper_transitions_are_debounced_and_counted_per_episode() -> None:
     assert report.gripper_accuracy_withheld_reason == ""
     assert report.gripper_dynamic_range == pytest.approx(0.9)
     assert report.gripper_transitions_per_episode == pytest.approx(7.0)
+
+
+def test_the_transition_count_does_not_change_when_the_same_episode_is_emitted_faster() -> None:
+    """The event count is a property of the robot's timeline, not of the emission cadence.
+
+    With stride < T every overlapped step is commanded by several chunks, so concatenating whole
+    chunks replays each open/close once per chunk that saw it: 35 transitions here instead of 7,
+    on 232 steps instead of the 64 the episode has. That inflates the very number the audit's
+    transition clause reads, and always upwards — so the same demonstration, re-emitted at a
+    faster cadence, would look like a busier gripper.
+    """
+    values = np.where((np.arange(STEPS * 8) // STEPS) % 2 == 0, 0.05, 0.95).astype(np.float32)
+    tiled = bench_metrics(gripper_episode(values))
+    overlapping = bench_metrics(gripper_episode(values, stride=2))
+
+    assert len(gripper_episode(values, stride=2)) > len(gripper_episode(values))
+    assert tiled.gripper_transitions_per_episode == pytest.approx(7.0)
+    assert overlapping.gripper_transitions_per_episode == pytest.approx(
+        tiled.gripper_transitions_per_episode
+    )
 
 
 def test_withholding_the_gripper_number_moves_no_rung_points() -> None:
@@ -484,6 +510,15 @@ def test_report_round_trips_and_renders() -> None:
 
 
 def test_script_scores_a_run_directory(tmp_path: Path) -> None:
+    """The default invocation scores every registered spec, each into its OWN pair of files.
+
+    ``bench.json`` is the artifact recorded verdicts were read from, so it has to keep meaning
+    the default spec forever. Naming the files is the whole mechanism: if a later spec's report
+    landed on ``bench.json`` the run's headline would silently change to a rule it was never
+    scored under, and neither the exit code, the stdout nor ``run_name`` would look any
+    different — which is why the filename set and each file's ``spec_version`` are asserted here
+    rather than the fact that something was written.
+    """
     targets = [constant(0.1), constant(0.2), constant(0.3)]
     run_dir = tmp_path / "run-a"
     run_dir.mkdir()
@@ -497,9 +532,25 @@ def test_script_scores_a_run_directory(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "WAM-Bench" in result.stdout
+
+    others = [v for v in sorted(BENCH_SPECS) if v != BENCH_SPEC_DEFAULT]
+    assert others, "with one registered spec this test cannot see the collision it guards"
+    assert {p.name for p in run_dir.iterdir()} == {
+        "predictions.jsonl",
+        "bench.json",
+        "bench.md",
+        *(f"bench-{v}.{ext}" for v in others for ext in ("json", "md")),
+    }
+
     written = BenchReport.from_json((run_dir / "bench.json").read_text(encoding="utf-8"))
     assert written.run_name == "run-a"
+    assert written.spec_version == BENCH_SPEC_DEFAULT
     assert (run_dir / "bench.md").read_text(encoding="utf-8").startswith("# WAM-Bench")
+    for version in others:
+        report = BenchReport.from_json(
+            (run_dir / f"bench-{version}.json").read_text(encoding="utf-8")
+        )
+        assert report.spec_version == version
 
 
 def test_script_refuses_to_compare_different_holdouts(tmp_path: Path) -> None:

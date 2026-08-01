@@ -163,10 +163,28 @@ def test_the_shipped_gr00t_gripper_mapping_fails_the_audit() -> None:
 
 
 def test_the_same_hand_passes_when_the_dead_hand_is_not_averaged_in() -> None:
-    """Identical joints, the active-hand mapping: two debounced transitions in every episode."""
+    """Identical joints, the active-hand mapping: two debounced transitions in every episode.
+
+    The dead hand is given the shape it has in a real recording set rather than a constant: a
+    different rest angle per session plus a little drift inside each one. That is what separates
+    the two candidate ranking rules — its GLOBAL range is then larger than the grasping hand's,
+    so electing the active hand on the global peak-to-peak would pick the frozen one, and only
+    the mean PER-EPISODE range ``fit_hand_affine`` documents still picks the left. With the right
+    hand pinned to one constant both rules agree and ``p2p_right == 0`` turns the ratio below
+    into "> 0", which no mapping bug can fail.
+    """
     episodes = [grasp_state_sequence(seed=i) for i in range(6)]
+    for i, state in enumerate(episodes):
+        drift = np.linspace(0.0, 0.002, state.shape[0], dtype=np.float32)
+        state[:, 36:43] = RIGHT_HAND_REST + 0.2 * i + drift[:, None]
+
+    right_global = float(np.ptp(np.concatenate([conv.raw_synergy(s[:, 36:43]) for s in episodes])))
+    left_global = float(np.ptp(np.concatenate([conv.raw_synergy(s[:, 29:36]) for s in episodes])))
+    assert right_global > left_global  # the frozen hand wins on the rule that must NOT be used
+
     affine = conv.fit_hand_affine(episodes)
     assert affine.active == "left"
+    assert affine.p2p_right > 0.0  # a measured drift, so the ratio below is a ratio
     assert affine.p2p_left > 100 * affine.p2p_right
 
     series = []
@@ -317,9 +335,15 @@ def test_the_gripper_affine_is_dataset_level_not_per_episode() -> None:
 
 
 def _write_wam_episode(
-    root: Path, name: str, gripper: np.ndarray, *, with_frames: bool = True
+    root: Path, name: str, gripper: np.ndarray, *, with_frames: bool = True, stride: int = 8
 ) -> None:
-    """Minimal WAM episode whose gripper_state is ``gripper`` [n, 2] and target = column 0."""
+    """Minimal WAM episode whose gripper_state is ``gripper`` [n, 2] and target = column 0.
+
+    ``stride`` is the emission cadence in control steps. At the default it equals the 8-step
+    horizon, so the chunks tile the episode and every written step was executed. A shorter one is
+    FR-05's receding horizon: consecutive chunks overlap and only their executed prefix was ever
+    commanded.
+    """
     spec = CanonicalSpaceSpec(joint_names=("j0", "j1"), gripper_dims=gripper.shape[1])
     n = gripper.shape[0]
     zero_imu = IMUState(
@@ -342,7 +366,7 @@ def _write_wam_episode(
                     validity=ValidityMask(q=True, dq=True, imu=False, gripper=True),
                 )
             )
-        for start in range(0, n - 8, 8):
+        for start in range(0, n - 8, stride):
             writer.add_action(
                 ActionChunk(
                     mode=ActionMode.JOINT_DELTA,
@@ -350,7 +374,7 @@ def _write_wam_episode(
                     gripper_target=gripper[start : start + 8, 0].astype(np.float32),
                     dt_s=DT,
                 ),
-                executed_prefix=8,
+                executed_prefix=stride,
                 timestamp_ns=int(start * DT * 1e9),
             )
 
@@ -379,6 +403,33 @@ def test_audit_reports_each_state_gripper_column_separately(tmp_path: Path) -> N
     assert report.channel("state.gripper[1]").debounced_transitions_per_episode == 0.0
     assert report.passed  # the scored channel is the live one
     assert report.source_kind == "wam"
+
+
+def test_overlapping_chunks_contribute_only_the_steps_that_were_executed(tmp_path: Path) -> None:
+    """Under a receding horizon the same control step is commanded by several chunks.
+
+    Concatenating whole chunks replays every overlapped step, so one physical open/close is
+    counted once per chunk that saw it: 15 transitions per episode here instead of 3, on 352
+    steps instead of the 88 the robot actually executed. Every clause reads the passing way,
+    which is why the audit slices each chunk to its executed prefix — and why the fixtures above,
+    where stride equals the horizon, cannot tell the two apart.
+    """
+    live = _square_gripper()  # 3 open/close edges in 96 steps
+    for i in range(3):
+        _write_wam_episode(tmp_path, f"ep{i:03d}", np.stack([live, live], axis=1), stride=2)
+
+    report = audit_wam_dataset(tmp_path)
+    target = report.channel("action.gripper_target")
+    recorded = report.channel("state.gripper[0]")
+
+    # 44 chunks x an executed prefix of 2 — the executed prefixes tile the episode exactly once.
+    assert target.num_steps == 3 * 88
+    # And so the commanded channel reports the same events as the state it was written from.
+    assert target.debounced_transitions_per_episode == pytest.approx(3.0)
+    assert target.debounced_transitions_per_episode == pytest.approx(
+        recorded.debounced_transitions_per_episode
+    )
+    assert target.crossings_per_episode == pytest.approx(recorded.crossings_per_episode)
 
 
 def test_audit_fails_and_names_every_broken_clause(tmp_path: Path) -> None:

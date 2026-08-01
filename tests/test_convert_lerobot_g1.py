@@ -86,14 +86,25 @@ def test_relabel_chunks_are_executed_state_deltas() -> None:
     np.testing.assert_allclose(chunk.gripper_target, grip[9:17].mean(axis=-1), atol=1e-7)
 
 
-def _write_fake_lerobot_episode(root: Path, episode_index: int, n: int = 40) -> None:
-    """Minimal GR00T-layout episode: 43-dim states at 30 Hz + a tiny ego mp4."""
+def _write_fake_lerobot_episode(
+    root: Path, episode_index: int, n: int = 40, hand_offset: float = 0.0
+) -> None:
+    """Minimal GR00T-layout episode: 43-dim states at 30 Hz + a tiny ego mp4.
+
+    ``hand_offset`` replaces the LEFT hand with a closing hand parked ``hand_offset`` rad off the
+    [-1, 1] scale the legacy gripper formula assumes: it is then the most active joint group in
+    the episode, so it is both what legacy rails and what ``active-hand`` fits. At the default
+    the whole state is inside [-1, 1] and nothing rails, which is what every other test wants.
+    """
     import cv2
 
     rng = np.random.default_rng(episode_index)
     base = rng.uniform(-0.3, 0.3, size=43).astype(np.float32)
     drift = rng.uniform(-0.005, 0.005, size=(n, 43)).astype(np.float32)
     state = base + np.cumsum(drift, axis=0)
+    if hand_offset:
+        closing = np.linspace(0.0, 0.5, n, dtype=np.float32)
+        state[:, conv.LEFT_HAND] = hand_offset + closing[:, None]
     ts = (np.arange(n) / 30.0).astype(np.float32)
 
     data_dir = root / "data" / "chunk-000"
@@ -176,3 +187,48 @@ def test_convert_episode_roundtrip_passes_validation_gates(tmp_path: Path) -> No
     chunk, executed_prefix, _ts = chunks[0]
     assert chunk.num_steps == 8 and executed_prefix == 8
     assert float(np.abs(np.asarray(chunk.targets)).max()) < 1.0  # tanh-learnable
+
+
+def _convert_args(source: Path, out: Path, *extra: str) -> list[str]:
+    return [
+        "--source", str(source),
+        "--out", str(out),
+        "--episodes", "2",
+        "--chunk-steps", "8",
+        "--resize", "24", "32",
+        *extra,
+    ]  # fmt: skip
+
+
+def test_the_converter_refuses_a_source_the_legacy_mapping_would_rail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``legacy_clipped_frac`` is only a gate if the conversion actually stops on it.
+
+    The roundtrip above converts a source that happens to live inside [-1, 1], so it walks
+    through the same branch measuring 0.0 and can never show the refusal. Here the left hand is
+    off that scale: every one of its samples is replaced by a rail in the written dataset, where
+    it is indistinguishable from a measurement — so the run has to end before any episode is
+    written, name the fraction it measured, and name the mapping that does not need to assume a
+    scale. That last part is what makes the refusal safe to be absolute: the alternative it
+    points at converts THIS source, and clips nothing.
+    """
+    source = tmp_path / "lerobot"
+    for i in range(2):
+        _write_fake_lerobot_episode(source, i, hand_offset=1.8)
+
+    out = tmp_path / "railed"
+    assert conv.main(_convert_args(source, out, "--gripper-mapping", "legacy")) == 2
+    err = capsys.readouterr().err
+    assert "clips 0.5000 of samples" in err  # one hand of two, the measurement not just a verdict
+    assert "--gripper-mapping active-hand" in err
+    assert list(out.glob("gr00t-apple-*")) == []  # refused before a single episode was written
+
+    fitted = tmp_path / "fitted"
+    assert conv.main(_convert_args(source, fitted, "--gripper-mapping", "active-hand")) == 0
+    reader = EpisodeReader(fitted / "gr00t-apple-000000")
+    left = np.stack([s.gripper_state for s in reader.read_states()])[:, 0]
+    assert 0.0 <= left.min() and left.max() <= 1.0
+    # The same hand the legacy formula flattened onto one rail spans the range once the mapping
+    # is fitted instead of assumed — so the refusal costs nothing that had to be given up.
+    assert float(left.max() - left.min()) > 0.9

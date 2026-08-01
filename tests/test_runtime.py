@@ -147,11 +147,17 @@ def read_records(path: Path) -> list[dict]:
 # -- derivation from the data ------------------------------------------------------------
 
 
-def _write_episode(root: Path, name: str, instruction: str, masks: list[ValidityMask]) -> None:
-    """One minimal episode with an explicit per-row validity mask sequence."""
+def _write_episode(
+    root: Path, name: str, instruction: str, masks: list[ValidityMask], *, subdir: str = ""
+) -> None:
+    """One minimal episode with an explicit per-row validity mask sequence.
+
+    ``subdir`` puts the episode below ``root`` the way a chunked LeRobot conversion does, which
+    is the only layout in which an episode's path and its directory name differ.
+    """
     spec = CanonicalSpaceSpec(joint_names=("a", "b"), gripper_dims=1)
     with EpisodeWriter(
-        root / name, episode_id=name, spec=spec, fps=10.0, instruction=instruction
+        root / subdir / name, episode_id=name, spec=spec, fps=10.0, instruction=instruction
     ) as w:
         for i, mask in enumerate(masks):
             w.add_state(
@@ -229,21 +235,42 @@ def test_contract_from_dataset_restricted_to_a_split_ignores_the_episodes_outsid
 def test_contract_from_dataset_hashes_the_same_episodes_the_trainer_hashes(
     tmp_path: Path,
 ) -> None:
-    """dataset_snapshot_ref must be comparable to the checkpoint's, or binding is guesswork."""
+    """dataset_snapshot_ref must be comparable to the checkpoint's, or binding is guesswork.
+
+    Two properties of that convention, neither of which a flat root can show. The episodes live
+    in different chunk directories, so what is hashed is each episode's path RELATIVE TO THE
+    ROOT and not its directory name — the shape ``convert_lerobot_g1`` writes, and the only one
+    in which the two differ. And the restricted contract is hashed as well: ``train_t16_lora``
+    narrows its hash to the episodes it actually trained on and ``eval_t16`` refuses a
+    checkpoint whose ref disagrees, so a contract that hashed the whole root would name a
+    training set that trained nothing.
+    """
     import hashlib
 
     from wam.data.episode import MANIFEST_FILENAME, list_episodes
 
     root = tmp_path / "ds"
-    _write_episode(root, "ep-0", "x", [ValidityMask()])
-    _write_episode(root, "ep-1", "x", [ValidityMask()])
+    _write_episode(root, "ep-0", "x", [ValidityMask()], subdir="chunk-000")
+    _write_episode(root, "ep-1", "x", [ValidityMask()], subdir="chunk-001")
 
-    digest = hashlib.sha256()
-    for episode_dir in list_episodes(root):
-        digest.update(str(episode_dir.relative_to(root)).encode("utf-8"))
-        digest.update((episode_dir / MANIFEST_FILENAME).read_bytes())
+    def snapshot(dirs: list[Path], key=lambda d: str(d.relative_to(root))) -> str:
+        """``train_t16_lora._dataset_snapshot_hash`` / ``eval_t16.dataset_snapshot_hash``."""
+        digest = hashlib.sha256()
+        for episode_dir in dirs:
+            digest.update(key(episode_dir).encode("utf-8"))
+            digest.update((episode_dir / MANIFEST_FILENAME).read_bytes())
+        return f"sha256:{digest.hexdigest()}"
 
-    assert PolicyContract.from_dataset(root).dataset_snapshot_ref == f"sha256:{digest.hexdigest()}"
+    episodes = list_episodes(root)
+    assert len(episodes) == 2
+    # Without this the "relative path" half of the convention is unobservable.
+    assert snapshot(episodes) != snapshot(episodes, key=lambda d: d.name)
+
+    assert PolicyContract.from_dataset(root).dataset_snapshot_ref == snapshot(episodes)
+
+    trained = PolicyContract.from_dataset(root, episode_ids=["ep-0"])
+    assert trained.dataset_snapshot_ref == snapshot(episodes[:1])
+    assert trained.dataset_snapshot_ref != snapshot(episodes)
 
 
 def test_contract_from_dataset_refuses_a_root_with_no_episodes_instead_of_declaring_nothing(

@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -333,6 +334,20 @@ def test_the_witness_comparison_counts_repeats(
         _run_eval(run_dir, holdout, tmp_path / "nope", train_episodes=TRAINED)
 
 
+#: ``--train-episodes`` followed by a value on the same line. Not a bare substring: every one of
+#: these jobs also EXPLAINS the flag in prose, and a shell comment is not an argument.
+_WITNESS_FLAG = re.compile(r"--train-episodes[=\s]+[^#\\\s]")
+
+
+def _passes_the_witness(sbatch_text: str) -> bool:
+    """True when a line that is not a comment actually hands ``--train-episodes`` a value."""
+    return any(
+        _WITNESS_FLAG.search(line)
+        for line in sbatch_text.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 def test_every_eval_sbatch_passes_the_split_witness() -> None:
     """The regression no test caught: ``verify_split`` grew a required argument and not one
     caller was updated, so four cluster jobs were one ``set -euo pipefail`` away from dying on
@@ -342,8 +357,24 @@ def test_every_eval_sbatch_passes_the_split_witness() -> None:
     """
     jobs = sorted((_REPO_ROOT / "cluster" / "discoverer").glob("6?_eval_*.sbatch"))
     assert jobs, "no eval sbatch files found — did they move?"
-    missing = [p.name for p in jobs if "--train-episodes" not in p.read_text()]
+    missing = [p.name for p in jobs if not _passes_the_witness(p.read_text())]
     assert not missing, f"eval jobs with no split witness: {missing}"
+
+    # And the scan has to be shown to discriminate, or it is a search for a word these files are
+    # full of. Every one of them documents --train-episodes in a comment next to passing it, so
+    # dropping it from the invocation and leaving the prose — the easy half of exactly the
+    # regression above — keeps a plain `in` check green. The mutation is applied to a COPY of
+    # each job's text: the cluster files themselves are never edited to make a point.
+    for path in jobs:
+        without_the_flag = "\n".join(
+            f"# {line}" if "--train-episodes" in line else line
+            for line in path.read_text().splitlines()
+        )
+        assert "--train-episodes" in without_the_flag, path.name
+        assert not _passes_the_witness(without_the_flag), path.name
+
+    # A flag with nothing after it is not a witness either — verify_split needs the file.
+    assert not _passes_the_witness("srun python eval_t16.py --train-episodes\n")
 
 
 def test_skip_split_check_scores_but_marks_the_output(
