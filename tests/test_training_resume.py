@@ -451,6 +451,127 @@ def test_grad_accum_consumes_one_batch_per_micro_step(tmp_path: Path) -> None:
     assert all(math.isfinite(entry["total"]) for entry in history)
 
 
+# -- the I-8 rung flag and the training set recorded in the checkpoint -------------------------
+
+
+def _rung_file(path: Path, ids: tuple[str, ...]) -> Path:
+    path.write_text("# a rung, with a comment and a blank line\n\n" + "\n".join(ids) + "\n")
+    return path
+
+
+def test_train_episodes_selects_exactly_the_listed_episodes_and_records_them(
+    tmp_path: Path,
+) -> None:
+    """A rung trains on its file and nothing else, and says so in its own provenance.
+
+    The recorded list is what lets the evaluator prove a rung's holdout was unseen at all:
+    a 40-episode run is not the complement of the holdout, so the complement proof — the only
+    one that existed before I-8 — refuses it by construction.
+    """
+    rung = _rung_file(tmp_path / "rung.txt", ("d1-0002", "d1-0005"))
+    out_dir = tmp_path / "rung-run"
+
+    assert tw.main(_argv(out_dir, **{"--train-episodes": str(rung), "--steps": "2"})) == 0
+
+    metadata = json.loads((out_dir / "run_metadata.json").read_text())
+    # list_episodes order, not the file's order and not a set: the snapshot digest is
+    # sequential, so the evaluator has to be able to replay this list verbatim.
+    assert metadata["train_episode_ids"] == ["d1-0002", "d1-0005"]
+
+    _config, embedded = tw._read_embedded_config(
+        tw.CheckpointManager(out_dir).latest() / tw.MODEL_FILENAME
+    )
+    assert embedded.train_episode_ids == ("d1-0002", "d1-0005")
+    assert embedded.dataset_snapshot_ref == metadata["dataset_snapshot_ref"]
+
+
+def test_a_run_without_the_rung_flag_still_records_what_it_trained_on(tmp_path: Path) -> None:
+    """The field is not conditional on --train-episodes. A full run records its full set, so
+    'no ids recorded' means exactly one thing: a checkpoint written before I-8."""
+    out_dir = tmp_path / "full-run"
+    assert tw.main(_argv(out_dir, **{"--steps": "2"})) == 0
+
+    metadata = json.loads((out_dir / "run_metadata.json").read_text())
+    assert metadata["train_episode_ids"] == [f"d1-{i:04d}" for i in range(8)]
+
+
+def test_train_episodes_overlapping_the_holdout_is_fatal(tmp_path: Path) -> None:
+    """The leak has to die at the PRODUCING end too.
+
+    Belt and braces against the evaluator's own check: if a rung file naming a held-out episode
+    is allowed to reach a checkpoint, the only thing standing between it and a published number
+    is somebody remembering to point --holdout at the right file.
+    """
+    rung = _rung_file(tmp_path / "leaky.txt", ("d1-0002", "d1-0006"))
+    holdout = _rung_file(tmp_path / "holdout.txt", ("d1-0006", "d1-0007"))
+
+    with pytest.raises(SystemExit, match="share 1 episode"):
+        tw.main(
+            _argv(
+                tmp_path / "nope",
+                **{"--train-episodes": str(rung), "--exclude-episodes": str(holdout)},
+            )
+        )
+
+
+def test_train_episodes_listing_an_absent_episode_is_fatal(tmp_path: Path) -> None:
+    """Mirrors --exclude-episodes: a rung file that does not line up with the dataset is a
+    typo, not a smaller rung, and silently training on 39 of 40 would go unnoticed."""
+    rung = _rung_file(tmp_path / "ghost.txt", ("d1-0002", "d1-9999"))
+
+    with pytest.raises(SystemExit, match="absent from"):
+        tw.main(_argv(tmp_path / "nope", **{"--train-episodes": str(rung)}))
+
+
+def test_resuming_a_chain_against_a_different_episode_set_is_fatal(tmp_path: Path) -> None:
+    """The copy-paste that would otherwise produce a wrong-but-self-consistent proof.
+
+    Three I-8 rungs share one dataset root and differ only in --train-episodes. Resuming
+    rung-120's --out-dir with rung-40's file loads rung-120's weights and stamps rung-40's
+    snapshot ref onto the final checkpoint — after which the evaluator's disjointness proof
+    PASSES on a lie. ``_report_config_drift`` cannot catch it: the episode list is not part of
+    the config, so both jobs have the identical config hash.
+    """
+    first = _rung_file(tmp_path / "a.txt", ("d1-0000", "d1-0001", "d1-0002"))
+    second = _rung_file(tmp_path / "b.txt", ("d1-0003", "d1-0004", "d1-0005"))
+    out_dir = tmp_path / "chain"
+
+    assert tw.main(_argv(out_dir, **{"--train-episodes": str(first), "--steps": "2"})) == 0
+    (out_dir / tw.DONE_FILENAME).unlink()  # pretend the chain was preempted, not finished
+
+    with pytest.raises(SystemExit, match="REFUSING TO RESUME"):
+        tw.main(
+            _argv(
+                out_dir, **{"--train-episodes": str(second), "--resume": "latest", "--steps": "4"}
+            )
+        )
+    # ...and resuming with the SAME rung still works, or the guard would have broken the chain.
+    assert (
+        tw.main(
+            _argv(out_dir, **{"--train-episodes": str(first), "--resume": "latest", "--steps": "4"})
+        )
+        == 0
+    )
+
+
+def test_the_rung_flag_is_reported_in_the_dry_run_line(tmp_path: Path) -> None:
+    """The dry run is the login-node pre-flight; if it does not say which rung it resolved,
+    the one thing that distinguishes three otherwise identical submissions is invisible."""
+    import contextlib
+    import io
+
+    rung = _rung_file(tmp_path / "rung.txt", ("d1-0002", "d1-0005"))
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        assert (
+            tw.main(_argv(tmp_path / "dry", **{"--train-episodes": str(rung), "--dry-run": ""}))
+            == 0
+        )
+
+    assert "2 train episodes" in buffer.getvalue()
+    assert "rung.txt" in buffer.getvalue()
+
+
 # -- sentinels and the flag surface ------------------------------------------------------------
 
 
@@ -625,3 +746,84 @@ def test_sbatch_flag_set_parses_in_a_subprocess(tmp_path: Path) -> None:
     assert "dry run OK" in result.stdout
     assert "backbone=tiny" in result.stdout
     assert "checkpoint_path" in result.stdout  # the splice ran and reported the ignored flag
+
+
+def _sbatch_trainer_flags(path: Path) -> list[str]:
+    """The ``--flag`` names in an sbatch's ``python "${TRAIN}" ... &`` invocation.
+
+    Read out of the file rather than copied into the test, so a flag renamed in one place and
+    not the other fails here instead of on an H200 after the job has queued.
+    """
+    lines = path.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith('python "${TRAIN}"'))
+    end = next(i for i, line in enumerate(lines[start:], start) if line.rstrip().endswith("&"))
+    block = " ".join(lines[start : end + 1])
+    return [token for token in block.split() if token.startswith("--")]
+
+
+def test_i8_rung_sbatch_flag_set_parses_in_a_subprocess(tmp_path: Path) -> None:
+    """The EXACT flag set cluster/discoverer/55_train_i8_rung.sbatch passes, on CPU.
+
+    55 is submitted three times against the deliverable allocation. A typo in --train-episodes
+    surfaces only after the job has queued, been scheduled and burned an H200 slot to die in
+    argparse — and the rung it was supposed to train is then simply missing from the curve.
+    """
+    sbatch = _REPO_ROOT / "cluster" / "discoverer" / "55_train_i8_rung.sbatch"
+    flags = _sbatch_trainer_flags(sbatch)
+    assert "--train-episodes" in flags, "55 no longer passes the rung file"
+    assert set(flags) >= set(_sbatch_trainer_flags(sbatch.with_name("50_train_t16.sbatch"))), (
+        "55 dropped a flag 50_train_t16.sbatch passes — the rungs must differ from the T-16 "
+        "run in the training SET only"
+    )
+
+    backbone_yaml = tmp_path / "tiny_backbone.yaml"
+    backbone_yaml.write_text(  # the tiny twin of configs/model/wan22_ti2v_5b.yaml
+        'wam_config_version: "0.1.0"\n'
+        "backbone:\n"
+        "  kind: tiny\n"
+        "  feature_dim: 64\n"
+        "  patch_size: 20\n"
+        "  depth: 2\n"
+        "  num_heads: 4\n"
+        "  num_frames: 9\n"
+        "  image_hw: [120, 160]\n"
+        "  text_vocab: 256\n"
+        "  max_text_tokens: 16\n"
+        "  state_embedding_dim: 32\n"
+    )
+    rung = _rung_file(tmp_path / "i8_train_002.txt", ("d1-0000", "d1-0001"))
+    holdout = _rung_file(tmp_path / "holdout.txt", ("d1-0006", "d1-0007"))
+    values = {
+        "--backbone-config": str(backbone_yaml),
+        "--backbone-source": str(tmp_path / "weights"),
+        "--training-config": str(_GR00T_YAML),
+        "--dataset": str(_MOCK_D1),
+        "--exclude-episodes": str(holdout),
+        "--train-episodes": str(rung),
+        "--seed": "0",
+        "--steps": "20000",
+        "--camera": "ego",
+        "--out-dir": str(tmp_path / "run"),
+        "--resume": "latest",
+        "--checkpoint-every-min": "30",
+        "--checkpoints-total-limit": "3",
+        "--save-adapter-only": None,
+        "--device": "cuda",  # a string in the config until a trainer is built; --dry-run builds none
+    }
+    assert list(values) == flags, "55's flag list drifted away from this test"
+
+    argv: list[str] = []
+    for flag, value in values.items():
+        argv.append(flag)
+        if value is not None:
+            argv.append(value)
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), *argv, "--dry-run"],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "dry run OK" in result.stdout
+    assert "2 train episodes, 2 held out" in result.stdout

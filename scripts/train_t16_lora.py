@@ -18,6 +18,11 @@ not an optimization, and three properties carry the whole chain:
 3. **One config hash for the chain (AC-04).** ``--resume`` uses the CHECKPOINT's config
    verbatim (only ``--device`` may be overridden). An edited YAML is reported, never applied:
    otherwise chunk 7 of a chain would silently be a different experiment in the same directory.
+4. **One training set for the chain.** Every checkpoint records both ``dataset_snapshot_ref``
+   and the ordered ``train_episode_ids`` it was fed, and a resume whose episode set hashes to
+   something else is fatal. The I-8 rungs (``--train-episodes``) share one dataset root and
+   differ only in that file, so the wrong ``--out-dir`` would otherwise stamp a small rung's
+   provenance onto a large rung's weights — wrong, self-consistent, and undetectable later.
 
 Contract with the batch script (its header documents the same three lines):
   - SIGUSR1 -> checkpoint at the next step boundary, then exit 0;
@@ -345,10 +350,13 @@ class CheckpointManager:
         run_id: str,
         elapsed_s: float = 0.0,
         dataset_snapshot_ref: str | None = None,
+        train_episode_ids: Sequence[str] | None = None,
         git_commit: str | None = None,
         adapter_only: bool = False,
     ) -> Path:
         """Write ``step`` atomically, repoint ``latest``, prune. Returns the final directory."""
+        from wam.training._utils import save_checkpoint as write_checkpoint
+
         final = self.checkpoints_dir / f"{STEP_DIR_PREFIX}{step:0{STEP_DIR_DIGITS}d}"
         tmp = final.with_name(final.name + ".tmp")
         shutil.rmtree(tmp, ignore_errors=True)
@@ -358,13 +366,25 @@ class CheckpointManager:
         # 30-minute checkpoint interval stays affordable next to a frozen multi-GB base. The
         # embedded config + RunMetadata ride along either way (FR-10, AC-04).
         payload_state = trainer.model.trainable_state_dict() if adapter_only else None
-        metadata = trainer.save_checkpoint(
-            tmp / MODEL_FILENAME,
-            run_id=run_id,
+        # The RunMetadata is assembled HERE rather than inside JointTrainer.save_checkpoint,
+        # which would otherwise need a fourth pure pass-through kwarg (and the same one added
+        # to ActionOnlyTrainer to keep them from diverging) to serve one caller. The chain
+        # driver is the component that knows which episodes were fed; the trainer does not.
+        # Field-for-field identical to what trainer.save_checkpoint would have produced —
+        # including checkpoint_ref pointing at the .tmp path, which is what every archived
+        # checkpoint records — so no recorded provenance changes shape.
+        metadata = RunMetadata.create(
+            run_id,
+            trainer.config,
+            checkpoint_ref=str(tmp / MODEL_FILENAME),
             dataset_snapshot_ref=dataset_snapshot_ref,
+            train_episode_ids=train_episode_ids,
             git_commit=git_commit,
-            state_dict=payload_state,
         )
+        write_checkpoint(
+            trainer.model, trainer.config, tmp / MODEL_FILENAME, metadata, state_dict=payload_state
+        )
+        trainer.metadata = metadata  # keep the trainer's own view of its last write intact
         torch.save(
             {
                 "trainer": trainer.state_dict(),  # optimizer moments + both RNG streams
@@ -640,26 +660,64 @@ def _load_excluded_ids(path: Path) -> set[str]:
     return load_episode_ids(path)
 
 
-def _training_episodes(root: Path, exclude: Path | None) -> tuple[list[Path], set[str]]:
-    """Episode dirs under ``root`` minus ``exclude``, with the split logged and verified."""
+def _training_episodes(
+    root: Path, exclude: Path | None, include: Path | None = None
+) -> tuple[list[Path], set[str]]:
+    """Episode dirs under ``root`` minus ``exclude``, narrowed to ``include``, verified.
+
+    ``include`` is an I-8 rung: a committed subset of the training set, so the only thing that
+    varies between rungs is how many episodes there are. It is checked against the holdout
+    first, because a rung file naming a held-out episode is the exact leak the whole split
+    proof exists to stop — and it has to die at the PRODUCING end too, or the leak reaches a
+    checkpoint and only the evaluator stands between it and a published number.
+
+    The filter is applied to the already-sorted ``list_episodes`` order and never re-sorts:
+    ``_dataset_snapshot_hash`` is an order-sensitive sequential digest, and the evaluator
+    replays the recorded order to reproduce it.
+    """
     from wam.data.episode import list_episodes
 
     episodes = list_episodes(root)
-    if exclude is None:
-        return episodes, set()
-    excluded = _load_excluded_ids(exclude)
-    present = {p.name for p in episodes}
-    missing = excluded - present
-    if missing:
-        # Silently training on an episode the evaluator believes is held out is the exact
-        # failure this flag exists to prevent, so a split that does not line up is fatal.
-        raise SystemExit(
-            f"--exclude-episodes lists {len(missing)} episode(s) absent from {root}: "
-            f"{sorted(missing)[:5]}{'...' if len(missing) > 5 else ''}"
-        )
+    excluded: set[str] = set()
+    if exclude is not None:
+        excluded = _load_excluded_ids(exclude)
+        present = {p.name for p in episodes}
+        missing = excluded - present
+        if missing:
+            # Silently training on an episode the evaluator believes is held out is the exact
+            # failure this flag exists to prevent, so a split that does not line up is fatal.
+            raise SystemExit(
+                f"--exclude-episodes lists {len(missing)} episode(s) absent from {root}: "
+                f"{sorted(missing)[:5]}{'...' if len(missing) > 5 else ''}"
+            )
     kept = [p for p in episodes if p.name not in excluded]
-    if not kept:
-        raise SystemExit(f"--exclude-episodes removed every episode under {root}")
+    if include is not None:
+        included = _load_excluded_ids(include)
+        overlap = sorted(included & excluded)
+        if overlap:
+            raise SystemExit(
+                f"--train-episodes and --exclude-episodes share {len(overlap)} episode(s): "
+                f"{overlap[:5]}{'...' if len(overlap) > 5 else ''} — a rung that names a "
+                "held-out episode would train on what it is later scored against"
+            )
+        absent = sorted(included - {p.name for p in episodes})
+        if absent:
+            # A rung file that does not line up with the dataset is a typo, not a smaller rung.
+            raise SystemExit(
+                f"--train-episodes lists {len(absent)} episode(s) absent from {root}: "
+                f"{absent[:5]}{'...' if len(absent) > 5 else ''}"
+            )
+        kept = [p for p in kept if p.name in included]
+    if not kept and (exclude is not None or include is not None):
+        selectors = " / ".join(
+            flag
+            for flag, given in (
+                ("--exclude-episodes", exclude is not None),
+                ("--train-episodes", include is not None),
+            )
+            if given
+        )
+        raise SystemExit(f"{selectors} removed every episode under {root}")
     return kept, excluded
 
 
@@ -753,6 +811,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="file of episode ids to hold out (plain list, or a baseline predictions.jsonl) — "
         "fine-tuning on the episodes the ablation scores on invalidates the AC-07 verdict",
     )
+    parser.add_argument(
+        "--train-episodes",
+        type=Path,
+        default=None,
+        help="file of episode ids to train on (plain list, or a predictions.jsonl) — one rung of "
+        "the I-8 data-scaling curve; default: every episode under --dataset minus "
+        "--exclude-episodes",
+    )
     parser.add_argument("--camera", type=str, default=None, help="override training.camera")
     parser.add_argument("--out-dir", type=Path, required=True, help="run dir, shared by the chain")
     parser.add_argument(
@@ -825,11 +891,12 @@ def main(argv: list[str] | None = None) -> int:
             raise  # fresh start: a config that does not validate is a hard, loud failure
         yaml_error = exc
 
+    ckpt_metadata: RunMetadata | None = None
     if resume_from is None:
         config = yaml_config  # never None here — the except above re-raised on a fresh start
         _log(f"fresh start from {args.training_config}")
     else:
-        config, _ckpt_metadata = _restored_config(resume_from, args.device)
+        config, ckpt_metadata = _restored_config(resume_from, args.device)
         _report_config_drift(config, yaml_config, yaml_error)
 
     run_id = args.run_id or out_dir.name
@@ -845,23 +912,29 @@ def main(argv: list[str] | None = None) -> int:
         # cross-checks before a job is ever queued. Deliberately touches neither the weights
         # nor the frames — both are the expensive part and neither can fail in a new way here.
         episodes, excluded = (
-            _training_episodes(args.dataset, args.exclude_episodes)
+            _training_episodes(args.dataset, args.exclude_episodes, args.train_episodes)
             if args.dataset.is_dir()
             else ([], set())
         )
         _log(
             f"dry run OK | dataset {args.dataset} ({len(episodes)} train episodes, "
-            f"{len(excluded)} held out) | out {out_dir} | "
+            f"{len(excluded)} held out"
+            + (f", rung {args.train_episodes}" if args.train_episodes else "")
+            + f") | out {out_dir} | "
             f"resume={resume_from} | checkpoint every {args.checkpoint_every_min} min, "
             f"keep {args.checkpoints_total_limit}, adapter_only={args.save_adapter_only} | "
             f"max_hours={args.max_hours}"
         )
         return 0
 
-    episodes, excluded = _training_episodes(args.dataset, args.exclude_episodes)
+    episodes, excluded = _training_episodes(
+        args.dataset, args.exclude_episodes, args.train_episodes
+    )
+    train_episode_ids = [p.name for p in episodes]
     _log(
         f"training on {len(episodes)} episodes, {len(excluded)} held out"
         + (f" via {args.exclude_episodes}" if args.exclude_episodes else " (no holdout)")
+        + (f" | rung {args.train_episodes}" if args.train_episodes else "")
     )
     dataset = EpisodeDataset(
         episodes,
@@ -870,6 +943,24 @@ def main(argv: list[str] | None = None) -> int:
         chunk_steps=config.head.num_steps,
     )
     snapshot_ref = _dataset_snapshot_hash(args.dataset, episodes)
+    if ckpt_metadata is not None and ckpt_metadata.dataset_snapshot_ref not in (None, snapshot_ref):
+        # Three I-8 rungs share one dataset root and differ ONLY in --train-episodes, so
+        # resuming rung-120's --out-dir with rung-40's rung file is one copy-paste away. That
+        # would load rung-120's weights and stamp rung-40's snapshot ref onto the final
+        # checkpoint: wrong, internally consistent, and the split proof would then PASS on a
+        # lie. _report_config_drift does not cover it — the episode list is not part of the
+        # config — so it has to be checked against the recorded snapshot instead.
+        recorded = ckpt_metadata.train_episode_ids
+        raise SystemExit(
+            "REFUSING TO RESUME — this job's training set is not the one the checkpoint was "
+            "trained on.\n"
+            f"  checkpoint trained on: {ckpt_metadata.dataset_snapshot_ref} "
+            f"({len(recorded) if recorded is not None else 'unrecorded'} episodes)\n"
+            f"  this job would train on: {snapshot_ref} ({len(episodes)} episodes)\n"
+            f"  (--dataset {args.dataset}, --exclude-episodes {args.exclude_episodes}, "
+            f"--train-episodes {args.train_episodes})\n"
+            "Point --out-dir at a new directory for a different training set."
+        )
     # On the cluster the repo is rsynced without .git, so read_git_commit() finds no repository
     # and reports "unknown" — which would leave the deliverable run with no code provenance.
     # cluster/discoverer/sync.sh stamps the hash into WAM_GIT_COMMIT for exactly this case.
@@ -899,6 +990,7 @@ def main(argv: list[str] | None = None) -> int:
         config,
         checkpoint_ref=str(out_dir),
         dataset_snapshot_ref=snapshot_ref,
+        train_episode_ids=train_episode_ids,
         git_commit=git_commit,
     )
     (out_dir / "run_metadata.json").write_text(
@@ -924,6 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             elapsed_s=time.monotonic() - started,
             dataset_snapshot_ref=snapshot_ref,
+            train_episode_ids=train_episode_ids,
             git_commit=git_commit,
             adapter_only=args.save_adapter_only,
         )

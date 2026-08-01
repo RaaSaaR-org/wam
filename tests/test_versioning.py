@@ -120,6 +120,60 @@ class TestRunMetadata:
         meta = RunMetadata.create("r", {"a": 1}, clock=fixed_clock)
         assert isinstance(meta.git_commit, str) and meta.git_commit
 
+    def test_run_metadata_round_trips_train_episode_ids_in_recorded_order(self) -> None:
+        """The ids travel as safetensors metadata (a JSON string) and come back as a tuple.
+
+        Order is load-bearing, not cosmetic: ``dataset_snapshot_ref`` is a sequential digest
+        over the episodes in the order the trainer iterated them, and ``eval_t16.verify_split``
+        replays exactly this list to reproduce it. A round trip that sorted, deduplicated or
+        set-ified the field would break the proof rather than the formatting.
+        """
+        ids = ("gr00t-apple-000070", "gr00t-apple-000027", "gr00t-apple-000038")
+        meta = RunMetadata.create(
+            "rung-040",
+            {"lr": 1e-4},
+            dataset_snapshot_ref="ds://test/0",
+            train_episode_ids=list(ids),
+            git_commit="deadbeef",
+            clock=fixed_clock,
+        )
+        assert meta.train_episode_ids == ids
+
+        restored = RunMetadata.model_validate(json.loads(json.dumps(meta.to_dict())))
+        assert restored.train_episode_ids == ids
+        assert restored == meta
+
+    def test_run_metadata_defaults_train_episode_ids_to_none_for_archived_records(self) -> None:
+        """Every checkpoint written before I-8 lacks the key entirely.
+
+        ``None`` is what selects the COMPLEMENT split proof in the evaluator, so this default is
+        the reason ``runs/t16-lora-seed0`` re-scores under the rule it was recorded under
+        instead of needing a migration.
+        """
+        archived = {
+            "run_id": "t16-lora-seed0",
+            "config_hash": "45ee9e6035eb6afe0721e33d807800a307b445cc73fca60b95111d913dae0d63",
+            "git_commit": "78fc56d888a71088dac16b375bc9b54ebab33b0c",
+            "schema_version": SCHEMA_VERSION,
+            "interfaces_version": INTERFACES_VERSION,
+            "checkpoint_ref": "/valhalla/.../step-020000.tmp/model.safetensors",
+            "dataset_snapshot_ref": "sha256:598f193fcf1c160236688b3a7ade22ef6b33ad910a74ba4aa32c",
+            "created_at": "2026-07-30T01:30:02.943441Z",
+        }
+        assert "train_episode_ids" not in archived
+        assert RunMetadata.model_validate(archived).train_episode_ids is None
+
+    def test_train_episode_ids_do_not_move_the_config_hash(self) -> None:
+        """RunMetadata is not an input to config_hash, so adding the field cannot restate any
+        archived experiment's identity. Pinned because a hash that moved would silently split
+        one requeue chain into two experiments (AC-04)."""
+        config = {"lr": 1e-4, "seed": 7}
+        without = RunMetadata.create("r", config, git_commit="x", clock=fixed_clock)
+        with_ids = RunMetadata.create(
+            "r", config, train_episode_ids=["a", "b"], git_commit="x", clock=fixed_clock
+        )
+        assert without.config_hash == with_ids.config_hash == config_hash(config)
+
 
 class TestJsonlRunLogger:
     def test_every_line_stamped(self, tmp_path: Path) -> None:

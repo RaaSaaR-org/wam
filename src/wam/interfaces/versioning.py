@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -106,6 +106,17 @@ class RunMetadata(BaseModel):
     ``checkpoint_ref`` / ``dataset_snapshot_ref`` are ``None`` only for runs
     that genuinely have no model/data (e.g. hardware smoke tests) — evaluation
     gates must reject ``None`` for training/rollout records.
+
+    ``train_episode_ids`` is the ORDERED list of episode ids the run actually
+    trained on, in the order they were hashed into ``dataset_snapshot_ref``.
+    Order is part of the record, not decoration: the snapshot hash is a
+    sequential digest, so a re-sorted list no longer reproduces it. ``None``
+    means "this run trained on the complement of a holdout" — every checkpoint
+    written before I-8, and the reason the evaluator keeps a second proof path
+    rather than requiring a migration of archived checkpoints.
+
+    Adding the field is hash-safe by construction: ``RunMetadata`` is not an
+    input to ``config_hash``, so no recorded hash moves.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -117,6 +128,7 @@ class RunMetadata(BaseModel):
     interfaces_version: str = INTERFACES_VERSION
     checkpoint_ref: str | None = None
     dataset_snapshot_ref: str | None = None
+    train_episode_ids: tuple[str, ...] | None = None
     created_at: datetime
 
     @classmethod
@@ -127,6 +139,7 @@ class RunMetadata(BaseModel):
         *,
         checkpoint_ref: str | None = None,
         dataset_snapshot_ref: str | None = None,
+        train_episode_ids: Sequence[str] | None = None,
         git_commit: str | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> RunMetadata:
@@ -140,6 +153,9 @@ class RunMetadata(BaseModel):
             git_commit=git_commit if git_commit is not None else read_git_commit(),
             checkpoint_ref=checkpoint_ref,
             dataset_snapshot_ref=dataset_snapshot_ref,
+            train_episode_ids=(
+                None if train_episode_ids is None else tuple(str(e) for e in train_episode_ids)
+            ),
             created_at=clock(),
         )
 
