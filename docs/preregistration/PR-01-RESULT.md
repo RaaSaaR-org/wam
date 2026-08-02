@@ -128,3 +128,14 @@ Whether the model would work on a real robot, or generalize. Every test here is 
 demonstrations of one task with the apple in the same place. VERDICT C is a statement about the
 *evidence*, not about the policy — which is exactly why the follow-on is a closed-loop task-success
 measurement rather than an architecture rewrite.
+
+> **CORRECTED 2026-08-02 — mine, and left in place rather than edited out.** *"the apple in the
+> same place"* was an assumption I never measured, and it is false. The reach target varies by
+> **0.6623 rad** between episodes, about 0.35 of the within-episode motion scale, with a grasp
+> detected in 402 of 402 episodes. What *is* true is the weaker claim I should have made:
+> **61 % of that variation is already predictable from the robot's starting pose** (cross-validated
+> R² 0.6136), leaving 0.41 rad out-of-fold that proprioception cannot supply. Grasp *timing*, by contrast, is
+> essentially absent from the state (R² 0.0771) — an independent route to `PR-01-GRIPPER.md`'s
+> finding, reached without touching the gripper channel's values. Nothing else in this document
+> depends on the retracted sentence; the consequences that do are restated in
+> `PR-01-TASK-VARIATION.md`.
