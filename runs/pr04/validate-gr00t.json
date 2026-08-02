@@ -1,0 +1,38 @@
+{
+  "ceiling_dominates": true,
+  "chunks": {
+    "holdout": 1040,
+    "train": 9476
+  },
+  "dataset": "datasets/gr00t-apple-grip",
+  "episodes": {
+    "holdout": 40,
+    "train": 362
+  },
+  "expect": {
+    "reference": "gr00t",
+    "reproduced": true
+  },
+  "gates": {
+    "m1_max": 0.45,
+    "m1_pass": false,
+    "m2_min": 0.45,
+    "m2_pass": false,
+    "m3_min": 2.0,
+    "m3_pass": true
+  },
+  "holdout_file": "configs/splits/t18_holdout_episodes.txt",
+  "m1_momentum_share": 0.6556522372465616,
+  "m2_blind_unreachable": 0.32837142833422706,
+  "m3_transitions_per_episode": 2.014925373134328,
+  "mse": {
+    "blind_ceiling": 5.361517448074899e-06,
+    "const_velocity": 9.137663561390431e-06,
+    "zero_delta": 1.6327600349619252e-05
+  },
+  "selection": {
+    "gamma_scale": 2.0,
+    "inner_mse": 5.888043803050677e-06,
+    "lambda": 10.0
+  }
+}
