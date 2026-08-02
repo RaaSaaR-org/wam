@@ -78,6 +78,16 @@ Two corrections to how the numbers were first reported, both mine to pass on:
    887 MB of mp4 in, ~81 MB out. It writes a **new directory**; `datasets/gr00t-apple-full` is
    untouched and every archived `dataset_snapshot_ref` keeps verifying (AC-04). The provenance cost
    only exists if someone overwrites in place — don't.
+
+   > **Done 2026-08-02.** 402 episodes, ~7 min of CPU, 80 MB, affine `active=left
+   > offset=-0.438654 span=0.466748` fitted over all 402 (the value the converter docstring
+   > predicts). `scripts/audit_gripper.py` PASSES all four clauses on `datasets/gr00t-apple-grip`
+   > and still FAILS `datasets/gr00t-apple-full`: **2.01 vs 0.00** debounced transitions/episode,
+   > **99.0 % vs 0.0 %** of episodes with a full grasp cycle, p2p **0.6885 vs 0.0804**. The legacy
+   > root re-verified its per-episode checksums during that audit, so it is provably untouched.
+   > Steps 2–4 below are **not** done: the holdout is still 40 episodes, nothing is re-split,
+   > nothing is refit, and the metric is not pre-registered. Until it is, no gripper number
+   > measured on this root may be reported.
 2. **Widen the holdout in the same pass.** The metric is bottlenecked entirely by holdout size, not
    by training data: the fine-tune is not starved at 250 episodes, but 40 holdout episodes cannot
    resolve the effect. Holding out **150** yields ~290 transition chunks and ~2 500 post-flip steps,
