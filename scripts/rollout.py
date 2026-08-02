@@ -561,9 +561,15 @@ def _build_g1(args: argparse.Namespace):
         for key in ("q_min", "q_max", "dq_max")
         if key in limits_cfg
     }
-    dt_s = robot_section.get("control", {}).get("dt_s")
+    control_cfg = robot_section.get("control", {})
+    dt_s = control_cfg.get("dt_s")
     if dt_s is not None:
         config_kwargs["control_dt_s"] = float(dt_s)
+    # Bounded feed-forward (T-25c). Absent in configs/robot/g1.yaml on purpose, where the
+    # G1Config default of 0.0 keeps the carry off until OD-08 fixes real gains.
+    window = control_cfg.get("q_track_window")
+    if window is not None:
+        config_kwargs["q_track_window"] = tuple(float(x) for x in window)
     config = G1Config(**config_kwargs)
     limits: dict[str, Any] = {
         "q_min": config.q_min,
@@ -615,9 +621,15 @@ def _build_mujoco_g1(args: argparse.Namespace):
     config_kwargs.update(
         {key: tuple(float(x) for x in gains_cfg[key]) for key in ("kp", "kd") if key in gains_cfg}
     )
-    dt_s = robot_section.get("control", {}).get("dt_s")
+    control_cfg = robot_section.get("control", {})
+    dt_s = control_cfg.get("dt_s")
     if dt_s is not None:
         config_kwargs["control_dt_s"] = float(dt_s)
+    # Bounded feed-forward (T-25c). Absent in configs/robot/g1.yaml on purpose, where the
+    # G1Config default of 0.0 keeps the carry off until OD-08 fixes real gains.
+    window = control_cfg.get("q_track_window")
+    if window is not None:
+        config_kwargs["q_track_window"] = tuple(float(x) for x in window)
     config = G1Config(**config_kwargs)
     limits: dict[str, Any] = {
         "q_min": config.q_min,

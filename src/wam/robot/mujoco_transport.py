@@ -139,19 +139,29 @@ SIM GAINS — MEASURE THEM AGAINST THE PROTOCOL THE ADAPTER ACTUALLY USES
   That is not a robot arm. Measured: even flat kp=4000 with critical damping only reaches
   mean 0.86 / min 0.56. The under-execution is therefore a property of the CONTROL ARCHITECTURE
   (re-base on measurement, no feed-forward, no integral action) on a plant with finite servo
-  bandwidth — not a MuJoCo artifact and not a gain to tune away. It is recorded as a known
-  limitation in ``docs/sim.md`` with the design-level fix (bounded feed-forward in
-  ``G1Adapter.execute()``) as a follow-up under T-25. Until then: an achieved (state, action)
-  pair recorded from this sim is NOT the commanded action, the safety-intervention rate is not
-  calibrated, and both move when ``prefix_steps`` moves.
+  bandwidth — not a MuJoCo artifact and not a gain to tune away.
 
-  THE RATCHET (same root cause, hold edition). A zero-delta chunk is NOT a position hold: the
-  adapter re-reads ``q``, so each cycle forgives the gravity droop accumulated in the previous
-  one and the arm creeps monotonically. Max |q - keyframe| over the 15 joints, through
-  ``execute()``: 0.080 rad @ 2 s, 0.329 @ 10 s, 0.730 @ 30 s, 0.971 @ 60 s (SIM_KP/SIM_KD;
-  kp=300/kd=15 gives 0.087 / 0.268 / 0.636 / 0.957 — the same order, still growing at 60 s).
-  Protocol (A)'s bounded 0.009 rad droop does NOT describe this. Never quote it as the sim's
-  hold accuracy.
+  FIXED BY T-25c, ARCHITECTURALLY, since that is the only level it could be fixed at. The
+  adapter now carries the previous commanded target into the next call, clamped to
+  ``G1Config.q_track_window`` of the measured ``q`` (``mujoco_g1.SIM_Q_TRACK_WINDOW`` = 0.05 rad
+  here). Every row of the ``prefix_steps`` table above becomes 0.987. The tables are kept as
+  measured because they are still exactly what happens at ``q_track_window = 0``, which is what
+  ``configs/robot/g1.yaml`` ships pending OD-08 — so on the hardware config the sentence below
+  still stands: an achieved (state, action) pair recorded there is NOT the commanded action, the
+  safety-intervention rate is not calibrated, and both move when ``prefix_steps`` moves.
+
+  THE RATCHET (same root cause, hold edition; same T-25c fix). At ``q_track_window = 0`` a
+  zero-delta chunk is NOT a position hold: the adapter re-reads ``q``, so each cycle forgives the
+  gravity droop accumulated in the previous one and the arm creeps monotonically. Max
+  |q - keyframe| over the 15 joints, through ``execute()``: 0.080 rad @ 2 s, 0.329 @ 10 s,
+  0.730 @ 30 s, 0.971 @ 60 s (SIM_KP/SIM_KD; kp=300/kd=15 gives 0.087 / 0.268 / 0.636 / 0.957 —
+  the same order, still growing at 60 s). Protocol (A)'s bounded 0.009 rad droop does NOT
+  describe that, and must never be quoted as the hold accuracy of a zero-window config.
+
+  With the window at SIM_Q_TRACK_WINDOW the carried target holds the pose and the same
+  measurement is 0.0091 rad, FLAT at 2 / 4 / 6 / 8 / 10 s — i.e. it converges onto protocol
+  (A)'s bounded droop, which is the point: the runtime protocol now achieves what the fixed
+  target always could.
 
   RECOMMENDED SIM GAINS: ``mujoco_g1.SIM_KP`` (500, the vendor Menagerie ``g1`` class stiffness
   — the value the model was authored for) with ``mujoco_g1.SIM_KD``, the per-joint CRITICAL

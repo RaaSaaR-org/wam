@@ -458,3 +458,230 @@ def test_config_gains_validated() -> None:
         G1Config(kp=(20.0,) * 3)
     with pytest.raises(ValueError):
         G1Config(kd=(-1.0,) * 15)
+
+
+# -- bounded feed-forward (T-25c) ------------------------------------------------------------
+#
+# FakeG1Transport's first-order lag (q += lag * (q_target - q)) is the kinematic stand-in for
+# a real position loop: with lag < 1 a joint NEVER reaches its setpoint inside one command,
+# which is the whole reason the carried target exists. These tests are the hardware-facing
+# half of T-25c — the sim tests in tests/test_mujoco_g1.py measure the same properties against
+# contact physics, and neither substitutes for the other.
+
+
+class BlockedJointTransport(FakeG1Transport):
+    """A transport where chosen motors physically cannot move — a collision, a jam, a person.
+
+    This is the adversarial case for any feed-forward: the commanded target keeps advancing
+    while the measurement does not, and without a clamp the stored error grows without bound
+    and is released as one uncontrolled swing the moment the obstruction clears.
+    """
+
+    def __init__(self, blocked: list[int], **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.blocked = list(blocked)
+        self.released = False
+
+    def write_motor_cmd(
+        self, q_target: np.ndarray, dq_target: np.ndarray, kp: np.ndarray, kd: np.ndarray
+    ) -> None:
+        frozen = self._q[self.blocked].copy()
+        super().write_motor_cmd(q_target, dq_target, kp, kd)
+        if not self.released:
+            self._q[self.blocked] = frozen
+
+
+def _window(value: float) -> dict[str, object]:
+    return {"q_track_window": (value,) * G1_SPEC.num_joints}
+
+
+def test_the_default_window_is_zero_so_the_carry_is_off_until_it_is_configured() -> None:
+    """The hardware config ships this default (OD-08): gains are placeholders, and the window
+    must exceed the tracking error THOSE gains produce, which nobody has measured on a real
+    G1. A window of 0 collapses the clamp onto the measured q, i.e. the pre-T-25c adapter."""
+    assert G1Config().q_track_window == (0.0,) * G1_SPEC.num_joints
+
+    adapter, fake = connected_adapter()
+    idx, motor = CANON_IDX["left_elbow"], MOTOR_IDX["left_elbow"]
+    deltas = np.zeros((1, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[0, idx] = 0.1
+    for _ in range(3):
+        q_before = float(fake.q[motor])
+        adapter.execute(make_chunk(deltas), prefix_steps=1)
+        # Re-based on the measurement, exactly: target = measured + delta, every call.
+        assert fake.motor_commands[-1]["q_target"][motor] == pytest.approx(
+            q_before + 0.1, abs=1e-6
+        )
+    # ...so the third target is NOT the 0.3 that was commanded in total.
+    assert fake.motor_commands[-1]["q_target"][motor] < 0.3
+    # The lag is still REPORTED though — telemetry does not depend on the window, and this is
+    # the number OD-08 will need in order to choose one.
+    assert adapter.tracking_error > 0.0
+
+
+def test_the_carried_target_makes_the_executed_magnitude_independent_of_prefix_steps() -> None:
+    """The defect T-25c exists to fix, in its purest form: the same commanded travel, split
+    into different prefixes, must land in the same place. ``prefix_steps`` is a receding-
+    horizon knob (FR-05) and must not scale the robot's motion."""
+    idx = CANON_IDX["left_elbow"]
+    total, per_step = 20, 0.01
+
+    def travel(window: float, prefix: int) -> float:
+        adapter, fake = connected_adapter(config=G1Config(**_window(window)))
+        deltas = np.zeros((total, G1_SPEC.num_joints), dtype=np.float32)
+        deltas[:, idx] = per_step
+        done = 0
+        while done < total:
+            take = min(prefix, total - done)
+            adapter.execute(make_chunk(deltas[done:]), prefix_steps=take)
+            done += take
+        return float(fake.q[MOTOR_IDX["left_elbow"]])
+
+    commanded = total * per_step
+    off = {p: travel(0.0, p) / commanded for p in (1, 5, 20)}
+    on = {p: travel(0.5, p) / commanded for p in (1, 5, 20)}
+    # Without the carry the outcome tracks the knob; with it, it does not.
+    assert off[1] < off[5] < off[20]
+    assert max(on.values()) - min(on.values()) < 0.02, on
+    assert all(v > 0.95 for v in on.values()), on
+
+
+def test_a_blocked_joint_cannot_wind_up_past_the_window() -> None:
+    """THE safety property. An uncorrected carry is an integrator with no anti-wind-up.
+
+    The joint is held fast while 50 chunks command it onward. The commanded target may lead
+    the measurement by at most ``q_track_window`` at carry-in, plus the travel one chunk's
+    per-step clip already allowed — and crucially it must not GROW with the number of chunks,
+    which is what an unclamped carry would do.
+    """
+    window, per_step, steps = 0.05, 0.01, 1
+    motor, idx = MOTOR_IDX["left_elbow"], CANON_IDX["left_elbow"]
+    fake = BlockedJointTransport([motor], lag=0.5)
+    adapter, _ = connected_adapter(config=G1Config(**_window(window)), fake=fake)
+    deltas = np.zeros((steps, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[:, idx] = per_step
+
+    leads = []
+    for _ in range(50):
+        adapter.execute(make_chunk(deltas), prefix_steps=steps)
+        leads.append(float(fake.motor_commands[-1]["q_target"][motor] - fake.q[motor]))
+
+    # The documented bound: the window, plus the travel this chunk's per-step clip allowed.
+    bound = window + steps * per_step
+    assert max(leads) <= bound + 1e-6, f"wind-up past the bound: {max(leads):.4f} > {bound:.4f}"
+    # Not merely bounded — SETTLED. An unclamped carry would climb 0.01 rad every chunk, so
+    # after 50 chunks it would lead by 0.5 rad instead of 0.06.
+    assert abs(leads[-1] - leads[len(leads) // 2]) < 1e-9, leads[-5:]
+    assert adapter.tracking_clamp_count > 0  # the clamp is what did it
+    # Steady state sits at exactly the bound: clamped back to window, then one step re-applied.
+    assert adapter.tracking_error == pytest.approx(bound, abs=1e-6)
+
+    # Release it: the stored error is bounded, so the catch-up motion is too.
+    fake.released = True
+    q_before = float(fake.q[motor])
+    adapter.execute(make_chunk(deltas), prefix_steps=steps)
+    assert float(fake.q[motor]) - q_before <= bound + 1e-9
+
+
+def test_an_unblocked_joint_never_engages_the_clamp() -> None:
+    """The clamp is an exception path. With a window sized above the tracking error it must
+    stay out of the way entirely, or it is silently throttling the feed-forward."""
+    adapter, _ = connected_adapter(config=G1Config(**_window(0.5)))
+    idx = CANON_IDX["left_elbow"]
+    deltas = np.zeros((4, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[:, idx] = 0.01
+    for _ in range(20):
+        adapter.execute(make_chunk(deltas), prefix_steps=4)
+    assert adapter.tracking_clamp_count == 0
+    assert adapter.tracking_error < 0.5
+
+
+@pytest.mark.parametrize("drop", ["estop", "hold", "connect", "forget_command"])
+def test_the_carry_is_dropped_wherever_the_command_stream_breaks(drop: str) -> None:
+    """After any of these the robot may be somewhere this adapter did not put it, so the
+    carried target is a stale setpoint. Feeding it forward would command a jump back to it.
+
+    ``estop`` is the one that matters most: damping lets the arm settle under gravity and
+    contact, so the pre-estop target is stale by an unbounded amount, and the first act after
+    ``clear_estop()`` must not be a lunge toward it.
+    """
+    adapter, fake = connected_adapter(config=G1Config(**_window(0.5)))
+    idx, motor = CANON_IDX["left_elbow"], MOTOR_IDX["left_elbow"]
+    deltas = np.zeros((1, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[0, idx] = 0.1
+    for _ in range(5):
+        adapter.execute(make_chunk(deltas), prefix_steps=1)
+    assert adapter.tracking_error > 0.0  # something is being carried
+
+    getattr(adapter, drop)()
+    if drop == "estop":
+        adapter.clear_estop()
+    assert adapter.tracking_error == 0.0
+
+    # The next command re-bases on the measurement, exactly like a fresh adapter: the target
+    # is measured + delta, NOT carried + delta (which would be the stale jump).
+    stale_continuation = float(fake.motor_commands[-1]["q_target"][motor]) + 0.1
+    fake.motor_commands.clear()
+    q_before = float(fake.q[motor])
+    adapter.execute(make_chunk(deltas), prefix_steps=1)
+    commanded = float(fake.motor_commands[0]["q_target"][motor])
+    assert commanded == pytest.approx(q_before + 0.1, abs=1e-6)
+    # The loop was lagging, so re-basing lands strictly short of continuing the stale target.
+    assert commanded < stale_continuation, "the stale target was carried across the break"
+
+
+def test_a_partially_executed_chunk_carries_only_what_was_commanded() -> None:
+    """If a write raises mid-chunk the carry must describe what the motors were actually
+    told, not the chunk we meant to send — otherwise a failed transport silently advances the
+    setpoint past the robot."""
+
+    class FailingTransport(FakeG1Transport):
+        def __init__(self, fail_after: int) -> None:
+            super().__init__()
+            self.fail_after = fail_after
+
+        def write_motor_cmd(self, q_target, dq_target, kp, kd) -> None:  # type: ignore[no-untyped-def]
+            if len(self.motor_commands) >= self.fail_after:
+                raise RuntimeError("transport died")
+            super().write_motor_cmd(q_target, dq_target, kp, kd)
+
+    fake = FailingTransport(fail_after=2)
+    adapter, _ = connected_adapter(config=G1Config(**_window(0.5)), fake=fake)
+    idx, motor = CANON_IDX["left_elbow"], MOTOR_IDX["left_elbow"]
+    deltas = np.zeros((5, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[:, idx] = 0.01
+    with pytest.raises(RuntimeError, match="transport died"):
+        adapter.execute(make_chunk(deltas), prefix_steps=5)
+    # Two writes landed, so the carry is two steps in — not five.
+    last_commanded = float(fake.motor_commands[-1]["q_target"][motor])
+    fake.fail_after = 999
+    fake.motor_commands.clear()
+    adapter.execute(make_chunk(np.zeros((1, G1_SPEC.num_joints), dtype=np.float32)), 1)
+    assert float(fake.motor_commands[0]["q_target"][motor]) == pytest.approx(last_commanded)
+
+
+def test_a_non_finite_carry_falls_back_to_the_measurement() -> None:
+    """np.clip with a nan bound returns nan, and nan reaches the motors. Measurement is the
+    safe fallback and is what a fresh adapter uses anyway."""
+    adapter, fake = connected_adapter(config=G1Config(**_window(0.5)))
+    deltas = np.zeros((1, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[0, CANON_IDX["left_elbow"]] = 0.1
+    adapter.execute(make_chunk(deltas), prefix_steps=1)
+    adapter._q_cmd[CANON_IDX["left_elbow"]] = np.nan  # type: ignore[index]
+    adapter.execute(make_chunk(deltas), prefix_steps=1)
+    assert np.isfinite(fake.motor_commands[-1]["q_target"]).all()
+    assert adapter.tracking_error == 0.0
+
+
+def test_config_rejects_a_window_that_would_break_the_bound() -> None:
+    """A negative window inverts the clip interval and a non-finite one poisons it; both turn
+    the wind-up bound into a number that does not hold."""
+    assert G1Config(**_window(0.05)).q_track_window[0] == 0.05
+    with pytest.raises(ValueError):
+        G1Config(q_track_window=(0.05,) * 3)
+    with pytest.raises(ValueError):
+        G1Config(**_window(-0.01))
+    with pytest.raises(ValueError):
+        G1Config(**_window(float("nan")))
+    with pytest.raises(ValueError):
+        G1Config(**_window(float("inf")))

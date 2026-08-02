@@ -336,6 +336,29 @@ class TestShippedConfigs:
             control_dt_s=float(robot["control"]["dt_s"]),
         )
 
+    def test_mujoco_g1_yaml_track_window_is_sim_only_and_matches_the_module(self) -> None:
+        """The bounded feed-forward window (T-25c) is sized from the SIM gains and must not
+        leak into the hardware config, for the same reason the gains must not: at g1.yaml's
+        kp=20/kd=0.5 placeholders the tracking error is ~0.17 rad, roughly 6x this window, so
+        copying it across would clamp on every step and silently throttle the feed-forward.
+
+        It must also exceed the measured 0.0299 rad steady-state tracking error at dq_max, or
+        the clamp bites during normal fast motion — the failure mode that made 0.02 too small.
+        """
+        from wam.robot.g1 import G1_SPEC
+        from wam.robot.mujoco_g1 import SIM_Q_TRACK_WINDOW
+
+        robot = load_config(CONFIGS_DIR / "robot/mujoco_g1.yaml")["robot"]
+        window = robot["control"]["q_track_window"]
+        assert len(window) == G1_SPEC.num_joints
+        assert all(w >= 0.0299 for w in window), "below the measured tracking error at dq_max"
+        # The no-config get_robot("mujoco_g1") path must enforce the same window as this file.
+        assert tuple(float(w) for w in window) == SIM_Q_TRACK_WINDOW
+        hardware = load_config(CONFIGS_DIR / "robot/g1.yaml")["robot"]
+        assert "q_track_window" not in hardware.get("control", {}), (
+            "the sim window must not appear in the hardware config (OD-08)"
+        )
+
     def test_safety_config_fields(self) -> None:
         cfg = load_config(CONFIGS_DIR / "safety/default.yaml")
         n = len(cfg["q_min"])

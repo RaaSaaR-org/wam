@@ -128,12 +128,12 @@ Ordered bring-up checklist: `docker/dds/README.md` § "Remaining steps for real-
 
 - Rehearse in MuJoCo first (`docs/sim.md`): the same `G1Adapter`, safety layer, watchdog and
   executor, on contact physics — `scripts/rollout.py --robot mujoco_g1 --policy dummy` runs the
-  whole loop, E2 gates included. Open work before it is a proper E2 *rehearsal rig*: every
-  commanded joint delta is under-executed by a `prefix_steps`-dependent factor (the adapter
-  re-bases on the measured `q`, so loop lag is discarded — mean 0.39 of a one-control-period step,
-  0.95 of a 25-step chunk), which means sim action labels, safety-intervention rates and velocity-
-  envelope numbers are **not calibrated**. See "Known limitations" in `docs/sim.md`; the design
-  fix (bounded feed-forward in `G1Adapter.execute()`) is T-25c.
+  whole loop, E2 gates included. The `prefix_steps`-dependent under-execution that made sim
+  action labels and safety-intervention rates uncalibrated is **fixed in sim** by T-25c's bounded
+  feed-forward (`control.q_track_window`, 0.987 of commanded travel at every prefix, zero-delta
+  ratchet 0.33 rad → a flat 0.0091). It is **off on `configs/robot/g1.yaml`** and stays off until
+  OD-08 gives real gains to size the window against — so the caveat still applies to anything run
+  with the hardware config. See "Known limitations" in `docs/sim.md`.
 - GPU box: `scripts/serve_policy.py --checkpoint …`; robot side:
   `scripts/rollout.py --robot g1 --policy remote --server-uri ws://…`.
 - Verify policy rate ≥ 2 Hz end-to-end over the wire.

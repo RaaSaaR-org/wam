@@ -482,52 +482,89 @@ is rejected by both write paths** (a NaN reaching `data.ctrl` makes MuJoCo zero 
 slam the robot to its zero pose with no exception and an advancing tick); a **failed
 `emergency_damp` propagates** instead of reporting success; `estop()` is exercised **concurrently
 from a second thread** (this segfaulted the interpreter 3/3 before the transport lock); the
-`prefix_steps`-dependent under-execution and the zero-delta ratchet are pinned to measured bands.
+`prefix_steps`-dependent under-execution and the zero-delta ratchet are pinned to measured bands,
+now on both sides of the T-25c fix (with the feed-forward on, and with `q_track_window: 0`).
 
 ## Known limitations — read before quoting any number out of this sim
 
-### 1. Every commanded joint delta is under-executed, by a `prefix_steps`-dependent factor
+### 1. Under-execution — FIXED in sim by T-25c, still live on the hardware config
 
-`G1Adapter.execute()` integrates chunk deltas onto the **measured** `q`, re-read at the start of
-every call. Within a chunk the targets accumulate correctly; **between** chunks the position
-loop's lag is discarded rather than caught up. A joint therefore executes ~0.39 of a
-one-control-period step within that period and ~0.95 of a 25-step chunk — see the `prefix_steps`
-table above. `MockRobot` (a kinematic integrator) shows 1.000 everywhere, which is why this never
-surfaced before there was contact physics behind the seam.
+**Status 2026-08-02.** Limitations 1 and 2 below described one defect, and it is now fixed
+*for this sim*. They are kept in full because the fix is opt-in per config, and the
+configuration they describe is still the one `configs/robot/g1.yaml` ships.
 
-**This is not tunable away.** Executing ~all of a 20 ms position step inside 20 ms needs a
-closed-loop bandwidth of several hundred rad/s; the scene's own effective inertias put the waist
-at 35 rad/s for the vendor kp=500 and would need kp ≈ 1.6e4 N·m/rad to reach 200 rad/s. Measured:
-even flat kp=4000 with critical damping only reaches mean 0.86 / min 0.56 per period. The cause is
-architectural — no feed-forward and no integral action anywhere in the chain — not MuJoCo.
+`G1Adapter.execute()` used to integrate chunk deltas onto the **measured** `q`, re-read at the
+start of every call. Within a chunk the targets accumulate correctly; **between** chunks the
+position loop's lag was discarded rather than caught up. A joint therefore executed ~0.39 of a
+one-control-period step and ~0.95 of a 25-step chunk — the executed magnitude depended on
+`prefix_steps`, which is a receding-horizon knob (FR-05), not physics. `MockRobot` (a kinematic
+integrator) shows 1.000 everywhere, which is why this never surfaced before there was contact
+physics behind the seam.
 
-**What this invalidates, concretely:**
+T-25c adds a **bounded feed-forward**: the previous commanded target is carried into the next
+call, clamped to within `control.q_track_window` of the measured `q`. Measured on
+`left_shoulder_yaw`, 0.400 rad commanded, at `prefix_steps` 1 / 5 / 25:
 
-- A recorded `(state, action)` pair from this sim is **not** a commanded/achieved pair. Do not
-  train an action head on sim labels and expect the magnitudes to transfer.
+| `q_track_window` | prefix 1 | prefix 5 | prefix 25 |
+|---|---:|---:|---:|
+| `0.0` (hardware config, pre-T-25c behaviour) | 0.306 | 0.666 | 0.947 |
+| `0.05` (shipped in `configs/robot/mujoco_g1.yaml`) | **0.987** | **0.987** | **0.987** |
+
+The window is **sized by measurement, and it is the smallest one that works.** It must exceed
+the controller's steady-state tracking error at `dq_max` — worst joint 0.0299 rad at 1.5 rad/s —
+or the clamp bites during normal fast motion: a window of 0.02 clamped on 58 of 60 steps at
+`dq_max` and dropped the executed magnitude back to 0.846. At 0.05 the clamp engages **zero**
+times from 0.2 to 2.0 rad/s.
+
+**Why it is clamped at all, and why the value is not generous.** An uncorrected carry is an
+integrator with no anti-wind-up: a joint blocked by a collision, a jam or a person keeps
+accumulating commanded target it cannot reach, and releases the whole stored error as one
+uncontrolled swing when freed. The clamp bounds the stored error at `q_track_window` per joint,
+so the worst-case release is a motion of that size — which is why the window is chosen as small
+as the tracking error permits rather than as large as convenient.
+`tests/test_g1.py::test_a_blocked_joint_cannot_wind_up_past_the_window` pins that bound on CPU;
+it is the hardware-facing half of the change and does not depend on MuJoCo.
+
+**The window does NOT transfer to the robot.** It is a property of `SIM_KP`/`SIM_KD`. At
+`g1.yaml`'s kp=20 / kd=0.5 placeholders the arm sags ~0.17 rad, about 6× this window, so copying
+the value across would clamp on every step and throttle the feed-forward to nothing. The
+hardware config therefore ships the `G1Config` default of **0.0 — feed-forward off** — until
+OD-08 produces real gains and someone measures the tracking error they produce. `tracking_error`
+is reported by the adapter regardless of the window precisely so that measurement is free to
+take.
+
+**What limitation 1 still invalidates, on any config with `q_track_window: 0` (i.e. hardware):**
+
+- A recorded `(state, action)` pair is **not** a commanded/achieved pair. Do not train an action
+  head on such labels and expect the magnitudes to transfer.
 - Safety-intervention rates and `accel_limit` counts are **not calibrated**: `SafetyLayer` seeds
-  `v_prev` from the *measured* `dq`, so on this robot the gate partly measures tracking error.
-  (Substituting the last *commanded* velocity drives interventions to 0 — that would **mask** this
-  limitation, not fix it. Do not do it.)
+  `v_prev` from the *measured* `dq`, so the gate partly measures tracking error. (Substituting
+  the last *commanded* velocity drives interventions to 0 — that would **mask** this limitation,
+  not fix it. Do not do it. This remains true with the feed-forward on.)
 - Any velocity-envelope or "the loop closes at X Hz of real motion" claim moves when
   `prefix_steps` moves.
 
-`tests/test_mujoco_g1.py::test_execute_under_executes_every_delta_by_a_prefix_dependent_factor`
-pins the measured bands so this cannot silently drift in either direction.
+Pinned by `test_execute_executes_the_commanded_magnitude_at_every_prefix` (the fix) and
+`test_the_disabled_window_reproduces_the_archived_under_execution` (the `q_track_window: 0` arm,
+which keeps the archived bands as a live regression guard rather than a memory).
 
-**Follow-up (design change, deliberately out of scope here):** bounded feed-forward in
-`G1Adapter.execute()` — carry the previous commanded target forward, clamped to a tracking window
-around the measured `q` so a blocked joint cannot wind up and slam when freed. That touches the
-safety-critical hardware path and needs its own review. Tracked as T-25c in `TASKS.md`.
+### 2. A zero-delta chunk (and `hold()`) was not a position hold — same fix, same caveat
 
-### 2. A zero-delta chunk (and `hold()`) is not a position hold
+Same root cause, same status. With `q_track_window: 0`, `execute()` re-reads `q`, so each cycle
+forgives the previous cycle's gravity droop and the arm creeps monotonically. Max |q − keyframe|
+through zero-delta chunks: **0.080 rad @ 2 s, 0.329 @ 10 s, 0.730 @ 30 s, 0.971 @ 60 s** — still
+growing.
 
-Same root cause. `execute()`/`hold()` re-read `q`, so each cycle forgives the previous cycle's
-gravity droop and the arm creeps monotonically. Max |q − keyframe| through zero-delta chunks:
-**0.080 rad @ 2 s, 0.329 @ 10 s, 0.730 @ 30 s, 0.971 @ 60 s** — still growing. The **bounded**
-0.0091 rad figure in the gains section is the *fixed-target* droop and describes a protocol the
-runtime never uses; never quote it as this sim's hold accuracy. On hardware the vendor's gravity
-compensation masks this; in sim it does not.
+With the sim's 0.05 window the same measurement is **0.0091 rad, flat** at 2 / 4 / 6 / 8 / 10 s.
+That is exactly the bounded *fixed-target* droop the gains section quotes — the accuracy the
+gains always implied and the runtime protocol could not previously reach. Note carefully: on the
+hardware config the old warning stands unchanged, and the 0.0091 figure must still never be
+quoted as that configuration's hold accuracy. On hardware the vendor's gravity compensation
+masks this; in sim it does not.
+
+`hold()` itself is unchanged and still re-reads `q` — deliberately. It is what the executor
+calls on a deadline miss or watchdog HOLD, i.e. exactly when the command stream has broken, so
+it commands the measured position and drops the carry.
 
 ### 3. An e-stop is not a freeze, and it moves the sim clock
 

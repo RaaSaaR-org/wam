@@ -38,15 +38,17 @@ Contracts:
   Dex3 synergy fraction, so the canonical unit and the vendor unit coincide; any other range
   would make ``G1Adapter.gripper_to_vendor`` command a fully-closed hand for every input above
   ~0.01 with no error anywhere. ``__init__`` rejects it.
-- **Every commanded joint delta is UNDER-EXECUTED, by a prefix-dependent factor.**
-  ``G1Adapter.execute()`` re-bases its target on the MEASURED ``q`` at each call, so the
-  position loop's lag is discarded rather than caught up. With the sim gains a joint executes
-  ~0.39 of a one-control-period step within that period, rising to ~0.9 over a 25-step chunk.
-  This is a property of the control architecture (no feed-forward, no integral action) on a
-  plant with a finite servo bandwidth, NOT a MuJoCo artifact and NOT tunable away at any
-  physically defensible stiffness — see the PER-CONTROL-PERIOD EXECUTION section of the
-  ``mujoco_transport`` module docstring for the measurements, and ``docs/sim.md`` for what it
-  invalidates (recorded action labels, safety-intervention rates, velocity-envelope claims).
+- **Commanded joint deltas used to be UNDER-EXECUTED by a prefix-dependent factor; T-25c fixes
+  that HERE but not on hardware.** ``G1Adapter.execute()`` re-based its target on the MEASURED
+  ``q`` at each call, so the position loop's lag was discarded rather than caught up: ~0.39 of a
+  one-control-period step, rising to ~0.9 over a 25-step chunk. It was never a gain to tune (even
+  flat kp=4000 reaches only 0.86) — it was the control architecture, and the fix is architectural
+  too. :data:`SIM_Q_TRACK_WINDOW` carries the previous commanded target forward, clamped to
+  0.05 rad of the measured ``q``, and execution becomes 0.987 at EVERY prefix. The clamp is the
+  safety half: it bounds what a blocked joint can store and release. The window is sized from
+  :data:`SIM_KP`/:data:`SIM_KD` and does not transfer — ``configs/robot/g1.yaml`` still ships
+  0.0, so everything ``docs/sim.md`` says the defect invalidates (recorded action labels,
+  safety-intervention rates, velocity-envelope claims) still holds for the hardware config.
 - **Pacing runs on SIM TIME, not wall time.** ``G1Adapter.execute()`` paces its per-step
   command stream so step ``i`` is sent no earlier than ``t0 + i * dt_s``; that pacing is
   what makes its ``dq_max * dt`` clip a genuine velocity limit. The injected clock is the
@@ -105,6 +107,7 @@ __all__ = [
     "SIM_DQ_MAX",
     "SIM_KD",
     "SIM_KP",
+    "SIM_Q_TRACK_WINDOW",
     "VENDOR_MODEL",
     "VENDOR_MODEL_MISSING_MSG",
     "MujocoG1Robot",
@@ -167,6 +170,19 @@ SIM_DQ_MAX: tuple[float, ...] = (
     2.0,  # right_wrist_pitch
     2.0,  # right_wrist_yaw
 )
+
+#: Bounded feed-forward window for the sim (T-25c), rad per canonical joint. MEASURED, not
+#: guessed: it must exceed the controller's steady-state tracking error at ``dq_max``, or the
+#: clamp bites during normal fast motion and execution degrades again. On this scene the worst
+#: joint is ``left_shoulder_yaw`` at 0.0299 rad when commanded at its own dq_max of 1.5 rad/s;
+#: 0.05 gives 1.67x headroom and produces ZERO clamps from 0.2 to 2.0 rad/s. A window of 0.02
+#: was measured too small: it clamped on 58 of 60 steps at dq_max and dropped executed
+#: magnitude back to 0.846.
+#:
+#: This number is a property of SIM_KP/SIM_KD and does NOT transfer to hardware, whose gains
+#: are still OD-08 placeholders with ~0.17 rad of sag — which is why ``configs/robot/g1.yaml``
+#: ships the 0.0 default (feed-forward off) instead of copying this.
+SIM_Q_TRACK_WINDOW: tuple[float, ...] = (0.05,) * G1_NUM_CANONICAL_JOINTS
 
 #: Cameras defined by ``configs/sim/g1_scene.xml``; these names become the ``Observation.images``
 #: keys the policy sees.
@@ -291,6 +307,7 @@ class MujocoG1Robot:
                 dq_max=SIM_DQ_MAX,
                 kp=(SIM_KP,) * G1_NUM_CANONICAL_JOINTS,
                 kd=SIM_KD,
+                q_track_window=SIM_Q_TRACK_WINDOW,
                 control_dt_s=transport.control_dt_s,
             )
         else:
@@ -446,6 +463,11 @@ class MujocoG1Robot:
         # (tick 0 -> tick 0) would make the first post-reset read look stale. forget_tick() is
         # the adapter's public, single-owner hook for exactly this deliberate clock rewind.
         self._adapter.forget_tick()
+        # Same reasoning for the bounded feed-forward (T-25c): reset() teleports the arm back
+        # to the keyframe, so the target carried from the previous episode describes a pose
+        # the robot is no longer near. Carrying it would make the first post-reset command a
+        # jump toward the old episode's end pose.
+        self._adapter.forget_command()
 
     # -- cameras --------------------------------------------------------------------------------
 

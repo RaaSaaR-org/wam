@@ -128,9 +128,13 @@ here — and `__init__` rejects anything else. Pacing runs on the **sim clock**,
 `dq_max·dt` velocity clip means what it means on hardware while the rollout runs faster than
 realtime.
 
-**Known limitation:** `G1Adapter.execute()` re-bases on the measured `q`, so every commanded delta
-is under-executed by a `prefix_steps`-dependent factor (mean 0.39 of a one-control-period step).
-It is architectural, not a gain to tune — see "Known limitations" in `docs/sim.md` and T-25c.
+**Formerly a known limitation, fixed by T-25c:** `G1Adapter.execute()` re-based on the measured
+`q`, so every commanded delta was under-executed by a `prefix_steps`-dependent factor (mean 0.39
+of a one-control-period step). The bounded feed-forward (`q_track_window`, 0.05 rad in
+`configs/robot/mujoco_g1.yaml`) carries the previous commanded target forward and reaches 0.987 at
+every prefix. It is **off by default and off on the hardware config** — the window has to exceed
+the tracking error of the gains in use, and `g1.yaml`'s are OD-08 placeholders. See "Known
+limitations" in `docs/sim.md`.
 
 `tests/test_mujoco_g1.py` runs the seam contract one layer below `tests/test_g1.py` — same
 adapter, real physics instead of the kinematic lag. The whole module skips with an actionable

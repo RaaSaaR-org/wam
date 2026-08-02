@@ -352,62 +352,130 @@ def test_execute_clips_an_over_large_delta_to_the_configured_limits() -> None:
         robot.close()
 
 
-def test_execute_under_executes_every_delta_by_a_prefix_dependent_factor(
-    robot: MujocoG1Robot,
-) -> None:
-    """PIN the known limitation, so it cannot silently drift.
-
-    ``G1Adapter.execute()`` re-bases its target on the MEASURED q at every call, so the
-    position loop's lag is discarded instead of caught up. The same total commanded travel
-    therefore lands differently depending on ``prefix_steps`` — a rollout knob, not physics.
-    Measured on ``left_shoulder_yaw`` (free space), 100 x 0.004 rad = 0.400 rad commanded:
-    0.31 of it at prefix 1, 0.67 at prefix 5, 0.95 at prefix 25.
-
-    This is architectural (no feed-forward, no integral action anywhere in the chain) and is
-    NOT tunable away: even kp=4000 with critical damping reaches only ~0.86 at prefix 1. The
-    bands below are wide enough for physics noise and narrow enough to fail if the sim ever
-    starts executing a third — or all — of a commanded motion. See docs/sim.md.
-    """
-    joint = "left_shoulder_yaw"
-    idx = CANON_IDX[joint]
+def _executed_fraction(robot: MujocoG1Robot, prefix: int) -> float:
+    """Fraction of a 100 x 0.004 rad = 0.400 rad commanded travel that ``left_shoulder_yaw``
+    actually reaches, driven in ``prefix``-step bites. Free space, no contact."""
+    idx = CANON_IDX["left_shoulder_yaw"]
     total, per_step = 100, 0.004
-    commanded = total * per_step
-    achieved: dict[int, float] = {}
-    for prefix in (1, 5, 25):
-        robot.clear_estop()
-        robot.reset()
-        q0 = robot.read_state().q[idx]
-        done = 0
-        while done < total:
-            take = min(prefix, total - done)
-            robot.execute(make_chunk(joint_deltas(total - done, **{joint: per_step})), take)
-            done += take
-        achieved[prefix] = float(robot.read_state().q[idx] - q0) / commanded
-
-    # Monotone in prefix_steps: longer open-loop runs lose less to the re-basing.
-    assert achieved[1] < achieved[5] < achieved[25]
-    assert 0.20 <= achieved[1] <= 0.45, achieved
-    assert 0.55 <= achieved[5] <= 0.80, achieved
-    assert 0.85 <= achieved[25] <= 0.99, achieved
-    # The whole point: the executed magnitude is NOT the commanded magnitude.
-    assert achieved[25] < 1.0
+    robot.clear_estop()
+    robot.reset()
+    q0 = robot.read_state().q[idx]
+    done = 0
+    while done < total:
+        take = min(prefix, total - done)
+        robot.execute(
+            make_chunk(joint_deltas(total - done, left_shoulder_yaw=per_step)), take
+        )
+        done += take
+    return float(robot.read_state().q[idx] - q0) / (total * per_step)
 
 
-def test_a_zero_delta_chunk_is_not_a_position_hold(robot: MujocoG1Robot) -> None:
-    """The ratchet, same root cause as the test above: ``execute()`` re-reads q, so every
-    cycle forgives the gravity droop of the previous one and the arm creeps monotonically.
-    Measured max |q - keyframe|: 0.08 rad @ 2 s, 0.33 @ 10 s, still growing at 60 s. Anything
-    that quotes the BOUNDED fixed-target droop (0.009 rad) as the sim's hold accuracy is
-    measuring a protocol the runtime never uses."""
+def _ratchet(robot: MujocoG1Robot, blocks: int = 2) -> list[float]:
+    """max |q - start| after each 100 control periods (2 s) of ZERO-delta chunks."""
+    robot.clear_estop()
+    robot.reset()
     q0 = robot.read_state().q.copy()
     zero = make_chunk(joint_deltas(1))
-    drift = []
-    for _ in range(2):  # 2 x 100 control periods = 2 x 2 s
+    out = []
+    for _ in range(blocks):
         for _ in range(100):
             robot.execute(zero, prefix_steps=1)
-        drift.append(float(np.abs(robot.read_state().q - q0).max()))
-    assert drift[0] > 0.02, f"expected a visible ratchet, got {drift}"
-    assert drift[1] > drift[0], f"the drift must still be growing, got {drift}"
+        out.append(float(np.abs(robot.read_state().q - q0).max()))
+    return out
+
+
+def test_execute_executes_the_commanded_magnitude_at_every_prefix(
+    robot: MujocoG1Robot,
+) -> None:
+    """T-25c's headline: the executed magnitude no longer depends on ``prefix_steps``.
+
+    ``prefix_steps`` is a receding-horizon knob (FR-05) — how much of a chunk the runtime
+    commits before re-planning. It has no business scaling how far the robot actually moves,
+    but before the bounded feed-forward it did, because ``execute()`` re-based on the MEASURED
+    q and threw the position loop's lag away at every call. See the window=0 test below for
+    the archived numbers that behaviour produced.
+
+    With ``q_track_window`` = 0.05 rad the carried target absorbs the lag and all three
+    prefixes land on the same 0.987. The residual 1.3 % is steady-state tracking error at this
+    speed, not the re-basing defect: it does not grow with the number of calls.
+    """
+    achieved = {prefix: _executed_fraction(robot, prefix) for prefix in (1, 5, 25)}
+    for prefix, value in achieved.items():
+        assert 0.95 <= value <= 1.02, (prefix, achieved)
+    spread = max(achieved.values()) - min(achieved.values())
+    # The property under test, stated directly: prefix_steps does not move the outcome.
+    assert spread < 0.01, f"executed magnitude still depends on prefix_steps: {achieved}"
+
+
+def test_a_zero_delta_chunk_is_a_bounded_position_hold(robot: MujocoG1Robot) -> None:
+    """A zero-delta chunk means "stay", and now it does.
+
+    Before T-25c every cycle forgave the previous cycle's gravity droop and re-based on it, so
+    the arm ratcheted monotonically downward: 0.08 rad @ 2 s, 0.33 @ 10 s, still growing at
+    60 s (see the window=0 test below, which keeps those numbers). Carrying the commanded
+    target forward makes the hold a real one — and it settles at 0.0091 rad, which is exactly
+    the BOUNDED fixed-target droop ``configs/robot/mujoco_g1.yaml`` measured for these gains.
+    The runtime finally achieves the accuracy the gains block always claimed.
+    """
+    drift = _ratchet(robot)
+    assert drift[0] < 0.015, f"expected the bounded droop, got {drift}"
+    # Bounded, not merely small: the second 2 s must not have crept further than the first.
+    assert drift[1] <= drift[0] + 1e-3, f"still ratcheting: {drift}"
+
+
+def test_the_disabled_window_reproduces_the_archived_under_execution(
+    sim: MujocoG1Robot,
+) -> None:
+    """The A/B arm: ``q_track_window`` = 0 is the pre-T-25c adapter, bit for bit.
+
+    Both archived measurements are kept here rather than deleted, for two reasons. They are
+    the evidence that the fix changed what it claimed to change and nothing else — the two
+    tests above are only meaningful against these. And 0.0 is what ``configs/robot/g1.yaml``
+    still ships (OD-08), so this is not a historical curiosity: it is the behaviour of the
+    HARDWARE configuration, and it must keep being pinned until real gains exist.
+
+    Archived: 0.31 / 0.67 / 0.95 of a 0.400 rad travel at prefix 1 / 5 / 25, monotone in
+    prefix; ratchet 0.08 rad @ 2 s and still growing at 4 s.
+    """
+    disabled = sim.adapter.config.model_copy(
+        update={"q_track_window": (0.0,) * G1_SPEC.num_joints}
+    )
+    robot = MujocoG1Robot(config=disabled)
+    try:
+        achieved = {prefix: _executed_fraction(robot, prefix) for prefix in (1, 5, 25)}
+        # Monotone in prefix_steps: longer open-loop runs lose less to the re-basing.
+        assert achieved[1] < achieved[5] < achieved[25]
+        assert 0.20 <= achieved[1] <= 0.45, achieved
+        assert 0.55 <= achieved[5] <= 0.80, achieved
+        assert 0.85 <= achieved[25] <= 0.99, achieved
+        assert achieved[25] < 1.0
+
+        drift = _ratchet(robot)
+        assert drift[0] > 0.02, f"expected a visible ratchet, got {drift}"
+        assert drift[1] > drift[0], f"the drift must still be growing, got {drift}"
+    finally:
+        robot.close()
+
+
+def test_the_tracking_error_stays_inside_the_window_under_real_physics(
+    robot: MujocoG1Robot,
+) -> None:
+    """The safety bound, checked against contact physics rather than a kinematic stand-in.
+
+    ``tracking_error`` is the carried target's lead over measurement BEFORE the clamp. Under
+    normal fast motion it must stay below the window, or the clamp is doing the work and the
+    feed-forward is being throttled (which is what a too-small window looks like: 0.02 rad
+    clamped on 58 of 60 steps at dq_max and cost 14 points of executed magnitude).
+    """
+    window = robot.adapter.config.q_track_window[CANON_IDX["left_shoulder_yaw"]]
+    per_step = 0.03  # = dq_max 1.5 rad/s * 0.02 s, the fastest this joint may be commanded
+    clamps_before = robot.adapter.tracking_clamp_count
+    worst = 0.0
+    for _ in range(50):
+        robot.execute(make_chunk(joint_deltas(1, left_shoulder_yaw=per_step)), prefix_steps=1)
+        worst = max(worst, robot.adapter.tracking_error)
+    assert worst < window, f"tracking error {worst:.4f} reached the window {window}"
+    assert robot.adapter.tracking_clamp_count == clamps_before, "the clamp should not engage"
 
 
 def test_execute_rejects_ee_delta_and_a_bad_width(robot: MujocoG1Robot) -> None:

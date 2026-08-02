@@ -32,6 +32,7 @@ Contracts:
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -111,12 +112,17 @@ class G1Config(BaseModel):
     # light damping) — tune upward only after E2/E3 verification (OD-08).
     kp: tuple[float, ...] = Field(default_factory=lambda: _uniform(20.0))
     kd: tuple[float, ...] = Field(default_factory=lambda: _uniform(0.5))
+    # Bounded feed-forward window (T-25c), per canonical joint, in rad: how far the COMMANDED
+    # target carried from the previous execute() may lead the MEASURED position. 0.0 disables
+    # the carry and re-bases every chunk on measurement — byte-for-byte the pre-T-25c
+    # behaviour, and what the hardware config still ships while gains are OD-08 placeholders.
+    q_track_window: tuple[float, ...] = Field(default_factory=lambda: _uniform(0.0))
     gripper_vendor_min: float = 0.0
     gripper_vendor_max: float = 1.0
 
     @model_validator(mode="after")
     def _check(self) -> G1Config:
-        for name in ("q_min", "q_max", "dq_max", "kp", "kd"):
+        for name in ("q_min", "q_max", "dq_max", "kp", "kd", "q_track_window"):
             v = getattr(self, name)
             if len(v) != G1_NUM_CANONICAL_JOINTS:
                 raise ValueError(f"{name}: expected {G1_NUM_CANONICAL_JOINTS} entries, got {len(v)}")
@@ -126,6 +132,10 @@ class G1Config(BaseModel):
             raise ValueError("dq_max entries must be > 0")
         if any(g < 0 for g in self.kp) or any(g < 0 for g in self.kd):
             raise ValueError("kp/kd entries must be >= 0")
+        # A non-finite or negative window would make the wind-up bound meaningless: np.clip
+        # with a nan bound returns nan, and a negative one inverts the interval.
+        if not all(math.isfinite(w) and w >= 0.0 for w in self.q_track_window):
+            raise ValueError("q_track_window entries must be finite and >= 0")
         if self.gripper_vendor_min >= self.gripper_vendor_max:
             raise ValueError("gripper_vendor_min must be < gripper_vendor_max")
         return self
@@ -156,6 +166,12 @@ class G1Adapter:
         self._connected = False
         self._estopped = False
         self._last_tick_ns: int | None = None
+        # Bounded feed-forward (T-25c): the last canonical target actually commanded, carried
+        # into the next execute() so the position loop's lag is caught up instead of discarded.
+        # None means "re-base on measurement" — the state after connect/hold/estop/reset.
+        self._q_cmd: np.ndarray | None = None
+        self._tracking_error: float = 0.0
+        self._tracking_clamps: int = 0
         # Wall-clock pacing seam for execute(); injectable for deterministic tests.
         self._clock: Callable[[], float] = clock if clock is not None else time.monotonic
         self._sleep: Callable[[float], None] = sleep if sleep is not None else time.sleep
@@ -180,6 +196,28 @@ class G1Adapter:
     def is_estopped(self) -> bool:
         return self._estopped
 
+    @property
+    def tracking_error(self) -> float:
+        """Max |commanded - measured| across joints at the last carry-in, in rad, measured
+        BEFORE the window clamp — i.e. how far the position loop was actually lagging.
+
+        0.0 means there was nothing to compare against: a fresh adapter, or the first
+        ``execute()`` after ``connect``/``hold``/``estop``/``forget_command``. It does NOT mean
+        the loop is tracking perfectly.
+
+        Reported regardless of ``q_track_window``, deliberately. With the window at 0 the carry
+        is discarded and this is pure telemetry — which is exactly the configuration the
+        hardware ships (OD-08), and the number somebody will need in order to choose a real
+        window. With the window active, a value pinned at ``q_track_window`` means the clamp is
+        holding a joint the controller is not tracking: blocked, saturated or mis-tuned.
+        """
+        return self._tracking_error
+
+    @property
+    def tracking_clamp_count(self) -> int:
+        """Monotonic count of ``execute()`` calls whose carry-in hit the window clamp."""
+        return self._tracking_clamps
+
     # -- connection guard ----------------------------------------------------------------
 
     def connect(self) -> None:
@@ -192,6 +230,8 @@ class G1Adapter:
             transport.open()  # RuntimeError without unitree_sdk2py
             self._transport = transport
         self._connected = True
+        # A target carried across a (re)connect describes a robot we were not talking to.
+        self.forget_command()
 
     def _require_connected(self, op: str) -> G1Transport:
         if not self._connected or self._transport is None:
@@ -265,13 +305,71 @@ class G1Adapter:
             ),
         )
 
+    def _carry_in(self, q_meas: np.ndarray) -> np.ndarray:
+        """Base position for this chunk's integration: the previous commanded target, pulled
+        back to within ``q_track_window`` of the measured ``q`` (T-25c).
+
+        Why carry anything at all: a position loop never reaches its setpoint inside one
+        control period, so re-basing on the MEASURED q at every call throws the residual away
+        instead of catching it up. Measured on the MuJoCo rig, a joint executed ~0.39 of a
+        one-step delta and ~0.95 of a 25-step chunk — the executed magnitude depended on
+        ``prefix_steps``, which is a rollout knob and has no business scaling the robot's
+        motion. Carrying the commanded target forward makes the executed magnitude the
+        commanded one, and makes a zero-delta chunk an actual hold rather than a slow ratchet
+        down under gravity.
+
+        Why the clamp, and why it is the whole safety argument: an uncorrected carry is an
+        integrator with no anti-wind-up. A joint that is blocked — collision, a person, a
+        jammed cable — keeps accumulating commanded target it cannot reach, and releases that
+        entire stored error as one uncontrolled swing the moment the obstruction goes away.
+        The clamp bounds the stored error at ``q_track_window`` per joint, so the worst-case
+        release is a motion of that size and no more, whatever happened upstream. With the
+        default window of 0.0 the clamp collapses to ``q_meas`` exactly and this method is a
+        no-op — the pre-T-25c behaviour, bit for bit.
+
+        Total lead over measurement at the i-th write of a chunk is therefore bounded by
+        ``q_track_window + (i + 1) * dq_max * dt`` — the window, plus the travel the per-step
+        clip already allowed before this change.
+        """
+        carried = self._q_cmd
+        # A non-finite carry would propagate through np.clip as nan and reach the motors;
+        # measurement is the safe fallback, and it is what a fresh adapter uses anyway.
+        if carried is None or not np.isfinite(carried).all():
+            self._tracking_error = 0.0
+            return q_meas.copy()
+        window = np.asarray(self._config.q_track_window, dtype=np.float64)
+        self._tracking_error = float(np.abs(carried - q_meas).max())
+        clamped = np.clip(carried, q_meas - window, q_meas + window)
+        if not np.array_equal(clamped, carried):
+            self._tracking_clamps += 1
+        return clamped
+
+    def forget_command(self) -> None:
+        """Drop the carried commanded target, so the next ``execute()`` re-bases on the
+        MEASURED position (T-25c).
+
+        Call it whenever the robot may have moved without this adapter commanding it — a
+        simulator episode reset, a reconnect, an operator repositioning the arm. The carried
+        target is only meaningful as "where I last told this joint to be"; after an external
+        move it is a stale setpoint, and feeding it forward would command a jump back to it,
+        bounded by ``q_track_window`` but still unasked for.
+
+        ``connect()``, ``hold()`` and ``estop()`` already do this for you. This is the hook
+        for the cases the adapter cannot detect on its own.
+        """
+        self._q_cmd = None
+        self._tracking_error = 0.0
+
     def execute(self, chunk: ActionChunk, prefix_steps: int) -> None:
         """Stream the first ``prefix_steps`` steps as per-step position targets.
 
         JOINT_DELTA only (EE_DELTA is post-MVP, OD-02: joint deltas were chosen for the
         MVP; an EE variant needs an IK layer that does not exist yet). Deltas are
-        integrated onto the CURRENT canonical q (read from the transport), clipped to
-        ``dq_max * dt`` per step and to ``[q_min, q_max]`` before sending — defense in
+        integrated onto the previous COMMANDED target, clamped to within
+        ``q_track_window`` of the measured ``q`` (bounded feed-forward, T-25c — see
+        ``_carry_in``; with the default window of 0.0 this is the measured ``q``, i.e. the
+        historical re-base-every-call behaviour). Each step is clipped to
+        ``dq_max * dt`` and to ``[q_min, q_max]`` before sending — defense in
         depth; the upstream SafetyLayer remains authoritative (FR-07). Successive step
         commands are PACED ``chunk.dt_s`` apart on the wall clock (step i is sent no
         earlier than ``t0 + i * dt_s``): the per-step ``dq_max * dt`` clip is a velocity
@@ -303,7 +401,7 @@ class G1Adapter:
         cfg = self._config
         low = transport.read_low_state()
         motor_q = np.asarray(low["q"], dtype=np.float64)
-        q_can = motor_q[_G1_MOTOR_INDICES].copy()
+        q_can = self._carry_in(motor_q[_G1_MOTOR_INDICES])
         q_min = np.asarray(cfg.q_min, dtype=np.float64)
         q_max = np.asarray(cfg.q_max, dtype=np.float64)
         max_step = np.asarray(cfg.dq_max, dtype=np.float64) * float(chunk.dt_s)
@@ -327,13 +425,22 @@ class G1Adapter:
                 _G1_UNMAPPED_MASK, motor_q, self.canonical_to_motor(q_can.astype(np.float32))
             ).astype(np.float32)
             transport.write_motor_cmd(q_target, dq_target, kp_motor, kd_motor)
+            # Recorded per step, not once at the end: if a later write raises, the carry must
+            # reflect what the motors were actually told, not the chunk we meant to send.
+            self._q_cmd = q_can.copy()
             # Scalar canonical gripper command drives both hands (MVP simplification).
             vendor = self.gripper_to_vendor(np.array([gripper[i], gripper[i]]))
             transport.write_gripper_cmd(float(vendor[0]), float(vendor[1]))
 
     def hold(self) -> None:
         """Re-send the current position as target with ``dq_target = 0`` (damped position
-        hold). No-op while e-stopped (damping is already active)."""
+        hold). No-op while e-stopped (damping is already active).
+
+        Drops the carried feed-forward target (T-25c): ``hold()`` is what the executor calls
+        on a deadline miss or a watchdog HOLD, i.e. exactly when the command stream has been
+        interrupted and the previous target is no longer the continuation of anything. It
+        also commands the MEASURED position, so re-basing there is what actually happened.
+        """
         transport = self._require_connected("hold")
         if self._estopped:
             return
@@ -343,6 +450,7 @@ class G1Adapter:
         kp_motor = self.canonical_to_motor(np.asarray(self._config.kp, dtype=np.float32))
         kd_motor = self.canonical_to_motor(np.asarray(self._config.kd, dtype=np.float32))
         transport.write_motor_cmd(q_target, zeros, kp_motor, kd_motor)
+        self.forget_command()
 
     def estop(self) -> None:
         """Emergency stop: vendor damping mode via the transport + latch. Safe to call at
@@ -352,12 +460,19 @@ class G1Adapter:
         The latch is set even if the transport raises while damping (the exception still
         propagates): a failed damp must never leave the adapter willing to keep commanding
         motion via ``execute()``.
+
+        The carried feed-forward target is dropped in the same ``finally`` (T-25c). Damping
+        lets the arm settle wherever gravity and contact put it, so the pre-estop target is
+        stale by an unbounded amount; carrying it past a ``clear_estop()`` would command a
+        jump back toward it as the first act after an emergency stop. Dropping it here — not
+        in ``clear_estop()`` — means a failed damp cannot leave it armed either.
         """
         try:
             if self._transport is not None:
                 self._transport.emergency_damp()
         finally:
             self._estopped = True
+            self.forget_command()
 
     def clear_estop(self) -> None:
         """Release the e-stop latch (deliberate operator action)."""
