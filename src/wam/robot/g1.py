@@ -413,6 +413,14 @@ class G1Adapter:
         dt_s = float(chunk.dt_s)
         t0 = self._clock()
         for i in range(steps):
+            if self._estopped:
+                # An e-stop that lands MID-CHUNK stops the stream here. estop() is required to
+                # be safe from any thread (RobotAdapter.estop), a watchdog or operator thread
+                # is exactly where it comes from, and the pacing sleep below makes a chunk a
+                # long window to land in. Checking only once before the loop meant the
+                # remaining steps kept writing full-gain position targets to an arm the vendor
+                # had just put into damping — the opposite of an emergency stop.
+                break
             if i > 0:
                 # Pace on the wall clock: never send step i before t0 + i * dt_s (FR-07:
                 # the dq_max * dt clip assumes commands are issued dt_s apart).
@@ -431,6 +439,15 @@ class G1Adapter:
             # Scalar canonical gripper command drives both hands (MVP simplification).
             vendor = self.gripper_to_vendor(np.array([gripper[i], gripper[i]]))
             transport.write_gripper_cmd(float(vendor[0]), float(vendor[1]))
+        if self._estopped:
+            # estop() drops the carry in its own finally, but it can land ANYWHERE above —
+            # including after the last write — and the loop would then re-arm it. Without this
+            # line the pre-estop setpoint survives clear_estop(), and the first motion after an
+            # emergency stop is an unrequested lunge back toward it (bounded by the window, but
+            # nobody asked for it), on a chunk as innocuous as the SafetyLayer's own zero-delta
+            # hold. Re-checking here closes every ordering: an e-stop observed at loop exit
+            # clears the carry, and one that lands after this check has no writer left to race.
+            self.forget_command()
 
     def hold(self) -> None:
         """Re-send the current position as target with ``dq_target = 0`` (damped position

@@ -24,6 +24,11 @@
   "holdout_file": "configs/splits/t18_holdout_episodes.txt",
   "m1_momentum_share": 0.6556522372465616,
   "m2_blind_unreachable": 0.32837142833422706,
+  "m3_active_hand": 0,
+  "m3_transitions_by_hand": [
+    810,
+    0
+  ],
   "m3_transitions_per_episode": 2.014925373134328,
   "mse": {
     "blind_ceiling": 5.361517448074899e-06,

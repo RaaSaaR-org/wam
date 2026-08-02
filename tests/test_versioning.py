@@ -359,6 +359,52 @@ class TestShippedConfigs:
             "the sim window must not appear in the hardware config (OD-08)"
         )
 
+    def test_view_sim_honours_every_robot_config_field_the_adapter_accepts(self) -> None:
+        """``scripts/view_sim.py`` claims to drive "the same chain as scripts/rollout.py", and
+        ``docs/sim.md`` repeats it. That is only true if it reads the same fields.
+
+        Found by adversarial review of T-25c: ``rollout.py`` was taught ``q_track_window`` and
+        ``view_sim.py`` was not, so the two entry points silently ran DIFFERENT control laws off
+        the same file — 0.44 vs 0.96 of a commanded travel, and 3.3x the accel_limit
+        interventions the doc quotes. Written generically rather than for that one field, so the
+        next field added to the yaml and forgotten here fails too.
+        """
+        import argparse
+        import importlib.util
+        import sys
+
+        path = CONFIGS_DIR / "robot/mujoco_g1.yaml"
+        spec = importlib.util.spec_from_file_location(
+            "view_sim", CONFIGS_DIR.parent / "scripts" / "view_sim.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["view_sim"] = module
+        spec.loader.exec_module(module)
+        built = module._build_robot(path, realtime=False)[1]
+
+        section = load_config(path)["robot"]
+        declared: dict[str, object] = {}
+        for block in ("limits", "gains", "control"):
+            for key, value in dict(section.get(block, {})).items():
+                name = "control_dt_s" if key == "dt_s" else key
+                if name in type(built).model_fields:
+                    declared[name] = value
+        assert "q_track_window" in declared, "the yaml no longer declares the field under test"
+        for name, value in declared.items():
+            got = getattr(built, name)
+            want = tuple(float(x) for x in value) if isinstance(value, list) else float(value)
+            assert got == want, f"view_sim.py drops robot config field {name!r}"
+
+        # And the same field really does reach rollout.py's builder for the same file.
+        spec_r = importlib.util.spec_from_file_location(
+            "rollout", CONFIGS_DIR.parent / "scripts" / "rollout.py"
+        )
+        rollout = importlib.util.module_from_spec(spec_r)
+        sys.modules["rollout"] = rollout
+        spec_r.loader.exec_module(rollout)
+        args = argparse.Namespace(robot_config=path, image_hw=None)
+        assert rollout._build_mujoco_g1(args)[1] == built.control_dt_s
+
     def test_safety_config_fields(self) -> None:
         cfg = load_config(CONFIGS_DIR / "safety/default.yaml")
         n = len(cfg["q_min"])

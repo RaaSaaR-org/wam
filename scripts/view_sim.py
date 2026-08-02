@@ -82,9 +82,17 @@ def _build_robot(robot_config: Path, *, realtime: bool) -> tuple[Any, G1Config, 
         if key in limits_cfg
     }
     kwargs.update({k: tuple(float(x) for x in gains_cfg[k]) for k in ("kp", "kd") if k in gains_cfg})
-    dt_s = section.get("control", {}).get("dt_s")
+    control_cfg = section.get("control", {})
+    dt_s = control_cfg.get("dt_s")
     if dt_s is not None:
         kwargs["control_dt_s"] = float(dt_s)
+    # Bounded feed-forward (T-25c). Must be read here as well as in rollout.py: this script's
+    # whole claim is that it drives the SAME chain, and dropping the window would silently run
+    # the viewer on the pre-T-25c control law while a rollout from the same config uses the new
+    # one — 0.44 vs 0.96 of a commanded travel, and 3.3x the accel_limit interventions.
+    window = control_cfg.get("q_track_window")
+    if window is not None:
+        kwargs["q_track_window"] = tuple(float(x) for x in window)
     config = G1Config(**kwargs)
 
     sim_cfg = dict(section.get("sim", {}))

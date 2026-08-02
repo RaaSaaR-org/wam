@@ -65,8 +65,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 #: Non-overlapping chunk length, matching the converter and every archived number.
 CHUNK_STEPS = 16
-#: Canonical gripper index the corpus actually actuates (T-31: the right hand never moves).
-ACTIVE_HAND = 0
 #: Proprioception lags handed to the blind model, in frames. 8 lags over ~0.4 s at 30 Hz.
 LAGS = (0, 1, 2, 3, 4, 6, 8, 12)
 #: Random Fourier features for the blind ceiling, and the bandwidth/ridge grids searched.
@@ -92,7 +90,12 @@ class Episode:
     features: np.ndarray  # (n_chunks, D) lagged blind state at each chunk's start frame
     targets: np.ndarray  # (n_chunks, 16 * 15) demonstrated arm deltas, flattened
     constvel: np.ndarray  # (n_chunks, 16 * 15) dq[start] * dt_s held across the chunk
-    transitions: int  # debounced gripper transitions in this episode
+    #: Debounced transitions PER GRIPPER CHANNEL. Which channel is the live one is a property
+    #: of the corpus, not of this script — a rig whose moving hand is index 1 is a perfectly
+    #: healthy rig, and hardcoding index 0 would report M3 = 0.00 for it and route PR-04 to
+    #: verdict C ("the recording or conversion killed the channel"), which is the exact
+    #: inversion of the failure G3 exists to catch.
+    transitions: np.ndarray  # (gripper_dims,)
 
 
 def _lagged(stream: np.ndarray, frame: int) -> np.ndarray:
@@ -144,7 +147,9 @@ def load_episode(root: Path, episode_id: str) -> Episode | None:
         features=np.asarray(feats),
         targets=np.asarray(rows),
         constvel=np.asarray(cvel),
-        transitions=debounced_transitions(grip[:, ACTIVE_HAND]),
+        transitions=np.asarray(
+            [debounced_transitions(grip[:, c]) for c in range(grip.shape[1])], dtype=np.int64
+        ),
     )
 
 
@@ -229,8 +234,12 @@ def screen(train: list[Episode], holdout: list[Episode], seed: int = SEED) -> di
     span = mse_zero - mse_ceiling
     m1 = (mse_zero - mse_constvel) / span if span > 0 else float("nan")
     m2 = mse_ceiling / mse_zero if mse_zero > 0 else float("nan")
-    transitions = [e.transitions for e in holdout + train]
-    m3 = float(np.mean(transitions))
+    # M3 is scored on the corpus's OWN live channel: the one with the most transitions summed
+    # over every episode. Ties and all-dead corpora fall to channel 0 and report 0.00, which is
+    # the honest answer — there is no live channel to find.
+    per_channel = np.sum([e.transitions for e in holdout + train], axis=0)
+    active_hand = int(np.argmax(per_channel))
+    m3 = float(np.mean([e.transitions[active_hand] for e in holdout + train]))
 
     # A ceiling a zero-parameter rule beats is not a ceiling, and every M1/M2 read off it is
     # meaningless. PR-03 hit exactly this and only caught it because the number was absurd.
@@ -239,6 +248,8 @@ def screen(train: list[Episode], holdout: list[Episode], seed: int = SEED) -> di
         "m1_momentum_share": m1,
         "m2_blind_unreachable": m2,
         "m3_transitions_per_episode": m3,
+        "m3_active_hand": active_hand,
+        "m3_transitions_by_hand": [int(v) for v in per_channel],
         "ceiling_dominates": dominates,
         "mse": {
             "zero_delta": mse_zero,
@@ -260,6 +271,17 @@ def screen(train: list[Episode], holdout: list[Episode], seed: int = SEED) -> di
 
 
 # ------------------------------------------------------------------------------------------- cli
+
+
+def _json_safe(value: object) -> object:
+    """Recursively replace non-finite floats with None, so the artifact is valid JSON."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
 
 
 def read_split(path: Path) -> list[str]:
@@ -342,8 +364,16 @@ def main(argv: list[str] | None = None) -> int:
     ):
         del key
         print(f"  {label} {value:8.4f}   bar {bar:>8}   {'PASS' if ok else 'FAIL'}")
+    print(
+        f"  (M3 scored on gripper channel {report['m3_active_hand']}; "
+        f"transitions by channel {report['m3_transitions_by_hand']})"
+    )
     if not report["ceiling_dominates"]:
-        print("  WARNING: the blind ceiling is beaten by a zero-parameter rule — M1/M2 are void")
+        print(
+            "  G4 FAIL: the blind ceiling is beaten by a zero-parameter rule, so M1 and M2 above\n"
+            "  are VOID (M1's denominator can even be negative). PR-04 verdict E: refit the\n"
+            "  ceiling; this says nothing about the corpus."
+        )
 
     status = 0
     if args.expect:
@@ -365,7 +395,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        # json.dumps emits a bare NaN token for a non-finite float, which Python and jq accept
+        # but every standards-conformant reader rejects outright. A collapsed ceiling is exactly
+        # when M1 goes NaN, i.e. the artifact most in need of inspection would be the one that
+        # cannot be parsed. null instead: absent, which is what it means.
+        args.out.write_text(json.dumps(_json_safe(report), indent=2, sort_keys=True) + "\n")
         print(f"\nwrote {args.out}")
     return status
 

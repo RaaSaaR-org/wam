@@ -55,7 +55,8 @@ episode's own measurement noise but do not add an independent unit, so the colum
 optimistic to an unknown degree — in the limit, `h` is floored by between-episode heterogeneity
 over the episode count alone. Treat "grasps per episode" as a strong lever with diminishing
 returns, not as a linear substitute for episodes. **The pilot measures the real exchange rate**
-(§4, gate G4), and this table is superseded by that measurement rather than defended.
+(§4, the exchange-rate diagnostic), and this table is superseded by that measurement
+rather than defended.
 
 **Recording plan.**
 
@@ -87,13 +88,22 @@ archived GR00T values (`--expect gr00t`, run 2026-08-02 on the committed 40-epis
 | M2 | 0.3284 | 0.333 | −0.0046 |
 | M3 | 2.0149 | 2.01 | +0.0049 |
 
-The two zero-parameter rules reproduce to every digit; M1/M2 sit ~0.005 low because this
-ceiling is slightly stronger (5.361517e-06 vs 5.431371e-06), which is the conservative
-direction — a stronger ceiling makes M2 *harder* to clear, not easier. **This is the like-for-
-like check PR-03's gate 1 could not do**, because the code it needed to compare against had
-never been committed. Note what that also means: the archived M1/M2/M3 were themselves produced
-by uncommitted code, so agreement to ±0.005 is evidence these two implementations agree, not
-proof either is canonical.
+The two zero-parameter rules reproduce to every digit; M1/M2 sit ~0.005 low because this ceiling
+is slightly stronger (5.361517e-06 vs 5.431371e-06). **This is the like-for-like check PR-03's
+gate 1 could not do**, because the code it needed to compare against had never been committed.
+Note what that also means: the archived M1/M2/M3 were themselves produced by uncommitted code,
+so agreement to ±0.005 is evidence these two implementations agree, not proof either is
+canonical.
+
+**Ceiling strength moves G1 and G2 in opposite directions, and that is what makes the pair
+sound.** A stronger ceiling shrinks M2 = `ceiling/zero` (harder to pass G2) but also *grows* the
+denominator of M1 = `(zero−constvel)/(zero−ceiling)`, shrinking M1 and making G1 *easier*. So a
+better ceiling search alone can flip G1: on this very corpus, a hypothetical perfect blind
+ceiling would give M1 = **0.4404**, which **passes** G1 on the dataset this document uses as its
+canonical R1 failure. It would simultaneously give M2 = 0.000, failing G2 outright. **Neither
+gate is trustworthy alone; requiring both is what cannot be gamed by fitting a better ceiling**,
+because strengthening it trades one gate against the other. Any report quoting M1 without M2 is
+misreading this screen.
 
 | gate | clause | bar |
 |---|---|---|
@@ -121,8 +131,17 @@ every run.
   are still momentum. **Do not scale.** Change the protocol along R2/R3/R6 — randomize placement
   further, break the timing stereotypy, teleop more decisively — and re-pilot 30 fresh episodes.
   Each re-pilot costs ~30 minutes and is the cheapest experiment available.
-- **C — FAIL on G3 or G4.** The recording or conversion has killed the gripper channel, exactly
-  as our own converter did in T-31. Fix the pipeline; this is a bug, not a data property.
+- **C — FAIL on G3.** The recording or conversion has killed the gripper channel, exactly as our
+  own converter did in T-31. Fix the pipeline; this is a bug, not a data property. Check
+  `m3_transitions_by_hand` first: the screen scores whichever channel is live, so a zero here
+  means *no* channel moved, not that the wrong one was read.
+- **E — FAIL on G4** (`ceiling_dominates: false`). **Says nothing about the corpus.** The
+  ceiling fit collapsed, so M1 and M2 are void — M1's denominator can be negative and the
+  reported numbers are arithmetic on a broken quantity, not measurements. Refit the ceiling
+  (widen `GAMMA_SCALES`/`LAMBDAS`, check for too few training episodes) and re-run. This branch
+  exists because the first version of this document routed a G4 failure to verdict C, which
+  would have sent someone to debug a recording pipeline whose gripper channel had just passed
+  its own gate.
 - **D — FAIL on G1/G2 after three protocol revisions.** Then the finding is about **the task
   family, not the dataset**: single-arm tabletop pick-and-place at 30 Hz may not admit a metric
   a blind extrapolator fails. That is a genuine, publishable negative and a much stronger claim
@@ -134,7 +153,7 @@ the same protocol is no verdict.
 
 ## 4. What the pilot also measures, without any extra recording
 
-- **G4-exchange:** post-flip steps per episode at the achieved grasps/episode — the real
+- **exchange rate:** post-flip steps per episode at the achieved grasps/episode — the real
   exchange rate for §2's table, which is currently an assumption.
 - **R2:** cross-validated R²(grasp pose | t=0 state), episode-disjoint folds. The method is
   `PR-01-TASK-VARIATION.md`'s, which reported +0.6136 on the current corpus.

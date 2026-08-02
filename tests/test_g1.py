@@ -685,3 +685,51 @@ def test_config_rejects_a_window_that_would_break_the_bound() -> None:
         G1Config(**_window(float("nan")))
     with pytest.raises(ValueError):
         G1Config(**_window(float("inf")))
+
+
+def test_an_estop_landing_mid_chunk_stops_the_stream_and_leaves_no_carry() -> None:
+    """Found by adversarial review of the T-25c commit, which claimed this already held.
+
+    ``estop()`` must be safe from any thread (``RobotAdapter.estop``), and a watchdog or
+    operator thread is exactly where it comes from — the pacing sleep makes a 25-step chunk a
+    long window to land in. ``execute()`` tested the latch once BEFORE the loop and wrote the
+    carry on every step, so an e-stop arriving mid-chunk had its carry-drop immediately undone
+    by the still-running loop. The pre-estop setpoint then survived ``clear_estop()`` and the
+    first motion after an emergency stop was an unrequested lunge back toward it — on a chunk
+    as innocuous as the SafetyLayer's own zero-delta hold.
+
+    Driven from inside the transport rather than from a thread: same code path, no race, and
+    it fails deterministically against the pre-fix adapter.
+    """
+
+    class EstopMidChunk(FakeG1Transport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.adapter: G1Adapter | None = None
+
+        def write_motor_cmd(self, q_target, dq_target, kp, kd) -> None:  # type: ignore[no-untyped-def]
+            super().write_motor_cmd(q_target, dq_target, kp, kd)
+            if len(self.motor_commands) == 2 and self.adapter is not None:
+                self.adapter.estop()  # the operator, two steps in
+
+    fake = EstopMidChunk()
+    adapter, _ = connected_adapter(config=G1Config(**_window(0.5)), fake=fake)
+    fake.adapter = adapter
+    idx, motor = CANON_IDX["left_elbow"], MOTOR_IDX["left_elbow"]
+    deltas = np.zeros((25, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[:, idx] = 0.01
+
+    adapter.execute(make_chunk(deltas), prefix_steps=25)
+
+    assert adapter.is_estopped
+    # The stream stops at the latch instead of driving 23 more targets into a damped arm.
+    assert len(fake.motor_commands) == 2, len(fake.motor_commands)
+    assert adapter.tracking_error == 0.0
+
+    # ...and nothing is carried across the e-stop: a zero-delta chunk after clear_estop() is a
+    # hold at the MEASURED position, not a jump back toward where we were headed.
+    adapter.clear_estop()
+    fake.motor_commands.clear()
+    q_before = float(fake.q[motor])
+    adapter.execute(make_chunk(np.zeros((1, G1_SPEC.num_joints), dtype=np.float32)), 1)
+    assert float(fake.motor_commands[0]["q_target"][motor]) == pytest.approx(q_before, abs=1e-6)
