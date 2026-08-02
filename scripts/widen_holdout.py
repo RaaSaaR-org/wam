@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Widen an existing holdout by drawing more episodes, keeping the old ones (PR-01-GRIPPER §2).
+
+`PR-01-GRIPPER.md` measured the restored gripper channel and found real headroom in exactly one
+place — the ~4 steps around a grasp flip, where every blind predictor is at a coin toss — and then
+found that 40 holdout episodes cannot resolve it: 660 post-flip target steps give an episode-
+bootstrap CI half-width of 7.56 points, so a model must beat the blind ceiling by ~15 points to be
+distinguishable. The metric is bottlenecked by HOLDOUT size, not by training data. This script
+produces the wider holdout that unblocks it.
+
+Two properties, and this script exists so they are a committed artifact rather than a shuffle
+somebody re-runs from memory:
+
+  NESTED   the new holdout is a strict SUPERSET of the base one. Two consequences, both wanted:
+           every number ever measured on the 40 stays a sub-metric of the 150 (they are the same
+           episodes, scored the same way), and no episode that was ever SCORED can drift into a
+           training set — the widening only ever moves episodes out of training, never into it.
+  SHUFFLED the additions come from a seeded permutation of the remaining pool, not from a sorted
+           prefix. ``gr00t-apple-000000..110`` is a contiguous block of one recording session; take
+           that and the widened holdout differs from the base one in WHEN it was recorded as well
+           as in how many episodes it has.
+
+    python scripts/widen_holdout.py \
+        --dataset datasets/gr00t-apple-grip \
+        --base configs/splits/t18_holdout_episodes.txt \
+        --size 150 --seed 0 --out configs/splits/pr03_holdout_150.txt
+
+Output is deterministic: same dataset, same base, same seed -> byte-identical file, header
+included (no timestamps, paths normalised to repo-relative). ``tests/test_splits.py`` pins that.
+
+WHAT WIDENING COSTS, said out loud because it is the part that gets forgotten: the episodes added
+to the holdout were in ``runs/t16-lora-seed0``'s training set (it trained on the dataset minus the
+base 40). That checkpoint therefore CANNOT be scored on the widened holdout — every added episode
+is one it has seen. This is not a soft warning: ``scripts/eval_t16.py`` proves the split from the
+checkpoint's recorded training-set hash and will refuse. Widening obliges a refit; that is what
+`PR-01-GRIPPER.md` §2 means by "convert once, re-split, refit once", and it is why the script
+prints the surviving training-pool size next to the holdout size.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import random
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+
+def _repo_relative(path: Path) -> str:
+    """``path`` as seen from the repo root when it lives inside it, else unchanged.
+
+    The header is part of the file's bytes and the file is committed, so an absolute path would
+    make the artifact depend on whose laptop generated it.
+    """
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(_REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def widened_ids(pool: list[str], base: set[str], size: int, seed: int) -> list[str]:
+    """``size`` episode ids containing all of ``base``, the rest drawn from ``pool`` by ``seed``.
+
+    ``pool`` must already be in a canonical order (``list_episodes`` is sorted) and must exclude
+    ``base``; the shuffle is what makes the addition arbitrary with respect to recording order.
+    """
+    if size < len(base):
+        raise SystemExit(
+            f"--size {size} is smaller than the {len(base)}-episode base holdout; widening only "
+            "adds episodes, because shrinking one would move a SCORED episode into training"
+        )
+    needed = size - len(base)
+    if needed > len(pool):
+        raise SystemExit(
+            f"--size {size} needs {needed} more episodes than the base holdout, but only "
+            f"{len(pool)} are available outside it"
+        )
+    order = list(pool)
+    random.Random(seed).shuffle(order)
+    return sorted(base | set(order[:needed]))
+
+
+def render(
+    ids: list[str],
+    *,
+    size: int,
+    seed: int,
+    dataset: Path,
+    base: Path,
+    base_size: int,
+    pool_size: int,
+    out: Path,
+) -> str:
+    """The file body: a self-documenting header (the shape t18_holdout_episodes.txt uses) + ids."""
+    return "".join(
+        f"{line}\n"
+        for line in (
+            f"# PR-03 holdout — {size} episodes, the set the grasp-anticipation metric SCORES on.",
+            "# Pass to train_t16_lora.py --exclude-episodes so the fine-tune never sees them, and",
+            "# to eval_t16.py --holdout so both sides share one definition of the split.",
+            "#",
+            "# Generated by:",
+            f"#   python scripts/widen_holdout.py --dataset {_repo_relative(dataset)} \\",
+            f"#       --base {_repo_relative(base)} --size {size} --seed {seed} \\",
+            f"#       --out {_repo_relative(out)}",
+            "#",
+            f"# seed:          {seed}",
+            f"# dataset:       {_repo_relative(dataset)}",
+            f"# base holdout:  {_repo_relative(base)} ({base_size} episodes)",
+            f"#                sha256:{_sha256(base)}",
+            f"#                NESTED: all {base_size} are below, so every number measured on",
+            "#                them stays a sub-metric of this file.",
+            f"# training pool: {pool_size} episodes (dataset minus this holdout)",
+            "#",
+            "# runs/t16-lora-seed0 CANNOT be scored here. It trained on the dataset minus the",
+            f"# {base_size}-episode base, so {size - base_size} of the episodes below are episodes it",
+            "# has seen. eval_t16.py proves the split from the checkpoint's training-set hash and",
+            "# will refuse. Widening the holdout obliges a refit (PR-01-GRIPPER.md §2).",
+            *ids,
+        )
+    )
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dataset", type=Path, default=_REPO_ROOT / "datasets" / "gr00t-apple-grip"
+    )
+    parser.add_argument(
+        "--base",
+        type=Path,
+        default=_REPO_ROOT / "configs" / "splits" / "t18_holdout_episodes.txt",
+        help="the holdout to widen; every episode in it stays held out (default: the T-18 holdout)",
+    )
+    parser.add_argument("--size", type=int, default=150, help="target holdout size")
+    parser.add_argument(
+        "--seed", type=int, default=0, help="permutation seed (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--out", type=Path, default=_REPO_ROOT / "configs" / "splits" / "pr03_holdout_150.txt"
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    from wam.data.episode import list_episodes
+    from wam.evaluation import load_episode_ids
+
+    episodes = list_episodes(args.dataset)
+    if not episodes:
+        raise SystemExit(f"no episodes under {args.dataset}")
+    base = load_episode_ids(args.base)
+    if not base:
+        raise SystemExit(f"--base {args.base} lists no episodes")
+    present = {p.name for p in episodes}
+    absent = sorted(base - present)
+    if absent:
+        # A base that does not line up with the dataset means the widened file would be proven
+        # against a different split than the evaluator later checks — fatal, not a warning.
+        raise SystemExit(
+            f"--base lists {len(absent)} episode(s) absent from {args.dataset}: {absent[:5]}"
+        )
+    pool = [p.name for p in episodes if p.name not in base]
+
+    ids = widened_ids(pool, base, args.size, args.seed)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(
+        render(
+            ids,
+            size=args.size,
+            seed=args.seed,
+            dataset=args.dataset,
+            base=args.base,
+            base_size=len(base),
+            pool_size=len(present) - len(ids),
+            out=args.out,
+        )
+    )
+    print(
+        f"{args.out}: {len(ids)} holdout episodes "
+        f"({len(base)} inherited + {len(ids) - len(base)} added), "
+        f"{len(present) - len(ids)} left to train on"
+    )
+
+    # Any committed split generated against the NARROWER holdout now names episodes this file
+    # holds out. Silence here is how a rung file ends up training on a scored episode.
+    overlapping = sorted(
+        (path, len(load_episode_ids(path) & set(ids)))
+        for path in sorted(args.out.parent.glob("*.txt"))
+        if path != args.out and path != args.base and load_episode_ids(path) & set(ids)
+    )
+    for path, count in overlapping:
+        print(
+            f"WARNING: {_repo_relative(path)} names {count} episode(s) this holdout scores. "
+            "It was generated against the narrower holdout and must be regenerated before it is "
+            "used with this one."
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
