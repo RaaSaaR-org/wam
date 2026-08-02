@@ -1,0 +1,114 @@
+{
+  "dataset": "/Users/heussers/develop/emai/wam/datasets/gr00t-apple-grip",
+  "definitions": {
+    "episode-latch": {
+      "best_non_ceiling": 66.59209545115586,
+      "ceiling_dominates": true,
+      "ci_halfwidth": 4.095209602786113,
+      "episodes_with_transition": 148,
+      "n_postflip": 2682,
+      "predictors": {
+        "ceiling": {
+          "k_to_k3": 59.0134529147982,
+          "postflip": 75.35421327367636,
+          "preflip": 82.46511627906978
+        },
+        "const-velocity": {
+          "k_to_k3": 47.98206278026906,
+          "postflip": 66.59209545115586,
+          "preflip": 83.53488372093022
+        },
+        "repeat-last": {
+          "k_to_k3": 17.130044843049326,
+          "postflip": 24.757643549589858,
+          "preflip": 76.09302325581395
+        },
+        "ridge-32": {
+          "k_to_k3": 21.524663677130047,
+          "postflip": 32.92319164802387,
+          "preflip": 76.93023255813954
+        },
+        "time-only": {
+          "k_to_k3": 46.27802690582959,
+          "postflip": 56.04026845637584,
+          "preflip": 62.372093023255815
+        }
+      },
+      "transition_chunks": 302
+    },
+    "label-steps": {
+      "best_non_ceiling": 61.5450643776824,
+      "ceiling_dominates": true,
+      "ci_halfwidth": 4.5537328575383995,
+      "episodes_with_transition": 147,
+      "n_postflip": 2330,
+      "predictors": {
+        "ceiling": {
+          "k_to_k3": 55.5014605647517,
+          "postflip": 71.75965665236052,
+          "preflip": 82.46511627906978
+        },
+        "const-velocity": {
+          "k_to_k3": 43.52482960077897,
+          "postflip": 61.5450643776824,
+          "preflip": 83.53488372093022
+        },
+        "repeat-last": {
+          "k_to_k3": 10.029211295034079,
+          "postflip": 13.390557939914164,
+          "preflip": 76.09302325581395
+        },
+        "ridge-32": {
+          "k_to_k3": 14.800389483933788,
+          "postflip": 22.78969957081545,
+          "preflip": 76.93023255813954
+        },
+        "time-only": {
+          "k_to_k3": 47.906523855890946,
+          "postflip": 56.90987124463519,
+          "preflip": 62.372093023255815
+        }
+      },
+      "transition_chunks": 280
+    },
+    "self-contained": {
+      "best_non_ceiling": 54.4822256568779,
+      "ceiling_dominates": false,
+      "ci_halfwidth": 6.537869975242483,
+      "episodes_with_transition": 133,
+      "n_postflip": 1294,
+      "predictors": {
+        "ceiling": {
+          "k_to_k3": 35.63218390804598,
+          "postflip": 50.9273570324575,
+          "preflip": 81.75895765472313
+        },
+        "const-velocity": {
+          "k_to_k3": 16.666666666666664,
+          "postflip": 30.757341576506953,
+          "preflip": 81.54180238870794
+        },
+        "repeat-last": {
+          "k_to_k3": 0.0,
+          "postflip": 0.0,
+          "preflip": 79.75027144408251
+        },
+        "ridge-32": {
+          "k_to_k3": 0.28735632183908044,
+          "postflip": 0.7727975270479135,
+          "preflip": 79.75027144408251
+        },
+        "time-only": {
+          "k_to_k3": 49.56896551724138,
+          "postflip": 54.4822256568779,
+          "preflip": 64.76655808903365
+        }
+      },
+      "transition_chunks": 196
+    }
+  },
+  "holdout": "configs/splits/pr03_holdout_150.txt",
+  "restrict": null,
+  "score_episodes": 150,
+  "train_episodes": 252
+}

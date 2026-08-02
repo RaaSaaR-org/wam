@@ -127,6 +127,32 @@ def expected_saturated_frac(num_episodes: int, num_steps: int) -> float:
     return min(1.0, 2.0 * max(num_episodes, 1) / num_steps)
 
 
+def latched_states(
+    values: np.ndarray,
+    *,
+    threshold: float = GRIPPER_BINARIZE_THRESHOLD,
+    margin: float = GRIPPER_HYSTERESIS_MARGIN,
+) -> np.ndarray:
+    """Per-sample latched state: 1 closed, 0 open, -1 before the first decisive sample.
+
+    The same dead band :func:`debounced_transitions` counts with, but kept per sample and
+    forward-filled, so a caller can ask *where* a transition happened rather than only how many
+    there were. PR-03's grasp-anticipation metric needs the index — it scores the steps at and
+    after a flip — and giving it its own latch would let the metric and the admissibility gate
+    disagree about what a grasp is. :func:`debounced_transitions` is defined in terms of this
+    function for exactly that reason; the two cannot drift.
+    """
+    v = np.asarray(values, dtype=np.float64).reshape(-1)
+    raw = np.where(v >= threshold + margin, 1, np.where(v <= threshold - margin, 0, -1))
+    out = np.empty(raw.shape, dtype=np.int8)
+    state = -1
+    for i, sample in enumerate(raw):
+        if sample >= 0:
+            state = int(sample)
+        out[i] = state
+    return out
+
+
 def debounced_transitions(
     values: np.ndarray,
     *,
@@ -142,12 +168,11 @@ def debounced_transitions(
     look like a grasp metric on a dead channel. The undebounced count is reported separately
     (``crossings``), so a FAIL can be read rather than merely asserted.
     """
-    v = np.asarray(values, dtype=np.float64).reshape(-1)
-    latched = np.where(v >= threshold + margin, 1, np.where(v <= threshold - margin, 0, -1))
-    seq = latched[latched >= 0]
-    if seq.size < 2:
+    seq = latched_states(values, threshold=threshold, margin=margin)
+    decided = seq[seq >= 0]
+    if decided.size < 2:
         return 0
-    return int((np.diff(seq) != 0).sum())
+    return int((np.diff(decided) != 0).sum())
 
 
 def crossings(values: np.ndarray, *, threshold: float = GRIPPER_BINARIZE_THRESHOLD) -> int:
