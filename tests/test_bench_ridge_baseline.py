@@ -1,18 +1,25 @@
-"""Tests for `scripts/bench_ridge_baseline.py` — the blind ridge a visual model has to beat.
+"""Tests for `scripts/bench_ridge_baseline.py` — the blind bars a visual model has to beat.
 
 The script's headline claim is that 7 920 linear parameters fitted on proprioception alone score
-6.330899e-06 on the T-16 holdout against the deployed Wan-5B+LoRA model's 1.112983e-05. A number
-that large only means something if the fit itself is trustworthy, so the tests here are not "does
+6.330899e-06 on the T-16 holdout against the deployed Wan-5B+LoRA model's 1.112983e-05, and that a
+blind NONLINEAR regressor on the same 32 dims goes further still, to 5.431371e-06. Numbers that
+large only mean something if the fits themselves are trustworthy, so the tests here are not "does
 it print a number". They are the four ways a baseline like this is usually wrong:
 
   it does not fit    On data where the target IS an exact linear function of the state, the ridge
                      has to recover it and score ~0. Without this calibration a broken solve looks
-                     identical to "the state does not predict the action".
-  it leaks           The mutation that matters. On data where the target is INDEPENDENT of the
-                     state the holdout MSE must land at the zero-delta baseline and NOT below it;
-                     anything better means holdout information reached the fit. Reinforced by a
-                     DELIBERATELY leaked split that scores detectably better, so the guard is shown
-                     to have teeth rather than merely passing.
+                     identical to "the state does not predict the action". The ceiling gets the
+                     matching calibration in the other direction: on a target that is a NONLINEAR
+                     function of the state it has to beat the linear ridge decisively, or it is
+                     just an expensive way to redo one.
+  it leaks           The mutation that matters, and it now has two shapes. For the ridge: on data
+                     where the target is INDEPENDENT of the state the holdout MSE must land at the
+                     zero-delta baseline and NOT below it, reinforced by a DELIBERATELY leaked
+                     split that scores detectably better. For the ceiling: the hyperparameters must
+                     be chosen on an inner split of TRAIN only — the guard raises when a holdout
+                     episode reaches the search, and the leak control here chooses the width,
+                     bandwidth and lambda ON THE HOLDOUT and comes out four orders of magnitude
+                     "better", which is what an unpoliced ceiling would be worth.
   it normalises on   Train and holdout are built with different means and the holdout must come
   the union          out transformed by the TRAIN statistics — visibly off-centre, not re-centred
                      using knowledge of itself.
@@ -20,15 +27,20 @@ it print a number". They are the four ways a baseline like this is usually wrong
   degenerates        bias column. Both are dropped, and the rank deficiency they would have caused
                      is asserted directly so the drop is shown to be necessary.
 
-Plus one contract test: the pairing rule must be `build_eval_pairs`' rule, checked by running both
-over the same episode and comparing row for row. That is what licenses printing the ridge's MSE
-next to a model's on the same line.
+Plus two contract tests. The pairing rule must be `build_eval_pairs`' rule, checked by running both
+over the same episode and comparing row for row — that is what licenses printing the ridge's MSE
+next to a model's on the same line. And `check_archived` must actually refuse a moved number, since
+it is the only thing standing between a refactor and three published write-ups quietly becoming
+claims about data nobody measured.
 
 Nothing here touches `datasets/gr00t-apple-full` or `runs/`. The episodes are synthesized in
 `tmp_path` with the repo's own `EpisodeWriter` (never a hand-rolled parquet writer), and — apart
 from the one test that cross-checks against `build_eval_pairs` — they carry no frames at all,
 because the baseline never opens a camera and encoding video for it would be paying for pixels
-that are the whole point of not being read.
+that are the whole point of not being read. The ceiling is exercised at a toy grid (32/128 random
+features, not 4096/8192): what is under test is the SEARCH DISCIPLINE, which is identical at both
+scales, and a 8193-wide solve per grid point would put minutes into a unit test to re-measure a
+number the script already prints.
 """
 
 from __future__ import annotations
@@ -67,6 +79,13 @@ CHUNKS_PER_EPISODE = 20
 
 TRAIN_EPISODES = tuple(f"ep-tr-{i:02d}" for i in range(8))
 HOLDOUT_EPISODES = tuple(f"ep-ho-{i:02d}" for i in range(3))
+
+#: A toy version of the ceiling's grid. 32/128 random features instead of 4096/8192, because what
+#: is under test is where the hyperparameters are CHOSEN, and that is the same code at both scales.
+CEILING_WIDTHS = (32, 128)
+CEILING_GAMMAS = (0.05, 0.5)
+CEILING_LAMBDAS = (1e-2, 1.0, 1e5)
+CEILING_VAL_EPISODES = 2
 
 SPEC = CanonicalSpaceSpec(
     joint_names=tuple(f"j{i}" for i in range(NUM_JOINTS)),
@@ -500,6 +519,346 @@ def test_the_state_is_the_last_one_at_or_before_the_chunk(tmp_path: Path) -> Non
         assert table.states[row] == pytest.approx(rb.state_vector(recorded[i]))
 
 
+# -- 6. the blind nonlinear ceiling ---------------------------------------------------------------
+
+
+def _nonlinear_dataset(root: Path, seed: int = 21) -> Path:
+    """A target that is a nonlinear function of the state with NO linear component at all.
+
+    ``(state**2 - 1) @ C`` on standard-normal states: every output is uncorrelated with every
+    input by construction (``E[x*(x^2-1)] = 0`` under N(0,1)), so the best linear map is the
+    intercept and the linear bar sits at the zero-delta baseline no matter how well it is fitted.
+    An RBF-kernel regressor recovers it easily. That is the whole distinction the ceiling exists
+    to measure, arranged so the two predictors cannot be confused for one another.
+    """
+    rng = np.random.default_rng(seed)
+    coefficients = rng.normal(0.0, 1.0, (STATE_DIM, TARGET_DIM))
+    for episode_id in (*TRAIN_EPISODES, *HOLDOUT_EPISODES):
+        states = rng.normal(0.0, 1.0, (CHUNKS_PER_EPISODE, STATE_DIM))
+        targets = (states**2 - 1.0) @ coefficients
+        _write_episode(
+            root,
+            episode_id,
+            states,
+            targets.reshape(CHUNKS_PER_EPISODE, CHUNK_STEPS, NUM_JOINTS),
+        )
+    return root
+
+
+def _holdout_barely_moves_dataset(root: Path, seed: int = 17) -> Path:
+    """Train carries a strong signal; the HOLDOUT is very nearly still.
+
+    Not realism — leverage. The holdout has a property the train side does not, and exactly one
+    hyperparameter reaches it: shrink hard enough and the prediction collapses towards the train
+    mean, which on this holdout is almost exactly right. A search that is allowed to look at the
+    holdout finds that immediately; an honest one, which only ever sees train-like validation
+    episodes, picks the opposite end of the lambda grid because on train-like data shrinking that
+    hard is terrible. So the two procedures are separated by construction rather than by luck.
+    """
+    rng = np.random.default_rng(seed)
+    weights = rng.normal(0.0, 1.0, (STATE_DIM, TARGET_DIM))
+    for episode_id in (*TRAIN_EPISODES, *HOLDOUT_EPISODES):
+        states = rng.normal(0.0, 1.0, (CHUNKS_PER_EPISODE, STATE_DIM))
+        if episode_id in HOLDOUT_EPISODES:
+            targets = rng.normal(0.0, 1e-3, (CHUNKS_PER_EPISODE, TARGET_DIM))
+        else:
+            targets = states @ weights
+        _write_episode(
+            root,
+            episode_id,
+            states,
+            targets.reshape(CHUNKS_PER_EPISODE, CHUNK_STEPS, NUM_JOINTS),
+        )
+    return root
+
+
+def _fit_ceiling(table: Any, holdout_ids: tuple[str, ...] = HOLDOUT_EPISODES, **kwargs: Any) -> Any:
+    """`fit_ceiling` on the toy grid, wired the way `main` wires it."""
+    train_mask, holdout_mask = rb.split_by_episode(table, set(holdout_ids))
+    train_x, train_y = table.select(train_mask)
+    holdout_x, holdout_y = table.select(holdout_mask)
+    options: dict[str, Any] = {
+        "widths": CEILING_WIDTHS,
+        "gammas": CEILING_GAMMAS,
+        "lambdas": CEILING_LAMBDAS,
+        "num_val_episodes": CEILING_VAL_EPISODES,
+    }
+    options.update(kwargs)
+    return rb.fit_ceiling(
+        train_x,
+        train_y,
+        table.episode_ids[train_mask],
+        holdout_x,
+        holdout_y,
+        set(holdout_ids),
+        **options,
+    )
+
+
+def _grid_scored_on(
+    table: Any, holdout_ids: tuple[str, ...] = HOLDOUT_EPISODES
+) -> list[tuple[Any, float]]:
+    """Every grid point refitted on all train rows and scored ON THE HOLDOUT — i.e. the leak.
+
+    This is what an unpoliced ceiling would report: the minimum of this list. It uses the same
+    refit seed the honest path uses, so the honest config is a member of it and the comparison is
+    "same fits, different chooser" rather than two different procedures.
+    """
+    train_mask, holdout_mask = rb.split_by_episode(table, set(holdout_ids))
+    train_x, train_y = table.select(train_mask)
+    holdout_x, holdout_y = table.select(holdout_mask)
+    standardizer = rb.Standardizer.fit(train_x)
+    scored: list[tuple[Any, float]] = []
+    for width in CEILING_WIDTHS:
+        for gamma in CEILING_GAMMAS:
+            predictions = rb.ceiling_scores(
+                standardizer,
+                train_x,
+                train_y,
+                holdout_x,
+                width=width,
+                gamma=gamma,
+                lambdas=CEILING_LAMBDAS,
+                rng=np.random.default_rng(rb.CEILING_REFIT_SEED),
+            )
+            for lam, predicted in predictions.items():
+                scored.append(
+                    (
+                        rb.CeilingConfig(width=width, gamma=gamma, lam=lam),
+                        float(((predicted - holdout_y) ** 2).mean()),
+                    )
+                )
+    return scored
+
+
+def test_the_inner_split_is_drawn_from_train_only_and_is_episode_disjoint(tmp_path: Path) -> None:
+    """The property the whole ceiling rests on, asserted over the episode tags themselves."""
+    table = rb.collect_chunks(_linear_dataset(tmp_path / "linear"), CHUNK_STEPS)
+    train_mask, _ = rb.split_by_episode(table, set(HOLDOUT_EPISODES))
+
+    inner_fit, validation = rb.inner_validation_episodes(
+        table.episode_ids[train_mask],
+        set(HOLDOUT_EPISODES),
+        num_val_episodes=CEILING_VAL_EPISODES,
+    )
+
+    assert len(validation) == CEILING_VAL_EPISODES
+    assert not (validation & inner_fit)
+    assert inner_fit | validation == set(TRAIN_EPISODES)
+    assert not (validation & set(HOLDOUT_EPISODES))
+    assert not (inner_fit & set(HOLDOUT_EPISODES))
+
+
+def test_the_inner_split_refuses_to_run_if_a_holdout_episode_reaches_it() -> None:
+    """The runtime check the ceiling's meaning depends on, exercised directly.
+
+    A nonlinear regressor with ~10^6 parameters and a free bandwidth can be tuned to nearly any
+    number on a 1 040-chunk holdout, so a ceiling whose hyperparameters saw the holdout is not a
+    ceiling — it is a bar built to the height the builder wanted. If this test ever fails, the
+    number in the module docstring stops being evidence about proprioception.
+    """
+    tagged = np.asarray([*TRAIN_EPISODES, "ep-ho-01", *TRAIN_EPISODES])
+
+    with pytest.raises(SystemExit, match="HOLDOUT"):
+        rb.inner_validation_episodes(
+            tagged, {"ep-ho-01"}, num_val_episodes=CEILING_VAL_EPISODES
+        )
+
+
+def test_fit_ceiling_refuses_train_rows_that_carry_a_holdout_episode(tmp_path: Path) -> None:
+    """The guard has to be WIRED, not merely present. Here the caller mislabels the split — the
+    rows are right but the tags claim a holdout episode is on the train side — and the search has
+    to stop rather than quietly choose its hyperparameters on it."""
+    table = rb.collect_chunks(_linear_dataset(tmp_path / "linear"), CHUNK_STEPS)
+    train_mask, holdout_mask = rb.split_by_episode(table, set(HOLDOUT_EPISODES))
+    train_x, train_y = table.select(train_mask)
+    holdout_x, holdout_y = table.select(holdout_mask)
+    mislabelled = table.episode_ids[train_mask].copy()
+    mislabelled[0] = HOLDOUT_EPISODES[0]
+
+    with pytest.raises(SystemExit, match="HOLDOUT"):
+        rb.fit_ceiling(
+            train_x,
+            train_y,
+            mislabelled,
+            holdout_x,
+            holdout_y,
+            set(HOLDOUT_EPISODES),
+            widths=CEILING_WIDTHS,
+            gammas=CEILING_GAMMAS,
+            lambdas=CEILING_LAMBDAS,
+            num_val_episodes=CEILING_VAL_EPISODES,
+        )
+
+
+def test_an_inner_validation_split_that_leaves_nothing_to_fit_is_refused(tmp_path: Path) -> None:
+    """Asking for every train episode as validation is a different failure from a bad ceiling and
+    must not be reported as one."""
+    table = rb.collect_chunks(_linear_dataset(tmp_path / "linear"), CHUNK_STEPS)
+    train_mask, _ = rb.split_by_episode(table, set(HOLDOUT_EPISODES))
+
+    with pytest.raises(SystemExit, match="nothing to fit on"):
+        rb.inner_validation_episodes(
+            table.episode_ids[train_mask],
+            set(HOLDOUT_EPISODES),
+            num_val_episodes=len(TRAIN_EPISODES),
+        )
+    with pytest.raises(SystemExit, match=">= 1"):
+        rb.inner_validation_episodes(
+            table.episode_ids[train_mask], set(HOLDOUT_EPISODES), num_val_episodes=0
+        )
+
+
+def test_choosing_the_ceiling_hyperparameters_on_the_holdout_is_detectably_better(
+    tmp_path: Path,
+) -> None:
+    """The leak control. Without it every other assertion about the ceiling is satisfied by a
+    procedure that tunes itself on the data it reports.
+
+    Same feature draws, same refits, same grid — the only difference is who picks. The honest
+    picker sees only train-like validation episodes; the leaking picker sees the holdout, notices
+    it barely moves, and takes the most-shrunk config on the grid. The gap is orders of magnitude,
+    which is the actual size of the thing the guard is preventing: a ceiling nobody can clear,
+    reported as a fact about proprioception.
+    """
+    table = rb.collect_chunks(_holdout_barely_moves_dataset(tmp_path / "leaky"), CHUNK_STEPS)
+
+    honest = _fit_ceiling(table)
+    leaked_config, leaked = min(_grid_scored_on(table), key=lambda row: row[1])
+
+    assert leaked < honest.holdout_mse / 100.0, (
+        f"leaked {leaked:.4e} vs honest {honest.holdout_mse:.4e} — choosing on the holdout bought "
+        "nothing here, so this dataset no longer separates the two procedures and the guard is "
+        "being tested against a case that cannot fail"
+    )
+    # And the honest search really did land somewhere else, rather than agreeing by accident.
+    assert honest.config != leaked_config
+    assert honest.config.lam < leaked_config.lam
+
+
+def test_the_ceiling_beats_the_linear_ridge_when_the_target_is_nonlinear(tmp_path: Path) -> None:
+    """Calibration, and the reason the row exists at all.
+
+    On a target that is a nonlinear function of the state the linear bar is structurally too low.
+    If the ceiling cannot clear it here, then it is not measuring nonlinearity — it is an
+    expensive way to recompute a ridge, and reporting it as a stronger bar would be false.
+    """
+    table = rb.collect_chunks(_nonlinear_dataset(tmp_path / "nonlinear"), CHUNK_STEPS)
+    _, _, _, holdout_y = _split(table, HOLDOUT_EPISODES)
+
+    ceiling = _fit_ceiling(table)
+    linear = _best_mse(table, HOLDOUT_EPISODES)
+    zero = rb.zero_delta_mse(holdout_y)
+
+    assert linear > zero * 0.9, "no linear component should pin the ridge to the zero-delta floor"
+    assert ceiling.holdout_mse < linear / 5.0
+    assert ceiling.holdout_mse < zero / 5.0
+
+
+def test_the_ceiling_does_not_beat_zero_delta_on_a_target_independent_of_the_state(
+    tmp_path: Path,
+) -> None:
+    """The ridge's no-leak mutation, repeated for the ceiling — which has three more orders of
+    magnitude of capacity and therefore three more orders of magnitude of ways to cheat. With no
+    relation to find, the honest procedure must shrink to the train mean and land AT the zero-delta
+    baseline; anything below it is holdout information inside the fit."""
+    table = rb.collect_chunks(_independent_dataset(tmp_path / "independent"), CHUNK_STEPS)
+    _, _, _, holdout_y = _split(table, HOLDOUT_EPISODES)
+
+    ceiling = _fit_ceiling(table)
+    zero = rb.zero_delta_mse(holdout_y)
+
+    assert ceiling.holdout_mse > zero * 0.9, (
+        f"ceiling {ceiling.holdout_mse:.4e} beat zero-delta {zero:.4e} on noise — leak"
+    )
+    assert ceiling.holdout_mse == pytest.approx(zero, rel=0.3)
+
+
+def test_the_ceilings_parameter_count_and_split_sizes_are_the_real_ones(tmp_path: Path) -> None:
+    """983 280 on the T-16 geometry is (4096 random features + 1 bias) x 240 outputs, and this is
+    that arithmetic at toy scale rather than a constant copied from the docstring."""
+    table = rb.collect_chunks(_nonlinear_dataset(tmp_path / "nonlinear"), CHUNK_STEPS)
+
+    ceiling = _fit_ceiling(table)
+
+    assert ceiling.config.width in CEILING_WIDTHS
+    assert ceiling.num_parameters == (ceiling.config.width + 1) * TARGET_DIM
+    assert ceiling.num_configs == len(CEILING_WIDTHS) * len(CEILING_GAMMAS) * len(CEILING_LAMBDAS)
+    assert ceiling.num_val_episodes == CEILING_VAL_EPISODES
+    assert ceiling.num_inner_fit_episodes == len(TRAIN_EPISODES) - CEILING_VAL_EPISODES
+    assert ceiling.num_val_rows == CEILING_VAL_EPISODES * CHUNKS_PER_EPISODE
+    assert ceiling.num_inner_fit_rows + ceiling.num_val_rows == (
+        len(TRAIN_EPISODES) * CHUNKS_PER_EPISODE
+    )
+    # The selection score and the reported score are computed on disjoint episodes by two fits.
+    assert ceiling.val_mse != ceiling.holdout_mse
+
+
+def test_a_degenerate_ceiling_hyperparameter_is_refused(tmp_path: Path) -> None:
+    """A zero bandwidth is a constant feature map and a non-positive lambda is unregularized
+    kernel regression on a rank-deficient system. Both are input errors, not numerical ones."""
+    table = rb.collect_chunks(_linear_dataset(tmp_path / "linear"), CHUNK_STEPS)
+    train_x, train_y, holdout_x, _ = _split(table, HOLDOUT_EPISODES)
+    standardizer = rb.Standardizer.fit(train_x)
+
+    with pytest.raises(SystemExit, match="gamma must be > 0"):
+        rb.ceiling_scores(
+            standardizer, train_x, train_y, holdout_x,
+            width=8, gamma=0.0, lambdas=(1.0,), rng=np.random.default_rng(0),
+        )  # fmt: skip
+    with pytest.raises(SystemExit, match="lambda must be > 0"):
+        rb.ceiling_scores(
+            standardizer, train_x, train_y, holdout_x,
+            width=8, gamma=0.5, lambdas=(0.0,), rng=np.random.default_rng(0),
+        )  # fmt: skip
+
+
+# -- 7. the archived numbers are the control, so they are checked ---------------------------------
+
+
+def test_the_archive_reproduces_when_nothing_has_moved() -> None:
+    measured = {key: float(value) for key, value in rb.ARCHIVED_T16.items()}
+
+    message = rb.check_archived(measured, dict(rb.ARCHIVED_T16_SHAPE))
+
+    assert message is not None
+    assert f"{len(rb.ARCHIVED_T16)}/{len(rb.ARCHIVED_T16)}" in message
+
+
+def test_a_moved_archived_number_raises_rather_than_printing_a_different_table() -> None:
+    """The teeth. Three write-ups are stated as ratios against these rows, so a refactor that moves
+    one has invalidated work that is already cited — and the printed table would look entirely
+    normal. The drift asserted here is in the SEVENTH significant digit, because that is the
+    resolution the numbers were published at and there is no amount of drift that is fine."""
+    measured = {key: float(value) for key, value in rb.ARCHIVED_T16.items()}
+    measured["ridge_all_lam10"] *= 1.0 + 1e-6
+
+    with pytest.raises(SystemExit, match="MOVED"):
+        rb.check_archived(measured, dict(rb.ARCHIVED_T16_SHAPE))
+
+
+def test_the_archive_stays_silent_on_a_dataset_that_is_not_the_archived_one() -> None:
+    """Checking T-16's numbers against some other dataset would fail every run for no reason, so
+    the control arms itself on an exact shape match and says nothing otherwise."""
+    measured = {key: 1.0 for key in rb.ARCHIVED_T16}
+    shape = dict(rb.ARCHIVED_T16_SHAPE)
+    shape["num_holdout_chunks"] += 1
+
+    assert rb.check_archived(measured, shape) is None
+
+
+def test_a_number_this_run_did_not_compute_is_skipped_not_failed() -> None:
+    """``--no-ceiling`` and a custom ``--lam`` leave cells uncomputed. Missing is not moved."""
+    measured: dict[str, float | None] = {
+        key: float(value) for key, value in rb.ARCHIVED_T16.items()
+    }
+    measured["ceiling"] = None
+
+    message = rb.check_archived(measured, dict(rb.ARCHIVED_T16_SHAPE))
+
+    assert message is not None and "1 not computed" in message
+
+
 # -- the CLI ------------------------------------------------------------------------------------
 
 
@@ -557,6 +916,7 @@ def test_the_cli_reports_every_group_the_controls_and_the_model(
             "--dataset", str(root),
             "--holdout", str(predictions),
             "--chunk-steps", str(CHUNK_STEPS),
+            "--no-ceiling",
             "--json", str(out),
         ]
     )  # fmt: skip
@@ -566,6 +926,8 @@ def test_the_cli_reports_every_group_the_controls_and_the_model(
     printed = capsys.readouterr().out
     assert "zero-delta (hold still)" in printed
     assert "model (from predictions)" in printed
+    # --no-ceiling has to say so: a reader must not take the linear bar for the stronger claim.
+    assert "--no-ceiling: the NONLINEAR bar was not computed" in printed
 
     record = json.loads(out.read_text())
     assert record["num_holdout_chunks"] == len(HOLDOUT_EPISODES) * CHUNKS_PER_EPISODE
@@ -577,8 +939,51 @@ def test_the_cli_reports_every_group_the_controls_and_the_model(
     # predicted = target + 0.01 everywhere, so the recomputed model MSE is exactly 1e-4.
     assert record["model_mse"] == pytest.approx(1e-4, rel=1e-4)
     assert record["zero_delta_mse"] > 0.0
+    assert record["ceiling"] is None
     # The calibration case again, this time through the CLI's own reported numbers.
     assert record["groups"]["all"]["best_mse"] < record["zero_delta_mse"] * 1e-6
+
+
+def test_the_cli_reports_the_ceiling_and_the_split_it_was_chosen_on(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ceiling is an ADDITIVE row: everything the linear run printed still prints, and the
+    ceiling arrives with the evidence that it was not tuned on the holdout — the inner split's
+    episode counts, the number of configs searched and the validation score of the winner, all on
+    the same screen as the holdout number they licence."""
+    root = _nonlinear_dataset(tmp_path / "nonlinear")
+    holdout = tmp_path / "holdout.txt"
+    holdout.write_text("\n".join(HOLDOUT_EPISODES) + "\n")
+    out = tmp_path / "ridge.json"
+
+    exit_code = rb.main(
+        [
+            "--dataset", str(root),
+            "--holdout", str(holdout),
+            "--chunk-steps", str(CHUNK_STEPS),
+            "--ceiling-val-episodes", str(CEILING_VAL_EPISODES),
+            *[a for w in CEILING_WIDTHS for a in ("--ceiling-width", str(w))],
+            *[a for g in CEILING_GAMMAS for a in ("--ceiling-gamma", str(g))],
+            *[a for l in CEILING_LAMBDAS for a in ("--ceiling-lam", str(l))],
+            "--json", str(out),
+        ]
+    )  # fmt: skip
+
+    assert exit_code == 0
+    printed = capsys.readouterr().out
+    assert "blind NONLINEAR ceiling" in printed
+    assert "TRAIN only" in printed
+    assert "zero-delta (hold still)" in printed  # still additive
+
+    record = json.loads(out.read_text())
+    ceiling = record["ceiling"]
+    assert ceiling["num_val_episodes"] == CEILING_VAL_EPISODES
+    assert ceiling["num_inner_fit_episodes"] == len(TRAIN_EPISODES) - CEILING_VAL_EPISODES
+    assert len(ceiling["val_grid"]) == ceiling["num_configs"]
+    assert ceiling["num_parameters"] == (ceiling["width"] + 1) * TARGET_DIM
+    # The whole point of the row: on a nonlinear target it clears the linear bar.
+    assert ceiling["holdout_mse"] < record["groups"]["all"]["best_mse"] / 2.0
+    assert record["archive_checked"] is False
 
 
 def test_a_plain_episode_id_list_is_accepted_and_reports_no_model(
@@ -596,6 +1001,7 @@ def test_a_plain_episode_id_list_is_accepted_and_reports_no_model(
             "--dataset", str(root),
             "--holdout", str(holdout),
             "--chunk-steps", str(CHUNK_STEPS),
+            "--no-ceiling",
             "--json", str(out),
         ]
     )  # fmt: skip

@@ -1,57 +1,85 @@
 #!/usr/bin/env python3
-"""The proprioception-only ridge: the bar a visual model must clear to have used its eyes.
+"""The blind proprioception bars: what a model that never opens the camera already scores.
 
-A linear least-squares map from the 32-dim robot state at chunk time (q15 + dq15 + gripper2)
-to the flattened [16, 15] action chunk. No frames are read. No backbone is built. Nothing is
-trained. It is 7 920 numbers solved in closed form, and on the T-16 holdout it beats the
-deployed model:
+Two predictors from the 32-dim robot state at chunk time (q15 + dq15 + gripper2) to the flattened
+[16, 15] action chunk. No frames are read. No backbone is built. Nothing is trained on a GPU. On
+the T-16 holdout both of them beat the deployed model:
 
-    ridge, all state      6.330899e-06     7 920 parameters, one np.linalg.solve
-    ridge, dq only        6.869239e-06     3 840 parameters
-    model (Wan-5B+LoRA)   1.112983e-05     82.5M trainable parameters
-    ridge, q only         1.348259e-05
-    ridge, gripper only   1.550558e-05
+    blind nonlinear ceiling 5.431371e-06   983 280 parameters, a random-Fourier ridge
+    ridge, all state        6.330899e-06     7 920 parameters, one np.linalg.solve
+    ridge, dq only          6.869239e-06     3 840 parameters
+    model (Wan-5B+LoRA)     1.112983e-05    82.5M trainable parameters
+    ridge, q only           1.348259e-05
+    ridge, gripper only     1.550558e-05
     zero-delta (hold still) 1.632760e-05
 
-Measured 2026-08-01 on ``datasets/gr00t-apple-full`` against
-``runs/t16-lora-seed0/eval-t30-regression/predictions.jsonl``, and independently reproduced by
-two separate implementations before being written down. The linear map is **1.76x better** than
-the fine-tune; velocity alone is still **1.62x better**. Position alone and gripper alone both
-lose to it, so the win is not "proprioception is trivially sufficient" — it is specifically ``dq``,
-the one channel that says where the arm is already going.
+Measured on ``datasets/gr00t-apple-full`` against
+``runs/t16-lora-seed0/eval-t30-regression/predictions.jsonl`` — the linear rows on 2026-08-01,
+independently reproduced by two separate implementations before being written down, the ceiling on
+2026-08-02. The linear map is **1.76x better** than the fine-tune; velocity alone is still
+**1.62x better**. Position alone and gripper alone both lose to it, so the win is not
+"proprioception is trivially sufficient" — it is specifically ``dq``, the one channel that says
+where the arm is already going.
 
-WHY THIS SHIPS AS A PERMANENT BASELINE
---------------------------------------
-Zero-delta and repeat-last-action (``wam.evaluation.bench``) ask whether a policy beats holding
-still and whether it beats the last command. Both are answerable without looking at the robot at
-all. This one is different in kind: it is the best a model can do *knowing everything about the
-body and nothing about the world*. A visual policy that scores above it has not demonstrated that
-it uses vision — it has demonstrated that it is a worse proprioceptive regressor than a matrix
-solve. Whatever its backbone costs in parameters, GPU-hours or LoRA rank, it has not earned it.
+TWO BARS, AND THEY DO NOT SAY THE SAME THING
+--------------------------------------------
+THE LINEAR BAR (``ridge, all state``) is the best a *linear* map can do knowing everything about
+the body and nothing about the world. A visual policy that scores above it has not demonstrated
+that it uses vision — it has demonstrated that it is a worse proprioceptive regressor than a
+matrix solve. Whatever its backbone cost in parameters, GPU-hours or LoRA rank, it has not
+earned it.
 
-That makes the ridge the bar for the claim, not just another row in a table. It belongs next to
-every WAM-Bench readout for the same reason the majority-class rate belongs next to a gripper
-accuracy: without it the number is unreadable, and the failure it hides is the expensive one.
+THE NONLINEAR CEILING (``blind nonlinear ceiling``) exists because the linear bar UNDERSTATES what
+is knowable without a camera: nothing says the blind-optimal predictor is linear, and on this
+holdout it is not — 4 096 random Fourier features over the same 32 dims reach 5.431371e-06 against
+the linear 6.330877e-06, a further 1.17x with the camera still shut. A score above the ceiling has
+not demonstrated *anything a blind regressor could not do*. That is the stronger and more
+uncomfortable statement, and it is the one an expensive model has to answer: clearing the linear
+bar only means "better than a matrix solve", while clearing the ceiling is the first evidence that
+the world model contributed something the body did not already imply.
 
-It is deliberately BLIND. The camera is never opened, which is what makes the comparison mean
-something and also what makes it run in seconds on a laptop instead of minutes on a GPU. Any
-future run can be checked against it for free.
+Both are answerable without looking at the robot's camera, which is what makes the comparison mean
+something and also what makes it run on a laptop instead of a GPU. The linear rows take seconds;
+the ceiling's hyperparameter search takes ~2 minutes of BLAS and can be skipped with
+``--no-ceiling`` when only the linear controls are wanted.
+
+THE CEILING'S HYPERPARAMETERS NEVER TOUCH THE HOLDOUT
+-----------------------------------------------------
+A ceiling tuned on the data it is a ceiling *for* is not a ceiling, it is a fit — and it would be
+the single easiest way to manufacture a bar no model can clear. So the width, the RBF bandwidth
+and the ridge penalty are chosen on an INNER validation split of the TRAIN episodes only,
+episode-disjoint from both the train remainder and the holdout, and the chosen config is then
+refitted on all train episodes and scored once. :func:`inner_validation_episodes` RAISES if a
+holdout episode reaches the search at all — a runtime check over the row tags, not a comment —
+and ``tests/test_bench_ridge_baseline.py`` pins it with a leak control that shows choosing on the
+holdout instead scores detectably better.
 
 WHAT IS NOT CLAIMED
 -------------------
-That the ridge is a policy. It is fitted on the demonstrations of a single task, it has no notion
-of where the apple is, and it would not survive the apple moving — which is exactly the
-generalization the video branch exists to buy. E1 action-MSE is a DIAGNOSTIC metric (PRD 10.4)
-and this baseline is a diagnostic on that diagnostic. Losing to it does not make a model useless;
-it makes the *offline MSE evidence* for that model worthless, which is a narrower and much more
-actionable statement.
+That either bar is a policy. Both are fitted on the demonstrations of a single task, neither has
+any notion of where the apple is, and neither would survive the apple moving — which is exactly
+the generalization the video branch exists to buy. E1 action-MSE is a DIAGNOSTIC metric
+(PRD 10.4) and these baselines are a diagnostic on that diagnostic. Losing to them does not make a
+model useless; it makes the *offline MSE evidence* for that model worthless, which is a narrower
+and much more actionable statement.
 
-``--lam`` is swept and the best holdout MSE is reported, which is a mild selection on the holdout
-and is named here rather than hidden. It buys almost nothing: across four orders of magnitude of
-lambda the all-state number moves in its seventh significant digit — 6.330899e-06 at 1e-2, the
-grid minimum 6.330877e-06 at 1e1, 6.333218e-06 at 1e2. Quoting any of them makes the same claim to
-the six digits anyone reads. The baseline is not tuned into its win, and the full per-lambda table
-is printed so a reader can see that for themselves instead of taking it on trust.
+That the ceiling is the true blind optimum. It is the best of a 48-point grid of one particular
+nonlinear family, so it is a LOWER BOUND on what proprioception affords, and the error is in the
+conservative direction: the real blind optimum is at most 5.431371e-06, so a model scoring between
+the true optimum and this number escapes the verdict rather than being falsely convicted. The
+number is also mildly draw-dependent — the search stream picks width 4096 over 8192 on a val gap
+in the third significant digit, and seeding each grid point independently instead flips that to
+8192 and 5.388504e-06, a 0.8% lower ceiling. Anything that hinges on the sixth digit of this row
+is not a finding.
+
+``--lam`` for the LINEAR rows is swept and the best holdout MSE is reported, which is a mild
+selection on the holdout and is named here rather than hidden. It buys almost nothing: across four
+orders of magnitude of lambda the all-state number moves in its seventh significant digit —
+6.330899e-06 at 1e-2, the grid minimum 6.330877e-06 at 1e1, 6.333218e-06 at 1e2. Quoting any of
+them makes the same claim to the six digits anyone reads. The baseline is not tuned into its win,
+and the full per-lambda table is printed so a reader can see that for themselves instead of taking
+it on trust. The ceiling does not get that latitude, because it is the row with enough capacity to
+abuse it.
 
     scripts/bench_ridge_baseline.py \\
         --dataset datasets/gr00t-apple-full \\
@@ -89,6 +117,81 @@ DEFAULT_LAMBDAS = (1e-2, 1e-1, 1.0, 10.0, 100.0)
 FEATURE_GROUPS = ("all", "q", "dq", "gripper")
 """Reported ablations. Each is a claim about WHICH proprioceptive channel carries the prediction,
 and the answer (``dq``, not ``q``) is the part of this baseline that is actually informative."""
+
+CEILING_WIDTHS = (4096, 8192)
+"""Random-Fourier feature counts searched for the nonlinear ceiling.
+
+Both are far more features than the 32 dims they are drawn over and than the ~9.5k train chunks,
+so the ridge penalty is what keeps the system honest, not the width. The grid is small on purpose:
+every point costs a Gram matrix of its own width, and the val gap between these two is already in
+the third significant digit."""
+
+CEILING_GAMMAS = (0.005, 0.01, 0.02, 0.05)
+"""RBF bandwidths. ``cos(z @ W + b)`` with ``W ~ N(0, 2*gamma)`` approximates an RBF kernel of
+bandwidth ``gamma`` on the STANDARDIZED state, so these are "how far apart do two robot states
+have to be before they stop predicting each other" measured in per-dimension standard deviations.
+The search lands on the smallest — the map the data supports is smooth."""
+
+CEILING_LAMBDAS = (1.0, 10.0, 100.0, 1e3, 1e4, 1e5)
+"""Ridge penalties for the ceiling. Higher than :data:`DEFAULT_LAMBDAS` because there are two to
+three orders of magnitude more features to shrink."""
+
+CEILING_VAL_EPISODES = 40
+"""Inner validation episodes, drawn from TRAIN only. Matches the holdout's own episode count, so
+the config is chosen on a split the same size as the one it will be scored on."""
+
+CEILING_SPLIT_SEED = 1
+"""Seed for the inner train/validation episode shuffle."""
+
+CEILING_SEARCH_SEED = 0
+"""Seed for the ONE feature stream the grid search draws from.
+
+One stream advanced across the grid, not a fresh seed per point, because that is what was measured
+and the archived 5.431371e-06 is the config that stream selected. It makes the search
+order-dependent, which is a real fragility and is named in the module docstring rather than hidden:
+re-seeding per grid point picks the other width and lands 0.8% lower."""
+
+CEILING_REFIT_SEED = 7
+"""Seed for the feature draw of the final refit on all train episodes.
+
+Deliberately NOT the search stream's. The features are redrawn anyway — the search standardizes on
+the inner-fit episodes and the refit on all of them, so the two feature maps differ regardless —
+and a separate seed makes it impossible to read the ceiling as the search's best val score
+recycled onto the holdout."""
+
+ARCHIVED_T16 = {
+    "zero_delta": "1.632760e-05",
+    "model": "1.112983e-05",
+    "ceiling": "5.431371e-06",
+    "ridge_all_lam0.01": "6.330899e-06",
+    "ridge_all_lam10": "6.330877e-06",
+    "ridge_all_lam100": "6.333218e-06",
+    "ridge_dq_lam1": "6.869239e-06",
+    "ridge_q_lam1": "1.348259e-05",
+    "ridge_gripper_lam0.01": "1.550558e-05",
+}
+"""Every number this module writes down, keyed so each is unambiguous about its lambda.
+
+These are the control. Three separate measurements — PR-01's incremental-value verdict, the
+momentum follow-up and the ceiling below — are stated relative to these rows, so a change anywhere
+in ``collect_chunks``, ``Standardizer`` or ``fit_ridge`` that moves one of them invalidates work
+that has already been reported. :func:`check_archived` therefore re-checks them on every run that
+matches the archived shape and RAISES instead of printing a quietly different table.
+
+Compared as the six-decimal strings this script prints: that is the precision the numbers were
+published at, and matching it means "reproduces to the digit" rather than "close enough"."""
+
+ARCHIVED_T16_SHAPE = {
+    "num_train_chunks": 9476,
+    "num_holdout_chunks": 1040,
+    "num_train_episodes": 362,
+    "num_holdout_episodes": 40,
+    "state_dim": 32,
+    "target_dim": 240,
+}
+"""The fingerprint that says this run IS the archived one. Checking the numbers on any other
+dataset would be nonsense, so the control arms itself on an exact shape match and stays silent
+otherwise."""
 
 
 # -- collection ---------------------------------------------------------------------------------
@@ -395,6 +498,253 @@ def feature_groups(num_joints: int, gripper_dims: int, state_dim: int) -> dict[s
     }
 
 
+# -- the blind nonlinear ceiling ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CeilingConfig:
+    """One point of the random-Fourier grid: width, RBF bandwidth, ridge penalty."""
+
+    width: int
+    gamma: float
+    lam: float
+
+    def __str__(self) -> str:
+        return f"width {self.width}  gamma {self.gamma:g}  lambda {self.lam:g}"
+
+
+@dataclass(frozen=True)
+class CeilingFit:
+    """The chosen config, what it scored on the INNER validation split, and its holdout MSE.
+
+    ``val_mse`` is carried next to ``holdout_mse`` on purpose. They are computed on disjoint
+    episodes by two different fits, so a reader can see the selection score and the reported score
+    side by side and check that the ceiling was not simply the best of 48 tries on the holdout —
+    which is the one way a number like this is usually wrong.
+    """
+
+    config: CeilingConfig
+    holdout_mse: float
+    val_mse: float
+    num_parameters: int
+    num_state_features: int
+    num_inner_fit_episodes: int
+    num_val_episodes: int
+    num_inner_fit_rows: int
+    num_val_rows: int
+    grid: tuple[tuple[CeilingConfig, float], ...]
+
+    @property
+    def num_configs(self) -> int:
+        return len(self.grid)
+
+
+def inner_validation_episodes(
+    train_episode_ids: np.ndarray,
+    holdout_ids: set[str],
+    *,
+    num_val_episodes: int = CEILING_VAL_EPISODES,
+    seed: int = CEILING_SPLIT_SEED,
+) -> tuple[set[str], set[str]]:
+    """``(inner fit episodes, inner validation episodes)``, drawn from TRAIN ONLY — and prove it.
+
+    This is the one property that makes the ceiling meaningful. A nonlinear regressor with ~10^6
+    parameters and a free bandwidth can be tuned to almost any number you like on a 1 040-chunk
+    holdout; a ceiling chosen that way says nothing about what proprioception affords and
+    everything about how many configs were tried. So the search never sees the holdout, and that
+    is checked HERE, at runtime, over the episode tags of the rows actually handed in — not
+    asserted in a docstring and not guaranteed by the caller having been written correctly.
+
+    Two ways it raises, both of which have happened to somebody:
+
+    - a holdout episode is present in ``train_episode_ids``. Then the "train" rows are not train
+      rows, the split above them leaked, and every config score below is contaminated.
+    - the selected validation set intersects the holdout. Unreachable given the first check, which
+      is exactly why it is worth stating: it is the invariant, and an invariant that is only ever
+      implied by another check is one refactoring away from being false.
+
+    ``SystemExit`` rather than ``assert`` so that ``python -O`` cannot remove the guard.
+    """
+    present = sorted(set(train_episode_ids.tolist()))
+    contaminated = sorted(set(present) & holdout_ids)
+    if contaminated:
+        raise SystemExit(
+            f"the ceiling's hyperparameter search was handed {len(contaminated)} HOLDOUT "
+            f"episode(s): {contaminated[:5]}{'...' if len(contaminated) > 5 else ''}. Choosing "
+            "width, bandwidth or lambda on data the ceiling is then reported on turns the bar into "
+            "a fit, and the number would be unusable rather than merely optimistic."
+        )
+    if num_val_episodes < 1:
+        raise SystemExit(f"--ceiling-val-episodes must be >= 1, got {num_val_episodes}")
+    if num_val_episodes >= len(present):
+        raise SystemExit(
+            f"--ceiling-val-episodes {num_val_episodes} leaves nothing to fit on: the train side "
+            f"has {len(present)} episode(s)"
+        )
+
+    episodes = list(present)
+    np.random.default_rng(seed).shuffle(episodes)
+    validation = set(episodes[:num_val_episodes])
+    inner_fit = set(episodes[num_val_episodes:])
+
+    leaked = sorted(validation & holdout_ids)
+    if leaked:  # pragma: no cover - unreachable while the check above stands, and that is the point
+        raise SystemExit(
+            f"the inner validation split selected holdout episode(s) {leaked[:5]} — the search "
+            "would be choosing its hyperparameters on the data it is scored on"
+        )
+    if validation & inner_fit:  # pragma: no cover - set arithmetic, stated because load-bearing
+        raise SystemExit("the inner split is not episode-disjoint")
+    return inner_fit, validation
+
+
+def ceiling_scores(
+    standardizer: Standardizer,
+    fit_states: np.ndarray,
+    fit_targets: np.ndarray,
+    eval_states: np.ndarray,
+    *,
+    width: int,
+    gamma: float,
+    lambdas: tuple[float, ...],
+    rng: np.random.Generator,
+) -> dict[float, np.ndarray]:
+    """One random-Fourier draw, one Gram, ``{lambda: predictions on eval_states}``.
+
+    ``cos(z @ W + b)`` with ``W ~ N(0, 2*gamma)`` and ``b ~ U(0, 2*pi)`` is Rahimi & Recht's
+    approximation to an RBF kernel of bandwidth ``gamma``: a kernel ridge regression that stays a
+    plain ``np.linalg.solve`` instead of becoming an N x N kernel matrix, which matters because the
+    whole point of this script is that it is arithmetic rather than training.
+
+    The draw comes from a caller-owned ``rng`` rather than a seed, because the archived search is
+    ONE stream advanced across the grid and reproducing 5.431371e-06 requires that exact sequence.
+
+    All lambdas share one Gram and one right-hand side. That is not just speed: re-forming
+    ``X'X`` per lambda would be six chances for the six numbers to differ in their last bits for
+    no reason, and the grid is compared at exactly that resolution.
+    """
+    if width < 1:
+        raise SystemExit(f"ceiling width must be >= 1, got {width}")
+    if gamma <= 0.0:
+        raise SystemExit(f"ceiling gamma must be > 0, got {gamma:g}")
+    z_fit = standardizer.design(fit_states)[:, :-1]
+    z_eval = standardizer.design(eval_states)[:, :-1]
+    weights = rng.normal(0.0, np.sqrt(2.0 * gamma), (z_fit.shape[1], width))
+    offsets = rng.uniform(0.0, 2.0 * np.pi, width)
+
+    design_fit = np.hstack([np.cos(z_fit @ weights + offsets), np.ones((z_fit.shape[0], 1))])
+    design_eval = np.hstack([np.cos(z_eval @ weights + offsets), np.ones((z_eval.shape[0], 1))])
+    gram = design_fit.T @ design_fit
+    rhs = design_fit.T @ fit_targets
+    eye = np.eye(gram.shape[0])
+
+    predictions: dict[float, np.ndarray] = {}
+    for lam in lambdas:
+        if lam <= 0.0:
+            raise SystemExit(f"ceiling lambda must be > 0, got {lam:g}")
+        try:
+            solved = np.linalg.solve(gram + lam * eye, rhs)
+        except np.linalg.LinAlgError as exc:  # pragma: no cover - guarded by lam > 0
+            raise SystemExit(
+                f"the ceiling's normal equations are singular at width={width}, lambda={lam:g}: "
+                f"{exc}"
+            ) from exc
+        predictions[float(lam)] = design_eval @ solved
+    return predictions
+
+
+def fit_ceiling(
+    train_states: np.ndarray,
+    train_targets: np.ndarray,
+    train_episode_ids: np.ndarray,
+    holdout_states: np.ndarray,
+    holdout_targets: np.ndarray,
+    holdout_ids: set[str],
+    *,
+    widths: tuple[int, ...] = CEILING_WIDTHS,
+    gammas: tuple[float, ...] = CEILING_GAMMAS,
+    lambdas: tuple[float, ...] = CEILING_LAMBDAS,
+    num_val_episodes: int = CEILING_VAL_EPISODES,
+) -> CeilingFit:
+    """Choose on an inner split of TRAIN, refit on all of TRAIN, score once on the holdout.
+
+    The order of the three steps is the whole argument, so it is worth being explicit about what
+    each one is allowed to see:
+
+    1. ``inner_validation_episodes`` splits the TRAIN episodes into an inner-fit set and a
+       validation set, and refuses outright if a holdout episode is among them.
+    2. every ``(width, gamma, lambda)`` is fitted on the inner-fit rows and scored on the
+       validation rows. The holdout arrays are not referenced anywhere in this loop — they are not
+       even standardized yet, because the standardizer used here is fitted on the inner-fit rows.
+    3. the single winner is refitted on ALL train rows, with a fresh feature draw and a
+       standardizer fitted on all train rows, and scored on the holdout exactly once.
+
+    Step 3 uses more data than step 2, so the reported number is not the validation score and is
+    not expected to equal it. It is also not corrected for the selection in step 2 — with 48
+    configs scored on 40 held-out-from-train episodes there is some optimism in the *choice*, but
+    it lands on which of two near-tied widths is picked rather than on the holdout MSE, which was
+    computed after the choice was frozen.
+    """
+    inner_fit_ids, val_ids = inner_validation_episodes(
+        train_episode_ids, holdout_ids, num_val_episodes=num_val_episodes
+    )
+    val_mask = np.isin(train_episode_ids, sorted(val_ids))
+    fit_mask = ~val_mask
+    inner_states, inner_targets = train_states[fit_mask], train_targets[fit_mask]
+    val_states, val_targets = train_states[val_mask], train_targets[val_mask]
+
+    inner_standardizer = Standardizer.fit(inner_states)
+    search_rng = np.random.default_rng(CEILING_SEARCH_SEED)
+    grid: list[tuple[CeilingConfig, float]] = []
+    for width in widths:
+        for gamma in gammas:
+            predicted = ceiling_scores(
+                inner_standardizer,
+                inner_states,
+                inner_targets,
+                val_states,
+                width=width,
+                gamma=gamma,
+                lambdas=lambdas,
+                rng=search_rng,
+            )
+            for lam, prediction in predicted.items():
+                grid.append(
+                    (
+                        CeilingConfig(width=width, gamma=gamma, lam=lam),
+                        float(((prediction - val_targets) ** 2).mean()),
+                    )
+                )
+    if not grid:
+        raise SystemExit("the ceiling grid is empty — nothing to select")
+    grid.sort(key=lambda row: row[1])
+    best, val_mse = grid[0]
+
+    standardizer = Standardizer.fit(train_states)
+    holdout_prediction = ceiling_scores(
+        standardizer,
+        train_states,
+        train_targets,
+        holdout_states,
+        width=best.width,
+        gamma=best.gamma,
+        lambdas=(best.lam,),
+        rng=np.random.default_rng(CEILING_REFIT_SEED),
+    )[best.lam]
+    return CeilingFit(
+        config=best,
+        holdout_mse=float(((holdout_prediction - holdout_targets) ** 2).mean()),
+        val_mse=val_mse,
+        num_parameters=(best.width + 1) * int(train_targets.shape[1]),
+        num_state_features=standardizer.num_features,
+        num_inner_fit_episodes=len(inner_fit_ids),
+        num_val_episodes=len(val_ids),
+        num_inner_fit_rows=int(fit_mask.sum()),
+        num_val_rows=int(val_mask.sum()),
+        grid=tuple(grid),
+    )
+
+
 # -- controls -----------------------------------------------------------------------------------
 
 
@@ -440,6 +790,43 @@ def model_mse_from_predictions(path: Path) -> tuple[float, int] | None:
     return total / chunks, chunks
 
 
+def check_archived(measured: dict[str, float | None], shape: dict[str, int]) -> str | None:
+    """Re-verify every number this module wrote down, or raise. ``None`` off the archived shape.
+
+    The reason this is a hard failure and not a warning: the rows in :data:`ARCHIVED_T16` are the
+    denominator of three separate write-ups. PR-01's verdict is stated as ratios against the ridge,
+    the momentum follow-up is stated as ratios against zero-delta and const-velocity, and the
+    ceiling below is stated as a ratio against the linear bar. If ``collect_chunks`` starts pairing
+    one chunk differently, or ``Standardizer`` changes which dims it drops, every one of those
+    ratios silently becomes a claim about data nobody measured — and the printed table would look
+    completely normal. A run that cannot reproduce its own archive is not a run with a slightly
+    different number, it is a run whose comparisons have quietly stopped meaning anything.
+
+    Comparison is on the six-decimal strings, because that is the precision the numbers were
+    published at. A tolerance would be a decision about how much drift is acceptable, and there is
+    no such amount: these are deterministic closed-form solves on a frozen dataset.
+    """
+    if shape != ARCHIVED_T16_SHAPE:
+        return None
+    moved = [
+        (key, expected, _fmt(measured[key]))
+        for key, expected in ARCHIVED_T16.items()
+        if measured.get(key) is not None and _fmt(measured[key]) != expected
+    ]
+    if moved:
+        lines = "\n".join(f"    {key:<24} archived {a}  now {b}" for key, a, b in moved)
+        raise SystemExit(
+            f"{len(moved)} archived number(s) MOVED on the T-16 shape this run matches:\n{lines}\n"
+            "These are the control for PR-01, the momentum follow-up and the nonlinear ceiling, "
+            "all of which are stated as ratios against them. Whatever changed, revert it and "
+            "report the drift — a re-derived table is not a substitute for the one already cited."
+        )
+    checked = sum(1 for key in ARCHIVED_T16 if measured.get(key) is not None)
+    skipped = len(ARCHIVED_T16) - checked
+    tail = f" ({skipped} not computed this run)" if skipped else ""
+    return f"archive   {checked}/{len(ARCHIVED_T16)} archived numbers reproduce exactly{tail}"
+
+
 # -- CLI ----------------------------------------------------------------------------------------
 
 
@@ -471,12 +858,63 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="ridge penalty; repeatable. Default: " + " ".join(f"{v:g}" for v in DEFAULT_LAMBDAS),
     )
+    parser.add_argument(
+        "--no-ceiling",
+        action="store_true",
+        help="skip the blind NONLINEAR ceiling (a ~2 minute hyperparameter search). The linear "
+        "rows still print; the run then reports a bar that understates what is knowable blind",
+    )
+    parser.add_argument(
+        "--ceiling-val-episodes",
+        type=int,
+        default=CEILING_VAL_EPISODES,
+        help="inner validation episodes for the ceiling's hyperparameter search, taken from the "
+        "TRAIN episodes only (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--ceiling-width",
+        type=int,
+        action="append",
+        default=None,
+        help="random-Fourier feature count to search; repeatable. Default: "
+        + " ".join(f"{v:g}" for v in CEILING_WIDTHS),
+    )
+    parser.add_argument(
+        "--ceiling-gamma",
+        type=float,
+        action="append",
+        default=None,
+        help="RBF bandwidth to search; repeatable. Default: "
+        + " ".join(f"{v:g}" for v in CEILING_GAMMAS),
+    )
+    parser.add_argument(
+        "--ceiling-lam",
+        type=float,
+        action="append",
+        default=None,
+        help="ridge penalty to search for the ceiling; repeatable. Default: "
+        + " ".join(f"{v:g}" for v in CEILING_LAMBDAS),
+    )
     parser.add_argument("--json", type=Path, default=None, help="write the full record here")
     return parser.parse_args(argv)
 
 
 def _fmt(value: float) -> str:
     return f"{value:.6e}"
+
+
+def _mse_at(results: dict[str, list[RidgeFit]], group: str, lam: float) -> float | None:
+    """The holdout MSE of one ``(group, lambda)`` cell, or ``None`` if this run did not fit it.
+
+    The archive is keyed by lambda rather than by "best", because "best" is an argmin over whatever
+    ``--lam`` happened to be and would compare two different fits across two runs. A custom
+    ``--lam`` simply leaves the cell uncomputed, and :func:`check_archived` skips it rather than
+    reporting a mismatch that is really a different question.
+    """
+    for fit in results.get(group, ()):
+        if fit.lam == lam:
+            return fit.holdout_mse
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -558,6 +996,40 @@ def main(argv: list[str] | None = None) -> int:
                 "NOT comparable — check --chunk-steps and that the dataset has not moved."
             )
 
+    ceiling: CeilingFit | None = None
+    if not args.no_ceiling:
+        print()
+        print(
+            f"blind NONLINEAR ceiling — random-Fourier ridge on the same {table.state_dim} dims, "
+            "camera still shut"
+        )
+        ceiling = fit_ceiling(
+            train_states,
+            train_targets,
+            table.episode_ids[train_mask],
+            holdout_states,
+            holdout_targets,
+            holdout_ids,
+            widths=tuple(args.ceiling_width) if args.ceiling_width else CEILING_WIDTHS,
+            gammas=tuple(args.ceiling_gamma) if args.ceiling_gamma else CEILING_GAMMAS,
+            lambdas=tuple(args.ceiling_lam) if args.ceiling_lam else CEILING_LAMBDAS,
+            num_val_episodes=args.ceiling_val_episodes,
+        )
+        print(
+            f"  inner split    {ceiling.num_inner_fit_episodes} fit / {ceiling.num_val_episodes} "
+            f"validation episodes ({ceiling.num_inner_fit_rows} / {ceiling.num_val_rows} chunks), "
+            "TRAIN only — no holdout episode is reachable from the search"
+        )
+        print(
+            f"  searched       {ceiling.num_configs} configs on validation, best {ceiling.config} "
+            f"at val {_fmt(ceiling.val_mse)}"
+        )
+        print(
+            f"  ceiling        {_fmt(ceiling.holdout_mse)}  from {ceiling.num_parameters} "
+            f"parameters ({ceiling.config.width} random features + bias, x {table.target_dim} "
+            "outputs), refitted on all train episodes"
+        )
+
     print()
     best_all = min(results["all"], key=lambda f: f.holdout_mse)
     print(
@@ -575,6 +1047,56 @@ def main(argv: list[str] | None = None) -> int:
             else f"the model is {1.0 / ratio:.2f}x better than the blind linear map"
         )
         print(f"  vs the model    {ratio:.2f}x   <- {verdict}")
+
+    if ceiling is not None:
+        print()
+        print(f"ceiling (blind nonlinear)  {_fmt(ceiling.holdout_mse)}")
+        print(
+            f"  vs the linear bar  {best_all.holdout_mse / ceiling.holdout_mse:.2f}x lower — "
+            "that much of the linear bar's headroom was nonlinearity in the body, not the world"
+        )
+        if model is not None:
+            ratio = model[0] / ceiling.holdout_mse
+            verdict = (
+                f"the model is {ratio:.2f}x WORSE than a blind nonlinear regressor — it has not "
+                "demonstrated anything proprioception alone could not do"
+                if ratio > 1.0
+                else f"the model is {1.0 / ratio:.2f}x better than the blind nonlinear ceiling — "
+                "the first evidence here that is not explainable without the camera"
+            )
+            print(f"  vs the model       {ratio:.2f}x   <- {verdict}")
+    else:
+        print()
+        print(
+            "--no-ceiling: the NONLINEAR bar was not computed, so 'beats the ridge' above is the "
+            "weaker of the two claims a blind regressor can make"
+        )
+
+    shape = {
+        "num_train_chunks": int(train_states.shape[0]),
+        "num_holdout_chunks": int(holdout_states.shape[0]),
+        "num_train_episodes": num_train_eps,
+        "num_holdout_episodes": len(holdout_ids),
+        "state_dim": table.state_dim,
+        "target_dim": table.target_dim,
+    }
+    archive = check_archived(
+        {
+            "zero_delta": zero,
+            "model": None if model is None else model[0],
+            "ceiling": None if ceiling is None else ceiling.holdout_mse,
+            "ridge_all_lam0.01": _mse_at(results, "all", 0.01),
+            "ridge_all_lam10": _mse_at(results, "all", 10.0),
+            "ridge_all_lam100": _mse_at(results, "all", 100.0),
+            "ridge_dq_lam1": _mse_at(results, "dq", 1.0),
+            "ridge_q_lam1": _mse_at(results, "q", 1.0),
+            "ridge_gripper_lam0.01": _mse_at(results, "gripper", 0.01),
+        },
+        shape,
+    )
+    if archive is not None:
+        print()
+        print(archive)
 
     if args.json is not None:
         record: dict[str, Any] = {
@@ -594,6 +1116,28 @@ def main(argv: list[str] | None = None) -> int:
             "zero_delta_mse": zero,
             "model_mse": None if model is None else model[0],
             "model_chunks": None if model is None else model[1],
+            "archive_checked": archive is not None,
+            "ceiling": None
+            if ceiling is None
+            else {
+                "holdout_mse": ceiling.holdout_mse,
+                "val_mse": ceiling.val_mse,
+                "width": ceiling.config.width,
+                "gamma": ceiling.config.gamma,
+                "lam": ceiling.config.lam,
+                "num_parameters": ceiling.num_parameters,
+                "num_state_features": ceiling.num_state_features,
+                "num_configs": ceiling.num_configs,
+                "num_inner_fit_episodes": ceiling.num_inner_fit_episodes,
+                "num_val_episodes": ceiling.num_val_episodes,
+                "num_inner_fit_chunks": ceiling.num_inner_fit_rows,
+                "num_val_chunks": ceiling.num_val_rows,
+                # The whole search, so the selection can be re-read instead of taken on trust.
+                "val_grid": [
+                    {"width": c.width, "gamma": c.gamma, "lam": c.lam, "val_mse": v}
+                    for c, v in ceiling.grid
+                ],
+            },
             "groups": {
                 group: {
                     "num_parameters": fits[0].num_parameters,
