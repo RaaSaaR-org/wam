@@ -483,3 +483,47 @@ class TestCheckpointResolution:
         (tmp_path / "other.safetensors").write_bytes(b"")
         with pytest.raises(FileNotFoundError, match="other.safetensors"):
             resolve_checkpoint(tmp_path)
+
+
+class TestVideoArtifacts:
+    """9 frames is 0.30 s at the corpus's 30 fps, so the mp4s exist to be looked at — but a
+    writer that silently emits an empty file would leave the sheets as the only evidence."""
+
+    def _clips(self, n=2):
+        rng = np.random.default_rng(0)
+        return rng.random((n, NUM_FRAMES, 16, 24, 3)).astype(np.float32)
+
+    def test_it_writes_a_playable_clip_video(self, tmp_path):
+        import cv2
+        from dream import write_clip_video
+
+        path = tmp_path / "arm.mp4"
+        assert write_clip_video(self._clips(2), path, fps=6.0, gap=2)
+        cap = cv2.VideoCapture(str(path))
+        try:
+            # two clips of NUM_FRAMES plus a 2-frame spacer after each
+            assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == 2 * (NUM_FRAMES + 2)
+            assert (
+                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            ) == (24, 16)
+        finally:
+            cap.release()
+
+    def test_the_comparison_stacks_every_arm_it_was_given(self, tmp_path):
+        import cv2
+        from dream import write_comparison_video
+
+        arms = {"recon": self._clips(1), "lora": self._clips(1), "base": self._clips(1)}
+        path = tmp_path / "cmp.mp4"
+        assert write_comparison_video(arms, path, fps=6.0)
+        cap = cv2.VideoCapture(str(path))
+        try:
+            assert int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) == 3 * (16 + 16)  # label bar per arm
+        finally:
+            cap.release()
+
+    def test_one_arm_is_not_a_comparison(self, tmp_path):
+        from dream import write_comparison_video
+
+        assert not write_comparison_video({"lora": self._clips(1)}, tmp_path / "cmp.mp4")

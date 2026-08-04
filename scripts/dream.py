@@ -111,6 +111,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     out.add_argument("--no-base-arm", action="store_true", help="skip the two adapter-off arms")
     out.add_argument("--out", default="runs/dream", help="output directory")
     out.add_argument("--contact-sheet", action="store_true", help="write a PNG per arm")
+    out.add_argument(
+        "--video",
+        action="store_true",
+        help="write an mp4 per arm (native 30 fps and a slow 6 fps copy) plus a stacked "
+        "recon/lora/base comparison — 9 frames is 0.30 s, so the slow copy is the watchable one",
+    )
     return p.parse_args(argv)
 
 
@@ -351,6 +357,81 @@ def write_contact_sheet(frames: Any, path: Path) -> bool:
     return bool(cv2.imwrite(str(path), cv2.cvtColor(sheet, cv2.COLOR_RGB2BGR)))
 
 
+#: The corpus was recorded at 30.05 fps, so a 9-frame clip is 0.30 s of real time. Writing it at
+#: 30 fps is honest and unwatchable; the slow mp4 exists to be looked at and says so in its name.
+NATIVE_FPS = 30.0
+SLOW_FPS = 6.0
+
+
+def write_clip_video(frames: Any, path: Path, *, fps: float = NATIVE_FPS, gap: int = 2) -> bool:
+    """Every clip of one arm, end to end, as an mp4. Returns False without cv2.
+
+    ``gap`` blank frames separate clips: 9 frames is 0.3 s, so several clips run together read as
+    one continuous shot and a viewer would see cuts as motion the model predicted.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return False
+    from wam.evaluation.dream import as_frames_255
+
+    array = as_frames_255(frames).clip(0, 255).astype(np.uint8)
+    _, _, height, width, _ = array.shape
+    spacer = np.zeros((gap, height, width, 3), dtype=np.uint8)
+    strip = np.concatenate([np.concatenate([clip, spacer]) for clip in array])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        return False
+    try:
+        for frame in strip:
+            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    finally:
+        writer.release()
+    return path.is_file() and path.stat().st_size > 0
+
+
+def write_comparison_video(arms: dict[str, Any], path: Path, *, fps: float = SLOW_FPS) -> bool:
+    """The arms stacked in one frame, same clip and timestep in every panel.
+
+    The comparison this whole task exists to make, and it only works side by side: `lora` against
+    `recon` is the ratio in G1 made visible, and `base` in the same frame is what the adapter is
+    doing to a prior that cannot generate at this geometry at all.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return False
+    from wam.evaluation.dream import as_frames_255
+
+    order = [name for name in ("recon", "lora", "base") if name in arms]
+    if len(order) < 2:
+        return False
+    stacks = {name: as_frames_255(arms[name]).clip(0, 255).astype(np.uint8) for name in order}
+    clips = min(s.shape[0] for s in stacks.values())
+    frames_n, height, width, _ = stacks[order[0]].shape[1:]
+    label_h = 16
+    panels_h = (height + label_h) * len(order)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, panels_h))
+    if not writer.isOpened():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        for clip in range(clips):
+            for step in range(frames_n):
+                panels = []
+                for name in order:
+                    bar = np.zeros((label_h, width, 3), dtype=np.uint8)
+                    cv2.putText(
+                        bar, name, (4, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
+                    )
+                    panels += [bar, cv2.cvtColor(stacks[name][clip, step], cv2.COLOR_RGB2BGR)]
+                writer.write(np.concatenate(panels, axis=0))
+    finally:
+        writer.release()
+    return path.is_file() and path.stat().st_size > 0
+
+
 # ---- entry -----------------------------------------------------------------------------
 
 
@@ -444,6 +525,14 @@ def main(argv: list[str] | None = None) -> int:
         for name, frames in arms.items():
             if write_contact_sheet(frames, out_dir / f"{name}.png"):
                 print(f"  contact sheet -> {out_dir / f'{name}.png'}")
+    if args.video:
+        for name, frames in arms.items():
+            for fps, tag in ((NATIVE_FPS, ""), (SLOW_FPS, "_slow")):
+                target = out_dir / f"{name}{tag}.mp4"
+                if write_clip_video(frames, target, fps=fps):
+                    print(f"  video -> {target}")
+        if write_comparison_video(arms, out_dir / "comparison_slow.mp4"):
+            print(f"  video -> {out_dir / 'comparison_slow.mp4'}")
 
     print("\n===== DREAM =====")
     for name, metrics in report.arms.items():
