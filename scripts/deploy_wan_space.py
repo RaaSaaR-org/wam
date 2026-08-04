@@ -39,6 +39,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--space", default=None, help=f"repo id; default <user>/{DEFAULT_SPACE}")
     p.add_argument("--model", default=None, help="override MODEL_ID variable on the Space")
     p.add_argument("--duration", type=int, default=None, help="GPU_DURATION seconds variable")
+    p.add_argument(
+        "--checkpoint-repo",
+        default=None,
+        help="CHECKPOINT_REPO variable: the WAM checkpoint the dream tab samples. A repo id "
+        "(private is fine with --set-hf-token) or a path inside the Space. Without it the tab "
+        "still loads, but every run stops with a message instead of a half-configured sample.",
+    )
     p.add_argument("--hardware", default=ZERO_GPU, help="Space hardware (default ZeroGPU)")
     p.add_argument("--public", action="store_true", help="create it public (default private)")
     p.add_argument(
@@ -121,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         variables["MODEL_ID"] = args.model
     if args.duration:
         variables["GPU_DURATION"] = str(args.duration)
+    if args.checkpoint_repo:
+        variables["CHECKPOINT_REPO"] = args.checkpoint_repo
 
     api.create_repo(
         space_id,
