@@ -325,6 +325,11 @@ class WanFlowBackbone(nn.Module):
     def num_video_tokens(self, video_latents: Any) -> int:
         return self._adapter.num_video_tokens(video_latents)
 
+    @property
+    def latent_frame_axis(self) -> int:
+        """Axis of ``encode_video``'s ``[B, z, F', h, w]`` that indexes latent frames."""
+        return 2
+
     def forward_flow(
         self, video_latents: Any, t: Any, text_ctx: Any, state_ctx: Any
     ) -> tuple[Tensor, Tensor]:
@@ -349,6 +354,21 @@ class WanFlowBackbone(nn.Module):
 
     def _has_trainable_lora(self) -> bool:
         return any(param.requires_grad for param in self.lora.values())
+
+    def set_lora_enabled(self, enabled: bool) -> bool:
+        """Bypass or restore the adapter in place; returns the previous state (T-35).
+
+        Inference only, and the caller owns the restore — this deliberately does not
+        context-manage itself, because the one place it is used
+        (:func:`~wam.evaluation.dream.sample_video` base arm) needs the toggle to survive
+        across several sampling calls that must share one loaded base.
+        """
+        return self._adapter.set_lora_enabled(enabled)
+
+    @property
+    def lora_enabled(self) -> bool:
+        """Whether the attached adapter is currently in the forward pass."""
+        return self._adapter.lora_enabled
 
     # ---- checkpointing ----------------------------------------------------------------------
 

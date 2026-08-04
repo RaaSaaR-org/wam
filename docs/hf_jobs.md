@@ -441,6 +441,19 @@ Three findings, and the third is the one that matters:
    than the demonstrations, which is why the model loses to repeat-last-action. The video branch
    and the action branch failed the *same* way: both converged on "nothing much happens next".
 
+   > **Correction (2026-08-05, T-35).** "a real 0.3 s of demonstration moves considerably more" is
+   > the load-bearing clause of this finding and it had **no number behind it**. Measured since
+   > (`scripts/dream.py --gt-only`, 200 clips over 40 episodes): real 9-frame clips move **0.958**
+   > at 120×160 and **0.922** on the 128×160 grid a decoded clip lives on, with 68.9 % of frame
+   > pairs moving under one grey level. This corpus barely moves — 0.73 is roughly **0.8×** the
+   > recorded motion, not ~0, and the 29.5 it was contrasted with is this same table's
+   > "psychedelic colour noise", an upper bound on noise rather than on plausible motion.
+   > That does not make the finding false: these clips came from `generate_future`, i.e. a stock
+   > diffusers pipeline with **no state port**, so they were generated without the proprioception
+   > token the DiT trained with, and no like-for-like arm existed. It makes the finding
+   > **unsupported as stated**. `docs/preregistration/PR-05-dream-motion.md` fixes the threshold
+   > (≥ 0.5 of the VAE round-trip) before the run that can settle it.
+
 The per-block adapter magnitudes agree. `lora_B` starts at exactly zero in peft and 0 % of it is
 still zero, so training moved everything — but blocks 23–27 moved most (mean |B| 1.2e-2) and
 block 10 least (7.0e-3). Blocks 11–29 receive gradient *only* from the video loss (the readouts

@@ -230,6 +230,16 @@ class TinyVideoBackbone(nn.Module):
         """Inverse of :meth:`encode_video` — identity, since the latents already are pixels."""
         return self._to_video_tensor(video_latents)
 
+    @property
+    def latent_frame_axis(self) -> int:
+        """Axis of :meth:`encode_video`'s output that indexes frames: 1, since latents == pixels.
+
+        Read by :func:`~wam.evaluation.dream.sample_video` when it anchors leading frames. Wan
+        says 2 for its ``[B, z, F', h, w]``; the difference is exactly the kind of layout detail
+        that must live in the backbone (FR-09).
+        """
+        return 1
+
     def num_video_tokens(self, video_latents: Any = None) -> int:
         """Leading video tokens in ``features``; fixed by the config, so the batch is ignored."""
         return self.config.num_video_tokens

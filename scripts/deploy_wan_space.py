@@ -25,6 +25,7 @@ SPACE_DIR = REPO_ROOT / "deploy" / "wan-smoke-space"
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "hf_job_wan_smoke.py"
 PROBE_SCRIPT = REPO_ROOT / "scripts" / "hf_job_wan_probe.py"
 CONVERTER_SCRIPT = REPO_ROOT / "scripts" / "convert_lerobot_g1.py"
+DREAM_SCRIPT = REPO_ROOT / "scripts" / "dream.py"
 DEFAULT_SPACE = "wam-wan-smoke"
 # 'zero-a10g' is the API's (legacy) identifier for ZeroGPU; the actual hardware is an
 # RTX Pro 6000 Blackwell — 48 GB for `large`, the @spaces.GPU default.
@@ -83,6 +84,9 @@ def payload() -> list[tuple[Path, str]]:
         (SMOKE_SCRIPT, "smoke.py"),
         (PROBE_SCRIPT, "probe.py"),
         (CONVERTER_SCRIPT, "convert_lerobot_g1.py"),
+        # Renamed so the module name cannot collide with the `dream` module inside the
+        # installed `wam` package, which app.py imports separately.
+        (DREAM_SCRIPT, "dream_cli.py"),
     ]
 
 

@@ -217,6 +217,8 @@ class WanI2VAdapter:
         # umT5 tower is the priciest frozen part to re-run — and it is deterministic.
         self._text_cache: dict[Any, Any] = {}
         self._lora_adapter: str | None = None
+        # Adapters arrive enabled (peft's own default); set_lora_enabled() tracks the toggle.
+        self._lora_enabled: bool = True
 
     # ---- BackboneAdapter protocol (metadata is available without weights) ---------------
 
@@ -356,6 +358,7 @@ class WanI2VAdapter:
         # Both caches describe the modules we are replacing here, not the adapter.
         self._text_cache.clear()
         self._lora_adapter = None
+        self._lora_enabled = True
 
         self.feature_blocks = tuple(resolved)
         self._num_layers = num_layers
@@ -897,6 +900,7 @@ class WanI2VAdapter:
         if not trainable:  # pragma: no cover - peft raises first, but never train a no-op
             raise RuntimeError(f"LoRA injection matched no module against {spec!r}")
         self._lora_adapter = adapter_name
+        self._lora_enabled = True
         return trainable
 
     def _activate_lora_parameters(self, param_dtype: str) -> int:
@@ -969,6 +973,36 @@ class WanI2VAdapter:
                     )
                 param.copy_(value.to(device=param.device, dtype=param.dtype))
 
+    def set_lora_enabled(self, enabled: bool) -> bool:
+        """Switch the attached adapter on/off in place; returns the previous state.
+
+        The base-arm control for any comparison that asks what the fine-tune did (T-35): same
+        process, same weights in memory, same sampling noise, adapter bypassed. The alternative
+        — loading the base a second time — costs 19 GB and puts a second model build between the
+        two numbers being compared, which is exactly the kind of difference that later turns out
+        to explain the result.
+
+        Toggling is peft's own ``disable_adapters``/``enable_adapters`` on the DiT, so the delta
+        is the adapter and nothing else. Deliberately NOT a scale knob: a partial scale is a
+        model that was never trained, and the archived generate-tab table already shows that
+        reading such a clip requires knowing the effective scaling is alpha/r = 2.0 and not 1.0.
+        """
+        self._require_loaded()
+        if self._lora_adapter is None:
+            raise RuntimeError("no LoRA adapter attached — nothing to enable or disable")
+        was_enabled = self._lora_enabled
+        if enabled:
+            self._transformer.enable_adapters()
+        else:
+            self._transformer.disable_adapters()
+        self._lora_enabled = bool(enabled)
+        return was_enabled
+
+    @property
+    def lora_enabled(self) -> bool:
+        """Whether the attached adapter is currently in the forward pass."""
+        return self._lora_adapter is not None and self._lora_enabled
+
     def save_lora(self, directory: str | Path) -> Path:
         """Write the adapter in the diffusers LoRA layout; returns the weight file path.
 
@@ -1003,6 +1037,7 @@ class WanI2VAdapter:
             weight_name=_LORA_WEIGHT_NAME,
         )
         self._lora_adapter = adapter_name
+        self._lora_enabled = True
         return self._activate_lora_parameters(param_dtype)
 
     def enable_gradient_checkpointing(self, enable: bool = True) -> None:
