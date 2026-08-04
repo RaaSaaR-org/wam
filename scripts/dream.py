@@ -89,7 +89,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     model = p.add_argument_group("model")
-    model.add_argument("--checkpoint", default=None, help="WAM joint checkpoint directory/file")
+    model.add_argument(
+        "--checkpoint",
+        default=None,
+        help="WAM joint checkpoint: the step-NNNNNN directory or its model.safetensors",
+    )
     model.add_argument("--backbone-source", default=None, help="local Wan snapshot dir")
     model.add_argument("--device", default=None)
     model.add_argument("--steps", type=int, default=DEFAULT_STEPS, help="Euler steps")
@@ -175,6 +179,34 @@ def drop_padded_windows(samples: list[dict[str, Any]]) -> tuple[list[dict[str, A
 def _all_frames_identical(frames: Any) -> bool:
     array = frames.numpy() if hasattr(frames, "numpy") else np.asarray(frames)
     return bool(array.shape[0] > 1 and np.all(array == array[0]))
+
+
+CHECKPOINT_FILENAME = "model.safetensors"
+
+
+def resolve_checkpoint(path: str | Path) -> str:
+    """A checkpoint directory or file -> the safetensors file ``load_joint_policy`` wants.
+
+    ``load_checkpoint_raw`` opens a FILE (the config and provenance ride in the safetensors
+    metadata), but every other way of naming a checkpoint in this project is a directory: the
+    trainer writes ``checkpoints/step-020000/``, and ``snapshot_download`` on the Space returns
+    a repo root. Resolving in one place keeps the Space and a laptop pointing at the same tensor
+    file instead of failing differently.
+
+    ``trainer_state.pt`` (660 MB of optimizer state) is deliberately not looked for: nothing here
+    resumes training, and it is the reason a checkpoint is 945 MB rather than 330.
+    """
+    source = Path(path)
+    if source.is_dir():
+        candidate = source / CHECKPOINT_FILENAME
+        if not candidate.is_file():
+            found = sorted(p.name for p in source.glob("*.safetensors"))
+            raise FileNotFoundError(
+                f"{source} has no {CHECKPOINT_FILENAME}"
+                + (f" (found: {found})" if found else " and no safetensors at all")
+            )
+        return str(candidate)
+    return str(source)
 
 
 def batch_from_windows(
@@ -361,10 +393,11 @@ def main(argv: list[str] | None = None) -> int:
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     t0 = time.perf_counter()
-    policy = load_joint_policy(args.checkpoint, device=device, backbone_source=args.backbone_source)
+    checkpoint = resolve_checkpoint(args.checkpoint)
+    policy = load_joint_policy(checkpoint, device=device, backbone_source=args.backbone_source)
     model = policy.model
     model.eval()
-    print(f"loaded {args.checkpoint} on {device} in {time.perf_counter() - t0:.1f}s")
+    print(f"loaded {checkpoint} on {device} in {time.perf_counter() - t0:.1f}s")
 
     num_frames = args.num_frames or int(model.config.backbone.num_frames)
     if args.num_frames and args.num_frames != int(model.config.backbone.num_frames):
@@ -383,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     info["num_frames"] = num_frames
     info["trained_num_frames"] = int(model.config.backbone.num_frames)
     info["image_hw"] = list(getattr(model.config.backbone, "image_hw", ()) or ())
-    info["checkpoint"] = str(args.checkpoint)
+    info["checkpoint"] = checkpoint
     info["run_id"] = getattr(policy.metadata, "run_id", None)
     info["config_hash"] = getattr(policy.metadata, "config_hash", None)
     info["anchor_latent_frames"] = args.anchor

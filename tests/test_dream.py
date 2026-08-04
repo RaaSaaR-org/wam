@@ -458,3 +458,28 @@ class TestSpaceBatchPath:
         padded["frames"] = np.tile(padded["frames"][:1], (NUM_FRAMES, 1, 1, 1))
         with pytest.raises(ValueError, match="no usable windows"):
             batch_from_windows([padded], "pick the apple")
+
+
+class TestCheckpointResolution:
+    """The Space downloads a repo root; `load_checkpoint_raw` opens a file. One resolver."""
+
+    def test_a_directory_resolves_to_its_safetensors(self, tmp_path):
+        from dream import resolve_checkpoint
+
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        (tmp_path / "trainer_state.pt").write_bytes(b"")  # 660 MB in reality; never wanted
+        assert resolve_checkpoint(tmp_path) == str(tmp_path / "model.safetensors")
+
+    def test_a_file_is_passed_through(self, tmp_path):
+        from dream import resolve_checkpoint
+
+        path = tmp_path / "step-020000.safetensors"
+        path.write_bytes(b"")
+        assert resolve_checkpoint(path) == str(path)
+
+    def test_a_directory_without_one_says_what_it_found(self, tmp_path):
+        from dream import resolve_checkpoint
+
+        (tmp_path / "other.safetensors").write_bytes(b"")
+        with pytest.raises(FileNotFoundError, match="other.safetensors"):
+            resolve_checkpoint(tmp_path)

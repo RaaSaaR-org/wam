@@ -326,6 +326,9 @@ def dream_on_gpu(
     sheets: dict[str, str] = {}
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            # snapshot_download returns a repo ROOT; load_checkpoint_raw opens a FILE (the config
+            # and provenance ride in the safetensors metadata). One resolver, shared with the CLI.
+            checkpoint = dream_cli.resolve_checkpoint(checkpoint)
             policy = load_joint_policy(checkpoint, device="cuda", backbone_source=source)
             model = policy.model
             model.eval()
