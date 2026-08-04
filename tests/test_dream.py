@@ -527,3 +527,213 @@ class TestVideoArtifacts:
         from dream import write_comparison_video
 
         assert not write_comparison_video({"lora": self._clips(1)}, tmp_path / "cmp.mp4")
+
+
+# ---- PR-06: which windows, and what the anchored arms have to beat -----------------------
+
+
+class TestMotionWindowSelection:
+    """PR-05 measured "does the dream move like the data" on the two windows per episode where
+    the data does not move. `linspace(0, n-1, 2)` is exactly `[first, last]`, and on
+    GR00T-AppleToPlate those are before the reach and after the withdrawal — no arm in frame."""
+
+    def test_linspace_at_two_per_episode_is_the_first_and_last_window(self):
+        """The defect itself, pinned: not a subtle bias, the endpoints and nothing else."""
+        assert list(np.linspace(0, 99, num=2, dtype=int)) == [0, 99]
+
+    def test_it_takes_the_highest_motion_windows(self):
+        from wam.evaluation.dream import select_windows_by_motion
+
+        assert select_windows_by_motion([0.1, 5.0, 0.2, 3.0, 0.05], 2) == [1, 3]
+
+    def test_the_picks_come_back_in_episode_order(self):
+        """Clip order must follow the episode, never the ranking — a report whose rows are sorted
+        by the quantity under test invites reading the sort as the finding."""
+        from wam.evaluation.dream import select_windows_by_motion
+
+        assert select_windows_by_motion([9.0, 1.0, 8.0, 2.0], 3) == [0, 2, 3]
+
+    def test_asking_for_more_windows_than_exist_takes_all_of_them(self):
+        from wam.evaluation.dream import select_windows_by_motion
+
+        assert select_windows_by_motion([1.0, 2.0], 10) == [0, 1]
+        assert select_windows_by_motion([1.0, 2.0], 0) == []
+
+    def test_ties_break_toward_the_earlier_window(self):
+        from wam.evaluation.dream import select_windows_by_motion
+
+        assert select_windows_by_motion([1.0, 1.0, 1.0], 2) == [0, 1]
+
+    def test_window_motions_scores_each_clip_separately(self):
+        from wam.evaluation.dream import window_motions
+
+        clips = np.zeros((2, 3, 4, 4, 3), dtype=np.uint8)
+        clips[1, 1:] = 10  # one step of 10 grey levels, then held
+        scores = window_motions(clips)
+        assert scores[0] == pytest.approx(0.0)
+        assert scores[1] == pytest.approx(5.0)  # one moving pair of two, 10 -> mean 5
+
+    def test_a_still_clip_ranks_below_a_moving_one(self):
+        from wam.evaluation.dream import select_windows_by_motion, window_motions
+
+        clips = np.zeros((3, 3, 4, 4, 3), dtype=np.uint8)
+        clips[2, 1:] = 40
+        assert select_windows_by_motion(window_motions(clips), 1) == [2]
+
+
+class TestFreezeBaseline:
+    def test_it_holds_the_anchor_frame(self):
+        from dream import freeze_baseline
+
+        frames = torch.arange(2 * 4 * 2 * 2 * 3, dtype=torch.float32).reshape(2, 4, 2, 2, 3)
+        held = freeze_baseline(frames, 3)
+        assert held.shape == (2, 3, 2, 2, 3)
+        for step in range(3):
+            assert torch.equal(held[:, step], frames[:, 0])
+
+    def test_it_has_no_motion_at_all(self):
+        """The baseline is literally "nothing happens" — if it scored motion it would not be one."""
+        from dream import freeze_baseline
+
+        from wam.evaluation.dream import motion_energy
+
+        rng = np.random.default_rng(0)
+        frames = rng.random((2, 5, 4, 4, 3)).astype(np.float32)
+        assert motion_energy(freeze_baseline(frames, 4)) == pytest.approx(0.0)
+
+    def test_it_works_on_numpy_and_torch_alike(self):
+        from dream import freeze_baseline
+
+        array = np.arange(1 * 3 * 2 * 2 * 3, dtype=np.float32).reshape(1, 3, 2, 2, 3)
+        assert freeze_baseline(array, 2).shape == (1, 2, 2, 2, 3)
+        assert freeze_baseline(torch.from_numpy(array), 2).shape == (1, 2, 2, 2, 3)
+
+
+class TestFreezeGate:
+    """PR-05's G2 compared `d(lora, base)` against `d(base, base_seed1)` on a base arm that
+    produces noise, so both operands measured that arm's variance and the verdict was void. The
+    replacement asks a question freezing can actually lose: is the prediction closer to what
+    happened than holding the anchor frame is."""
+
+    def _arms(self, dream_error: float) -> dict:
+        rng = np.random.default_rng(0)
+        recon = rng.integers(0, 256, (2, 4, 8, 8, 3)).astype(np.uint8)
+        truth = recon.astype(np.float32) / 255.0
+        frozen = np.repeat(truth[:, :1], 4, axis=1)
+        dream = frozen + (truth - frozen) * (1.0 - dream_error)
+        return {"recon": recon, "recon_a": truth, "freeze_a": frozen, "lora_a": dream}
+
+    def _report(self, arms):
+        return build_report(
+            arms,
+            pairs={
+                "lora_a_vs_truth": ("lora_a", "recon_a"),
+                "freeze_vs_truth": ("freeze_a", "recon_a"),
+            },
+            freeze_gate=("lora_a_vs_truth", "freeze_vs_truth"),
+        )
+
+    def test_a_perfect_prediction_beats_freezing(self):
+        report = self._report(self._arms(dream_error=0.0))
+        assert report.verdicts["beats_freezing"] == "PREDICTS"
+
+    def test_predicting_the_frozen_frame_does_not_beat_freezing(self):
+        """The exact failure the gate is for: a model that learned "nothing changes" reproduces
+        the baseline and must not be recorded as having predicted anything."""
+        report = self._report(self._arms(dream_error=1.0))
+        assert report.verdicts["beats_freezing"] == "NO_BETTER_THAN_FREEZING"
+
+    def test_a_coin_flip_win_is_not_enough(self):
+        from wam.evaluation.dream import FREEZE_MARGIN
+
+        # 5 % closer than freezing — a win, and below the 10 % margin fixed before the run.
+        report = self._report(self._arms(dream_error=0.95))
+        assert report.pair_distance["lora_a_vs_truth"] < report.pair_distance["freeze_vs_truth"]
+        assert report.verdicts["beats_freezing"] == "NO_BETTER_THAN_FREEZING"
+        assert FREEZE_MARGIN == 0.9
+
+    def test_the_gate_operands_must_be_in_the_report_beside_it(self):
+        arms = self._arms(dream_error=0.0)
+        with pytest.raises(KeyError, match="freeze_gate names"):
+            build_report(arms, pairs={}, freeze_gate=("lora_a_vs_truth", "freeze_vs_truth"))
+
+
+class TestArmGroups:
+    """`run_arms` returns two groups that answer different questions; the anchored one is the
+    only group a pixel-distance verdict may be read from."""
+
+    def _args(self, **overrides):
+        import argparse
+
+        defaults = {"steps": 2, "seed": 0, "anchor": 0, "no_base_arm": True, "base_null": False}
+        return argparse.Namespace(**{**defaults, **overrides})
+
+    def test_a_free_run_produces_no_anchored_arms(self):
+        from dream import run_arms
+
+        batch = make_batch()
+        arms = run_arms(self._args(), batch, tiny_joint_model())
+        assert set(arms) == {"recon", "sample"}
+        assert arms["sample"].shape[1] == NUM_FRAMES
+
+    def test_anchoring_adds_the_truth_and_the_baseline_it_must_beat(self):
+        from dream import run_arms
+
+        batch = make_batch()
+        arms = run_arms(self._args(anchor=1), batch, tiny_joint_model())
+        assert {"recon_a", "freeze_a", "sample_a", "sample_a_seed1"} <= set(arms)
+        # one latent frame anchored -> one pixel frame stripped from every anchored arm
+        for name in ("recon_a", "freeze_a", "sample_a", "sample_a_seed1"):
+            assert arms[name].shape[1] == NUM_FRAMES - 1, name
+        assert arms["recon"].shape[1] == NUM_FRAMES  # the free group keeps its full length
+
+    def test_the_two_anchored_seeds_are_different_draws(self):
+        """A verdict that flips between seeds is no verdict — PR-05 shipped without the second."""
+        from dream import run_arms
+
+        arms = run_arms(self._args(anchor=1), make_batch(), tiny_joint_model())
+        assert not torch.allclose(arms["sample_a"], arms["sample_a_seed1"])
+
+    def test_the_frozen_arm_holds_the_anchor_frame_of_the_round_trip(self):
+        """Built from `recon`, not the raw recording, so both sides of the gate carry the same
+        VAE and resize loss and the comparison isolates predicted motion."""
+        from dream import run_arms
+
+        from wam.evaluation.dream import motion_energy
+
+        arms = run_arms(self._args(anchor=1), make_batch(), tiny_joint_model())
+        assert motion_energy(arms["freeze_a"]) == pytest.approx(0.0)
+        assert torch.allclose(arms["freeze_a"][:, 0], arms["recon"][:, 0])
+
+
+class TestPairWiring:
+    def test_an_anchored_run_declares_the_gate_and_its_operands(self):
+        from dream import dream_pairs
+
+        arms = dict.fromkeys(["recon", "lora", "recon_a", "freeze_a", "lora_a", "lora_a_seed1"], 0)
+        pairs, gate = dream_pairs(arms)
+        assert gate == ("lora_a_vs_truth", "freeze_vs_truth")
+        assert set(gate) <= set(pairs)
+        assert pairs["lora_a_vs_truth"] == ("lora_a", "recon_a")
+        assert pairs["freeze_vs_truth"] == ("freeze_a", "recon_a")
+
+    def test_a_free_run_declares_no_gate(self):
+        from dream import dream_pairs
+
+        pairs, gate = dream_pairs(dict.fromkeys(["recon", "lora", "base"], 0))
+        assert gate is None
+        assert pairs == {"lora_vs_base": ("lora", "base")}
+
+    def test_the_void_gate_cannot_fire_without_being_asked_for(self):
+        """`base_seed1` is opt-in (`--base-null`), so PR-05's `fine_tune_changed_the_prior`
+        verdict stays out of every report that did not deliberately request it."""
+        from dream import dream_pairs
+
+        rng = np.random.default_rng(3)
+        arms = {
+            name: rng.integers(0, 256, (1, 3, 4, 4, 3)).astype(np.uint8)
+            for name in ("recon", "lora", "base")
+        }
+        pairs, _ = dream_pairs(arms)
+        assert "base_seed_null" not in pairs
+        assert "fine_tune_changed_the_prior" not in build_report(arms, pairs=pairs).verdicts

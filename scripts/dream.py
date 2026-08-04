@@ -76,6 +76,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     data.add_argument("--windows-per-episode", type=int, default=2)
     data.add_argument("--camera", default=DEFAULT_CAMERA)
     data.add_argument(
+        "--window-select",
+        choices=("linspace", "motion"),
+        default="linspace",
+        help="which windows of each episode to take. 'linspace' spreads them evenly over the "
+        "episode and at 2 per episode returns the first and last chunk — on this corpus the two "
+        "moments the arm is NOT in frame (PR-05's defect). 'motion' takes the highest-motion "
+        "windows: a selected subpopulation, not a corpus sample. See select_windows_by_motion",
+    )
+    data.add_argument(
         "--keep-padded",
         action="store_true",
         help="keep start-of-episode windows whose frames are all identical (clamped by "
@@ -108,7 +117,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     out = p.add_argument_group("output")
     out.add_argument("--gt-only", action="store_true", help="reference arms only: no model, no GPU")
-    out.add_argument("--no-base-arm", action="store_true", help="skip the two adapter-off arms")
+    out.add_argument("--no-base-arm", action="store_true", help="skip the adapter-off arm")
+    out.add_argument(
+        "--base-null",
+        action="store_true",
+        help="also sample base at seed+1. This is PR-05's void gate: on a base arm that produces "
+        "noise, d(base, base_seed1) measures that arm's variance, not the fine-tune's effect. "
+        "Off by default so the verdict it feeds cannot fire by accident — see PR-05-RESULT §G2",
+    )
     out.add_argument("--out", default="runs/dream", help="output directory")
     out.add_argument("--contact-sheet", action="store_true", help="write a PNG per arm")
     out.add_argument(
@@ -124,16 +140,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def build_batch(args: argparse.Namespace, num_frames: int) -> tuple[dict[str, Any], list[str]]:
-    """Evenly-spaced windows from the first ``--episodes`` episodes, collated into one batch.
+    """Windows from the first ``--episodes`` episodes, collated into one batch.
 
-    Evenly spaced rather than random: the arms must see the SAME windows, and a seeded shuffle
+    Deterministic rather than a seeded shuffle: the arms must see the SAME windows, and a shuffle
     would be one more thing to keep in sync between a laptop run and a Space run for no gain.
     Episode order is ``list_episodes``' (sorted), which is a fixed, inspectable set — this is a
     diagnostic over a handful of clips, not a holdout score, so nothing here is a split claim.
+
+    ``--window-select`` decides WHICH windows, and it is the difference between measuring the
+    robot acting and measuring the table it acts on: see
+    :func:`~wam.evaluation.dream.select_windows_by_motion`.
     """
     import torch
 
     from wam.data.episode import list_episodes
+    from wam.evaluation.dream import motion_energy, select_windows_by_motion
     from wam.training.datasets import EpisodeDataset, collate_episode_batch
 
     root = Path(args.dataset)
@@ -148,7 +169,15 @@ def build_batch(args: argparse.Namespace, num_frames: int) -> tuple[dict[str, An
         )
         total = len(dataset)
         take = min(args.windows_per_episode, total)
-        indices = np.linspace(0, total - 1, num=take, dtype=int) if take else []
+        if not take:
+            continue
+        if args.window_select == "motion":
+            # Every window of the episode is already resident (EpisodeDataset materializes its
+            # samples and the frame slices are views), so this is a numpy pass, not a re-decode.
+            motions = [motion_energy(dataset[i]["frames"]) for i in range(total)]
+            indices = select_windows_by_motion(motions, take)
+        else:
+            indices = np.linspace(0, total - 1, num=take, dtype=int)
         samples.extend(dataset[int(i)] for i in indices)
 
     if not args.keep_padded:
@@ -291,6 +320,23 @@ def strip_anchor(frames: Any, anchor_latent_frames: int, temporal_stride: int) -
     return frames[:, covered:]
 
 
+def freeze_baseline(frames: Any, num_frames: int) -> Any:
+    """Frame 0, held ``num_frames`` times — the trivial future predictor, and G2's baseline.
+
+    Built from the VAE round-trip rather than the raw recording so it carries the same codec and
+    resize artifacts the sampled arms do: the comparison then isolates *predicted motion* and
+    charges neither side for the pipeline. On a corpus where 96 % of frame pairs move less than
+    one grey level this is a strong baseline, not a straw man — which is the point. A world model
+    that cannot beat "nothing happens" over 0.3 s has not been shown to model the world.
+
+    List indexing rather than a repeat/tile call so one implementation serves both a torch tensor
+    (what ``decode_video`` returns) and a numpy array (what a recorded clip is).
+    """
+    if num_frames < 1:
+        raise ValueError(f"num_frames must be >= 1, got {num_frames}")
+    return frames[:, [0] * num_frames]
+
+
 def vae_temporal_stride(model: Any) -> int:
     """The backbone's VAE temporal stride, asked of the backbone rather than assumed.
 
@@ -303,40 +349,80 @@ def vae_temporal_stride(model: Any) -> int:
 
 
 def run_arms(args: argparse.Namespace, batch: dict[str, Any], model: Any) -> dict[str, Any]:
-    """Sample every model arm; returns ``{arm_name: frames}`` ready for :func:`build_report`."""
+    """Sample every model arm; returns ``{arm_name: frames}`` ready for :func:`build_report`.
+
+    Two groups, and mixing them up is the mistake this docstring exists to prevent:
+
+    ``free`` (``lora``, ``base``) start from pure noise on text + state alone. They answer G1 —
+    does the video branch move the way the data moves — and they are **not** future predictions:
+    nothing tells them where the apple is except the proprioception token, so scoring them
+    against the observed clip pixel-for-pixel would score a question they were never asked.
+
+    ``anchored`` (the ``_a`` suffix, present only when ``--anchor`` > 0) pin the leading latent
+    frame to the observation, which makes the clip a prediction of what follows it and therefore
+    scorable: ``recon_a`` is what actually followed and ``freeze_a`` is the anchor frame held.
+    The anchored frames are stripped before anything is measured — leaving them in would import
+    the recording's own motion into every arm and is the one error here that flatters the model.
+    """
     from wam.evaluation.dream import sample_video, vae_roundtrip
 
     stride = vae_temporal_stride(model)
-    arms: dict[str, Any] = {"recon": vae_roundtrip(model, batch["frames"])}
-
-    def sampled(seed: int) -> Any:
-        return strip_anchor(
-            sample_video(
-                model, batch, steps=args.steps, seed=seed, anchor_latent_frames=args.anchor
-            ),
-            args.anchor,
-            stride,
-        )
-
+    recon = vae_roundtrip(model, batch["frames"])
     has_lora = bool(getattr(model.backbone, "lora_enabled", False))
-    t0 = time.perf_counter()
-    arms["lora" if has_lora else "sample"] = sampled(args.seed)
-    print(f"  sampled {'lora' if has_lora else 'sample'} in {time.perf_counter() - t0:.1f}s")
+    dream = "lora" if has_lora else "sample"
+    arms: dict[str, Any] = {"recon": recon}
 
+    def sampled(label: str, seed: int, anchor: int) -> Any:
+        t0 = time.perf_counter()
+        frames = sample_video(
+            model, batch, steps=args.steps, seed=seed, anchor_latent_frames=anchor
+        )
+        print(f"  sampled {label} in {time.perf_counter() - t0:.1f}s")
+        return strip_anchor(frames, anchor, stride)
+
+    arms[dream] = sampled(dream, args.seed, 0)
     if has_lora and not args.no_base_arm:
         model.backbone.set_lora_enabled(False)
         try:
-            t0 = time.perf_counter()
-            arms["base"] = sampled(args.seed)
-            # The null: same weights, same conditioning, different sampling noise. Without it a
-            # nonzero d(lora, base) says only that the sampler is stochastic.
-            arms["base_seed1"] = sampled(args.seed + 1)
-            print(f"  sampled base x2 in {time.perf_counter() - t0:.1f}s")
+            arms["base"] = sampled("base", args.seed, 0)
+            if args.base_null:
+                arms["base_seed1"] = sampled("base_seed1", args.seed + 1, 0)
         finally:
             model.backbone.set_lora_enabled(True)
 
-    arms["recon"] = strip_anchor(arms["recon"], args.anchor, stride)
+    if args.anchor:
+        recon_a = strip_anchor(recon, args.anchor, stride)
+        arms["recon_a"] = recon_a
+        arms["freeze_a"] = freeze_baseline(recon, int(recon_a.shape[1]))
+        arms[f"{dream}_a"] = sampled(f"{dream}_a", args.seed, args.anchor)
+        # A second seed on the arm a verdict is read from. PR-05 shipped without one and had to
+        # caveat that a verdict which flips between seeds is no verdict; this is that caveat closed.
+        arms[f"{dream}_a_seed1"] = sampled(f"{dream}_a_seed1", args.seed + 1, args.anchor)
     return arms
+
+
+def dream_pairs(arms: dict[str, Any]) -> tuple[dict[str, tuple[str, str]], tuple[str, str] | None]:
+    """``(pairs, freeze_gate)`` for :func:`build_report`, given whichever arms actually ran.
+
+    ``base_seed_null`` is only declared when ``base_seed1`` exists, and it is opt-in
+    (``--base-null``), so PR-05's void ``fine_tune_changed_the_prior`` verdict cannot fire on a
+    run that did not deliberately ask for it.
+    """
+    pairs: dict[str, tuple[str, str]] = {}
+    dream = "lora" if "lora" in arms else "sample"
+    if dream in arms and "base" in arms:
+        pairs[f"{dream}_vs_base"] = (dream, "base")
+    if "base" in arms and "base_seed1" in arms:
+        pairs["base_seed_null"] = ("base", "base_seed1")
+
+    freeze_gate: tuple[str, str] | None = None
+    if f"{dream}_a" in arms and "recon_a" in arms and "freeze_a" in arms:
+        pairs[f"{dream}_a_vs_truth"] = (f"{dream}_a", "recon_a")
+        pairs["freeze_vs_truth"] = ("freeze_a", "recon_a")
+        if f"{dream}_a_seed1" in arms:
+            pairs[f"{dream}_a_seed1_vs_truth"] = (f"{dream}_a_seed1", "recon_a")
+        freeze_gate = (f"{dream}_a_vs_truth", "freeze_vs_truth")
+    return pairs, freeze_gate
 
 
 # ---- artifacts -------------------------------------------------------------------------
@@ -391,12 +477,27 @@ def write_clip_video(frames: Any, path: Path, *, fps: float = NATIVE_FPS, gap: i
     return path.is_file() and path.stat().st_size > 0
 
 
-def write_comparison_video(arms: dict[str, Any], path: Path, *, fps: float = SLOW_FPS) -> bool:
+#: Panel orders for :func:`write_comparison_video`. The free set shows G1 (does the dream move
+#: like the round-trip, and what was the prior doing before the fine-tune); the anchored set
+#: shows G2 (the prediction, what actually happened, and the frozen frame it has to beat).
+FREE_PANELS = ("recon", "lora", "base")
+ANCHORED_PANELS = ("recon_a", "lora_a", "freeze_a")
+
+
+def write_comparison_video(
+    arms: dict[str, Any],
+    path: Path,
+    *,
+    fps: float = SLOW_FPS,
+    panels: tuple[str, ...] = FREE_PANELS,
+) -> bool:
     """The arms stacked in one frame, same clip and timestep in every panel.
 
     The comparison this whole task exists to make, and it only works side by side: `lora` against
     `recon` is the ratio in G1 made visible, and `base` in the same frame is what the adapter is
-    doing to a prior that cannot generate at this geometry at all.
+    doing to a prior that cannot generate at this geometry at all. With ``ANCHORED_PANELS`` it
+    shows G2 instead — the prediction above the truth above the frozen frame, which is the only
+    form in which "closer than freezing" is something a person can check rather than take.
     """
     try:
         import cv2
@@ -404,7 +505,7 @@ def write_comparison_video(arms: dict[str, Any], path: Path, *, fps: float = SLO
         return False
     from wam.evaluation.dream import as_frames_255
 
-    order = [name for name in ("recon", "lora", "base") if name in arms]
+    order = [name for name in panels if name in arms]
     if len(order) < 2:
         return False
     stacks = {name: as_frames_255(arms[name]).clip(0, 255).astype(np.uint8) for name in order}
@@ -501,24 +602,22 @@ def main(argv: list[str] | None = None) -> int:
     info["run_id"] = getattr(policy.metadata, "run_id", None)
     info["config_hash"] = getattr(policy.metadata, "config_hash", None)
     info["anchor_latent_frames"] = args.anchor
+    info["window_select"] = args.window_select
     info["steps"] = args.steps
     info["state_conditioned"] = True  # the difference from the generate-future tab
 
     arms = run_arms(args, batch, model)
     # Raw recording, for context only: it sits on the dataset's own pixel grid (GR00T 120x160),
     # not the DiT-legal one the decoded arms come back on, so its ratio is not a like-for-like
-    # comparison — that is what `recon` is for.
-    arms["gt"] = strip_anchor(batch["frames"], args.anchor, vae_temporal_stride(model))
-
-    pairs: dict[str, tuple[str, str]] = {}
-    if "lora" in arms and "base" in arms:
-        pairs["lora_vs_base"] = ("lora", "base")
-    if "base" in arms and "base_seed1" in arms:
-        pairs["base_seed_null"] = ("base", "base_seed1")
+    # comparison — that is what `recon` is for. Full length: it belongs to the free group.
+    arms["gt"] = batch["frames"]
+    pairs, freeze_gate = dream_pairs(arms)
 
     if torch.cuda.is_available():
         info["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
-    report = build_report(arms, reference_arm="recon", pairs=pairs, info=info)
+    report = build_report(
+        arms, reference_arm="recon", pairs=pairs, freeze_gate=freeze_gate, info=info
+    )
 
     (out_dir / "dream.json").write_text(report.model_dump_json(indent=2))
     if args.contact_sheet:
@@ -531,8 +630,10 @@ def main(argv: list[str] | None = None) -> int:
                 target = out_dir / f"{name}{tag}.mp4"
                 if write_clip_video(frames, target, fps=fps):
                     print(f"  video -> {target}")
-        if write_comparison_video(arms, out_dir / "comparison_slow.mp4"):
-            print(f"  video -> {out_dir / 'comparison_slow.mp4'}")
+        for tag, panels in (("", FREE_PANELS), ("_anchored", ANCHORED_PANELS)):
+            target = out_dir / f"comparison{tag}_slow.mp4"
+            if write_comparison_video(arms, target, panels=panels):
+                print(f"  video -> {target}")
 
     print("\n===== DREAM =====")
     for name, metrics in report.arms.items():

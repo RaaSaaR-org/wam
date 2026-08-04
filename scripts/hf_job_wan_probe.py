@@ -108,6 +108,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     data.add_argument("--episodes", type=int, default=12, help="use the first N episodes")
     data.add_argument("--start", type=int, default=0, help="first source episode index")
     data.add_argument("--windows-per-episode", type=int, default=8)
+    data.add_argument(
+        "--window-select",
+        choices=("linspace", "motion"),
+        default="linspace",
+        help="which chunks of each episode become windows. 'linspace' spreads them evenly and "
+        "at 2 per episode returns the first and last — on GR00T-AppleToPlate the two moments "
+        "the arm is not in frame. 'motion' takes the highest-motion windows (a selected "
+        "subpopulation, not a corpus sample) — see wam.evaluation.dream.select_windows_by_motion",
+    )
     data.add_argument("--frames", type=int, default=5, help="context frames per window")
     data.add_argument("--height", type=int, default=192, help="probe frame height (mult. of 32)")
     data.add_argument("--width", type=int, default=256, help="probe frame width (mult. of 32)")
@@ -207,7 +216,17 @@ def build_windows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], str, 
         if not eligible:
             continue
         count = min(args.windows_per_episode, len(eligible))
-        picks = np.unique(np.linspace(0, len(eligible) - 1, count).round().astype(int))
+        if getattr(args, "window_select", "linspace") == "motion":
+            from wam.evaluation.dream import select_windows_by_motion
+
+            # One pass over the episode's frame diffs, then a window's score is the mean of the
+            # diffs it spans — identical to differencing each window separately, at 1/frames the
+            # work. int16 because np.diff on uint8 wraps and a wrapped 255->0 reads as no motion.
+            diffs = np.abs(np.diff(frames.astype(np.int16), axis=0)).mean(axis=(1, 2, 3))
+            scores = [float(diffs[s - args.frames + 1 : s].mean()) for _, s in eligible]
+            picks = select_windows_by_motion(scores, count)
+        else:
+            picks = np.unique(np.linspace(0, len(eligible) - 1, count).round().astype(int))
         for k in picks:
             chunk, start = eligible[int(k)]
             dq = (q[start] - q[start - 1]) / dt_s if start > 0 else np.zeros(NUM_JOINTS)
@@ -238,6 +257,7 @@ def build_windows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], str, 
         "dataset": str(source),
         "episodes": episode_indices,
         "windows": len(windows),
+        "window_select": getattr(args, "window_select", "linspace"),
         "frames": args.frames,
         "resize": [args.height, args.width],
         "chunk_steps": args.chunk_steps,

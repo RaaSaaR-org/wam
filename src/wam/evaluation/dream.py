@@ -73,6 +73,14 @@ _MAX_UNIT_PEAK = 16.0
 #: downstream. Fixed BEFORE the first Wan run (T-35), so the number cannot be chosen to fit.
 MOTION_FLOOR_RATIO = 0.5
 
+#: Pre-registered margin for the freeze gate (:func:`build_report`, ``freeze_gate``). An ANCHORED
+#: dream is a future prediction, and the baseline every future prediction has to beat is the
+#: trivial one — hold the anchor frame and predict no change. On a corpus where 96 % of frame
+#: pairs move less than one grey level, freezing is a *strong* baseline, so a coin-flip win is
+#: not evidence: PASS requires the dream to be at least 10 % closer to the observation than
+#: freezing is. Fixed BEFORE the first PR-06 run.
+FREEZE_MARGIN = 0.9
+
 
 class ClipMetrics(BaseModel):
     """Motion statistics of one arm's clips. All pixel quantities in 0-255."""
@@ -235,6 +243,50 @@ def motion_ratio(arm_motion: float, reference_motion: float) -> float:
     return arm_motion / reference_motion
 
 
+# ---- window selection -------------------------------------------------------------------
+
+
+def select_windows_by_motion(motions: Any, count: int) -> list[int]:
+    """Indices of the ``count`` highest-motion windows, returned in ascending order.
+
+    **Why this exists (PR-06).** Both window builders picked with
+    ``np.linspace(0, n - 1, count)``, and at the two-windows-per-episode setting PR-05 ran,
+    ``linspace`` returns exactly ``[0, n - 1]`` — the FIRST and LAST chunk of every episode. On
+    GR00T-AppleToPlate those are the two moments the arm is not in frame: the apple sitting
+    beside the plate before the reach, and sitting on the plate after the withdrawal. Measured
+    over the first 8 episodes, 9-frame windows: first+last average 0.071 motion against 1.107
+    for all windows and 5.183 at the episode's peak. PR-05 therefore asked "does the dream move
+    like the data" on windows ~15x quieter than the data, and its MOVES verdict means far less
+    than it reads.
+
+    Selecting by motion is not a random sample of the corpus and must never be reported as one —
+    it is a deliberately chosen subpopulation, "the moments where the robot is acting", which is
+    the regime the whole video branch exists to model. It does not bias the ratio the gates are
+    read from: every arm is sampled on the SAME windows and divided by the round-trip of those
+    same windows, so the selection moves which regime is tested, not the scale of the answer.
+
+    Ties break toward the earlier window (``argsort`` is stable on the negated array), and the
+    result is sorted so a run's clip order depends on the episode, never on the sort.
+    """
+    values = np.asarray(motions, dtype=np.float64).reshape(-1)
+    if count < 0:
+        raise ValueError(f"count must be >= 0, got {count}")
+    take = min(count, values.size)
+    if take == 0:
+        return []
+    top = np.argsort(-values, kind="stable")[:take]
+    return sorted(int(i) for i in top)
+
+
+def window_motions(frames: Any) -> np.ndarray:
+    """Per-clip motion of a ``[B, F, H, W, 3]`` stack — the score
+    :func:`select_windows_by_motion` ranks on."""
+    array = as_frames_255(frames)
+    if array.shape[1] < 2:
+        return np.zeros((array.shape[0],), dtype=np.float64)
+    return np.abs(np.diff(array, axis=1)).mean(axis=(1, 2, 3, 4)).astype(np.float64)
+
+
 # ---- sampling --------------------------------------------------------------------------
 
 
@@ -348,14 +400,29 @@ def build_report(
     *,
     reference_arm: str = "recon",
     pairs: Mapping[str, tuple[str, str]] | None = None,
+    freeze_gate: tuple[str, str] | None = None,
     info: Mapping[str, Any] | None = None,
 ) -> DreamReport:
-    """Measure every arm, ratio them against ``reference_arm``, and record the two verdicts.
+    """Measure every arm, ratio them against ``reference_arm``, and record the verdicts.
 
     ``pairs`` names the arm-vs-arm distances to compute, e.g.
     ``{"lora_vs_base": ("lora", "base"), "base_seed_null": ("base", "base_seed1")}``. The second
     is not optional decoration: without a same-model null, a nonzero ``lora_vs_base`` says only
     that sampling is stochastic.
+
+    ``freeze_gate`` names two ALREADY-DECLARED ``pairs`` labels, ``(dream_vs_truth,
+    freeze_vs_truth)``, and turns them into the one verdict an anchored run exists to produce:
+    is the dream closer to what actually happened than holding the anchor frame is. Passing
+    labels rather than reading fixed arm names keeps the gate's operands visible in the report
+    next to its verdict — the failure mode of PR-05's void gate was that its two operands
+    (``d(lora, base)`` and ``d(base, base_seed1)``) looked like a comparison and were not one,
+    because both were dominated by the base arm's own noise.
+
+    The ``fine_tune_changed_the_prior`` verdict below is PR-05's void gate and only fires when
+    both of its labels are requested. **Do not request them together again**: on a base arm that
+    produces noise, mean absolute pixel distance measures that arm's variance, not the
+    fine-tune's effect, and the verdict it emits is false. Kept, not deleted, so the archived
+    report and the code that produced it still agree; see ``PR-05-RESULT.md`` §G2.
     """
     measured = {name: measure_clips(frames, arm=name) for name, frames in arms.items()}
     if reference_arm not in measured:
@@ -381,6 +448,19 @@ def build_report(
         null = distances["base_seed_null"]
         verdicts["fine_tune_changed_the_prior"] = (
             "CHANGED" if distances["lora_vs_base"] > null else "INDISTINGUISHABLE"
+        )
+    if freeze_gate is not None:
+        dream_label, freeze_label = freeze_gate
+        missing = [label for label in freeze_gate if label not in distances]
+        if missing:
+            raise KeyError(
+                f"freeze_gate names {missing} which is not among the computed pairs "
+                f"{sorted(distances)} — the gate's operands must be in the report beside it"
+            )
+        verdicts["beats_freezing"] = (
+            "PREDICTS"
+            if distances[dream_label] < FREEZE_MARGIN * distances[freeze_label]
+            else "NO_BETTER_THAN_FREEZING"
         )
     return DreamReport(
         arms=measured,

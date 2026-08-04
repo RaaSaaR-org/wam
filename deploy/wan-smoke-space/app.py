@@ -313,7 +313,10 @@ def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: 
 def dream_on_gpu(
     checkpoint: str, source: str, windows: list[dict[str, Any]], instruction: str, opts: Any
 ) -> tuple[str, Any, Any]:
-    """Load the WAM checkpoint, sample every arm, measure motion. Returns (log, report, sheets)."""
+    """Load the WAM checkpoint, sample every arm, measure motion.
+
+    Returns ``(log, report, sheets, videos)``.
+    """
     import dream_cli
     import torch
 
@@ -324,6 +327,7 @@ def dream_on_gpu(
     started = time.perf_counter()
     report = None
     sheets: dict[str, str] = {}
+    videos: list[str] = []
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
             # snapshot_download returns a repo ROOT; load_checkpoint_raw opens a FILE (the config
@@ -337,14 +341,8 @@ def dream_on_gpu(
                 k: (v.to("cuda") if isinstance(v, torch.Tensor) else v) for k, v in batch.items()
             }
             arms = dream_cli.run_arms(opts, batch, model)
-            arms["gt"] = dream_cli.strip_anchor(
-                batch["frames"], opts.anchor, dream_cli.vae_temporal_stride(model)
-            )
-            pairs = {}
-            if "lora" in arms and "base" in arms:
-                pairs["lora_vs_base"] = ("lora", "base")
-            if "base_seed1" in arms:
-                pairs["base_seed_null"] = ("base", "base_seed1")
+            arms["gt"] = batch["frames"]
+            pairs, freeze_gate = dream_cli.dream_pairs(arms)
             info = {
                 "checkpoint": checkpoint,
                 "run_id": getattr(policy.metadata, "run_id", None),
@@ -352,27 +350,44 @@ def dream_on_gpu(
                 "clips": int(batch["frames"].shape[0]),
                 "steps": opts.steps,
                 "anchor_latent_frames": opts.anchor,
+                "window_select": getattr(opts, "window_select", "linspace"),
                 "state_conditioned": True,
                 "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
             }
-            report = build_report(arms, reference_arm="recon", pairs=pairs, info=info)
+            report = build_report(
+                arms, reference_arm="recon", pairs=pairs, freeze_gate=freeze_gate, info=info
+            )
             for name, frames in arms.items():
                 path = Path(f"/tmp/dream_{name}.png")
                 if dream_cli.write_contact_sheet(frames, path):
                     sheets[name] = str(path)
+                # Every clip, not the four a contact sheet renders. Encoding 16 short clips is a
+                # couple of CPU seconds inside the GPU call, against a second GPU call to get
+                # them any other way — the arms only exist on this side of the boundary.
+                clip = Path(f"/tmp/dream_{name}_slow.mp4")
+                if dream_cli.write_clip_video(frames, clip, fps=dream_cli.SLOW_FPS):
+                    videos.append(str(clip))
+            for tag, panels in (
+                ("", dream_cli.FREE_PANELS),
+                ("_anchored", dream_cli.ANCHORED_PANELS),
+            ):
+                path = Path(f"/tmp/dream_comparison{tag}_slow.mp4")
+                if dream_cli.write_comparison_video(arms, path, panels=panels):
+                    videos.append(str(path))
     except Exception:  # noqa: BLE001 - a crashed run must still surface its log in the UI
         buffer.write("\n" + traceback.format_exc())
     buffer.write(f"\ngpu wall: {time.perf_counter() - started:.1f}s")
-    return buffer.getvalue(), report, sheets
+    return buffer.getvalue(), report, sheets, videos
 
 
 def run_dream(checkpoint: str, episodes: int, windows_per_ep: int, steps: int, seed: int,
-              anchor: int, height: int, width: int, frames: int, instruction: str):  # fmt: skip
+              anchor: int, height: int, width: int, frames: int, instruction: str,
+              window_select: str, base_arm: bool):  # fmt: skip
     """Dream tab: episodes + checkpoint on CPU (free), sampling and metrics on GPU."""
     import probe
 
     log: list[str] = [f"host: {json.dumps(host_info())}", f"model: {MODEL_ID}"]
-    yield "\n".join(log), None, None
+    yield "\n".join(log), None, None, None
 
     try:
         repo = checkpoint.strip() or CHECKPOINT_REPO
@@ -384,7 +399,7 @@ def run_dream(checkpoint: str, episodes: int, windows_per_ep: int, steps: int, s
                 "cannot supply the proprioception token the DiT was trained with."
             )
         log.append("\ndownloading weights + episodes + checkpoint (no GPU quota consumed)…")
-        yield "\n".join(log), None, None
+        yield "\n".join(log), None, None, None
         source = snapshot_download(MODEL_ID, ignore_patterns=IGNORE)
         data_dir = download_episodes(list(range(int(episodes))))
         ckpt = repo if Path(repo).exists() else snapshot_download(repo)
@@ -393,6 +408,7 @@ def run_dream(checkpoint: str, episodes: int, windows_per_ep: int, steps: int, s
             "--data-dir", data_dir,
             "--episodes", str(int(episodes)),
             "--windows-per-episode", str(int(windows_per_ep)),
+            "--window-select", str(window_select),
             "--frames", str(int(frames)),
             "--height", str(int(height)),
             "--width", str(int(width)),
@@ -402,20 +418,28 @@ def run_dream(checkpoint: str, episodes: int, windows_per_ep: int, steps: int, s
         probe_args = probe.parse_args(argv)
         built, resolved_instruction, data_info = probe.build_windows(probe_args)
         log.append(f"windows: {len(built)} from {data_info['episodes']}")
+        log.append(f"window_select: {data_info['window_select']}")
         log.append(f"instruction: {resolved_instruction}")
 
         import argparse as _argparse
 
         opts = _argparse.Namespace(
-            steps=int(steps), seed=int(seed), anchor=int(anchor), no_base_arm=False
+            steps=int(steps),
+            seed=int(seed),
+            anchor=int(anchor),
+            no_base_arm=not bool(base_arm),
+            base_null=False,  # PR-05's void gate — never fires unless deliberately re-enabled
+            window_select=str(window_select),
         )
         log.append(f"\nrequesting GPU (duration cap {GEN_GPU_DURATION}s)…")
-        yield "\n".join(log), None, None
+        yield "\n".join(log), None, None, None
 
-        gpu_log, report, sheets = dream_on_gpu(ckpt, source, built, resolved_instruction, opts)
+        gpu_log, report, sheets, videos = dream_on_gpu(
+            ckpt, source, built, resolved_instruction, opts
+        )
         log.append(gpu_log)
         if report is None:
-            yield "\n".join(log), None, {"ok": False, "error": "dream failed — see log"}
+            yield "\n".join(log), None, None, {"ok": False, "error": "dream failed — see log"}
             return
         payload = json.loads(report.model_dump_json())
         for name, metrics in report.arms.items():
@@ -429,10 +453,10 @@ def run_dream(checkpoint: str, episodes: int, windows_per_ep: int, steps: int, s
         for name, verdict in report.verdicts.items():
             log.append(f"  VERDICT {name}: {verdict}")
         gallery = [(path, name) for name, path in sorted(sheets.items())]
-        yield "\n".join(log), gallery, payload
+        yield "\n".join(log), gallery, sorted(videos), payload
     except Exception:  # noqa: BLE001
         log.append(traceback.format_exc())
-        yield "\n".join(log), None, {"ok": False, "error": "dream failed"}
+        yield "\n".join(log), None, None, {"ok": False, "error": "dream failed"}
 
 
 with gr.Blocks(title="WAM · Wan backbone on ZeroGPU") as demo:
@@ -569,11 +593,18 @@ verbatim from `scripts/`). First run downloads ~34 GB before any GPU is requeste
             "*and the robot state* — the input the tab above structurally cannot supply, because "
             "a diffusers pipeline has no state port and the DiT was trained with proprioception "
             "on the text context.\n\n"
-            "Five arms in one GPU call: `recon` (the VAE round-trip of the same clips — every "
-            "ratio divides by it), `lora` (the dream), `base` (adapter disabled, same weights in "
-            "memory), `base_seed1` (the null `d(lora, base)` is compared against) and `gt`. "
-            "**Motion is only readable as a ratio**: the base prior scores 29.5 at 9x128x160 and "
-            "2.93 at 49x480x640, a 10x spread that is about geometry, not imagination.\n\n"
+            "Two groups of arms in one GPU call. **Free** (`recon`, `lora`, `base`, `gt`) start "
+            "from noise on text + state alone and answer *does the dream move like the data*; "
+            "**motion is only readable as a ratio** there, because the base prior scores 29.5 at "
+            "9x128x160 and 2.93 at 49x480x640 — a 10x spread that is about geometry, not "
+            "imagination. **Anchored** (`*_a`, when anchor > 0) pin the first latent frame to the "
+            "observation, which makes the clip a real prediction and lets it be scored against "
+            "`recon_a` (what actually happened) and `freeze_a` (the anchor frame held).\n\n"
+            "**window select** is not cosmetic. `linspace` at 2 windows/episode returns the "
+            "first and last chunk, and on GR00T-AppleToPlate those are the two moments the arm "
+            "is out of frame — the defect that made PR-05's motion verdict much weaker than it "
+            "read. `motion` takes the highest-motion windows instead: a chosen subpopulation "
+            "(the moments the robot is acting), never to be reported as a corpus sample.\n\n"
             "A dream is a diagnostic. It is not evidence the policy works, and it is not "
             "training data — a generator fitted to 402 success-only episodes cannot invent the "
             "failures `PR-04` says the next corpus needs."
@@ -592,10 +623,18 @@ verbatim from `scripts/`). First run downloads ~34 GB before any GPU is requeste
             d_frames = gr.Number(value=9, label="frames (trained: 9)", precision=0)
             d_height = gr.Number(value=128, label="height (trained: 128)", precision=0)
             d_width = gr.Number(value=160, label="width (trained: 160)", precision=0)
-            d_anchor = gr.Number(value=0, label="anchor latent frames (0 = faithful)", precision=0)
+            d_anchor = gr.Number(value=0, label="anchor latent frames (0 = free)", precision=0)
+        with gr.Row():
+            d_select = gr.Radio(
+                choices=["linspace", "motion"],
+                value="linspace",
+                label="window select (linspace at 2/episode = the two arm-free moments)",
+            )
+            d_base = gr.Checkbox(value=True, label="base arm (adapter disabled)")
         d_instruction = gr.Textbox(value="", label="instruction (blank = the episode's own)")
         dream_btn = gr.Button("Dream", variant="primary")
-        dream_gallery = gr.Gallery(label="contact sheets (one clip per row)", columns=1)
+        dream_gallery = gr.Gallery(label="contact sheets (first 4 clips, one per row)", columns=1)
+        dream_videos = gr.Files(label="clips (every window, 6 fps — 9 frames is 0.30 s at 30)")
         dream_log = gr.Textbox(label="log", lines=20, max_lines=28, show_copy_button=True)
         dream_report = gr.JSON(label="report")
         dream_btn.click(
@@ -611,8 +650,10 @@ verbatim from `scripts/`). First run downloads ~34 GB before any GPU is requeste
                 d_width,
                 d_frames,
                 d_instruction,
+                d_select,
+                d_base,
             ],
-            [dream_log, dream_gallery, dream_report],
+            [dream_log, dream_gallery, dream_videos, dream_report],
         )
 
 if __name__ == "__main__":
