@@ -14,6 +14,9 @@ robot-agnostic. Torch-free, numpy + pydantic.
 | `g1_transport.py` | `G1Transport` seam + `FakeG1Transport` (tests) and `DdsG1Transport` (real DDS) |
 | `mujoco_transport.py` | `MujocoG1Transport` — the same seam, backed by MuJoCo physics (optional dep) |
 | `mujoco_g1.py` | `MujocoG1Robot` — `G1Adapter` + MuJoCo transport + cameras, episode reset, sim clock |
+| `isaac_binding.py` | `IsaacBinding` protocol + `IsaacSimBinding` (real) and `FakeIsaacBinding` (CPU) |
+| `isaac_transport.py` | `IsaacG1Transport` — the same seam, backed by Isaac Sim / PhysX (optional dep) |
+| `isaac_g1.py` | `IsaacG1Robot` — `G1Adapter` + Isaac transport + USD cameras, episode reset, sim clock |
 
 ## The `RobotAdapter` contract
 
@@ -141,3 +144,39 @@ adapter, real physics instead of the kinematic lag. The whole module skips with 
 reason when `mujoco` or the fetched model is absent.
 
 Setup, scene layout, measured numbers and the honest limits: `docs/sim.md`.
+
+## `isaac_binding.py`, `isaac_transport.py`, `isaac_g1.py`
+
+The fourth `G1Transport` (after `FakeG1Transport`, `DdsG1Transport` and `MujocoG1Transport`) and
+the same composition shape as `mujoco_g1.py`: `IsaacG1Robot` **holds** a `G1Adapter`, forwards the
+four protocol methods, and adds `render_frames`, `reset()`, `clear_estop()`, `sim_time_ns`,
+`close()`.
+
+One extra layer that MuJoCo does not need. `IsaacBinding` is a 17-method protocol between the
+transport and Omniverse, with two implementations: `IsaacSimBinding` (the real one — **written
+against NVIDIA's documentation and never executed**, because Isaac Sim runs on Linux + an NVIDIA
+GPU) and `FakeIsaacBinding` (a caricature PD integrator that runs anywhere). Everything above the
+binding — the transport, the robot, and the unmodified `G1Adapter` driving them — is therefore
+testable on a Mac with no GPU, which is what `tests/test_isaac_g1.py` and
+`tests/test_isaac_binding.py` do. What the fake cannot test, `scripts/preflight_isaac.py` tests on
+the box: it is the gate that turns each documented assumption into pass/fail before a rollout.
+
+**Three things about this backend are not like the others, and none of them are papered over:**
+
+1. **The e-stop is not at parity with hardware.** The Omniverse API is main-thread-only, so
+   `emergency_damp()` from a watchdog thread only *latches*, in pure Python; the damping is
+   applied by a `PHYSICS_PRE_STEP` callback at the next physics step. The latch is also what
+   stops the control loop stepping — so in the ordinary case that step never comes and the gains
+   are never lowered at all. Safe in sim (a stopped clock is a stopped arm) and exactly what an
+   e-stop must not do on a robot. `damp_applied_count` / `is_damping` / `last_damp_error` report
+   the truth; read them.
+2. **It runs in a different python.** `isaacsim-core` 6.0.1 pins torch 2.11.0 and this repo's
+   lock resolves 2.13.0, so the Isaac side is deliberately torch-free at module scope (asserted
+   in a subprocess) and the supported topology is `rollout.py --robot isaac_g1 --policy remote`
+   in the Isaac venv against `scripts/serve_policy.py` in this one.
+3. **The gains in `configs/robot/isaac_g1.yaml` are unmeasured.** They are Isaac Lab's published
+   G1 magnitudes and disagree with the MuJoCo rig's measured ones by an order of magnitude. An
+   Isaac number and a MuJoCo number are not comparable until someone measures on the box.
+
+Setup, the preflight's 31 checks, and the full list of ways this differs from the MuJoCo backend:
+`docs/isaac.md`.

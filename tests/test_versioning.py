@@ -257,23 +257,37 @@ class TestLoadConfig:
         assert load_config(path)["x"] == 1
 
 
+#: Every shipped robot config, DISCOVERED rather than listed. The hand-maintained
+#: parametrize lists this replaced went stale the moment configs/robot/isaac_g1.yaml landed:
+#: that file's own header claimed this module covered it while no entry here named it, so it
+#: shipped with none of the checks below applied to it. A glob cannot silently omit the next
+#: one; test_the_config_glob_found_the_configs_it_is_supposed_to_cover keeps it from silently
+#: matching nothing instead.
+ROBOT_CONFIGS = sorted(f"robot/{p.name}" for p in (CONFIGS_DIR / "robot").glob("*.yaml"))
+#: The subset driving G1Adapter — every shipped robot config except MockRobot's.
+G1_ROBOT_CONFIGS = [p for p in ROBOT_CONFIGS if p != "robot/mock.yaml"]
+
+
 class TestShippedConfigs:
-    @pytest.mark.parametrize(
-        "rel_path",
-        [
+    def test_the_config_glob_found_the_configs_it_is_supposed_to_cover(self) -> None:
+        """A glob that matched nothing would make every parametrized test in this class pass
+        vacuously — the failure mode you trade for when you stop hand-listing. Naming the
+        known configs catches a deletion or a rename without capping what may be added."""
+        assert set(ROBOT_CONFIGS) >= {
             "robot/mock.yaml",
             "robot/g1.yaml",
             "robot/mujoco_g1.yaml",
-            "safety/default.yaml",
-        ],
-    )
+            "robot/isaac_g1.yaml",
+        }
+        assert "robot/mock.yaml" not in G1_ROBOT_CONFIGS
+        assert len(G1_ROBOT_CONFIGS) == len(ROBOT_CONFIGS) - 1
+
+    @pytest.mark.parametrize("rel_path", [*ROBOT_CONFIGS, "safety/default.yaml"])
     def test_loads_with_valid_version(self, rel_path: str) -> None:
         cfg = load_config(CONFIGS_DIR / rel_path)
         assert cfg["wam_config_version"] == WAM_CONFIG_VERSION
 
-    @pytest.mark.parametrize(
-        "rel_path", ["robot/mock.yaml", "robot/g1.yaml", "robot/mujoco_g1.yaml"]
-    )
+    @pytest.mark.parametrize("rel_path", ROBOT_CONFIGS)
     def test_robot_config_consistency(self, rel_path: str) -> None:
         cfg = load_config(CONFIGS_DIR / rel_path)
         robot = cfg["robot"]
@@ -290,12 +304,13 @@ class TestShippedConfigs:
         assert len(limits["gripper_min"]) == spec.gripper_dims
         assert len(limits["gripper_max"]) == spec.gripper_dims
 
-    @pytest.mark.parametrize("rel_path", ["robot/g1.yaml", "robot/mujoco_g1.yaml"])
+    @pytest.mark.parametrize("rel_path", G1_ROBOT_CONFIGS)
     def test_g1_yaml_canonical_space_matches_adapter_spec(self, rel_path: str) -> None:
         """Coordination gate: every versioned G1 yaml and the hard-wired G1_SPEC/G1Config
         must describe the SAME canonical space — episodes, policies and calibration files
-        built from the yaml would otherwise be unusable on the adapter. Both G1 configs are
-        covered: the hardware one and the MuJoCo (E2) one, which drives the same adapter."""
+        built from the yaml would otherwise be unusable on the adapter. Every G1 config is
+        covered: the hardware one and the two sim ones (MuJoCo and Isaac), which drive the
+        same adapter through different transports."""
         from wam.robot.g1 import G1_SPEC, G1Config
 
         robot = load_config(CONFIGS_DIR / rel_path)["robot"]
@@ -313,9 +328,13 @@ class TestShippedConfigs:
         assert len(limits["gripper_min"]) == G1_SPEC.gripper_dims
 
     def test_mujoco_g1_yaml_gains_are_sim_only_and_well_formed(self) -> None:
-        """The MuJoCo config is the only shipped one carrying a `gains:` block. It must not
-        leak into the hardware placeholders (OD-08), and kd must be the per-joint critical
-        damping shape, never a flat number."""
+        """Sim gains must not leak into the hardware placeholders (OD-08), and kd must be the
+        per-joint critical damping shape, never a flat number.
+
+        The kd-shape assertion is MuJoCo-SPECIFIC and stays that way: those numbers are
+        per-joint critical damping derived from the rig's measured inertias, which is why the
+        spread is large. ``isaac_g1.yaml`` also ships gains and is checked separately, with a
+        weaker rule, because Isaac Lab's published numbers are flat per body group."""
         from wam.robot.g1 import G1_SPEC, G1Config
 
         robot = load_config(CONFIGS_DIR / "robot/mujoco_g1.yaml")["robot"]
@@ -326,6 +345,40 @@ class TestShippedConfigs:
         hardware = load_config(CONFIGS_DIR / "robot/g1.yaml")["robot"]
         assert "gains" not in hardware, "sim gains must not appear in the hardware config"
         # It really does build the adapter config it claims to.
+        limits = robot["limits"]
+        G1Config(
+            q_min=tuple(limits["q_min"]),
+            q_max=tuple(limits["q_max"]),
+            dq_max=tuple(limits["dq_max"]),
+            kp=tuple(gains["kp"]),
+            kd=tuple(gains["kd"]),
+            control_dt_s=float(robot["control"]["dt_s"]),
+        )
+
+    def test_isaac_g1_yaml_gains_are_sim_only_well_formed_and_not_mistaken_for_measured(
+        self,
+    ) -> None:
+        """The Isaac config's gains are the ones ``--robot isaac_g1`` actually loads, and
+        NOBODY HAS MEASURED THEM on PhysX. They are Isaac Lab's published G1 magnitudes,
+        roughly an order of magnitude above the MuJoCo rig's measured ones (waist 5000 vs
+        500). This pins the shape and the provenance, not the values: asserting the numbers
+        would only re-state the file, while asserting they differ from MuJoCo's is what stops
+        someone "harmonising" the two and quietly implying one is evidence for the other.
+        """
+        from wam.robot.g1 import G1_SPEC, G1Config
+
+        robot = load_config(CONFIGS_DIR / "robot/isaac_g1.yaml")["robot"]
+        gains = robot["gains"]
+        assert len(gains["kp"]) == len(gains["kd"]) == G1_SPEC.num_joints
+        assert all(v > 0 for v in gains["kp"] + gains["kd"])
+        hardware = load_config(CONFIGS_DIR / "robot/g1.yaml")["robot"]
+        assert "gains" not in hardware, "sim gains must not appear in the hardware config"
+
+        mujoco = load_config(CONFIGS_DIR / "robot/mujoco_g1.yaml")["robot"]["gains"]
+        assert tuple(gains["kp"]) != tuple(mujoco["kp"]), (
+            "the two sim backends' gains were made equal; if that was a measurement rather "
+            "than a copy, replace this test with the measurement"
+        )
         limits = robot["limits"]
         G1Config(
             q_min=tuple(limits["q_min"]),
@@ -358,6 +411,58 @@ class TestShippedConfigs:
         assert "q_track_window" not in hardware.get("control", {}), (
             "the sim window must not appear in the hardware config (OD-08)"
         )
+
+    def test_rollouts_isaac_builder_reads_every_field_the_yaml_declares(self) -> None:
+        """The same failure ``test_view_sim_honours_...`` was written for, one backend later.
+
+        ``_build_isaac_g1`` maps the yaml onto ``IsaacG1Robot``'s constructor by hand, key by
+        key, and a key it silently ignores is invisible: the robot still boots, with a
+        different physics rate or on a different device than the file says. Nobody can
+        construct ``IsaacG1Robot`` here (no Isaac Sim), so the builder is run for its kwargs —
+        which is the part that can be wrong on a Mac — and the factory is left uncalled.
+
+        Written generically: every ``sim:`` key in the yaml must reach a real parameter of
+        ``IsaacG1Robot.__init__`` and appear in the kwargs the builder assembles.
+        """
+        import argparse
+        import importlib.util
+        import inspect
+        import sys
+
+        from wam.robot.isaac_g1 import IsaacG1Robot
+
+        path = CONFIGS_DIR / "robot/isaac_g1.yaml"
+        spec_r = importlib.util.spec_from_file_location(
+            "rollout", CONFIGS_DIR.parent / "scripts" / "rollout.py"
+        )
+        rollout = importlib.util.module_from_spec(spec_r)
+        sys.modules["rollout"] = rollout
+        spec_r.loader.exec_module(rollout)
+
+        captured: dict[str, object] = {}
+
+        def spy(name: str, **kwargs: object):
+            captured.update(kwargs)
+            raise RuntimeError("stop before Isaac")
+
+        rollout.get_robot = spy
+        args = argparse.Namespace(robot_config=path, image_hw=None)
+        canonical, dt_s, limits, factory = rollout._build_isaac_g1(args)
+        with pytest.raises(RuntimeError, match="stop before Isaac"):
+            factory(0, jitter=False)
+
+        section = load_config(path)["robot"]
+        assert dt_s == float(section["control"]["dt_s"])
+        accepted = set(inspect.signature(IsaacG1Robot.__init__).parameters)
+        sim_keys = dict(section.get("sim", {}))
+        assert sim_keys, "the yaml no longer declares a sim: block"
+        for key in sim_keys:
+            # 'scene' is the repo-wide yaml spelling; IsaacG1Robot takes it as scene_path.
+            param = "scene_path" if key == "scene" else key
+            assert param in accepted, f"sim.{key} is not a parameter of IsaacG1Robot"
+            assert param in captured, f"_build_isaac_g1 drops sim.{key} from the yaml"
+        assert captured["config"].control_dt_s == dt_s
+        assert len(limits["ddq_max"]) == canonical.num_joints
 
     def test_view_sim_honours_every_robot_config_field_the_adapter_accepts(self) -> None:
         """``scripts/view_sim.py`` claims to drive "the same chain as scripts/rollout.py", and

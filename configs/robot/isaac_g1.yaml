@@ -1,0 +1,178 @@
+# WAM robot config — Unitree G1 in NVIDIA Isaac Sim 6.0.1 (E2 simulation).
+#
+# The SAME canonical space and the SAME adapter as configs/robot/g1.yaml and
+# configs/robot/mujoco_g1.yaml — only the transport differs (wam.robot.isaac_g1 composes
+# wam.robot.g1.G1Adapter with an Isaac Sim transport, exactly as mujoco_g1 does with MuJoCo).
+# Everything above the G1Transport seam is byte-identical in all four backends.
+#
+# NOTHING IN THIS FILE HAS EVER BEEN LOADED BY ISAAC SIM. It was written against NVIDIA's
+# documentation on a machine with no Isaac Sim and no GPU, like the code it configures
+# (src/wam/robot/isaac_binding.py). Read docs/isaac.md before running anything, and run
+# scripts/preflight_isaac.py FIRST — it is what turns the assumptions below into pass/fail on
+# the box. Every value here is labelled with where it came from; "unverified" means exactly
+# that, not "probably fine".
+#
+# The canonical space MUST match wam.robot.g1.G1_SPEC exactly (same joint names in the same
+# order, gripper_dims=2), like g1.yaml and mujoco_g1.yaml. ENFORCED by
+# tests/test_versioning.py's TestShippedConfigs, which now DISCOVERS configs/robot/*.yaml by
+# glob rather than naming them — this file shipped for a day under hand-maintained
+# @parametrize lists that did not include it, which is exactly the drift the class exists to
+# catch. The gains block has its own test there, and it asserts provenance (Isaac Lab's
+# published numbers, unmeasured, deliberately unequal to MuJoCo's) rather than the values.
+# gripper_dims=2: [left, right], each normalized to [0, 1] and mapped to a Dex3-1 grasp
+# synergy in the transport.
+wam_config_version: "0.1.0"
+
+robot:
+  name: isaac_g1
+  adapter: wam.robot.isaac_g1
+
+  canonical_space:
+    schema_version: "0.1.0"
+    joint_names:
+      - waist_yaw
+      - left_shoulder_pitch
+      - left_shoulder_roll
+      - left_shoulder_yaw
+      - left_elbow
+      - left_wrist_roll
+      - left_wrist_pitch
+      - left_wrist_yaw
+      - right_shoulder_pitch
+      - right_shoulder_roll
+      - right_shoulder_yaw
+      - right_elbow
+      - right_wrist_roll
+      - right_wrist_pitch
+      - right_wrist_yaw
+    gripper_dims: 2
+    ee_frame: base
+    ee_rotation_convention: quat_wxyz
+
+  # Limits in canonical units: rad, rad/s, rad/s^2; gripper normalized [0, 1].
+  # q_min/q_max are COPIED VERBATIM from configs/robot/mujoco_g1.yaml, i.e. they are the
+  # MJCF jnt_range values of MuJoCo Menagerie's unitree_g1 rounded inward to 4 decimals.
+  # They are NOT read from the USD. The justification is lineage, not measurement: the USD
+  # ({assets_root}/Isaac/Robots/Unitree/G1/g1.usd) and the MJCF are both conversions of the
+  # same vendor URDF (g1_29dof_with_hand_rev_1_0), so the MJCF ranges are the best available
+  # proxy — but a converter is free to widen, narrow or drop a limit, and NOTHING has checked.
+  # scripts/preflight_isaac.py does not read joint limits either (see docs/isaac.md, "What is
+  # not verified"). This is defense in depth rather than a hazard: the safety layer and
+  # G1Adapter clip to these numbers regardless of what the USD believes, so a mismatch makes
+  # the clip conservative or loose, never absent. UNVERIFIED against this asset.
+  # dq_max/ddq_max are IDENTICAL to g1.yaml and mujoco_g1.yaml on purpose: they are
+  # conservative MVP policy caps (PRD §11.2), not hardware facts, and a sim-validated policy
+  # should carry the same velocity envelope onto the robot.
+  limits:
+    q_min: [-2.618, -3.0892, -1.5882, -2.618, -1.0472, -1.9722, -1.6144, -1.6144, -3.0892, -2.2515, -2.618, -1.0472, -1.9722, -1.6144, -1.6144]
+    q_max: [2.618, 2.6704, 2.2515, 2.618, 2.0944, 1.9722, 1.6144, 1.6144, 2.6704, 1.5882, 2.618, 2.0944, 1.9722, 1.6144, 1.6144]
+    dq_max: [1.5, 1.5, 1.5, 1.5, 1.5, 2.0, 2.0, 2.0, 1.5, 1.5, 1.5, 1.5, 2.0, 2.0, 2.0]
+    ddq_max: [4.0, 4.0, 4.0, 4.0, 4.0, 6.0, 6.0, 6.0, 4.0, 4.0, 4.0, 4.0, 6.0, 6.0, 6.0]
+    gripper_min: [0.0, 0.0]
+    gripper_max: [1.0, 1.0]
+
+  # SIM GAINS — NOT the conservative hardware placeholders of configs/robot/g1.yaml, and NOT
+  # the MuJoCo numbers of configs/robot/mujoco_g1.yaml (those are that model's own actuator
+  # stiffness with per-joint critical damping computed from that scene's inertia; they mean
+  # nothing to PhysX).
+  #
+  # PROVENANCE, per number. These are the magnitudes NVIDIA's Isaac Lab uses for the 29-DoF
+  # G1 (`G1_29DOF_CFG` in isaaclab_assets/robots/unitree.py, read from the IsaacLab `main`
+  # branch on 2026-08-05):
+  #   waist_yaw  -> stiffness 5000.0, damping 5.0   (its "waist" ImplicitActuatorCfg group,
+  #                 which sets 5000/5.0 on waist_yaw_joint, waist_roll_joint, waist_pitch_joint)
+  #   both arms  -> stiffness 3000.0, damping 10.0  (its "arms" ImplicitActuatorCfg group,
+  #                 covering shoulder pitch/roll/yaw, elbow and all three wrist joints)
+  # That cfg spawns `{ISAAC_NUCLEUS_DIR}/Robots/Unitree/G1/g1.usd` — the SAME asset this
+  # backend loads (isaac_binding.DEFAULT_ASSET_SUBPATH), which is the entire reason these
+  # numbers are worth copying rather than inventing.
+  #
+  # THE DEPENDENCY IS NOT TAKEN. Only the magnitudes are copied. Isaac Lab is not imported,
+  # not installed and not required: its actuator layer is precisely what this backend refuses
+  # (G1_29DOF_CFG drives the legs through DCMotorCfg, an explicit actuator model that computes
+  # torque in Python and neutralises the sim's PD gains — our contract is that the CALLER owns
+  # the gains, so that a safety-intervention rate means something). Copying two scalars costs
+  # nothing; importing the class that re-tunes them behind our back costs the contract.
+  #
+  # UNVERIFIED ON THIS ASSET, twice over. (a) Nobody here has run Isaac Sim, so no step
+  # response, no droop, no steady-state error has been measured — compare mujoco_g1.yaml,
+  # every one of whose gain claims carries a measured rad figure. (b) Isaac Lab reaches these
+  # joints through actuator groups and its own articulation writer; this backend writes
+  # `Articulation.set_dof_gains` directly, and whether the effective PD loop is identical is
+  # an assumption. scripts/preflight_isaac.py check J proves only that a gain WRITE round-trips
+  # and that kp=0 is accepted, never that these particular values track a trajectory.
+  # First thing to do on the box after the preflight: repeat the two protocols documented in
+  # the wam.robot.mujoco_transport module docstring (fixed absolute target, 1.5 s hold, then a
+  # 5 s gravity hold) and put the numbers here, replacing this paragraph.
+  #
+  # THIS FILE IS THE ONLY SOURCE OF THESE GAINS. Unlike MujocoG1Robot, IsaacG1Robot substitutes
+  # NOTHING when constructed without a config — it uses G1Config's conservative HARDWARE
+  # placeholders (kp=20, kd=0.5), under which the arm sags. So `get_robot("isaac_g1")` with no
+  # config is not this configuration, and `rollout.py --robot isaac_g1` (which loads this file)
+  # is. Note also that wam.robot.isaac_g1's module docstring suggests mujoco_g1.yaml's numbers
+  # as the starting point instead; this file goes the other way on provenance — those kd values
+  # are per-joint critical damping computed from the MuJoCo scene's effective inertia and are a
+  # property of that engine's actuator model, while the numbers below were authored for PhysX
+  # against this very USD. Neither has been measured here. Measure, then delete this paragraph.
+  gains:
+    kp: [5000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0, 3000.0]
+    kd: [5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+
+  control:
+    dt_s: 0.02 # 50 Hz; exactly 10 x the 1/500 s physics step declared under sim.physics_hz.
+    # Chunks MUST use this dt_s: the adapter paces per-step commands on the SIM clock, which
+    # advances exactly control_dt_s per motor command (same contract as mujoco_g1).
+    #
+    # BOUNDED FEED-FORWARD (T-25c), rad per canonical joint: how far the COMMANDED target
+    # carried from the previous execute() may lead the MEASURED q. SHIPPED OFF (0.0), which
+    # is byte-for-byte the pre-T-25c behaviour — every chunk re-bases on measurement.
+    # Off, deliberately, and not because it is wrong here. The window is a property of the
+    # gains above, and mujoco_g1.yaml's 0.05 was SIZED BY MEASUREMENT: it is the smallest
+    # value exceeding the measured steady-state tracking error at dq_max (0.0299 rad on the
+    # worst joint), with the cost that a blocked joint stores up to that much commanded error
+    # and releases it when freed. On Isaac nothing has been measured, so any non-zero number
+    # here would be an unmeasured safety allowance dressed as a tuning constant.
+    # Turning it on is a two-step job, in this order: (1) measure the steady-state error at
+    # dq_max per joint under the gains above, (2) set each entry just above its own joint's
+    # measured error and confirm the clamp does not bite from 0.2 to 2.0 rad/s. Until then
+    # expect the same defect mujoco_g1.yaml documents — the executed fraction of a commanded
+    # delta depends on prefix_steps, and a zero-delta chunk drifts instead of holding.
+    q_track_window: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  # Isaac Sim wiring. Every key here is a keyword argument of wam.robot.isaac_g1.IsaacG1Robot,
+  # under the same name, and the shapes follow configs/robot/mujoco_g1.yaml's sim block where
+  # the two backends have the same concept (cameras = a LIST of names, image_hw = [H, W]).
+  sim:
+    # NOTE the deliberate absence of a `scene` key. IsaacG1Robot's `scene_path` (an alias for
+    # `asset`, and the key rollout.py maps sim.scene onto) is OPTIONAL: with no asset given,
+    # the binding resolves isaacsim.storage.native.get_assets_root_path() +
+    # isaac_binding.DEFAULT_ASSET_SUBPATH ("/Isaac/Robots/Unitree/G1/g1.usd") — the 29-DoF
+    # revision WITH Dex3-1 hands, i.e. 29 body motors + 2 x 7 finger joints = 43 DoFs, which
+    # the binding asserts. That is what we want, so the key is omitted rather than set to a
+    # value. Add `scene: /abs/path/to/g1.usd` to run against a local USD with no asset
+    # streaming; do NOT point it at Isaac Lab's ISAACLAB_NUCLEUS_DIR copy, which is the legacy
+    # 23-DoF G1 and would fail the 43-DoF assertion (that assertion doing its job).
+    #
+    # PhysX computes steps_per_second = int(1.0 / dt); 1/500 survives that truncation exactly
+    # (checked here: int(1.0/(1.0/500)) == 500), and the binding refuses a rate that does not.
+    # 500 Hz also makes control.dt_s above an exact 10 physics steps. Isaac Lab ships a live
+    # victim of the truncation (dt=0.0167 -> 59, not 60), which is why this is not a free knob.
+    physics_hz: 500
+    device: cuda:0 # PhysX tensor device. The policy runs in the OTHER venv (docs/isaac.md).
+    # Camera NAMES, which become the Observation.images keys — so this is what the policy's
+    # camera selection has to match (on the --policy remote path that is serve_policy.py
+    # --policy-camera, not rollout.py's). camera_prims maps each name to its USD prim.
+    # /OmniverseKit_Persp is the viewport camera that exists on any stage: it is what preflight
+    # check K renders from, and with the bare g1.usd it is the ONLY camera there is. There is
+    # no Isaac equivalent of configs/sim/g1_scene.xml yet — no table, no cube, no head/wrist
+    # cameras. A scene that adds camera prims extends both keys; the prims must already exist
+    # on the stage or camera setup raises.
+    cameras: [persp]
+    camera_prims:
+      persp: /OmniverseKit_Persp
+    image_hw: [256, 256] # (H, W) of every render product; IsaacG1Robot's DEFAULT_IMAGE_HW
+    # How many times render_frames re-renders while the rgb annotator still returns None. 20 is
+    # NVIDIA's own number in the warmup test preflight check K mirrors. Raising it is the first
+    # thing to try if check K fails with "still None after N render ticks".
+    render_warmup_ticks: 20
+    headless: true # false opens a window; a desktop compositor also costs VRAM (docs/isaac.md)

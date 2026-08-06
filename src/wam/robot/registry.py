@@ -34,8 +34,17 @@ _FACTORIES: dict[str, Callable[..., RobotAdapter]] = {
 # name -> (module, attribute), imported on the first get_robot() call. "mujoco_g1" pulls in
 # mujoco (extra: wam[sim]) plus the fetched scene assets (scripts/fetch_g1_model.py); its
 # factory raises RuntimeError naming the install fix when the package is absent.
+#
+# "isaac_g1" is lazy for a different reason: wam.robot.isaac_g1 imports fine anywhere (it is
+# deliberately torch-free and isaacsim-free at module scope), but it is only CONSTRUCTIBLE
+# inside the Isaac Sim python, which cannot contain this repo's torch — isaacsim-core 6.0.1
+# pins torch 2.11.0 and uv.lock resolves 2.13.0. So it belongs with the optional robots, and
+# IsaacG1Robot's constructor raises RuntimeError naming that two-venv split. Registering it
+# here rather than in _FACTORIES also keeps `get_robot("mock")` from importing the Isaac
+# stack on machines that will never run it.
 _LAZY_FACTORIES: dict[str, tuple[str, str]] = {
     "mujoco_g1": ("wam.robot.mujoco_g1", "MujocoG1Robot"),
+    "isaac_g1": ("wam.robot.isaac_g1", "IsaacG1Robot"),
 }
 
 

@@ -33,6 +33,59 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a circular import wi
 G1_NUM_MOTORS = 29
 SDK_MISSING_MSG = "G1 hardware support requires unitree_sdk2py"
 
+#: Canonical joint name per G1 motor slot, in the 29-DoF ``G1JointIndex`` convention:
+#: legs 0-11, waist yaw/roll/pitch 12-14, left arm 15-21, right arm 22-28.
+#:
+#: This lives HERE, beside the protocol, because every simulator backend has to map its own
+#: model's joint names onto these 29 slots and each copy of the order is a chance to permute
+#: it. A permuted map is the worst failure this seam has: the robot moves, the readings look
+#: plausible, and nothing catches it until a physical arm goes somewhere it should not.
+#: ``G1Adapter`` gathers by hard-coded index (``G1_JOINT_MAP``), so one wrong entry here is
+#: silent. One definition, asserted by each backend against its own model at construction.
+G1_MOTOR_JOINT_NAMES: tuple[str, ...] = (
+    "left_hip_pitch",
+    "left_hip_roll",
+    "left_hip_yaw",
+    "left_knee",
+    "left_ankle_pitch",
+    "left_ankle_roll",
+    "right_hip_pitch",
+    "right_hip_roll",
+    "right_hip_yaw",
+    "right_knee",
+    "right_ankle_pitch",
+    "right_ankle_roll",
+    "waist_yaw",
+    "waist_roll",
+    "waist_pitch",
+    "left_shoulder_pitch",
+    "left_shoulder_roll",
+    "left_shoulder_yaw",
+    "left_elbow",
+    "left_wrist_roll",
+    "left_wrist_pitch",
+    "left_wrist_yaw",
+    "right_shoulder_pitch",
+    "right_shoulder_roll",
+    "right_shoulder_yaw",
+    "right_elbow",
+    "right_wrist_roll",
+    "right_wrist_pitch",
+    "right_wrist_yaw",
+)
+
+#: Dex3-1 finger joints per hand, in the model's JOINT order (the ACTUATOR order differs
+#: between the hands — always resolve by name). Same single-definition argument as above.
+DEX3_FINGER_JOINTS: tuple[str, ...] = (
+    "thumb_0",
+    "thumb_1",
+    "thumb_2",
+    "middle_0",
+    "middle_1",
+    "index_0",
+    "index_1",
+)
+
 # -- DDS wire constants (unitree_hg IDL family) -------------------------------------------
 # Verified against unitree_sdk2py @ 65691c8a8bc53b98d3976dba4dbf9d5d20b2e7f5 (v1.0.1):
 # LowCmd_/LowState_ carry 35 motor slots, of which the 29-DoF G1 uses 0..28.

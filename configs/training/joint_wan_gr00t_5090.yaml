@@ -1,0 +1,218 @@
+# WAM training config — configs/training/joint_wan_gr00t.yaml sized for ONE RTX 5090 (32 GiB).
+# For running the remaining I-8 / T-32 rungs (040, 120) locally instead of on Discoverer+.
+# Driven by scripts/run_i8_rung_local.sh, which is the local twin of
+# cluster/discoverer/55_train_i8_rung.sbatch.
+#
+# ONE field differs from joint_wan_gr00t.yaml: batch_size 8 -> 2. Nothing else. Not the
+# geometry (num_frames 9, image_hw [128,160]), not feature_blocks [2,10], not lora_rank 32
+# (that one lives in configs/model/wan22_ti2v_5b.yaml and is passed unchanged), not the loss
+# weights, not the learning rates, not the step budget. That is deliberate: T-32 is a
+# data-scaling CURVE, rung 362 of it is already measured as runs/t16-lora-seed0, and a rung
+# trained at a different geometry is not a point on the same curve — it is a different
+# experiment wearing the curve's axis labels. The memory arithmetic below is what says the
+# geometry does not have to move.
+#
+# ############################################################################################
+# # batch_size 2 is ONLY comparable to rung 362 when the runner passes --grad-accum 4.       #
+# # Effective batch = batch_size * grad_accum = 8, the same 8 that runs/t16-lora-seed0 used   #
+# # and the same 8 that tests/test_splits.py pins as STAGE1_BATCH. train_t16_lora.py          #
+# # normalises the accumulated loss by 1/len(batches) (:774, :779), so 2x4 IS the same        #
+# # optimizer update as 1x8, not a 4x-larger gradient. Run this config WITHOUT --grad-accum 4 #
+# # and you have silently trained at effective batch 2. Use scripts/run_i8_rung_local.sh.     #
+# ############################################################################################
+#
+# ============================================================================================
+# MEMORY ARITHMETIC
+# ============================================================================================
+# Unit convention: GB = bytes / 1e9, because that is what this repo's VRAM numbers are —
+# scripts/hf_job_wan_smoke.py:424 and scripts/dream.py:634 both divide by 1e9. Decimal GB.
+# The card is quoted in binary: 32 GiB = 34.360 GB decimal. Mixing the two is the difference
+# between "does not fit" and "fits with 4 GB to spare", so every number below is decimal GB.
+#
+# -- Resident floor (weights) — MEASURED ------------------------------------------------------
+# Parameter counts read from the safetensors HEADERS of Wan-AI/Wan2.2-TI2V-5B-Diffusers
+# (per-tensor shapes and dtypes, not file sizes), and multiplied by the dtype each tower is
+# actually loaded at in src/wam/backbones/wan_i2v.py:288-296:
+#
+#   DiT       4,999,787,712 params  x2 (bf16, config.dtype)         =  9.9996 GB
+#   umT5-XXL  5,680,910,336 params  x2 (bf16, config.dtype)         = 11.3618 GB
+#   VAE         704,688,668 params  x4 (fp32 — HARD-WIRED, :289-291)=  2.8188 GB
+#                                                          frozen sum = 24.1802 GB
+#
+#   NOTE the VAE. It is 2.82 GB resident, not the ~1.4 GB one gets by assuming the on-disk
+#   figure is already halved: the Hub stores it F32 and wan_i2v.py keeps it F32. There is no
+#   flag to change that. It is the third-largest single item in this budget.
+#
+#   CROSS-CHECK against the only real measurement of this exact set of towers:
+#   runs/smoke/183599/wan_smoke_report.json:129 reports 24.2818 GB peak (H200, after
+#   reset_peak_memory_stats, so it is weights + one forward's transient). The arithmetic
+#   above is 24.1802 GB — 0.42 % under a measurement it did not use. The weight terms are
+#   not a guess.
+#   The same run gives the allocator's reserved/allocated ratio: 25.1805 / 24.2818 = 1.0370.
+#
+# -- Resident floor (training state) — MEASURED -----------------------------------------------
+# From runs/t16-lora-seed0/checkpoints/step-020000/, i.e. from the rung-362 run this curve
+# has to stay comparable to. Read out of the files, not inferred from their sizes:
+#
+#   model.safetensors  = 330,163,504 B on disk; header says 643 tensors, 82,519,450 params,
+#                        every one F32 -> 330,077,800 B of tensor data
+#     of which LoRA     80,609,280 params = 2,686,976 per block x 30 blocks. Reproduced
+#                        exactly by injecting the same peft LoraConfig(r=32, alpha=64,
+#                        targets to_q/to_k/to_v/to_out.0/net.0.proj/net.2) into a
+#                        WanTransformer3DModel built from the real transformer/config.json.
+#     the rest          action_head 852,992 + velocity_head 803,872 + backbone state proj
+#                        135,168 + align_proj 101,376 + state/action encoders 16,762.
+#
+#   trainer_state.pt   = 660,718,839 B on disk; unpickled it holds AdamW's exp_avg and
+#                        exp_avg_sq, each 82,519,450 F32 params = 330,077,800 B, plus 643
+#                        F32 step scalars and two 5,056 B RNG states.
+#
+#   trainable params fp32                                          =  0.3301 GB
+#   gradients        fp32 (same 82,519,450 params)                 =  0.3301 GB
+#   AdamW exp_avg + exp_avg_sq fp32                                =  0.6602 GB
+#                                                    training sum  =  1.3203 GB
+#
+#   FLOOR, text encoder resident        = 24.1802 + 1.3203 = 25.5005 GB
+#   FLOOR, with --offload-text          = 25.5005 - 11.3618 = 14.1387 GB
+#
+# -- Activations — MEASURED ON CPU at these exact shapes, then extrapolated ---------------------
+# torch.profiler(profile_memory=True), peak of the running live-bytes balance over exclusive
+# per-op memory. Same tensor shapes and dtypes the CUDA run will use.
+#
+#   VAE encode, [B,3,9,128,160] fp32 under no_grad (wan_i2v.py:704-706):
+#     B=1 0.1499 GB, B=2 0.2999 GB, B=4 0.5998 GB -> exactly linear, 0.1499 GB per sample.
+#     (Latent comes back [B,48,3,8,10] -> 3*4*5 = 60 video tokens, as the model config says.)
+#
+#   DiT forward+backward, ONE real block, bf16, gradient checkpointing on, 60 video tokens +
+#   512 text tokens, LoRA in fp32:
+#     B=1 52,578,096 B / B=2 99,852,896 / B=4 194,402,496 / B=8 383,501,696
+#     -> exactly linear: 47,274,800 B per sample + 5,303,296 B fixed.
+#     Going 1 block -> 2 blocks at B=1 added 10,747,904 B, which is EXACTLY one block's fp32
+#     LoRA gradient buffer (2,686,976 x 4). So with gradient checkpointing on, depth costs
+#     gradient buffers — already counted above as the 0.3301 GB grads term — and not retained
+#     activations. The only per-sample term that does scale with depth is the retained chain
+#     of block outputs: 30 x [B,60,3072] bf16 = 11,059,200 B per sample.
+#     ESTIMATED for the full 30 blocks: 0.0053 GB + 0.0583 GB per sample.
+#
+#   action branch + the fp32 readout features (2 blocks x [B,60,3072]): ~0.0015 GB per sample.
+#
+#   TOTAL ~0.005 GB + 0.209 GB per sample. ESTIMATED on CUDA, and the error goes both ways:
+#   CUDA SDPA does not materialise the attention matrix the CPU math backend does (lower),
+#   and cuDNN picks conv3d workspaces for the fp32 VAE that the CPU path has no analogue for
+#   (higher, and UNQUANTIFIED — this is the largest unmeasured term in the budget).
+#
+# -- What the card has — ESTIMATED -------------------------------------------------------------
+#   32 GiB board                                                  = 34.360 GB
+#   nvidia-smi total after board reserve (~0.5 %)                  ~ 34.19  GB   ESTIMATED
+#   CUDA context + cuBLAS/cuDNN handles                            ~  0.8   GB   ESTIMATED
+#   Linux compositor, if the box is not headless                   ~  0.3-1.5 GB ESTIMATED
+#   -> conservative allocatable by torch                           ~ 31.8   GB
+#   -> headless best case                                          ~ 33.3   GB
+#
+# -- The batch size that follows ---------------------------------------------------------------
+#   peak_reserved(B) ~ 1.0370 * (25.5005 + 0.005 + 0.209*B) + 0.8
+#
+#     B=2 (this config)  26.89 reserved + 0.8 ctx = 27.7 GB   -> ~4.1 GB margin, conservative
+#     B=4                27.32              + 0.8 = 28.1 GB   -> ~3.7 GB margin
+#     B=8 (the H200 run) 28.18              + 0.8 = 29.0 GB   -> ~2.8 GB margin
+#
+#   B=8 fits ON PAPER. It is not the default because 2.8 GB is inside the error bar of the
+#   two terms nobody has measured (cuDNN conv3d workspace, compositor) and there is no 5090
+#   here to settle it. B=2 x accum 4 buys 1.3 GB of that margin back for free — the update is
+#   arithmetically identical, and per-micro-batch activations are freed before the next one
+#   allocates. If the box measures its own peak and it lands where this says, raising to
+#   --batch-size 4 --grad-accum 2 or --batch-size 8 --grad-accum 1 keeps the same effective
+#   batch and is a pure speedup. run_i8_rung_local.sh takes BATCH and ACCUM for exactly that.
+#
+# -- Is --offload-text required? NO. -----------------------------------------------------------
+#   At batch_size 2: 27.7 GB without it, 15.9 GB with it. Both fit. It is HELPFUL, not
+#   REQUIRED, and it is nearly free here: this dataset has exactly ONE distinct instruction
+#   across all 402 episodes ("move the apple to the plate"), so encode_instructions()
+#   (training/_utils.py:85-86) takes the single-string path, wan_i2v.py:472-492 memoizes it,
+#   and the umT5 tower is touched once in 20,000 steps. Moving it to CPU costs one forward.
+#   Take it anyway: it turns a 4 GB margin against unmeasured terms into a 16 GB one.
+#
+# -- One thing this config CANNOT keep identical -----------------------------------------------
+#   config_hash. batch_size is part of JointTrainingConfig, so a rung trained from this file
+#   hashes differently from runs/t16-lora-seed0 (which is 45ee9e6035eb) no matter what
+#   --grad-accum does — grad_accum is a runtime argument and is not in the hash at all. AC-04
+#   traceability is intact (every checkpoint still records its own hash); what is NOT true is
+#   "same experiment => same config_hash" across the curve. The comparability claim rests on
+#   the effective batch and the loss normalisation, not on the hash.
+#
+# -- Host RAM, not VRAM: the other thing that can stop this box --------------------------------
+#   device_map is unreachable from train_t16_lora.py, so from_pretrained materialises each
+#   tower in HOST RAM before attach() moves it. Peak host RAM ~24.2 GB of weights plus a
+#   shard buffer. 32 GB of system RAM is the floor; on 16 GB the load swaps and the run never
+#   really starts. ESTIMATED — the load path was never instrumented for host RAM.
+# ============================================================================================
+wam_config_version: "0.1.0"
+
+training:
+  seed: 0
+  device: cuda
+  # Unchanged from joint_wan_gr00t.yaml: the freshly initialized action branch (head,
+  # encoders, velocity head) learns at 1e-3, the LoRA adapters on a pretrained DiT at 1e-4.
+  lr: 0.001
+  backbone_lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  # THE ONLY LINE THAT DIFFERS FROM joint_wan_gr00t.yaml (which has 8).
+  # 8 was chosen for an H200's 141 GB. On 32 GiB the resident floor is 25.50 GB before a
+  # single activation, so the per-sample 0.209 GB is what has to shrink. --grad-accum 4
+  # restores the effective batch to 8; see the banner at the top of this file.
+  batch_size: 2
+  steps: 20000 # unchanged: rung 362 trained 20 000 steps and the rungs must share a budget
+  camera: ego
+  limit_margin: 0.95
+
+  weights: # PRD §10.4 loss inventory — byte-identical to joint_wan_gr00t.yaml
+    video: 0.5
+    action_flow: 1.0
+    action_recon: 1.0
+    action_reg: 1.0
+    gripper: 0.5
+    alignment: 0.1
+    smoothness: 0.01
+    limit: 0.001
+
+  state: # StateMLPConfig (FR-02) — 15 q + 15 dq + 10 imu + 2 gripper = 42
+    embedding_dim: 32
+    hidden_dims: [64, 64]
+    num_joints: 15
+    gripper_dims: 2
+    use_layernorm: true
+    activation: gelu
+
+  # WanBackboneConfig (FR-09). Weight location and the LoRA surface still come from
+  # configs/model/wan22_ti2v_5b.yaml via --backbone-config; unchanged, including lora_rank 32
+  # and gradient_checkpointing: true. Dropping the rank to 16 would save 0.66 GB of the
+  # 1.32 GB training state — and would make the run a different experiment for 2.6 % of VRAM.
+  backbone:
+    kind: wan_i2v
+    dtype: bfloat16
+    device: cuda
+    feature_dim: 3072
+    num_frames: 9 # unchanged: 9 frames -> F' = 3 -> 60 video tokens. See the arithmetic above.
+    image_hw: [128, 160] # unchanged: 60 tokens is already tiny; activations are not the problem
+    state_embedding_dim: 32
+    max_text_tokens: 512
+    feature_blocks: [2, 10] # unchanged; keep in sync with the model config
+
+  action_encoder: # ActionChunkEncoderConfig (training only, PRD 9.5)
+    latent_dim: 32
+    hidden_dims: [64]
+    target_dim: 15
+    gripper_dims: 1
+    max_steps: 32
+
+  head: # ActionHeadConfig decoder on shared features (FR-04)
+    feature_dim: 3072
+    num_steps: 16
+    target_dim: 15
+    gripper_dims: 1
+    mode: joint_delta
+    dt_s: 0.0333333
+    hidden_dims: [256]
+
+  velocity_hidden_dims: [256]

@@ -193,7 +193,11 @@ from typing import Any
 import numpy as np
 
 from wam.robot.g1 import G1_JOINT_MAP
-from wam.robot.g1_transport import _as_motor_array
+from wam.robot.g1_transport import (
+    DEX3_FINGER_JOINTS,
+    G1_MOTOR_JOINT_NAMES,
+    _as_motor_array,
+)
 
 MUJOCO_MISSING_MSG = (
     "MuJoCo simulation support requires the 'mujoco' package — install it with "
@@ -216,51 +220,11 @@ DEFAULT_KEYFRAME = "ready"
 #: MJCF joint/actuator names are the canonical joint name plus this suffix.
 MJCF_JOINT_SUFFIX = "_joint"
 
-#: Canonical joint name per G1 motor slot, in the 29-DoF ``G1JointIndex`` convention:
-#: legs 0-11, waist yaw/roll/pitch 12-14, left arm 15-21, right arm 22-28.
-G1_MOTOR_JOINT_NAMES: tuple[str, ...] = (
-    "left_hip_pitch",
-    "left_hip_roll",
-    "left_hip_yaw",
-    "left_knee",
-    "left_ankle_pitch",
-    "left_ankle_roll",
-    "right_hip_pitch",
-    "right_hip_roll",
-    "right_hip_yaw",
-    "right_knee",
-    "right_ankle_pitch",
-    "right_ankle_roll",
-    "waist_yaw",
-    "waist_roll",
-    "waist_pitch",
-    "left_shoulder_pitch",
-    "left_shoulder_roll",
-    "left_shoulder_yaw",
-    "left_elbow",
-    "left_wrist_roll",
-    "left_wrist_pitch",
-    "left_wrist_yaw",
-    "right_shoulder_pitch",
-    "right_shoulder_roll",
-    "right_shoulder_yaw",
-    "right_elbow",
-    "right_wrist_roll",
-    "right_wrist_pitch",
-    "right_wrist_yaw",
-)
-
-#: Dex3-1 finger joints per hand, in the model's JOINT order (the ACTUATOR order differs
-#: between the hands — always resolve by name).
-DEX3_FINGER_JOINTS: tuple[str, ...] = (
-    "thumb_0",
-    "thumb_1",
-    "thumb_2",
-    "middle_0",
-    "middle_1",
-    "index_0",
-    "index_1",
-)
+# ``G1_MOTOR_JOINT_NAMES`` and ``DEX3_FINGER_JOINTS`` are re-exported from the seam module
+# (see the import block above). They moved there when a second simulator backend appeared:
+# two copies of a 29-entry ordering is two chances to permute it, and a permuted map is
+# silent. They are still importable from here — ``mujoco_transport.G1_MOTOR_JOINT_NAMES``
+# keeps working — because the tests and the scene doc reference that path.
 
 #: The six finger joints that curl during a Dex3 grasp. ``thumb_0`` (opposition roll) is held at
 #: 0 in both the open and the closed pose — see the module docstring for the measurement.

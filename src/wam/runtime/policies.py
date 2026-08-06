@@ -46,8 +46,7 @@ def _relocate_backbone(backbone_config: BaseModel, *, source: str | Path | None,
     """Point a trained backbone config at THIS machine's weights and device.
 
     Where the frozen weights sit is machine-local. ``train_t16_lora`` keeps it off the committed
-    YAML on purpose and folds ``--backbone-source`` in at run time, so ``config_hash`` matches
-    across two machines training the identical model (AC-04). The consequence lands here: a
+    YAML on purpose and folds ``--backbone-source`` in at run time. The consequence lands here: a
     checkpoint trained on the cluster carries *that cluster's* absolute path, so loading it
     anywhere else has to substitute a local one or ``build_backbone`` goes looking for weights
     that are not on this disk.
@@ -57,8 +56,20 @@ def _relocate_backbone(backbone_config: BaseModel, *, source: str | Path | None,
     checkpoint that recorded ``cuda`` would allocate tens of GB of VRAM on the way to a CPU
     policy — or just fail outright on a box with no GPU.
 
-    ``config_hash`` is deliberately NOT recomputed. These two fields record where a run happened,
-    not what was trained, which is precisely why they were excluded from the hash to begin with.
+    ``config_hash`` is deliberately NOT recomputed here, and the reason is NOT that these fields
+    are outside the hash — they are inside it. :func:`wam.interfaces.versioning.config_hash`
+    digests the whole canonicalized config with no exclusion list, and ``train_t16_lora`` hashes
+    the config AFTER splicing ``--backbone-source`` in (:920). Measured on the archived
+    checkpoint: ``runs/t16-lora-seed0/checkpoints/step-020000`` reproduces its recorded
+    ``45ee9e6035eb…`` exactly, and swapping ``backbone.checkpoint_path`` to a local directory
+    gives ``915ca4b0fd32…`` instead. The hash is left alone because it is a RECORD of the run
+    that produced this checkpoint; relocating weights to read that checkpoint elsewhere must not
+    rewrite what the training run was. The real consequence is one level up and belongs to
+    training, not to loading: a fresh run started here with a local ``--backbone-source`` gets a
+    different ``config_hash`` from the cluster's even when the model is bit-identical, so
+    "identical experiment ⇒ identical hash" does not hold across machines. AC-04 traceability
+    still does — every checkpoint records the hash of the config it was actually trained with.
+    See docs/local_gpu.md §2.
     """
     fields = type(backbone_config).model_fields
     updates: dict[str, object] = {}

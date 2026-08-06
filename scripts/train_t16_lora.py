@@ -66,6 +66,12 @@ from wam.interfaces.versioning import (
     load_config,
     read_git_commit,
 )
+from wam.runtime.offload import (
+    OFFLOAD_TEXT_HELP,
+    advise_alloc_conf,
+    distinct_instructions,
+    offload_text_encoder,
+)
 from wam.training import EpisodeDataset, JointTrainer, JointTrainingConfig, collate_episode_batch
 from wam.training._utils import (
     CHECKPOINT_CONFIG_KEY,
@@ -851,6 +857,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--allow-download", action="store_true", help="let the backbone fetch")
+    parser.add_argument(
+        "--offload-text",
+        action="store_true",
+        help=OFFLOAD_TEXT_HELP + ". READ THIS BEFORE USING IT ON A LONG RUN: the umT5 forward "
+        "then runs on the CPU, and condition_text memoizes per instruction STRING, so the cost "
+        "is one CPU encode per DISTINCT instruction in the training set, not per step. That is "
+        "free for the GR00T corpus (all 402 episodes of gr00t-apple-full and -grip carry the "
+        "one instruction 'move the apple to the plate'), and a per-batch stall on a "
+        "multi-instruction set. This script counts the distinct instructions at startup and "
+        "warns when there is more than one.",
+    )
     parser.add_argument("--run-id", type=str, default=None, help="default: --out-dir basename")
     parser.add_argument(
         "--dry-run",
@@ -969,6 +986,7 @@ def main(argv: list[str] | None = None) -> int:
     # Seed BEFORE the backbone so an injected backbone initializes from the same stream the
     # non-injected path would have used; JointTrainer re-seeds and builds the heads after.
     torch.manual_seed(config.seed)
+    advise_alloc_conf(config.device)
     backbone = build_backbone(config.backbone, load=True)
     trainer = JointTrainer(config, backbone=backbone)
     feeder = EpochFeeder(
@@ -980,6 +998,26 @@ def main(argv: list[str] | None = None) -> int:
         payload = manager.restore(trainer, resume_from)
         step = int(payload["step"])
         feeder.seek(int(payload["epoch"]), int(payload["batch_in_epoch"]))
+
+    if args.offload_text:
+        # LAST, on purpose: JointTrainer.__init__ ends in .to(self.device), which
+        # WanFlowBackbone._apply forwards to the held towers, so anything offloaded before this
+        # point comes straight back onto the GPU. Restore only fills tensors in place.
+        instructions = distinct_instructions(episodes)
+        if len(instructions) > 1:
+            # Loud, because the cost model inverts here. condition_text memoizes per prompt
+            # string, so one instruction means one CPU umT5 forward for the entire run; N
+            # instructions mean the cache misses whenever a batch introduces an unseen one, and
+            # on a set with many prompts that is a CPU forward inside the training step.
+            _log(
+                f"WARNING --offload-text: this training set has {len(instructions)} distinct "
+                "instructions. The umT5 forward now runs on the CPU and is memoized per prompt, "
+                "so the first appearance of each one stalls the step it lands in. That is fine "
+                "for a handful and NOT fine for a corpus with per-episode phrasing — measure a "
+                "few steps before committing to a long run."
+            )
+        offload_text_encoder(backbone, log=_log)
+        _log(f"--offload-text: umT5 on CPU, {len(instructions)} distinct instruction(s) to encode")
     _log(
         f"{len(dataset)} samples, {feeder.batches_per_epoch} batches/epoch | start at step "
         f"{step}/{config.steps}, sampler at epoch {feeder.position[0]} batch {feeder.position[1]}"
@@ -1068,6 +1106,13 @@ def main(argv: list[str] | None = None) -> int:
                     "steps": step,
                     "checkpoint": str(manager.latest()),
                     "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    # Not in config_hash and not in RunMetadata (it describes where a frozen
+                    # tower sat, not what was trained) — so without this line a 20k-step run
+                    # that encoded its text on the CPU is indistinguishable from one that did
+                    # not. It is only the LAST leg's value: a chain that resumed with a
+                    # different setting is not recorded here, which is why
+                    # scripts/run_i8_rung_local.sh pins it in the resume stamp instead.
+                    "offload_text": bool(args.offload_text),
                 },
                 indent=2,
                 sort_keys=True,

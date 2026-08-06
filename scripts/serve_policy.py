@@ -20,6 +20,7 @@ from pathlib import Path
 
 from wam.interfaces import CanonicalSpaceSpec, load_config
 from wam.interfaces.protocols import Policy
+from wam.runtime.offload import OFFLOAD_TEXT_HELP, advise_alloc_conf, offload_text_encoder
 from wam.runtime.server import PolicyServer
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +60,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="local dir holding the frozen base weights (--joint); needed when the checkpoint "
         "was trained on another machine, whose recorded path does not exist here",
     )
+    parser.add_argument(
+        "--offload-text",
+        action="store_true",
+        help=OFFLOAD_TEXT_HELP + " (--joint only). A served policy encodes the instruction "
+        "once per distinct prompt and then reads the memoized result, so the tower is dead "
+        "weight on the GPU for the rest of the session.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765, help="0 = OS-assigned port")
     args = parser.parse_args(argv)
@@ -66,6 +74,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--joint requires --checkpoint")
     if args.policy_camera is not None and not args.joint:
         parser.error("--policy-camera applies to --joint checkpoints only")
+    if args.offload_text and not args.joint:
+        # Refused, not ignored: only the Wan backbone behind --joint has a separate umT5 tower
+        # to move, so accepting this anywhere else would promise memory relief it cannot give.
+        parser.error("--offload-text applies to --joint checkpoints only")
     return args
 
 
@@ -94,7 +106,11 @@ def _build_checkpoint_policy(path: Path) -> Policy:
 
 
 def _build_joint_policy(
-    path: Path, device: str, camera: str | None, backbone_source: str | None = None
+    path: Path,
+    device: str,
+    camera: str | None,
+    backbone_source: str | None = None,
+    offload_text: bool = False,
 ) -> Policy:
     """Serve a world-action checkpoint (T-16). No fallback: unlike the action-only model,
     ``JointWorldActionModel`` needs ``JointCheckpointPolicy`` to reach ``predict``.
@@ -104,7 +120,12 @@ def _build_joint_policy(
     ``backbone_source`` when this is not the machine that trained them."""
     from wam.runtime.policies import load_joint_policy
 
+    advise_alloc_conf(device)
     policy = load_joint_policy(path, device=device, camera=camera, backbone_source=backbone_source)
+    if offload_text:
+        # After the loader, which is where the .to(device) that WanFlowBackbone._apply forwards
+        # to the held towers happens; an offload before it would be silently undone.
+        offload_text_encoder(policy, log=print)
     md = policy.metadata
     print(
         f"loaded world-action checkpoint run_id={md.run_id} config_hash={md.config_hash} "
@@ -118,7 +139,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.checkpoint is not None and args.joint:
         policy: Policy = _build_joint_policy(
-            args.checkpoint, args.device, args.policy_camera, args.backbone_source
+            args.checkpoint,
+            args.device,
+            args.policy_camera,
+            args.backbone_source,
+            args.offload_text,
         )
     elif args.checkpoint is not None:
         policy = _build_checkpoint_policy(args.checkpoint)

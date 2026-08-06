@@ -60,6 +60,8 @@ for candidate in ("/wam-src", str(Path(__file__).resolve().parents[1] / "src")):
 
 import numpy as np
 
+from wam.runtime.offload import OFFLOAD_TEXT_HELP, advise_alloc_conf, offload_text_encoder
+
 DEFAULT_DATASET = "datasets/gr00t-apple-grip"
 DEFAULT_CAMERA = "ego"
 DEFAULT_STEPS = 32
@@ -104,6 +106,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="WAM joint checkpoint: the step-NNNNNN directory or its model.safetensors",
     )
     model.add_argument("--backbone-source", default=None, help="local Wan snapshot dir")
+    model.add_argument(
+        "--offload-text",
+        action="store_true",
+        help=OFFLOAD_TEXT_HELP + ". This script is the one that needs it: the archived runs "
+        "peaked at 32.47 and 32.54 GB ALLOCATED (decimal GB; runs/dream/t35-zerogpu-seed0/ and "
+        "t36-zerogpu-motion-seed0/dream.json). A 32 GiB card is 34.36 decimal GB, so that looks "
+        "like ~1.8 GB spare -- but occupied exceeds allocated by the allocator's slack (0.90 GB, "
+        "measured) plus the CUDA context (~0.8 GB, estimated), and the board reports ~34.19. The "
+        "two runs then land on opposite sides of the limit by less than the error bar. Treat "
+        "archived settings as having no margin; this flag takes the peak to ~21 GB. See "
+        "docs/local_gpu.md section 0c. Only the encode moves to the CPU, and condition_text "
+        "memoizes per prompt, so every arm after the first reads the same cached tensor.",
+    )
     model.add_argument("--device", default=None)
     model.add_argument("--steps", type=int, default=DEFAULT_STEPS, help="Euler steps")
     model.add_argument("--seed", type=int, default=DEFAULT_SEED)
@@ -574,12 +589,18 @@ def main(argv: list[str] | None = None) -> int:
     from wam.runtime.policies import load_joint_policy
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    advise_alloc_conf(device)
     t0 = time.perf_counter()
     checkpoint = resolve_checkpoint(args.checkpoint)
     policy = load_joint_policy(checkpoint, device=device, backbone_source=args.backbone_source)
     model = policy.model
     model.eval()
     print(f"loaded {checkpoint} on {device} in {time.perf_counter() - t0:.1f}s")
+    if args.offload_text:
+        # Only once the policy is resident: JointCheckpointPolicy.__init__ has done the
+        # .to(device) that WanFlowBackbone._apply forwards to the held towers, and .eval()
+        # moves nothing. Offloading any earlier would be undone by that move.
+        offload_text_encoder(policy, log=print)
 
     num_frames = args.num_frames or int(model.config.backbone.num_frames)
     if args.num_frames and args.num_frames != int(model.config.backbone.num_frames):
@@ -615,6 +636,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if torch.cuda.is_available():
         info["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
+        # Next to the number it explains: a peak measured with the umT5 tower parked on the CPU
+        # is not comparable with the archived 32.47/32.54 GB runs, which held it resident.
+        info["offload_text"] = bool(args.offload_text)
     report = build_report(
         arms, reference_arm="recon", pairs=pairs, freeze_gate=freeze_gate, info=info
     )

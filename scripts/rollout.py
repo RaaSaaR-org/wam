@@ -14,6 +14,9 @@ Usage examples::
   .venv/bin/python scripts/rollout.py --policy remote --server-uri ws://127.0.0.1:8765
   .venv/bin/python scripts/rollout.py --robot g1 --policy dummy --rollouts 1
   .venv/bin/python scripts/rollout.py --robot mujoco_g1 --policy dummy --rollouts 1
+  # Isaac: from the ISAAC venv, against serve_policy.py in this one (two-venv split,
+  # docs/isaac.md) — and run scripts/preflight_isaac.py there first.
+  isaac-python scripts/rollout.py --robot isaac_g1 --policy remote --rollouts 1
   .venv/bin/python scripts/rollout.py --robot mujoco_g1 --policy joint \\
       --checkpoint runs/t18-real-ablation-seed0/checkpoint.safetensors \\
       --policy-camera head --image-hw 120 160
@@ -74,9 +77,13 @@ returns an all-NaN chunk (safety layer must nan_reject -> HOLD) and every m-th p
 stalls past the executor deadline (chunk discarded -> hold, watchdog not fed). Rollouts
 are labeled ``task="sim:fault_injection"`` — EVERY supported robot runs simulated today
 ("mock" = MockRobot, "g1" = G1Adapter on FakeG1Transport, "mujoco_g1" = the same G1Adapter
-on MuJoCo contact physics), and the acceptance harness detects sim evidence solely via the
-``sim:`` task prefix — so AC-03 excludes them and AC-06 reports pending_hardware instead of
-claiming real-robot safe-stop evidence.
+on MuJoCo contact physics, "isaac_g1" = the same again on Isaac Sim/PhysX), and the
+acceptance harness detects sim evidence solely via the ``sim:`` task prefix — so AC-03
+excludes them and AC-06 reports pending_hardware instead of claiming real-robot safe-stop
+evidence. ``isaac_g1`` is the weakest of the four for AC-06 specifically: its e-stop damping
+is applied by a physics callback, so from a watchdog thread it commonly never lands at all
+(``docs/isaac.md`` §5). Read a green fault-injection run there as "the latch held", not "the
+arm was damped".
 
 AC-04 TRACEABILITY AND THE 2026-08-01 KEY-SET CHANGE (``ROLLOUT_CONFIG_VERSION``): the
 ``config_hash`` stamped on every log line is the traceability link, and T-31 changed what goes
@@ -124,6 +131,7 @@ from wam.runtime import (
     RolloutResult,
 )
 from wam.runtime.executor import PolicyContract, policy_contract_record
+from wam.runtime.offload import OFFLOAD_TEXT_HELP, advise_alloc_conf, offload_text_encoder
 from wam.safety import SafetyConfig, SafetyLayer, Watchdog
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -407,7 +415,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--robot", choices=("mock", "g1", "mujoco_g1"), default="mock")
+    parser.add_argument(
+        "--robot", choices=("mock", "g1", "mujoco_g1", "isaac_g1"), default="mock"
+    )
     parser.add_argument(
         "--policy", choices=("checkpoint", "joint", "dummy", "remote"), default="checkpoint"
     )
@@ -434,6 +444,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--policy-device", default="cpu", help="torch device for --policy checkpoint|joint"
+    )
+    parser.add_argument(
+        "--offload-text",
+        action="store_true",
+        help=OFFLOAD_TEXT_HELP + " (--policy joint). A closed-loop rollout re-encodes the same "
+        "--instruction on every tick, which condition_text serves from its per-prompt cache, "
+        "so the tower is resident for nothing. It does NOT enter config_hash — that hash "
+        "describes the trained model, and this is a runtime placement choice. But do not read "
+        "that as bit-identical: the umT5 forward runs on whichever device the tower is on, so "
+        "this moves a bf16 encode to the CPU and PyTorch promises no cross-device bitwise "
+        "equality. Unmeasured. The flag is recorded in the rollout artifact instead, so two "
+        "runs are at least distinguishable.",
     )
     parser.add_argument("--server-uri", default=None, help="ws://host:port for --policy remote")
     parser.add_argument("--remote-timeout-s", type=float, default=1.0)
@@ -497,7 +519,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         nargs=2,
         metavar=("H", "W"),
         default=None,
-        help="override the sim render size (--robot mujoco_g1); must match the policy's backbone",
+        help="override the sim render size (--robot mujoco_g1/isaac_g1); must match the "
+        "policy's backbone",
     )
     parser.add_argument(
         "--safety-config", type=Path, default=_REPO_ROOT / "configs" / "safety" / "default.yaml"
@@ -509,7 +532,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--reach-tolerance-rad", type=float, default=DEFAULT_REACH_TOLERANCE_RAD)
     parser.add_argument("--e2-probes", type=int, default=16)
     parser.add_argument("--skip-e2", action="store_true", help="skip the E2 static release gate")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.offload_text and args.policy != "joint":
+        # Refused, not ignored: only the Wan backbone behind --policy joint has a separate umT5
+        # tower to move. A 'checkpoint' policy is action-only and a 'remote' one's weights live
+        # in another process entirely.
+        parser.error("--offload-text applies to --policy joint only")
+    return args
 
 
 def _build_mock(args: argparse.Namespace):
@@ -665,6 +694,104 @@ def _build_mujoco_g1(args: argparse.Namespace):
     return G1_SPEC, config.control_dt_s, limits, factory
 
 
+def _build_isaac_g1(args: argparse.Namespace):
+    """(spec, dt_s, robot_limits, robot_factory) for IsaacG1Robot — the second E2 sim robot.
+
+    Same shape as ``_build_mujoco_g1``: same canonical space, same ``G1Adapter``, same safety
+    chain, a different transport. Only the ``sim:`` block differs, because Isaac is configured
+    by physics rate / device / USD camera prims rather than by a scene file and a keyframe.
+
+    RUNS IN THE ISAAC VENV, NOT THIS ONE. ``isaacsim-core`` 6.0.1 pins torch 2.11.0 and
+    ``uv.lock`` resolves 2.13.0, so this cannot share a python with ``--policy checkpoint``.
+    The supported topology is ``--policy remote`` here, against ``scripts/serve_policy.py``
+    running in the WAM venv; ``IsaacG1Robot``'s constructor says so if isaacsim is absent.
+
+    THE GAINS IN ``configs/robot/isaac_g1.yaml`` ARE NOT MEASURED. They are Isaac Lab's
+    published G1 magnitudes, which disagree with the MuJoCo rig's by an order of magnitude
+    (waist 5000 vs 500). Whichever is right, they are not the same robot response — so an
+    Isaac number and a MuJoCo number are not comparable until someone measures on the box.
+    See ``docs/isaac.md`` §4.
+    """
+    from wam.robot.g1 import G1_SPEC, G1Config
+    from wam.robot.isaac_binding import ISAAC_MISSING_MSG
+
+    robot_section = load_config(args.robot_config)["robot"]
+    spec = CanonicalSpaceSpec(**robot_section["canonical_space"])
+    if spec != G1_SPEC:
+        raise SystemExit(
+            f"--robot-config {args.robot_config}: canonical_space does not match the G1 "
+            f"adapter's G1_SPEC ({G1_SPEC.num_joints} joints, "
+            f"gripper_dims={G1_SPEC.gripper_dims})"
+        )
+    limits_cfg: dict[str, Any] = dict(robot_section.get("limits", {}))
+    gains_cfg: dict[str, Any] = dict(robot_section.get("gains", {}))
+    config_kwargs: dict[str, Any] = {
+        key: tuple(float(x) for x in limits_cfg[key])
+        for key in ("q_min", "q_max", "dq_max")
+        if key in limits_cfg
+    }
+    config_kwargs.update(
+        {key: tuple(float(x) for x in gains_cfg[key]) for key in ("kp", "kd") if key in gains_cfg}
+    )
+    control_cfg = robot_section.get("control", {})
+    dt_s = control_cfg.get("dt_s")
+    if dt_s is not None:
+        config_kwargs["control_dt_s"] = float(dt_s)
+    window = control_cfg.get("q_track_window")
+    if window is not None:
+        config_kwargs["q_track_window"] = tuple(float(x) for x in window)
+    config = G1Config(**config_kwargs)
+    limits: dict[str, Any] = {
+        "q_min": config.q_min,
+        "q_max": config.q_max,
+        "dq_max": config.dq_max,
+        "ddq_max": tuple(
+            float(x)
+            for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
+        ),
+    }
+
+    sim_cfg: dict[str, Any] = dict(robot_section.get("sim", {}))
+    robot_kwargs: dict[str, Any] = {"config": config}
+    # 'scene' is the yaml key every robot config uses for "the thing to load"; IsaacG1Robot
+    # takes it as scene_path, an alias for asset=. Left unset it resolves the Isaac asset
+    # root plus DEFAULT_ASSET_SUBPATH, which is the normal case on the box.
+    if "scene" in sim_cfg:
+        robot_kwargs["scene_path"] = str(sim_cfg["scene"])
+    for key in ("physics_hz", "render_warmup_ticks"):
+        if key in sim_cfg:
+            robot_kwargs[key] = int(sim_cfg[key])
+    for key in ("device",):
+        if key in sim_cfg:
+            robot_kwargs[key] = str(sim_cfg[key])
+    if "headless" in sim_cfg:
+        robot_kwargs["headless"] = bool(sim_cfg["headless"])
+    if "cameras" in sim_cfg:
+        robot_kwargs["cameras"] = tuple(str(c) for c in sim_cfg["cameras"])
+    if "camera_prims" in sim_cfg:
+        robot_kwargs["camera_prims"] = {str(k): str(v) for k, v in sim_cfg["camera_prims"].items()}
+    if "image_hw" in sim_cfg:
+        robot_kwargs["image_hw"] = tuple(int(x) for x in sim_cfg["image_hw"])
+    if args.image_hw is not None:
+        robot_kwargs["image_hw"] = tuple(args.image_hw)
+
+    def factory(index: int, *, jitter: bool) -> RobotAdapter:
+        del index, jitter  # the USD default state is fixed; start-pose jitter is mock-only
+        try:
+            return get_robot("isaac_g1", **robot_kwargs)
+        except RuntimeError as exc:
+            # "You ran this in the wrong python" is the single most likely first-run mistake
+            # here, and it IS a usage error (exit 1), not a crash. IsaacG1Robot's message
+            # already names the two-venv topology; a 20-line traceback around it just buries
+            # the one paragraph the operator needs. Narrow on purpose: only this message is
+            # converted, so a genuine Isaac failure still surfaces with its stack.
+            if str(exc) != ISAAC_MISSING_MSG:
+                raise
+            raise SystemExit(f"--robot isaac_g1: {exc}") from exc
+
+    return G1_SPEC, config.control_dt_s, limits, factory
+
+
 def _build_policy(args: argparse.Namespace, spec: CanonicalSpaceSpec, dt_s: float) -> Policy:
     if args.policy == "checkpoint":
         from wam.runtime.policies import CheckpointPolicy  # torch import stays lazy
@@ -677,12 +804,18 @@ def _build_policy(args: argparse.Namespace, spec: CanonicalSpaceSpec, dt_s: floa
         # carries no base weights, so it needs the frozen backbone built and strict=False.
         from wam.runtime.policies import load_joint_policy
 
-        return load_joint_policy(
+        advise_alloc_conf(args.policy_device)
+        policy = load_joint_policy(
             args.checkpoint,
             device=args.policy_device,
             camera=args.policy_camera,
             backbone_source=args.backbone_source,
         )
+        if args.offload_text:
+            # After the loader: load_joint_policy -> JointCheckpointPolicy.__init__ is where the
+            # .to(device) happens, and WanFlowBackbone._apply forwards it to the held towers.
+            offload_text_encoder(policy, log=print)
+        return policy
     if args.policy == "remote":
         if not args.server_uri:
             raise SystemExit("--policy remote requires --server-uri ws://host:port")
@@ -729,14 +862,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.rollouts < 0:
         raise SystemExit(f"--rollouts must be >= 0, got {args.rollouts}")
 
-    # Both supported robots are simulated today (MockRobot / G1Adapter on FakeG1Transport),
-    # so fault-injection evidence is labeled 'sim:' — the acceptance harness must report
-    # AC-06 as pending_hardware, never as real-robot safe-stop evidence (AC-06 contract).
+    # EVERY supported robot is simulated today (MockRobot, G1Adapter on FakeG1Transport,
+    # MuJoCo contact physics, Isaac Sim/PhysX), so fault-injection evidence is labeled 'sim:'
+    # — the acceptance harness must report AC-06 as pending_hardware, never as real-robot
+    # safe-stop evidence (AC-06 contract).
     task = (SIM_TASK_PREFIX + FAULT_INJECTION_TASK) if args.fault_injection else args.task
     if args.robot_config is None:
         args.robot_config = _REPO_ROOT / "configs" / "robot" / f"{args.robot}.yaml"
     if args.robot == "mujoco_g1":
         spec, dt_s, robot_limits, robot_factory = _build_mujoco_g1(args)
+    elif args.robot == "isaac_g1":
+        spec, dt_s, robot_limits, robot_factory = _build_isaac_g1(args)
     elif args.robot == "g1":
         spec, dt_s, robot_limits, robot_factory = _build_g1(args)
     else:
@@ -854,6 +990,13 @@ def main(argv: list[str] | None = None) -> int:
             # that only lived inside the preimage would be invisible to exactly the reader it
             # exists for. Its ABSENCE identifies a pre-2026-08-01 (0.1.0) log.
             logger.log({"kind": "rollout_config_version", "version": ROLLOUT_CONFIG_VERSION})
+            # Same argument one line up, for the same reason: --offload-text is deliberately not
+            # in config_hash (it describes where a tower sits, not what was trained), but it
+            # moves the umT5 encode off cuBLAS onto the CPU, and no measurement here establishes
+            # that the actions come out bit-identical. Unrecorded, two archives that differ for
+            # that reason are indistinguishable. Its ABSENCE identifies a log written before
+            # 2026-08-05, when the flag did not exist.
+            logger.log({"kind": "runtime_placement", "offload_text": bool(args.offload_text)})
             if contract is None:
                 # An unchecked run must SAY it was unchecked. The config reaches the log only
                 # as a hash, so without this line an archive reader cannot tell a run that

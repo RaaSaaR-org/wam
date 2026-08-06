@@ -78,6 +78,7 @@ from wam.evaluation import (
     load_episode_ids,
     save_predictions_jsonl,
 )
+from wam.runtime.offload import OFFLOAD_TEXT_HELP, advise_alloc_conf, offload_text_encoder
 
 CHECKPOINT_DIRNAME = "checkpoints"
 MODEL_FILENAME = "model.safetensors"
@@ -381,6 +382,7 @@ def build_policy(
     camera: str | None,
     backbone_source: str | None,
     *,
+    offload_text: bool = False,
     flow_steps: int | None = None,
     flow_seed: int = DEFAULT_FLOW_SEED,
     flow_mean_k: int = DEFAULT_FLOW_MEAN_K,
@@ -408,6 +410,12 @@ def build_policy(
         flow_steps=flow_steps,
         flow_seed=flow_seed,
     )
+    if offload_text:
+        # After load_joint_policy, never before: JointCheckpointPolicy.__init__ does the
+        # .to(device) that WanFlowBackbone._apply forwards to the held towers, so an earlier
+        # offload would be undone. Before the ControlArmPolicy wrap only for readability —
+        # the wrapper delegates .model, so either side would resolve.
+        offload_text_encoder(policy, log=print)
     if flow_mean_k != DEFAULT_FLOW_MEAN_K or flow_t0 != DEFAULT_FLOW_T0:
         policy = ControlArmPolicy(policy, mean_k=flow_mean_k, t0=flow_t0)
     return policy, config, metadata
@@ -524,6 +532,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="local dir holding the frozen base weights; required when scoring a checkpoint "
         "trained on another machine, whose recorded path does not exist here",
+    )
+    parser.add_argument(
+        "--offload-text",
+        action="store_true",
+        help=OFFLOAD_TEXT_HELP + ". NOT bit-identical, and nobody has measured the difference: "
+        "condition_text runs the umT5 forward on whichever device the tower is on, so this moves "
+        "a bf16 encode from cuBLAS to the CPU, and PyTorch guarantees no cross-device bitwise "
+        "equality. The result is memoized and becomes the frozen text context for the whole eval, "
+        "so any drift applies uniformly to every episode rather than varying within a run. Do not "
+        "mix offloaded and non-offloaded numbers in one comparison. Cost is one "
+        "CPU umT5 encode per DISTINCT instruction, because condition_text memoizes per prompt — "
+        "and every episode of the default dataset (gr00t-apple-full) carries the same one, so "
+        "in practice that is a single encode per run. OFF by default, like every flag here.",
     )
     parser.add_argument(
         "--frame-history",
@@ -655,11 +676,13 @@ def main(argv: list[str] | None = None) -> int:
 
     model_path = resolve_checkpoint(args.run_dir, args.checkpoint)
     print(f"checkpoint {model_path}")
+    advise_alloc_conf(args.device)
     policy, config, metadata = build_policy(
         model_path,
         args.device,
         args.camera,
         args.backbone_source,
+        offload_text=args.offload_text,
         flow_steps=flow_steps,
         flow_seed=flow_seed,
         flow_mean_k=flow_mean_k,
@@ -761,6 +784,11 @@ def main(argv: list[str] | None = None) -> int:
                 "seconds": elapsed_s,
                 "ms_per_chunk": ms_per_chunk,
                 "device": policy.device,
+                # Next to "device" because it qualifies it: with this on, the umT5 encode ran on
+                # the CPU even though everything else ran on `device`, and nothing here has
+                # measured that the two agree bitwise. A bench.json scored with the flag would
+                # otherwise be indistinguishable from one scored without it.
+                "offload_text": bool(args.offload_text),
                 "frame_history": bool(args.frame_history),
                 "flow_steps": flow_steps,
                 "flow_seed": flow_seed if flow_steps is not None else None,
