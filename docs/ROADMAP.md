@@ -4,7 +4,8 @@ Status 2026-07-27: M0–M4 code-complete (604 tests, acceptance report in `runs/
 the closed loop now also runs on MuJoCo contact physics with rendered pixels (`docs/sim.md`) and
 over a real DDS bus in an arm64 container (`docker/dds/README.md`). Everything below is decisions,
 hardware, and real data — in order.
-Details per task: `TASKS.md`. PRD §16 (internal document, outside this repository).
+Details per task: `.mc/tasks/` (one file each; `TASKS.md` is the milestone index over them).
+PRD §16 (internal document, outside this repository).
 
 ## 1. Decisions — resolved 2026-07-26
 
@@ -123,6 +124,21 @@ Ordered bring-up checklist: `docker/dds/README.md` § "Remaining steps for real-
   tiled-only and a table carrying both modes is not a comparison at all. Re-scoring the two
   archived checkpoints costs no allocation (`scripts/rescore_archived.py`). Full result:
   `docs/improvements.md` I-7, `docs/benchmark.md` "The T-16 result".
+- **RESOLVED the same day.** The re-score ran on 2026-08-01, on a laptop CPU, for zero allocation,
+  and **neither baseline moved**: −20.86 → −20.88 % and −129.04 → −129.00 %. The frame-mode
+  confound is **backbone-specific** — it costs the Wan fine-tune 10.65 pp and the two `tiny` runs
+  nothing, because that backbone does not use the frame axis. That is the first *positive* evidence
+  in this project that the pretrained video prior carries temporal information the action head can
+  reach, and it arrived sideways, as a control for a measurement error. The ladder is single-mode,
+  and AC-07 reads: the clean same-backbone ablation is **−129.00 % against −20.88 %**, i.e. the
+  world branch costs 108 pp on `tiny`; the pretrained prior recovers essentially all of it and buys
+  no advantage over the action-only baseline. **No measurable world-action advantage**, in
+  distribution. `docs/improvements.md` I-7, `docs/benchmark.md`.
+- **What is genuinely open is one step further back (T-39, `PR-07`).** Every verdict above compares
+  a WAM variant against a trivial baseline; none compares anything against a method known to work,
+  and this corpus is NVIDIA's own tutorial dataset for a recipe this repo has never run. Until that
+  positive control reports, no negative here separates "the approach is wrong" from "nothing clears
+  this bar on this corpus".
 
 ## 6. Real rollouts (M4 / E3)
 

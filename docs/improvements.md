@@ -56,7 +56,7 @@ something training never did — and both deviations point at the same measured 
 | # | Trained on | Deployed / evaluated on | Item | Priced? |
 |---|---|---|---|---|
 | 1 | a real 9-frame window, `frames[indices]` (`training/datasets.py:156`) | **one** frame tiled 9×, `image.expand(num_frames, …)` (`training/joint.py:388`) | **I-7** | **yes — +10.65 pp, still fails** |
-| 2 | both `velocity_head` (flow) and `action_head` (regression) (`joint.py:338-339`) | `action_head` only — the flow branch is never sampled | **I-3** | T-30, running |
+| 2 | both `velocity_head` (flow) and `action_head` (regression) (`joint.py:338-339`) | `action_head` only — the flow branch is never sampled | **I-3** | **no — T-30 ran 2026-08-01, all flow arms below L0** |
 
 The T-16 result, on the freeze-frame it was published from, is `skill_vs_zero` **+25.9 %**,
 `skill_vs_repeat` **−32.4 %**, `smoothness_ratio` **0.29**. Read as a symptom rather than a score,

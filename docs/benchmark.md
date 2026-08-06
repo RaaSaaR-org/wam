@@ -352,12 +352,17 @@ evidence that video helps.
 > 50.6** — not −32.4 % / 48.4. **The verdict is unchanged (L1 still fails, by 21.8 pp) and the
 > figure is not.** This is a correction rather than an addendum, per the rule fixed before the run.
 >
-> **The `action-only` and `world-action (tiny)` columns were NOT re-scored** and remain freeze-frame
-> numbers, so the table below is **mixed-mode and no longer a comparison**. Re-scoring them is
-> ~0.4 GPU-h and is item 2 in `docs/improvements.md`. Until it lands, do not read the
-> `skill_vs_repeat_pct` row across columns — in particular, the claim that the fine-tune is "worse
-> than the action-only baseline" rests on −32.4 % vs −20.9 %, and the in-distribution figure is
-> −21.80 % vs an unknown.
+> ~~**The `action-only` and `world-action (tiny)` columns were NOT re-scored** and remain
+> freeze-frame numbers, so the table below is **mixed-mode and no longer a comparison**.~~
+> **Discharged 2026-08-01, the same day, for zero allocation** (`scripts/rescore_archived.py`,
+> laptop CPU, ~7 s per run — both checkpoints are ~0.9 MB). Neither column moved: −20.86 → −20.88 %
+> and −129.04 → −129.00 %. **The `tiled ⚠` marks on those two columns therefore mean `tiled ≡ real
+> window`**, exactly as in the "First results" table above, and the row *is* readable across
+> columns. What the re-score cost was ~0.4 GPU-h of nothing; what it bought is that the frame-mode
+> confound is **backbone-specific** — 10.65 pp for Wan, ~0.03 pp for `tiny`. The claim that the
+> fine-tune is worse than the action-only baseline is now measurable in one mode and is **not
+> supported**: −21.80 % against −20.88 % is a 0.92 pp gap between two runs that differ in the
+> backbone *and* the world branch at once, which is not a clean ablation in either direction.
 
 `runs/t16-lora-seed0`, 20 000 steps of Wan2.2-TI2V-5B LoRA on the 362 training episodes, scored on
 the same 40-episode holdout by `scripts/eval_t16.py` (split proven against the trainer's

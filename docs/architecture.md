@@ -224,10 +224,18 @@ WAM-Bench L0, `skill_vs_repeat_pct` −32.4 % **tiled** — measured on one fram
 i.e. losing to repeat-last-action. One of the three confounds under that verdict has since been
 measured: T-29 re-scored the same checkpoint with a real frame window and the gap narrows to
 **−21.80 %**, +10.65 pp. The confound was real and worth about a third of the gap, and it did not
-come close to closing it: the verdict survives, the published figure does not. Two confounds remain
-open — T-30 (flow readout) is running now, T-32 (data scaling) is unrun — and only
-`t16-lora-seed0` has been re-scored, so the baselines it is held against are still tiled-only
-numbers and AC-07 is back to *undetermined* rather than answered. The honest reading is now
-"negative in distribution, and still through a readout training never deployed". See
+come close to closing it: the verdict survives, the published figure does not. ~~Two confounds remain
+open — T-30 (flow readout) is running now, T-32 (data scaling) is unrun.~~ **T-30 reported
+2026-08-01 (job 184670) and is negative too** — all nine flow arms below L0, the mean-of-8
+measurement arm 11.1× worse than the regression readout — so the readout axis is closed and only
+T-32 is left, itself now blocked behind T-39 (the positive control, `PR-07`). ~~Only `t16-lora-seed0`
+has been re-scored, so the baselines it is held against are still tiled-only numbers and AC-07 is
+back to *undetermined* rather than answered.~~ **Both baselines were re-scored on 2026-08-01 (CPU,
+zero allocation) and neither moved**, so the ladder is single-mode: adding the world branch to the
+`tiny` backbone costs **108 pp** (−129.00 % vs −20.88 %), and the pretrained prior recovers that
+and no more. AC-07's answer is unchanged — *no measurable world-action advantage* — but it is now
+an answer about models rather than about frame windows. The honest reading is now
+"negative in distribution, and still through a readout training never deployed" — and, since
+2026-08-06, "against no positive control at all" (T-39 / `docs/preregistration/PR-07-positive-control.md`). See
 `docs/benchmark.md` and the "Not proven" table in `README.md` before quoting anything from here as
 evidence.
