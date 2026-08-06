@@ -2121,6 +2121,7 @@ dependencies = [
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "typing-extensions" },
 ]
 
 [package.optional-dependencies]
@@ -2137,6 +2138,25 @@ dev = [
 ]
 jobs = [
     { name = "huggingface-hub" },
+]
+local = [
+    { name = "accelerate" },
+    { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "av", version = "18.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "diffusers" },
+    { name = "einops" },
+    { name = "ftfy" },
+    { name = "mujoco" },
+    { name = "opencv-python" },
+    { name = "peft" },
+    { name = "pyarrow" },
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "safetensors" },
+    { name = "sentencepiece" },
+    { name = "torch" },
+    { name = "transformers" },
+    { name = "websockets" },
 ]
 serve = [
     { name = "websockets" },
@@ -2162,31 +2182,48 @@ wan = [
 
 [package.metadata]
 requires-dist = [
+    { name = "accelerate", marker = "extra == 'local'" },
     { name = "accelerate", marker = "extra == 'wan'" },
     { name = "av", marker = "extra == 'data'" },
+    { name = "av", marker = "extra == 'local'" },
+    { name = "diffusers", marker = "extra == 'local'", specifier = ">=0.35" },
     { name = "diffusers", marker = "extra == 'wan'", specifier = ">=0.35" },
+    { name = "einops", marker = "extra == 'local'" },
     { name = "einops", marker = "extra == 'train'" },
+    { name = "ftfy", marker = "extra == 'local'" },
     { name = "ftfy", marker = "extra == 'wan'" },
     { name = "huggingface-hub", marker = "extra == 'jobs'", specifier = ">=0.34" },
+    { name = "mujoco", marker = "extra == 'local'" },
     { name = "mujoco", marker = "extra == 'sim'" },
     { name = "numpy" },
     { name = "opencv-python", marker = "extra == 'data'" },
+    { name = "opencv-python", marker = "extra == 'local'" },
     { name = "peft", marker = "extra == 'dev'", specifier = ">=0.14" },
+    { name = "peft", marker = "extra == 'local'", specifier = ">=0.14" },
     { name = "peft", marker = "extra == 'wan'", specifier = ">=0.14" },
     { name = "pyarrow", marker = "extra == 'data'" },
+    { name = "pyarrow", marker = "extra == 'local'" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'local'" },
     { name = "pyyaml" },
-    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.0" },
+    { name = "ruff", marker = "extra == 'local'", specifier = "==0.16.0" },
+    { name = "safetensors", marker = "extra == 'local'" },
     { name = "safetensors", marker = "extra == 'train'" },
     { name = "safetensors", marker = "extra == 'wan'" },
+    { name = "sentencepiece", marker = "extra == 'local'" },
     { name = "sentencepiece", marker = "extra == 'wan'" },
+    { name = "torch", marker = "extra == 'local'" },
     { name = "torch", marker = "extra == 'train'" },
     { name = "torch", marker = "extra == 'wan'" },
+    { name = "transformers", marker = "extra == 'local'", specifier = ">=4.51" },
     { name = "transformers", marker = "extra == 'wan'", specifier = ">=4.51" },
+    { name = "typing-extensions" },
+    { name = "websockets", marker = "extra == 'local'", specifier = ">=12" },
     { name = "websockets", marker = "extra == 'serve'", specifier = ">=12" },
 ]
-provides-extras = ["train", "data", "serve", "wan", "jobs", "sim", "dev"]
+provides-extras = ["train", "data", "serve", "wan", "jobs", "sim", "isaac", "dev", "local"]
 
 [[package]]
 name = "wcwidth"

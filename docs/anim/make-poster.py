@@ -28,7 +28,11 @@ LANE_X, LANE_Y = 52, 386
 PLANNED = [26, 33, 39, 36, 51, 57, 54, 38, 31, 25, 21, 27, 34, 41, 42, 39]
 CLIPPED = [i for i, h in enumerate(PLANNED) if h > LIMIT]
 FILTERED = [min(h, LIMIT) for h in PLANNED]
-sx = lambda i: X0 + SLOT_W / 2 + i * PITCH
+
+
+def sx(i):
+    return X0 + SLOT_W / 2 + i * PITCH
+
 
 ORANGE, ORANGEB, TEAL = "#FF6700", "#FF8534", "#2DD4BF"
 INK, MUT, FAINT = "#F5F5F4", "#A8A29E", "#78716C"
@@ -49,7 +53,8 @@ def card(cx, cy, w, h, color, title, sub):
     a(f'<rect x="{cx-hw+1.5}" y="{cy-(h-6)/2}" width="5" height="{h-6}" rx="2" fill="{color}"/>')
     a(f'<line x1="{cx-hw+2}" y1="{cy+nyo+12}" x2="{cx+hw-2}" y2="{cy+nyo+12}" stroke="{color}" stroke-opacity="0.30"/>')
     a(f'<rect x="{cx+hw-38}" y="{cy+nyo-6.5}" width="24" height="13" rx="3" fill="{NODE}" stroke="{color}" stroke-opacity="0.7"/>')
-    b1 = int(w * 0.46); b2 = int(w * 0.30)
+    b1 = int(w * 0.46)
+    b2 = int(w * 0.30)
     a(f'<rect x="{cx-hw+24}" y="{cy+5}" width="{b1}" height="6" rx="3" fill="{BORD}"/>')
     a(f'<rect x="{cx-hw+24}" y="{cy+19}" width="{b2}" height="6" rx="3" fill="{BORD2}"/>')
     a(f'<text x="{cx-hw+18}" y="{cy+nyo+5}" class="disp" font-size="13" fill="{color}">{title}</text>')

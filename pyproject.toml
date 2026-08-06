@@ -3,10 +3,15 @@ name = "wam"
 version = "0.0.1"
 description = "Modular World Action Model — joint video/action prediction for humanoid manipulation"
 requires-python = ">=3.10"
+# typing-extensions is a REAL core dependency, not a convenience: `from typing_extensions import
+# Self` is a module-level import in wam.interfaces.versioning, wam.data.episode and
+# wam.runtime.client, so `import wam` fails without it. It arrives today only transitively
+# through pydantic, which is a dependency of a dependency and not a promise.
 dependencies = [
     "numpy",
     "pydantic>=2",
     "pyyaml",
+    "typing-extensions",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +27,12 @@ wan = [
     "transformers>=4.51",
     "accelerate",
     "sentencepiece",
+    # NOT protobuf, deliberately — cluster/discoverer/10_build_env.sbatch:46 installs it and this
+    # does not need to. protobuf is only pulled in when transformers has to convert a slow
+    # sentencepiece tokenizer to a fast one; Wan-AI/Wan2.2-TI2V-5B-Diffusers ships a prebuilt
+    # tokenizer/tokenizer.json (checked against the Hub file listing), so
+    # AutoTokenizer.from_pretrained(..., subfolder="tokenizer") (wan_i2v.py:298) never takes the
+    # conversion path. Add it if a future snapshot drops that file.
     "ftfy",
     "peft>=0.14",
     "safetensors",
@@ -32,9 +43,67 @@ jobs = ["huggingface_hub>=0.34"]
 # (wam.robot.mujoco_g1 / mujoco_transport). CPU only, works headless on macOS and Linux.
 # The G1 model itself is NOT a package — fetch it with scripts/fetch_g1_model.py.
 sim = ["mujoco"]
+# Isaac Sim (E2, the second sim backend). DELIBERATELY EMPTY, and the empty list is the point:
+# `uv pip install wam[isaac]` in this venv must NOT pull isaacsim-core, because it pins
+# torch==2.11.0 while uv.lock resolves 2.13.0 — one resolver would silently downgrade the
+# other's torch and both halves would then be subtly wrong. Isaac lives in its own python
+# (NVIDIA's installer or their pip index), where this package is installed WITHOUT the train
+# and wan extras; wam.robot.isaac_* is torch-free at module scope precisely so that works.
+# The extra exists to name the backend and carry this note. See docs/isaac.md §0.
+isaac = []
 # peft is a dev dependency too: without it the LoRA tests skip instead of run, and a broken
 # adapter surface would then only show up on the cluster.
-dev = ["pytest", "ruff", "peft>=0.14"]
+#
+# ruff is PINNED, not floated. An unpinned linter makes "All checks passed!" a claim about the
+# week it was run: ruff 0.16.0 changed its default rule set and turned a clean tree into 10 errors
+# in docs/anim/ with no source change (docs/handoff.md §4). 0.16.0 is what uv.lock already resolved
+# (uv.lock:1750) and what .venv/bin/ruff reports; the pin freezes that, and [tool.ruff.lint] names
+# the rules so neither half of the claim can drift on its own. Bump both together, deliberately.
+dev = ["pytest", "ruff==0.16.0", "peft>=0.14"]
+# Everything ONE local GPU box needs to run docs/local_gpu.md end to end, in one bracket.
+#
+# This exists because the runbook used to say `pip install -e '.[dev]'`, and dev is
+# [pytest, ruff, peft] — no diffusers, no transformers, no pyarrow. src/wam/data/episode.py
+# imports pyarrow at module level, so every GPU command in that runbook died on import before
+# it ever reached the GPU. The alternative fix was to tell people to type
+# '.[wan,data,serve,sim,dev]', which is exactly the string that drifts away from the runbook.
+#
+# It is a flat UNION, not `wam[wan,data,...]`, on purpose: scripts/preflight_gpu.py parses this
+# table to work out which extra provides a missing import and to print the repair command. A
+# self-referential entry would tell it this group provides one distribution called "wam", and
+# the tool whose whole job is catching this bug would go blind to the fix.
+#
+# Keep it declared LAST. scripts/preflight_gpu.py:cover_extras breaks ties on declaration order,
+# so a narrower group still wins when it covers just as much, and `local` is only named when it
+# genuinely covers more.
+#
+# It deliberately does NOT pin an index for torch. On Blackwell (sm_120) install torch FIRST
+# from the CUDA build you want — see docs/local_gpu.md §0, which also explains why `uv sync`
+# must not be used to install this project on that box.
+local = [
+    # wan
+    "torch",
+    "diffusers>=0.35",
+    "transformers>=4.51",
+    "accelerate",
+    "sentencepiece",
+    "ftfy",
+    "peft>=0.14",
+    "safetensors",
+    # data — pyarrow is module-level in wam.data.episode; nothing runs without it
+    "pyarrow",
+    "opencv-python",
+    "av",
+    # train
+    "einops",
+    # serve — scripts/serve_policy.py and wam.runtime.client
+    "websockets>=12",
+    # sim — docs/local_gpu.md §4 runs `rollout.py --robot mujoco_g1`
+    "mujoco",
+    # dev — §0 tells you to run the test suite before trusting a GPU number from this repo
+    "pytest",
+    "ruff==0.16.0",  # pinned; see the dev extra for why, and [tool.ruff.lint] for the rule set
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -45,3 +114,47 @@ packages = ["src/wam"]
 
 [tool.ruff]
 line-length = 100
+
+# The rule set is named here, and the linter version is pinned above (ruff==0.16.0 in the dev and
+# local extras). Neither used to be true: this repo ran a bare `[tool.ruff]` with only line-length
+# and inherited whatever ruff's DEFAULT set happened to be that week. ruff 0.16.0 changed that
+# default and `ruff check .` went from "All checks passed!" (2026-07-29) to 10 errors in docs/anim/
+# — 5 UP031, 2 EXE001, 2 RUF100, 1 SIM115 — with not one line of source changed (docs/handoff.md
+# §4). A lint claim with neither a pinned linter nor a named rule set has an expiry date.
+#
+# `select` is E4/E7/E9/F: pycodestyle imports + statements + runtime errors, plus all of pyflakes.
+# `ignore` is not cosmetic tidying, so read it before trusting a green run. To see what it hides,
+# you need an explicit override — `.venv/bin/ruff check . --statistics` reads THIS file, so the
+# `ignore` below suppresses every finding and it prints nothing at all. The command that does
+# reproduce the number is:
+#
+#   .venv/bin/ruff check . --statistics \
+#       --config 'lint.select=["E4","E7","E9","F"]' --config 'lint.ignore=[]'
+#
+# Under ruff 0.16.0 on 2026-08-06 that reports 216 findings, none of them the 10 above. The two
+# codes below are that 216, entire:
+#
+#   F405  158×  every one in docs/anim/make-receding-horizon.py, from its `from emai_lottie_kit
+#               import *` (line 39). That line already carries `# noqa: F401,F403,E402`, and the
+#               plain `import emai_lottie_kit as kit  # noqa: E402` three lines above it (line 36)
+#               carries one too — those two directives are the two RUF100 that fire under 0.16.0's
+#               default and stop firing under this select, one each, at :36 and :39. Neither
+#               suppresses F405. Enabling it would mean 158 noqa comments in one drawing script
+#               or rewriting its DSL import. Neither is lint work.
+#   E402   58×  the repo's script bootstrap: `sys.path.insert(0, str(_REPO_ROOT / "src"))` before
+#               `from wam... import ...`, so scripts/ runs against a checkout without an install
+#               (e.g. scripts/audit_gripper.py:28-30). Deliberate idiom, 58 sites, no way to keep
+#               the rule and the idiom except a noqa on each.
+#
+# Three more codes used to be listed here — E731 2×, E741 2×, E702 1×, the 5 sites that were the
+# only ones a source fix could clear. They were fixed in source on 2026-08-06, not suppressed, and
+# their `ignore` entries deleted: `def` instead of lambda (docs/anim/make-poster.py:33,
+# scripts/hf_job_wan_probe.py:553), `l` renamed (hf_job_wan_probe.py:792 → `lbl`,
+# tests/test_bench_ridge_baseline.py:967 → `lam`), semicolon split (make-poster.py:56). That took
+# the override command's count from 221 to 216 and left F405 + E402, which are not lint work.
+# For anything that remains: do NOT add a per-file-ignore or a `# noqa`, and do not extend this
+# list to make a new failure go away. Adding rules is likewise a deliberate act: bump the pin and
+# widen `select` in the same commit, so the diff shows which rules arrived.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["F405", "E402"]

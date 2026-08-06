@@ -964,7 +964,7 @@ def test_the_cli_reports_the_ceiling_and_the_split_it_was_chosen_on(
             "--ceiling-val-episodes", str(CEILING_VAL_EPISODES),
             *[a for w in CEILING_WIDTHS for a in ("--ceiling-width", str(w))],
             *[a for g in CEILING_GAMMAS for a in ("--ceiling-gamma", str(g))],
-            *[a for l in CEILING_LAMBDAS for a in ("--ceiling-lam", str(l))],
+            *[a for lam in CEILING_LAMBDAS for a in ("--ceiling-lam", str(lam))],
             "--json", str(out),
         ]
     )  # fmt: skip

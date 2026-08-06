@@ -549,7 +549,10 @@ def episode_split(episode_of: np.ndarray) -> dict[str, np.ndarray]:
     train_eps = episodes[: -n_test - n_val]
     if not train_eps:
         raise ValueError("split left no training episodes — use more episodes")
-    pick = lambda eps: np.flatnonzero(np.isin(episode_of, eps))
+
+    def pick(eps):
+        return np.flatnonzero(np.isin(episode_of, eps))
+
     return {
         "train": pick(train_eps),
         "val": pick(val_eps),
@@ -785,7 +788,9 @@ def _compare_readouts(
         "state_only_joints_test_r2": floor,
         "per_readout": per_readout,
         "grid_vs_random_control": controls,
-        "any_spatial_beats_state_only": any(per_readout[l]["beats_state_only"] for l in spatial),
+        "any_spatial_beats_state_only": any(
+            per_readout[lbl]["beats_state_only"] for lbl in spatial
+        ),
         "any_geometry_gain_over_control": any(c["geometry_helps"] for c in controls),
     }
 
