@@ -75,9 +75,11 @@ MOTION_FLOOR_RATIO = 0.5
 
 #: Pre-registered margin for the freeze gate (:func:`build_report`, ``freeze_gate``). An ANCHORED
 #: dream is a future prediction, and the baseline every future prediction has to beat is the
-#: trivial one — hold the anchor frame and predict no change. On a corpus where 96 % of frame
-#: pairs move less than one grey level, freezing is a *strong* baseline, so a coin-flip win is
-#: not evidence: PASS requires the dream to be at least 10 % closer to the observation than
+#: trivial one — hold the anchor frame and predict no change. On a corpus where **68.9 %** of frame
+#: pairs move less than one grey level (`docs/preregistration/PR-05-dream-motion.md:44`, 200 clips
+#: over 40 episodes — that is the corpus statistic this margin was set against; individual t35 clips
+#: run as high as 0.96 and are not the basis), freezing is a *strong* baseline, so a coin-flip win
+#: is not evidence: PASS requires the dream to be at least 10 % closer to the observation than
 #: freezing is. Fixed BEFORE the first PR-06 run.
 FREEZE_MARGIN = 0.9
 

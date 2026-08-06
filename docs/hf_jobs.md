@@ -39,13 +39,14 @@ python scripts/launch_wan_smoke_job.py --flavor l40sx1
 hf jobs logs <job_id>
 ```
 
-Equivalent CLI (what `--dry-run` prints):
+Equivalent CLI (what `--dry-run` prints, with the absolute repo path shortened to `./src`):
 
 ```bash
 hf jobs uv run --flavor l40sx1 --timeout 45m --name wan-smoke --secrets HF_TOKEN \
   -v hf://Wan-AI/Wan2.2-TI2V-5B-Diffusers:/model \
   -v ./src:/wam-src \
-  scripts/hf_job_wan_smoke.py -- --source /model --device cuda --frames 5 --height 256 --width 448
+  scripts/hf_job_wan_smoke.py -- --source /model --device cuda --dtype bfloat16 \
+  --frames 5 --height 256 --width 448 --out /tmp/wan_smoke_report.json
 ```
 
 `-v hf://<repo>:/model` mounts the weights read-only (no download step inside the job);
@@ -73,6 +74,28 @@ once, then the tower moves to CPU). Default timeout is 30 min — the launcher s
 
 A first smoke run is a couple of dollars. Set a budget expectation before scaling to training
 runs; every job is billed per second of wall clock, including dependency install (~2 min).
+
+**Every vendor claim in this file is unverified — this note covers all of them, not just the
+prices.** The per-flavor prices above are the ones hard-coded in
+`scripts/launch_wan_smoke_job.py:25` (`FLAVOR_COST`), which is where they were copied to, not a
+check on them. Everything else in this file that comes off a vendor page or a model card is
+likewise restated without verification here:
+
+- the quota and billing rules throughout — HF's published terms as of 2026-07-26;
+- "any flavor up to 8x H200" in the table at the top;
+- the GPU / VRAM column above (A10G 24 GB, L4 24 GB, L40S 48 GB, RTX Pro 6000 96 GB,
+  H200 141 GB);
+- "Both Wan generations are **Apache 2.0**" under *Model choice*;
+- Cosmos3-Nano's stated architecture, licence and packaging under *Backbone bake-off*
+  ("16B MoT: 8B AR reasoner + 8B diffusion generator", "OpenMDW-1.1", "diffusers-native since
+  0.37"). The Space pins `diffusers==0.39.0`, which does not establish 0.37 as the first
+  version that works.
+
+Re-check any of these before budgeting, and before a licence or procurement decision rests on
+one. Model *geometry* is a separate matter, and splits: the 5B numbers under *Model choice* are
+read back from `info.geometry` in `runs/wan_ablation/2026-07-26-zerogpu-5b.json` (30 layers,
+`feature_dim` 3072, 48 latent channels, VAE strides 16 / 4), while the 14B row was never loaded
+here and is card-derived like the rest of this list.
 
 ## Model choice (OD-04)
 
@@ -131,7 +154,16 @@ quota it bills pre-paid credits at $1 per 10 min — the same balance Jobs needs
 | load / VAE encode / DiT forward | 7.1 s / 0.37 s / 0.08 s |
 | peak VRAM | 24.3 GB (26.3 GB reserved) |
 
-The 12 ms/token-block forward is what matters for FR-05: the DiT pass is nowhere near the
+The report of *this* call was never persisted; the archived artifact from the same session is
+the ablation below (`runs/wan_ablation/2026-07-26-zerogpu-5b.json`), which reproduces the
+geometry, the shapes, `std=0.7127` and the VRAM figures exactly and reads 7.4 s / 0.47 s /
+0.10 s for the three timings. Of the table's three timings only the DiT forward carries a
+second receipt: the message body of commit `09b1474` (`git log -1 --format=%B 09b1474`) records
+this run as "24.3 GB peak VRAM, and the DiT forward takes 81 ms". A commit message is an
+artifact, so 0.08 s and the 24.3 GB are receipted; the 7.1 s load and the 0.37 s VAE encode are
+receipted nowhere and stay unverified.
+
+The 81 ms DiT forward is what matters for FR-05: the DiT pass is nowhere near the
 2 Hz policy-rate budget, so the closed loop is limited by chunk length, not the backbone.
 
 Two things this caught that stub tests could not — see the git history for both: the Wan 2.2
@@ -151,8 +183,8 @@ Result on `Wan2.2-TI2V-5B` (30 blocks):
 | blocks | motion | instruction | state | combined score |
 |---|---|---|---|---|
 | 0–19 | 0.28–0.39 | 0.02–0.05 | 0.010–0.020 | 0.02–0.26 |
-| **20–24** | 0.26–0.37 | **0.07–0.11** | **0.025–0.030** | 0.34–0.58 |
-| 25–28 | 0.32–0.43 | 0.03–0.04 | 0.022–0.025 | 0.20–0.38 |
+| **20–24** | 0.26–0.37 | **0.07–0.11** | **0.024–0.029** | 0.34–0.57 |
+| 25–28 | 0.32–0.43 | 0.03–0.04 | 0.023–0.025 | 0.20–0.38 |
 | **29** | **0.56** | 0.09 | **0.057** | **0.93** |
 
 Three readings: every conditioning path is alive (each probe moves features somewhere);
@@ -167,7 +199,7 @@ loop the ablation left open: 96 windows (12 GR00T-AppleToPlate episodes × 8 win
 at 192×256), one frozen DiT forward each, per-block token-pooled features, ridge regression
 onto the next 16-step canonical action chunk. Honest evaluation: episode-level split
 (train 0–6 / val 7–8 / test 9–11), alpha chosen on val only, joints and gripper scored
-separately (their label scales differ by ~50×). 8/8 checks, 73 s wall on ZeroGPU.
+separately (their label scales differ by ~50×). 8/8 checks, 16.1 s GPU wall on ZeroGPU.
 Full table: `runs/wan_probe/2026-07-26-zerogpu-5b.json`.
 
 | features | joints test R² | gripper test R² |
@@ -192,14 +224,15 @@ absent from the backbone. The next section closes that gap: it is absent either 
 ## Spatial readouts (T-26 / I-1, 2026-07-29)
 
 **Result: no geometry gain, verdict unchanged.** 10/10 checks on ZeroGPU,
-`runs/wan_probe/2026-07-29-zerogpu-5b-readouts.json`. Joints test R², block pair chosen on val:
+`runs/wan_probe/2026-07-29-zerogpu-5b-readouts.json`. Joints test R², best *single* block chosen
+on val — which is block 10 in all three readouts:
 
 | readout | width | val | **test** |
 |---|---:|---:|---:|
 | `mean` | 3 072 | 0.404 | **0.310** |
 | `grid2x2` | 12 288 | 0.424 | **0.370** |
 | `rand4` (control) | 12 288 | 0.417 | **0.376** |
-| `state_only` | 52 | 0.547 | **0.456** |
+| `state_only` | 32 | 0.547 | **0.456** |
 
 Gripper: 0.881 state-only against 0.704 for the best readout. On the val-selected pair
 `grid2x2` scores 0.338 against the control's 0.3657 — the grid is *behind* random grouping of
@@ -252,10 +285,10 @@ On the Space, leave the readout box blank for the default. Read
 
 **Cost.** The GPU side does not change at all — still one forward per window, all readouts
 computed from the same activation (7.6 s measured on ZeroGPU). What grows is the ridge, and it
-runs *outside* `@spaces.GPU`, so it burns no quota. Measured on this Mac at the real 96-window /
-12-episode layout: ~3 s for `mean`, ~12 s per `grid2x2`-width readout, ~44 s at `grid3x4`
-width. The default trio lands around 30 s; going wider than 3×4 cells is the first thing that
-actually costs something.
+runs *outside* `@spaces.GPU`, so it burns no quota. Timed ad hoc on this Mac at the real
+96-window / 12-episode layout (no artifact, so unverified): ~3 s for `mean`, ~12 s per
+`grid2x2`-width readout, ~44 s at `grid3x4` width. The default trio lands around 30 s; going
+wider than 3×4 cells is the first thing that actually costs something.
 
 ## Backbone bake-off: Cosmos3-Nano probe (T-24, 2026-07-26)
 
@@ -270,7 +303,7 @@ hooks pool the gen-pathway residual stream of all 36 MoT layers.
 
 Deploy: `scripts/deploy_cosmos3_space.py` (private ZeroGPU Space, `diffusers==0.39.0` exact
 pin — the probe drives private packing helpers). Run 2026-07-26: **9/9 checks**, 96 windows,
-features `(96, 36, 4096)`, load 8.1 s, 0.106 s/window forward, peak VRAM 36.2 GB, ~33 s GPU
+features `(96, 36, 4096)`, load 8.1 s, 0.106 s/window forward, peak VRAM 36.2 GB, 18.3 s GPU
 wall. Full table: `runs/cosmos3_probe/2026-07-26-zerogpu-nano.json`.
 
 | features | joints test R² | gripper test R² |
@@ -284,18 +317,25 @@ wall. Full table: `runs/cosmos3_probe/2026-07-26-zerogpu-nano.json`.
 
 Verdict: **frozen Cosmos3 features do not beat the state-only ridge either → stay on Wan for
 the T-16 LoRA.** The robotics pretraining is visible but small: gripper readability is
-clearly above Wan's (0.822 vs. 0.698 single-block) and approaches the state-only ceiling,
-while joints land in the same ~0.33–0.40 band as Wan. Note the top-2-by-val pair (11, 24)
-*overfits the val episodes* (val 0.465 → test 0.324) — with 2 val episodes, pair selection
-by val R² is noisy; the depth heuristic generalized better here. Neither backbone's frozen
-prior linearly encodes next-chunk actions, so the earlier conclusion stands unchanged: the
-action value must come from fine-tuning, and Wan stays primary (Apache 2.0, 5B vs. 16B —
-cheaper to LoRA and to serve). Cosmos3 remains the fallback candidate if the Wan LoRA
-underdelivers; the probe harness reruns against any diffusers-native backbone.
+clearly above Wan's (0.822 against Wan's best single block, 0.734 at block 6) and approaches
+the state-only ceiling, while joints land in the same ~0.32–0.40 band as Wan. Note the
+top-2-by-val pair (11, 24) *overfits the val episodes* (val 0.465 → test 0.324) — with 2 val
+episodes, pair selection by val R² is noisy; the depth heuristic generalized better here.
+Neither backbone's frozen prior linearly encodes next-chunk actions, so the earlier conclusion
+stands unchanged: the action value must come from fine-tuning, and Wan stays primary
+(Apache 2.0, 5B vs. 16B — cheaper to LoRA and to serve). Cosmos3 remains the fallback
+candidate if the Wan LoRA underdelivers; the probe harness reruns against any
+diffusers-native backbone.
+
+> **Superseded in part (2026-08-05, T-38).** Everything above is a **12-episode** verdict.
+> Run as one experiment on identical windows at 12 / 24 / 48 episodes, the *ranking reverses*:
+> at 48 episodes Cosmos3 scores 0.4267 joints against Wan's 0.3867, and both still lose to the
+> floor at every size. "Both lose to state-only" survives; "Wan is ahead of Cosmos3" does not.
+> `docs/backbone-eval.md` §7, `runs/backbone_eval/compare_backbones.json`.
 
 **Qualitative side-by-side (2026-07-26):** the Cosmos3 script also has a `--generate` mode
 (mirror of the Wan probe's, "generate future" tab on the same Space) that sampled the two
-`wan_futures/` prompts from the identical start frame (49 frames 640×480, 35 steps, ~46 s
+`wan_futures/` prompts from the identical start frame (49 frames 480×640, 35 steps, ~46 s
 sampling, peak 35.6 GB with tiled VAE decode) → `runs/presentation/cosmos3_futures/`,
 mirrored to `huhn511/wam-presentation`. Both clips follow their instruction (apple lands on
 the plate / plate pushed left, apple stays) with plausible physics — but Cosmos3 invents a
@@ -330,16 +370,18 @@ rebuild via `runs/presentation/build/make_videocond_video.py`).
 The third follow-up runs the whole task as **closed-loop chunks** (the FR-05 pattern
 against fixed footage): 5 Video2World runs, each conditioned on the 97 real frames
 ending at an anchor (150/210/270/330/390), each predicting 48 frames (2 s, the PRD
-chunk length; 145-frame canvas, ~165 s sampling per chunk, one ZeroGPU queue timeout
-retried). Conditioning verified at VAE-roundtrip level (1.3–2.0/255) on every chunk.
+chunk length; 145-frame canvas, 145–146 s sampling per chunk, one ZeroGPU queue timeout
+retried). Conditioning verified at VAE-roundtrip level (1.3–2.0/255) on every chunk —
+a check that left no artifact behind, so those bounds are unverified.
 Stitched (`cosmos3_futures/chunks/stitched_fulltask.mp4`, predicted 24 fps segments
 resampled to 30 fps) this covers the full 15-s task time-aligned with the real episode
 (`stitched_vs_real.mp4` is the side-by-side). Findings: (1) it corrects an earlier
 claim — the G1 arm *does* enter the ego view from ~frame 200 on, and every context
 window that contains it yields the true embodiment (silver arm, Dex3 hand, grasp,
 place, retreat all plausible); only chunk 1, whose context predates the arm, still
-invents a white manipulator. (2) Re-anchor seams show drift of 14–39/255 — e.g. chunk 1
-slides the apple instead of lifting it — and the next anchor pulls the prediction back:
+invents a white manipulator. (2) Re-anchor seams show drift of 14–39/255 — also
+unverified, the chunk reports hold only the sampling parameters — e.g. chunk 1
+slides the apple instead of lifting it, and the next anchor pulls the prediction back:
 predict, re-observe, re-anchor is exactly what the runtime loop will do. (3) Generated
 re-creations of recorded demos are diagnosis/presentation material, not training data —
 the LoRA (T-16) on real demos stays the way to close the fresh-start embodiment gap.
@@ -401,7 +443,7 @@ progress:
 - the video loss was deliberately downweighted to **0.5** so the latent flow residual would not
   dominate the action branch (R-07) — fidelity was never the objective;
 - the DiT trained with **proprioception tokens concatenated onto the text context**
-  (`wan_i2v.py:605`), which a diffusers pipeline cannot supply, so this runs without them.
+  (`wan_i2v.py:609`), which a diffusers pipeline cannot supply, so this runs without them.
 
 And the action branch is not in the file at all. On WAM-Bench the full checkpoint reaches L0 and
 loses to repeat-last-action: 48.4/100 and −32.4 % as published (tiled, i.e. one frame repeated
@@ -415,6 +457,14 @@ Five ZeroGPU calls, episode 0 / frame 150 (Dex3 hand at the apple, arm not yet i
 the base prior has to invent it), same prompt and seed 0 throughout. Artifacts in
 `runs/presentation/t16_lora_futures/`. `motion` is the mean absolute frame-to-frame difference
 in 0–255.
+
+The five `*.report.json` there record the calls (geometry, scale, seed, sampling time) but
+**not** the motion column — and not the frame `std` values quoted in finding 1 below, which
+came off the same unrecorded Space scratch output. No committed code produced either until
+`src/wam/evaluation/dream.py` (see its module note at lines 54–58), which now emits both
+(`motion` and `pixel_std`) — but the numbers printed below predate it and were never
+re-derived through it. Read the motion column and the `std` figures alike as indicative, not
+as re-derivable measurements.
 
 | geometry | LoRA scale | motion | what it looks like |
 |---|---|---|---|
@@ -466,7 +516,14 @@ fine-tune.
 1. ~~Record which blocks give the most action-predictive features~~ — done twice: label-free
    ablation said (20, 29), label-validated probes overturned it → (2, 10) in
    `configs/model/wan22_ti2v_5b.yaml`, provisional until LoRA.
-2. T-16 on the same infrastructure: LoRA on the DiT + the state projection, checkpoints to a
-   storage bucket volume (`-v hf://buckets/<user>/<bucket>:/outputs`), `--timeout 4h`.
-3. Compare against the `tiny` backbone on D1 (the T-18 ablation harness) — that is the real
-   "does the video branch help" verdict, and it needs real teleop data (D2), not synthetic.
+2. ~~T-16 on the same infrastructure: LoRA on the DiT + the state projection, checkpoints to a
+   storage bucket volume (`-v hf://buckets/<user>/<bucket>:/outputs`), `--timeout 4h`~~ — T-16
+   ran 2026-07-30, but on **Discoverer+** (H200), not on HF Jobs:
+   `runs/t16-lora-seed0/run_metadata.json` records `checkpoint_ref`
+   `/valhalla/projects/ehpc-aif-2026pg01-905/runs/t16-lora-seed0`. The bucket-volume route was
+   never used.
+3. ~~Compare against the `tiny` backbone on D1 (the T-18 ablation harness)~~ — done on real
+   data (T-18/AC-07, re-scored 2026-08-01): `t18-real-ablation-seed0` −129.00 % against
+   `d1-full-gen-seed0` −20.88 % on `skill_vs_repeat_pct`, i.e. the world branch costs 108 pp on
+   `tiny`. T-16's −21.80 % is **not** a clean ablation against either — backbone *and* branch
+   differ. See `docs/improvements.md` and `TASKS.md`.
