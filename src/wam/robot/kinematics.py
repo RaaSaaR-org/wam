@@ -59,7 +59,13 @@ def _load_model(scene_path: str | Path | None) -> Any:
 
 
 def _mat_to_rpy(mat: np.ndarray) -> np.ndarray:
-    """3x3 rotation -> intrinsic XYZ euler (roll, pitch, yaw), radians.
+    """3x3 rotation -> (roll, pitch, yaw) radians, with ``R = Rz(yaw) @ Ry(pitch) @ Rx(roll)``.
+
+    That composition is EXTRINSIC XYZ, equivalently intrinsic ZYX — spelled out because the two
+    are one capital letter apart in the library a consumer will reach for and are not the same
+    rotation: ``scipy...Rotation.from_euler("xyz", rpy)`` reconstructs this, ``"XYZ"`` does not.
+    The same statement, as an assertion against MuJoCo's own matrix, is
+    ``test_the_reported_euler_angles_reconstruct_the_scenes_own_rotation_matrix``.
 
     Bridge-style action ports quote orientation as roll/pitch/yaw, so that is what this returns.
     Euler angles are a poor rotation representation in general — they are discontinuous at
