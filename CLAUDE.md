@@ -30,6 +30,9 @@ configs/        versioned robot/model/training configs
 
 ## Conventions
 
-- Python, PyTorch. Tasks live in `TASKS.md` (milestones M0–M4 map to the PRD roadmap).
+- Python, PyTorch. Tasks are one file each under `.mc/tasks/{todo,done}/` (MissionControl format,
+  IDs stay `T-NN`; see `.mc/README.md`). `TASKS.md` is the milestone index over them — milestones
+  M0–M4 map to the PRD roadmap. `mc task next` gives the next actionable task, `mc show T-16` the
+  full record. Edit the task file, not the index; run `mc index` afterwards.
 - Every rollout must be traceable to checkpoint + dataset snapshot + config hash (AC-04).
 - Milestone order is strict: overfit a small task first (D1), only then scale (P6).

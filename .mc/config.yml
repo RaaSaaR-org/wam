@@ -1,0 +1,64 @@
+# MissionControl Configuration (embedded mode)
+# Stored in .mc/ alongside an existing project.
+
+site:
+  name: WAM
+  description: Modular World-Action Model — joint visual-future + action prediction on a G1
+
+paths:
+  meetings: meetings/
+  research: research/
+  tasks: tasks/
+  sprints: sprints/
+  proposals: proposals/
+  data: data/
+  templates: templates/
+  archive: archive/
+
+# Task IDs stay `T-NN` — they are cited across README.md, docs/, cluster/*.sbatch and
+# git history, so renumbering them to TASK-NNN would break every existing reference.
+# `mc new task` will mint T-040 onward (mc pads to three digits); older two-digit and
+# letter-suffixed IDs (T-16a, T-25c) are matched by the same `^T-(\d+)` scan.
+id_prefixes:
+  meeting: MTG
+  research: RES
+  task: T
+  sprint: SPR
+  proposal: PROP
+
+statuses:
+  meeting:
+    - scheduled
+    - completed
+    - cancelled
+  research:
+    - draft
+    - in-progress
+    - final
+    - outdated
+  task:
+    - backlog
+    - todo
+    - in-progress
+    - review
+    - done
+    - cancelled
+  sprint:
+    - planning
+    - active
+    - review
+    - completed
+    - cancelled
+  proposal:
+    - draft
+    - proposed
+    - accepted
+    - rejected
+    - superseded
+    - withdrawn
+
+priorities:
+  1: critical
+  2: high
+  3: medium
+  4: low
