@@ -8,8 +8,9 @@ that is the *why*, this is the *how*.
 readout probe, T-16 itself (20 000 LoRA steps, `runs/t16-lora-seed0`, negative: WAM-Bench L0,
 `skill_vs_repeat_pct` −32.4 %, a *tiled* number), and T-29, which re-measured that same
 checkpoint through the real frame window: −21.80 % (+10.65 pp). L1 is still failed by 21.80 pp,
-so the verdict survives and the published figure does not. Step 9 (T-30) is running as job
-184670. Steps 10–11 are staged and unrun.
+so the verdict survives and the published figure does not. Step 9 (T-30) **ran 2026-08-01 as job
+184670 and is negative** — every flow arm below L0. Steps 10–13 are staged and unrun, and 12–13
+are blocked behind 11.
 
 **No document here asserts how much of the allocation is left** — that number moves every job and a
 stale copy of it is worse than none. Read it live with `accountcheck` (`docs/discoverer.md` §9).
@@ -70,12 +71,19 @@ Checkpoints belong in `${PROJ}/runs` ([scratch](https://docs.discoverer.bg/scrat
 | 6 | `50_train_t16.sbatch` | project | the budget | the LoRA fine-tune |
 | 7 | `60_eval_t16.sbatch` | project | ~0.2 GPU-h | score the checkpoint on the proven holdout |
 | 8 | `61_eval_t29_frame_history.sbatch` | project | ~0.4 GPU-h | T-29 / I-7: tiled frame vs. the real window — **ran** 2026-08-01 (job 184648): −32.45 % → −21.80 %, L1 still failed |
-| 9 | `63_eval_t30_flow_head.sbatch` | project | ~4 GPU-h ×1–2 | T-30 / I-3: regression head vs. the flow sampler — **running** (submitted 2026-08-01, job 184670) |
-| 10 | `55_train_i8_rung.sbatch` | project | ~36 GPU-h ×3 | I-8 / T-32 rungs 040 / 120 (+ a seed-1 replicate) |
-| 11 | `62_eval_i8_curve.sbatch` | project | ~1 GPU-h | both frame modes × 3 rungs, then the pre-registered verdict |
+| 9 | `63_eval_t30_flow_head.sbatch` | project | ~4 GPU-h ×1–2 | T-30 / I-3: regression head vs. the flow sampler — **ran** 2026-08-01 (job 184670): all 10 arms below L0, mean-of-8 arm 11.1× worse than the regression readout |
+| 10 | `70_train_t39_baseline.sbatch` | project | ≤8 GPU-h | **T-39 / PR-07, the positive control** — NVIDIA's own recipe on our committed split |
+| 11 | `71_eval_t39_control.sbatch` | project | ~0.5 GPU-h | four arms + the pre-registered `T39_RULE_V1` verdict |
+| 12 | `55_train_i8_rung.sbatch` | project | ~36 GPU-h ×3 | I-8 / T-32 rungs 040 / 120 (+ a seed-1 replicate) — **blocked on step 11** |
+| 13 | `62_eval_i8_curve.sbatch` | project | ~1 GPU-h | both frame modes × 3 rungs, then the pre-registered verdict |
 
 The `#` column is execution order, not the filename number: `55_` sorts before `60_` because it
 is a *training* script, but it runs after step 8.
+
+**Steps 10–11 run before 12–13, and that ordering is pre-registered** (`PR-07` §2). T-32 spends
+~109 GPU-h fitting a scaling curve on a method no positive control has ever validated on this
+corpus; if the method is simply broken here, every branch of `I8_RULE_V3` describes the scaling of
+brokenness. T-39 costs an order of magnitude less and is what makes T-32 readable.
 
 Steps 1–3 cost nothing. Run them first — they catch every environment problem before a single
 GPU-hour is spent.
@@ -171,4 +179,11 @@ sync.sh                push repo + dataset from the Mac; --pull fetches results 
 61_eval_t29_frame_history.sbatch  T-29 frame-mode A/B      ~0.4 GPU-h, ran 2026-08-01
 62_eval_i8_curve.sbatch the I-8 curve + its decision rule  ~1 GPU-h
 63_eval_t30_flow_head.sbatch      T-30 readout A/B         ~4 GPU-h, resubmit to continue
+70_train_t39_baseline.sbatch      T-39 positive control    <=8 GPU-h, own venv virt_envs/t39
+71_eval_t39_control.sbatch        T-39 arms + T39_RULE_V1  ~0.5 GPU-h
 ```
+
+`70_`/`71_` use **`$PROJ/virt_envs/t39`**, not `virt_envs/wam`. The vendored trainer pins its own
+torch and attention kernels, and importing it into the WAM env is how one dependency resolution
+quietly changes every WAM number afterwards. Neither job is submittable yet — `PR-07` §8 lists
+what must exist first.

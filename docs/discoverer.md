@@ -10,13 +10,13 @@ that can hold a training run for hours. ZeroGPU cannot; Discoverer+ can. This cl
 compute half of OD-05.
 
 **Runnable form:** the job scripts in this document are checked in as `cluster/discoverer/`
-(sync script + eleven `sbatch` files, in execution order). This document is the *why* — machine facts,
+(sync script + thirteen `sbatch` files, in execution order). This document is the *why* — machine facts,
 quotas, billing, gotchas; that directory is the *how*. Its README opens with the seven
 **never-do** rules and carries the full link table to the provider's documentation (24 pages,
 all checked reachable 2026-07-28). The environment build, the weight staging, the smoke job, the
-readout probe, T-16 itself and the T-29 frame-mode A/B (job 184648, 2026-08-01) have run; T-30
-(the flow-head eval, job 184670) was submitted 2026-08-01 and is running; the I-8 rung remains
-staged and unrun.
+readout probe, T-16 itself, the T-29 frame-mode A/B (job 184648, 2026-08-01) and T-30 (the
+flow-head eval, job 184670, 2026-08-01 — negative) have run; the T-39 positive control and the I-8
+rung remain staged and unrun, in that order.
 
 | | |
 |---|---|
@@ -513,8 +513,18 @@ Each step below is a checked-in file in `cluster/discoverer/` — see its README
    backbone. Still the real AC-07 verdict, and still unrun — the recorded one ("video hurts")
    was measured with the `tiny` backbone and explicitly attributed to the missing pretrained
    prior. Since 2026-08-01 it also needs the *frame mode* stated: that number is tiled-only,
-   T-16's is not, and the two do not compare (T-29 / I-7). Re-scoring the archived checkpoint
-   in history mode costs no allocation and is the cheaper half of this — `scripts/rescore_archived.py`.
+   T-16's is not, and the two do not compare (T-29 / I-7). ~~Re-scoring the archived checkpoint
+   in history mode costs no allocation and is the cheaper half of this.~~ **The cheaper half ran
+   the same day** — `scripts/rescore_archived.py`, laptop CPU, zero allocation, and neither
+   baseline moved (−20.88 % / −129.00 %). The mode caveat is discharged; what is still unrun is the
+   *retrain* against the fine-tuned backbone, and that still needs the allocation.
+7. **T-39 positive control** — `70_train_t39_baseline.sbatch` → `71_eval_t39_control.sbatch`,
+   ≤12 GPU-h, with `T39_RULE_V1` and `docs/preregistration/PR-07-positive-control.md` in git
+   first. **Runs before T-32**, which is pre-registered ordering and not preference: T-32 spends
+   ~109 GPU-h fitting a scaling curve on a method no positive control has ever validated on this
+   corpus. Uses its own venv `$PROJ/virt_envs/t39` — the vendored trainer's torch and attention
+   pins are not ours, and importing them into `virt_envs/wam` would change the dependency set
+   every WAM number was produced under. Not submittable yet: PR-07 §8.
 
 If we ever pre-extract latents: Lustre punishes many-small-files dataloaders — pack shards, don't
 decode MP4s per step.
@@ -615,5 +625,5 @@ count (2), CUDA module (`nvidia/cuda/12/12.8`), setgid (yes), budget (5 000 GPU-
 
 *Written 2026-07-27 from `docs.discoverer.bg` and the EuroHPC AI-Factory Terms of Reference, then
 verified in a live session on `login-plus` the same day. Status as of 2026-08-01: the allocation is
-in use — T-16 trained for ~20 000 steps, T-29 (job 184648) evaluated, T-30 (job 184670) is running.
+in use — T-16 trained for ~20 000 steps, T-29 (job 184648) evaluated, T-30 (job 184670) evaluated.
 How much of the budget that consumed is not recorded here; `sacct` on the cluster is the source.*

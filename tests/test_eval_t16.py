@@ -355,7 +355,10 @@ def test_every_eval_sbatch_passes_the_split_witness() -> None:
 
     Scoring is the whole point of these four jobs; a flag they cannot omit belongs in a test.
     """
-    jobs = sorted((_REPO_ROOT / "cluster" / "discoverer").glob("6?_eval_*.sbatch"))
+    # Glob on the ROLE, not on the step number: the first version matched ``6?_eval_*`` and
+    # 71_eval_t39_control.sbatch (T-39, the positive control) landed outside it — a new eval job
+    # silently exempt from the one check that exists because eval jobs kept dropping this flag.
+    jobs = sorted((_REPO_ROOT / "cluster" / "discoverer").glob("*_eval_*.sbatch"))
     assert jobs, "no eval sbatch files found — did they move?"
     missing = [p.name for p in jobs if not _passes_the_witness(p.read_text())]
     assert not missing, f"eval jobs with no split witness: {missing}"
