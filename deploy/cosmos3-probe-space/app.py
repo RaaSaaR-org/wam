@@ -219,10 +219,9 @@ def run_generate(prompt: str, episode: int, frame: int, num_frames: int, steps: 
         if prompt.strip():
             argv += ["--gen-prompt", prompt.strip()]
         args = cosmos_probe.parse_args(argv)
-        if int(cond_frames) > 1:  # Video2World: real clip ending at `frame` as context
-            image = cosmos_probe.load_gen_clip(args)
-        else:
-            image = cosmos_probe.wanprobe.load_gen_frame(args)
+        # cond_frames > 1 -> Video2World clip ending at `frame`; the branch itself lives in
+        # cosmos_probe so the CLI (HF Jobs) and this tab cannot drift into different modes.
+        image = cosmos_probe.load_conditioning(args)
         log.append(f"conditioning: episode {episode} frame {frame}, {image.shape}")
         log.append(f"\nrequesting GPU (duration cap {GEN_GPU_DURATION}s)…")
         yield "\n".join(log), None, None

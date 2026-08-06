@@ -343,6 +343,19 @@ def load_gen_clip(args: argparse.Namespace) -> np.ndarray:
     return np.stack(frames)
 
 
+def load_conditioning(args: argparse.Namespace) -> np.ndarray:
+    """The pixels ``--generate`` conditions on: a clip ``[N, H, W, 3]``, or one frame ``[H, W, 3]``.
+
+    The mode switch lives here and nowhere else because it used to live in the Space app only:
+    the CLI — which is what an HF Job runs — called ``load_gen_frame`` unconditionally, so
+    ``--gen-cond-frames 97`` produced a single-frame run whose report still said 97. The two
+    callers now cannot disagree about which mode a run was in.
+    """
+    if args.gen_cond_frames > 1:
+        return load_gen_clip(args)
+    return wanprobe.load_gen_frame(args)
+
+
 def generate_future(
     args: argparse.Namespace, image_rgb: np.ndarray, report: smoke.Report
 ) -> dict[str, Any]:
@@ -362,6 +375,23 @@ def generate_future(
         raise ValueError(f"--gen-cond-frames must satisfy (N-1) % 4 == 0, got {args.gen_cond_frames}")
     if args.gen_height % 32 or args.gen_width % 32:
         raise ValueError("--gen-height/--gen-width must be multiples of 32")
+    if image_rgb.ndim == 4:
+        # A latent frame listed in condition_frame_indexes_vision is a frame the denoise loop
+        # never touches: prepare_latents seeds it from the encoded real clip and
+        # _mask_velocity_predictions zeroes its velocity. With as many conditioning frames as
+        # output frames *every* latent frame is clean, so the sampler is a no-op and the mp4 is
+        # a VAE round-trip of the input — a clip that would score near-perfectly against ground
+        # truth having predicted nothing, which is exactly the reading T-36 exists to avoid.
+        # The pipeline's own check_inputs catches cond > num (index past the timeline) and lets
+        # cond == num through silently; measured against diffusers 0.39 at latent_t = 13.
+        latent_t = (args.gen_num_frames - 1) // 4 + 1
+        cond_latents = (len(image_rgb) - 1) // 4 + 1
+        if cond_latents >= latent_t:
+            raise ValueError(
+                f"{len(image_rgb)} conditioning frames leave nothing to predict in a "
+                f"{args.gen_num_frames}-frame clip: {cond_latents} of {latent_t} latent frames "
+                "would be clean conditioning. Use fewer conditioning than output frames."
+            )
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     prompt = args.gen_prompt or wanprobe.DEFAULT_INSTRUCTION
 
@@ -383,9 +413,11 @@ def generate_future(
             "condition_frame_indexes_vision": tuple(range((len(clip) - 1) // 4 + 1)),
         }
         start = clip[-1]
+        cond_frames = len(clip)
     else:
         start = Image.fromarray(image_rgb).resize(size, Image.LANCZOS)
         cond = {"image": start}
+        cond_frames = 1
     t0 = time.perf_counter()
     result = pipe(
         prompt=prompt,
@@ -413,7 +445,9 @@ def generate_future(
         "episode": args.gen_episode,
         "start_frame": args.gen_frame,
         "conditioning": "video" if image_rgb.ndim == 4 else "image",
-        "cond_frames": args.gen_cond_frames,
+        # Counted off the array the pipeline was handed, not off the flag: the flag is a request
+        # and this field is the record of what the run actually saw.
+        "cond_frames": cond_frames,
         "num_frames": args.gen_num_frames,
         "steps": args.gen_steps,
         "guidance_scale": args.gen_guidance,
@@ -470,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         }
     )
     if args.generate:
-        generate_future(args, wanprobe.load_gen_frame(args), report)
+        generate_future(args, load_conditioning(args), report)
     else:
         windows, instruction, data_info = wanprobe.build_windows(args)
         report.info["data"] = data_info
