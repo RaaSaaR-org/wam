@@ -3,10 +3,10 @@ id: T-041
 aliases:
 - T-041
 - T-41
-title: Fine-tune a Cosmos generator on G1 data — frozen by PR-07, scoped here
+title: Fine-tune Cosmos3-Super on G1 data — unfrozen by OD-10, pre-registered as PR-09
 slug: cosmos-generator-finetune-on-g1
-status: backlog
-priority: 4
+status: todo
+priority: 3
 owner: ''
 projects: []
 customers: []
@@ -17,18 +17,35 @@ tags:
 - cluster
 - prereg
 sprint: ''
-depends_on:
-- "[[T-39]]"
-- "[[T-040]]"
+depends_on: []
+# T-39 and T-040 were hard dependencies until OD-10 (2026-08-07) decided not to wait for either.
+# They are still RELATED and the relationship is argued in prose below and in PR-09 §1/§9 — T-39
+# remains CRITICAL, and its verdict is what a result here must eventually be read against. They
+# are no longer BLOCKING, and leaving them here would keep this task out of `mc task next` for a
+# reason the user has already decided against.
 due_date: ''
 created: 2026-08-06
-updated: 2026-08-06
-status_note: "Frozen, not merely blocked. PR-07 §7 names Cosmos3-Super generation in its freeze
-  list; this task exists so the idea is written down with its costs rather than picked up
-  informally. It is scoped, not scheduled — nothing here is actionable while T-39 is unreported."
+updated: 2026-08-07
+status_note: "UNBLOCKED AND READY TO SUBMIT, 2026-08-07 — nothing has been submitted. The pipeline
+  is `docs/preregistration/PR-09-cosmos-super-finetune.md` (rule `T041_RULE_V1`) plus
+  `cluster/discoverer/90..95`, `scripts/prepare_cosmos_corpus.py`, `make_t041_eval_prompts.py`,
+  `eval_t041_embodiment.py` and `configs/cosmos3/t041_eval_selection.toml` (51 tests).
+  THE FREEZE IS LIFTED: OD-10 (2026-08-07, by the user) lifts PR-07 §7's *Cosmos3-Super generation*
+  clause only — T-32 and Cosmos3-Edge stay frozen, and PR-07 is NOT edited, because rules here are
+  versioned rather than amended. The jobs still refuse to run unless `T041_FREEZE_LIFTED` names a
+  reason, and that string lands verbatim in `run_metadata.json`, so every artifact carries the
+  decision that allowed it. PR-09 §8 item 6 is the only open item and it is a measurement, not a
+  document: 8-GPU VRAM on dgx1, taken by the mandatory probe.
+  TWO EARLIER BLOCKERS ARE GONE. (1) Captions: NOT our pipeline to build. cosmos-framework ships
+  `caption_from_video` (Qwen3-VL-8B-FP8 via vLLM, two-phase) and `captions_to_sft_jsonl`; that
+  'largest unpriced item' was answered by reading the framework, not by building anything.
+  (2) Licence: PR-09 §2 takes the embodiment-fidelity goal, whose corpus is AppleToPlate
+  (CC-BY-4.0) + the 13 unitreerobotics/G1_Dex3_* sets (Apache-2.0). Humanoid Everyday is the
+  VARIETY corpus and that goal was dropped for the reasons in PR-09 §2 — so OD-09 is not engaged
+  by this task at all any more."
 ---
 
-# Fine-tune a Cosmos generator on G1 data — frozen by PR-07, scoped here
+# Fine-tune Cosmos3-Super on G1 data — unfrozen by OD-10, pre-registered as PR-09
 
 ## Description
 
@@ -43,7 +60,15 @@ generator that has actually seen a G1 would not produce it in the first place. T
 argument. What it buys is paid for by turning "augment with a frozen tool" into "train a video
 model", which is the activity fourteen recorded negatives in this repo are about.
 
-## Why it is frozen
+## Why it *was* frozen — kept, because OD-10 is a decision taken against these reasons
+
+> **Lifted 2026-08-07 by OD-10**, narrowly: PR-07 §7's *Cosmos3-Super generation* clause only.
+> T-32 and Cosmos3-Edge remain frozen. **PR-07 is not edited** — the rule stands as written and
+> the decision is recorded beside it. None of the three reasons below was refuted; the third in
+> particular is still true, and PR-09 §9 forbids reading a P here as evidence about T-040's
+> question. What changed is the judgement that they are worth 122 GPU-h (2.4 % of the allocation)
+> to act against, given that T-39 is not a short wait — it is unsubmittable with PR-07 §8 items
+> 4–6 open.
 
 - **PR-07 §7, by name:** *"Frozen until T-39 reports: T-32 (§2), any Cosmos3-Super generation, any
   Cosmos3-Edge work."* Not an inference from the spirit of the freeze — the words.
@@ -180,11 +205,20 @@ three specific things, not "what is the licence": **(1)** put a `LICENSE` file �
 field in the card — on `Humanoid-Everyday-G1` *itself*; **(2)** state which of MIT (GitHub README)
 and Apache-2.0 (mixed-repo card) governs the **data**, given that they contradict; **(3)** confirm
 whether the Unitree Apache-2.0 code lineage above bears on the recordings. Until (1) exists, no
-weight is trained on this corpus. That is an **unresolved dataset-licence blocker owned by this
+weight is trained on this corpus. That was an **unresolved dataset-licence blocker owned by this
 task and by [[T-040]]** — it stands on its own evidence (the table above) and is not the
 consequence of any decision recorded elsewhere in this repo.
 
-**Gap, flagged not filed:** no row in the open-decisions table covers *dataset* licensing —
+> **Superseded 2026-08-07 by OD-09 — by decision, not by evidence.** Everything above still holds
+> as a factual finding; none of it was refuted. The user weighed it and chose to train on the
+> corpus anyway, on the basis of the EU TDM exception (Art. 4 DSM / §44b UrhG: mining lawfully
+> accessible works, no machine-readable reservation present). Read the section as *the evidence the
+> decision was taken against*, not as a live blocker. OD-09 records what the decision does **not**
+> cover — redistribution, and selling or serving a model trained on this — and names that as its
+> review trigger. The sentence "until (1) exists, no weight is trained on this corpus" no longer
+> reflects the project's position.
+
+**Gap, now filed as OD-09 (2026-08-07).** As originally written: no row in the open-decisions table covers *dataset* licensing —
 OD-04 is "Open fallback backbone + license" (`TASKS.md:201`, `docs/ROADMAP.md:17`), a **model**
 licence decision, ✅ closed on Wan2.2-TI2V-5B and challenged-and-held 2026-08-05 by T-37, saying
 nothing about data; the rest of `TASKS.md:198-205` is platform (OD-01), action space (OD-02),
@@ -227,12 +261,20 @@ right question, not about whether it is technically possible.
 
 ### Two things the recipe demands that we do not have
 
-- **Structured-JSON captions.** The loader consumes `caption_json`, dense multi-sentence prose
-  covering subject, scene, lighting, camera and motion (see `docs/dataset_jsonl.md` — the
-  BridgeData2 examples run to ~100 words, measured max ~1790 tokens). Humanoid Everyday ships a
-  **task string** (247 of them) and AppleToPlate ships **one** (`"move the apple to the plate"`).
-  Captioning ~18 h of video is its own pipeline — plausibly Cosmos-Reason2 — and an uncaptioned
-  corpus cannot enter this recipe at all. Cost this before anything else.
+- ~~**Structured-JSON captions.**~~ **Resolved 2026-08-07 — the captioner is NVIDIA's and we do not
+  build it.** The claim below was right about the requirement and wrong about the cost. The loader
+  does consume `caption_json`, and neither corpus ships one. But `cosmos-framework` ships the
+  pipeline that produces it: `cosmos_framework.scripts.caption_from_video` drives a
+  `Qwen/Qwen3-VL-8B-Instruct-FP8` vLLM server through two phases (structured-JSON scene analysis,
+  then a dense narrative rewrite that is embedded back as `temporal_caption`), and
+  `captions_to_sft_jsonl` assembles `video_dataset_file.jsonl` — mirroring the loader's own silent
+  filters so the count matches what trains. That is one GPU for a few hours
+  (`93_caption_corpus.sbatch`), not a project. **Recorded as a correction rather than edited away:
+  "this is its own pipeline, cost it before anything else" was an inference from the requirement,
+  and the requirement was real. What was missing was reading `docs/dataset_jsonl.md` §"Video
+  Captioning" to the end.** Original text: *"Captioning ~18 h of video is its own pipeline —
+  plausibly Cosmos-Reason2 — and an uncaptioned corpus cannot enter this recipe at all. Cost this
+  before anything else."*
 - **Action conditioning is not available for our embodiment.** Super's card lists supported action
   inputs — camera 9D, AV 9D, egocentric 57D, Franka 10/20D, Agibot 29D, UR/Google/WidowX 10D, UMI
   9D. **No humanoid, no G1, no 28-dim Dex3.** The action-conditioned SFT cookbooks are
@@ -251,24 +293,64 @@ not just training, which the 4 h `MaxWall` and `MaxJobsPU=4` have to absorb.
 
 ## What must be answered before it is unfrozen
 
-- [x] Which model, from a **primary source** — `nvidia/Cosmos3-Super`, 64B, above. Pin the
-      revision when the task is actually taken up.
+- [x] Which model, from a **primary source** — `nvidia/Cosmos3-Super`, 64B. **Revision pinned
+      2026-08-07: `e0262be9d8f7586bc24c069a2aed2b665bdff266`** (HF API, 134.6 GB, not gated),
+      hard-coded in `91_stage_cosmos_weights.sbatch`.
 - [x] Whether the licence permits fine-tuning and downstream use — OpenMDW-1.1, above. Still read
       the licence text before training; "permissive" is not a reading.
-- [ ] A GPU-h estimate for **training** against the 5 000 h allocation, from a measured step time.
-      500 iters is the recipe default; the step time on our clip length is unmeasured. The
-      *generation* side is estimated above from a vendor number, which is not the same as measured.
+- [x] A GPU-h estimate for **training** — **not estimated, measured, and made a gate.**
+      `94_train_t041_cosmos_super.sbatch` runs `PROBE=1` first: two torchruns at 5 and 25
+      iterations into throwaway output roots, so the per-iteration cost separates from the DCP
+      load by subtraction instead of by parsing NVIDIA's log format. If 500 iterations do not fit
+      the pre-registered 96 GPU-h / 3-pass ceiling, **the run is not started and the shortfall is
+      the finding** (PR-09 §7). The ceiling is not raised to fit the recipe.
 - [x] VRAM feasibility per H200 (141 GB) — the recipe is tested on 8×H100 80 GB, so the headroom
-      is real. Confirm on the actual node before claiming it.
-- [ ] **The captioning pipeline**, which is now the largest unpriced item. See above.
-- [ ] Which of the two goals above it is pursuing — **embodiment fidelity** or **visual variety**.
-      They need different corpora, and pooling HE + AppleToPlate does not merge them: a rank-16
-      LoRA on 18 h learns *HE's* rooms plus *one* NVIDIA room, not arbitrary rooms.
-- [ ] Its own pre-registration. This task does not inherit T-040's.
+      is real. Confirm on the actual node before claiming it: the probe is that confirmation.
+- [x] **The captioning pipeline** — see the correction above. It is NVIDIA's, it is shipped, and it
+      is `93_caption_corpus.sbatch`.
+- [x] Which of the two goals it is pursuing — **embodiment fidelity**, fixed in PR-09 §2 so the
+      corpus cannot be reselected after a disappointing result. Visual variety is dropped, with
+      this task's own argument as the first reason: a rank-16 LoRA on ~18 h learns *those* rooms,
+      not arbitrary rooms.
+- [x] Its own pre-registration — `docs/preregistration/PR-09-cosmos-super-finetune.md`,
+      rule `T041_RULE_V1`. It does not inherit T-040's and does not lift PR-07 §7.
+- [x] **PR-09 §8 items 3 and 4** — the eval *selection* (`configs/cosmos3/t041_eval_selection.toml`
+      + `make_t041_eval_prompts.py`) and the §6 scorer (`eval_t041_embodiment.py`, 31 tests,
+      `95_eval_t041_embodiment.sbatch`), both in git before generation. Item 3 was amended: the
+      prompt *text* is a caption job `93` produces, so what is pre-committed is the deterministic
+      selection rule, not the strings.
+- [ ] **PR-09 §8 item 6** — 8-GPU VRAM on dgx1. The only open item, and it is a measurement rather
+      than a document: the mandatory probe takes it.
+
+## What was built 2026-08-07, and what it does not do
+
+| | |
+|---|---|
+| `docs/preregistration/PR-09-cosmos-super-finetune.md` | goal, arms, `T041_RULE_V1`, the 122 GPU-h ceiling, what a P cannot be read as |
+| `scripts/prepare_cosmos_corpus.py` + 20 tests | LeRobot → the clip tree the captioner eats, at **source** resolution; mirrors the loader's silent >61 s / <61 frame filters; seeded split; per-clip sha256 manifest (AC-04) |
+| `90_build_cosmos_env.sbatch` | cosmos + cosmos-framework at pinned commits, `--group=cu128-train` (this cluster's CUDA is 12.8), its **own** venv — never `virt_envs/wam` |
+| `91_stage_cosmos_weights.sbatch` | the pinned revision + Wan2.2 VAE + DCP conversion |
+| `92_fetch_g1_corpus.sbatch` | AppleToPlate + the 13 `G1_Dex3_*` sets, meta+videos only, camera keys printed and never guessed |
+| `93_caption_corpus.sbatch` | NVIDIA's captioner; fails if the jsonl count disagrees with the manifest |
+| `94_train_t041_cosmos_super.sbatch` | the probe gate, the chained 4 h passes, and the resume patch below |
+
+**The one trap worth naming, because it produces a plausible wrong number rather than a crash.**
+The shipped TOML sets `checkpoint.keys_to_skip_loading = ["net_ema.", "lora_"]`. Correct on a cold
+start — the base checkpoint has no adapter and it must init fresh. On a **resume** from
+`iter_<N>/`, that same line skips the adapter we just trained and re-initialises it, while
+`optim/`, `scheduler/` and the iteration counter in `trainer/` *are* restored. The run continues
+from iteration 300 with a fresh adapter and a stale optimiser, logs plausible losses, and writes a
+checkpoint that is not what its metadata says. With a 4 h walltime and `PreemptMode=REQUEUE`,
+resuming is not the exception. `94_*` generates the resume TOML with that one key changed and
+**diffs it into the job log**; a pass without that diff is not a valid resume (PR-09 §6 G0c). The
+guard is scoped to that line only — `[optimizer].keys_to_select = ["lora_"]` must *stay*, or the
+run silently becomes a 32B full fine-tune.
 
 ## Notes
 
-Scoped deliberately as a written-down idea with its costs attached, so it is not picked up
-informally as "while we are at it". Frozen means frozen.
+No longer just a written-down idea: the pipeline exists and is tested. It is still **not
+submitted**, and the only thing between here and `sbatch` is PR-07 §7. Frozen means frozen — but
+the freeze is now a named variable in five job scripts rather than an absence of code, so lifting
+it is one decision instead of a week.
 
 %% mc-links: [[T-39]] [[T-040]] [[T-37]] %%
