@@ -5,8 +5,8 @@ aliases:
 - T-40
 title: Cosmos-Transfer2.5 photoreal augmentation — pre-register before generating anything
 slug: cosmos-transfer-photoreal-augmentation
-status: backlog
-priority: 3
+status: todo
+priority: 2
 owner: ''
 projects: []
 customers: []
@@ -22,9 +22,13 @@ depends_on:
 due_date: ''
 created: 2026-08-06
 updated: 2026-08-06
-status_note: "Backlog on purpose. The deliverable of this task is a pre-registration, not a corpus
-  — nothing is generated under it until that document and its screen exist. Blocked behind T-39
-  because T-39 decides whether a synthetic-data move is answering the right question at all."
+status_note: "Promoted out of backlog 2026-08-06: the deliverable is a document, the document costs
+  no GPU, and PR-07 §7's freeze does not name Transfer2.5. `docs/preregistration/PR-08-photoreal-augmentation.md`
+  is written — rule `T40_RULE_V1`, four arms, three VOID gates — and closes 9 of 13 acceptance
+  criteria. The four left open need the cluster or a written contract, not a decision: throughput on
+  an H200, the chunked sbatch, the vla-training consumer contract, and the two measured constants
+  GEOM_TOL / EST_DRIFT_P95. GENERATION STILL WAITS ON T-39 — PR-08 §1 binds itself to the reason
+  behind the freeze even though its letter does not reach Transfer2.5."
 ---
 
 # Cosmos-Transfer2.5 photoreal augmentation — pre-register before generating anything
@@ -38,8 +42,9 @@ it.**
 
 The pipeline is the one thing in the 2026-08 material that is concrete
 (`docs/backbone-eval.md` §5): **Cosmos-Transfer2.5** consumes depth + segmentation + Canny and
-emits photorealistic video, and the Isaac backend (`src/wam/robot/isaac_transport.py`) already
-emits exactly those three. The consumer is `emai/vla-training` — a 28-dim G1+Dex3 LeRobot v3
+emits photorealistic video, and the Isaac backend (`src/wam/robot/isaac_transport.py`) ~~already
+emits exactly those three~~ **[corrected 2026-08-06 — it does not; see the Notes]**. The consumer
+is `emai/vla-training` — a 28-dim G1+Dex3 LeRobot v3
 pipeline that trains GR00T N1.7 / π0.5 / SmolVLA and evaluates in MuJoCo and Isaac.
 
 **Why Transfer and not Predict, Nano or Super.** Transfer restyles frames of an episode that
@@ -81,8 +86,10 @@ Transfer2.5 consumes **depth + segmentation + Canny**. Our real corpus ships non
 and NVIDIA's source is one head RealSense D435 colour topic. Only Canny is computable from it.
 Two paths follow, and they are **not** the same experiment:
 
-- **Isaac path.** `isaac_transport.py` renders depth and segmentation for free, so the conditioning
-  is exact. But then the frames being restyled are *sim* frames, which collides with T-25 directly
+- **Isaac path.** `isaac_transport.py` ~~renders depth and segmentation for free~~ **[corrected —
+  it renders neither today; two annotators have to be attached first, see the Notes]**, so the
+  conditioning is exact *once wired*. But then the frames being restyled are *sim* frames, which
+  collides with T-25 directly
   rather than at one remove, and the actions come from sim teleop rather than the 402 real demos.
 - **Real-teleop path.** Depth and segmentation must be **estimated** (monocular depth, SAM-class
   masks) from RGB. Estimation error lands as geometry drift — precisely what the
@@ -145,40 +152,73 @@ Three standing results, none of which this task may quietly step over:
 
 ## Acceptance Criteria
 
-- [ ] `docs/preregistration/PR-08-*.md` exists: the hypothesis, the arms, the gate, the verdict
+- [x] `docs/preregistration/PR-08-*.md` exists: the hypothesis, the arms, the gate, the verdict
       table, and what each verdict forbids — same shape as PR-06/PR-07, written before any clip
-      is generated.
-- [ ] The gate is **borrowed, not coined** — reuse an existing margin (as PR-07 borrows
+      is generated. → `PR-08-photoreal-augmentation.md`, 2026-08-06, rule `T40_RULE_V1`.
+- [x] The gate is **borrowed, not coined** — reuse an existing margin (as PR-07 borrows
       `MATERIAL_FLOOR_PP` from `I8_RULE_V3`) so the choice of threshold cannot become the finding.
-- [ ] The gate includes an **embodiment check** that is not a pixel distance, because
+      → the same constant from the same place; ladder is WAM-Bench's L1/L2.
+- [x] The gate includes an **embodiment check** that is not a pixel distance, because
       `video_fidelity` provably cannot see the generic-manipulator defect. Concretely: the G1's own
       pixels must survive the restyle — verify against the robot segmentation mask, and composite
       the real robot back over the generated frame if the generator repaints it.
-- [ ] A **geometry-invariance check**: object and plate positions in the restyled clip agree with
+      → G0c, and stronger than asked: the composite is **unconditional**, so the defect cannot
+      enter and no IoU threshold has to be coined. IoU is kept as a generator diagnostic.
+- [x] A **geometry-invariance check**: object and plate positions in the restyled clip agree with
       the source within tolerance, so the carried-over actions still describe what is on screen.
-- [ ] The control arm is named and is not trivial: the same policy trained on the un-restyled
-      episodes. "Augmented beats nothing" is not a result.
-- [ ] The **eval set is visually shifted** from the training domain. Evaluated in the same domain,
+      → G0b. `GEOM_TOL` is *derived* — the median per-step object-centroid displacement in the
+      source — so it is not a coined number either. The value is measured under §8 item 4.
+- [x] The control arm is named and is not trivial: the same policy trained on the un-restyled
+      episodes. "Augmented beats nothing" is not a result. → arm A, plus arm **C
+      `real+identity`**, which PR-08 adds: same generator, same frame count, zero added diversity.
+      Without it a gain from B cannot be attributed to diversity rather than to the generator.
+- [x] The **eval set is visually shifted** from the training domain. Evaluated in the same domain,
       augmentation can only be neutral or harmful — the experiment would be unable to produce a
-      signal, and a null would say nothing.
-- [ ] The pre-registration states which **`--tune-visual` recipe** it runs under (`vla-training`
+      signal, and a null would say nothing. → disjoint `TRAIN_STYLES` / `EVAL_STYLES`, partition
+      committed before generation. **PR-08 §7 records what this still cannot buy:** the shifted
+      eval is *generated*, so a P licenses recording a real shifted eval and nothing else.
+- [x] The pre-registration states which **`--tune-visual` recipe** it runs under (`vla-training`
       §7, Recipe A vs. B). Varied pixels into a frozen vision tower is a strictly weaker version
-      of the experiment; unstated, the result is not readable.
-- [ ] `screen_corpus.py` (T-34) is specified to run **on the generated corpus** and its output is
-      a release gate, not a report.
+      of the experiment; unstated, the result is not readable. → **Recipe B**, lr 5e-5,
+      `submit_chain.sh visual`, fixed in PR-08 §8 item 1.
+- [x] `screen_corpus.py` (T-34) is specified to run **on the generated corpus** and its output is
+      a release gate, not a report. → G0a, **with the AC's own defect corrected**: a restyle
+      changes no action, so M1/M2/M3 are identical to the source by construction and the gate as
+      written would pass vacuously. Restated as an *identity* check — it must reproduce the source
+      within the script's `EXPECT_TOL`, and a deviation means the pipeline corrupted the labels.
 - [ ] The consumer contract with `emai/vla-training` is written down: LeRobot v3.0, 28-dim
       arms+hands, right hand index-before-middle, and where the action labels come from.
-- [ ] **One path chosen and justified** — Isaac (exact conditioning, sim frames) or real teleop
+      → **open.** PR-08 §8 item 2 names the fields; the contract document itself is not written.
+- [x] **One path chosen and justified** — Isaac (exact conditioning, sim frames) or real teleop
       (real frames, estimated conditioning). Under the real path, the depth/segmentation
       estimator's error is measured *before* generation, against Humanoid Everyday's ground-truth
       depth on the same camera, and that error enters the geometry gate as a budget.
+      → **real teleop**, PR-08 §3, because the Isaac path changes the trajectories and so is not an
+      augmentation of AppleToPlate at all. **One substitution, deliberate:** the estimator is
+      calibrated against **Isaac's** rendered ground truth, not HE's measured depth, because HE is
+      unlicensed data and must not sit on the critical path. PR-08 §4 records the cost — synthetic
+      renders make `EST_DRIFT_P95` a *lower* bound, so a G0b margin that only clears under it is
+      not a pass. HE becomes the confirmatory measurement if the licence resolves.
 - [ ] **A measured throughput number** from one timed episode on an H200 at target resolution,
       and a GPU-h ceiling derived from it — enforced in the sbatch, as `MAX_RESTARTS` enforces
-      T-39's. ~172 k frames per variant is the multiplier.
-- [ ] Generation is **chunked and resumable** under 4 h `MaxWall` / `MaxJobsPU=4`.
+      T-39's. ~172 k frames per variant is the multiplier. → **open, needs the cluster.**
+- [ ] Generation is **chunked and resumable** under 4 h `MaxWall` / `MaxJobsPU=4`. → **open**, the
+      sbatch is not written.
 - [ ] Nothing is generated, trained or submitted under this task until the above is reviewed.
+      → **standing.** Also gated on T-39 reporting, per PR-08 §1.
 
 ## Notes
+
+**Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above
+claimed `isaac_transport.py` already emits depth and segmentation. Checked against the code on
+`main`: `isaac_binding.py` makes **exactly one** `AnnotatorRegistry.get_annotator` call and it is
+`"rgb"`. `distance_to_camera`, `distance_to_image_plane`, `semantic_segmentation` and
+`instance_segmentation` appear **nowhere** in `src/` or `tests/`. The drift is traceable —
+`docs/backbone-eval.md:221` says Isaac **"can emit"** those, which is true and is a statement about
+Replicator's capability; this task hardened "can" into "already", which is a statement about our
+code and is false. Recorded rather than silently patched, because the same hardening would have
+made the PR-08 calibration rig look free when it is a code change with tests. It is now PR-08 §8
+item 5, and it blocks the estimator error budget entirely.
 
 Rules are versioned, never edited in place — if the gate written here turns out wrong, the fix is
 a `V2` alongside it, not an edit. See `docs/handoff.md` §3.
