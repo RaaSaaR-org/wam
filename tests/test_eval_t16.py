@@ -339,10 +339,30 @@ def test_the_witness_comparison_counts_repeats(
 _WITNESS_FLAG = re.compile(r"--train-episodes[=\s]+[^#\\\s]")
 
 
+#: The generator evals prove the same thing by a different route, so they need a different
+#: pattern — but the PURPOSE is identical and is what this file tests: *an eval job must show, on
+#: a line that runs, that what it scores was not in what it trained on.*
+#:
+#: T-041 (PR-09) scores generated video against a held-out PROMPT set, not a policy against held-out
+#: episodes, so there is no ``--train-episodes`` and no ``verify_split`` to call. Its witness is
+#: ``make_t041_eval_prompts.py``, which refuses when the corpus manifest's split seed differs from
+#: the pre-registered one, and refuses again when any selected clip appears in the manifest's
+#: ``train`` list. Invoking it IS the check — which is why the pattern below demands the
+#: invocation, not the word.
+_PROMPT_WITNESS = re.compile(r"make_t041_eval_prompts\.py")
+
+
 def _passes_the_witness(sbatch_text: str) -> bool:
-    """True when a line that is not a comment actually hands ``--train-episodes`` a value."""
+    """True when a line that is not a comment actually establishes the train/eval separation.
+
+    Two accepted forms, one purpose. Either the job hands ``--train-episodes`` a value (the
+    policy-eval route, checked by ``eval_t16.verify_split``), or it runs
+    ``make_t041_eval_prompts.py`` (the generator-eval route, which refuses on a seed mismatch or
+    a prompt drawn from the training split). A job doing neither is scoring something it cannot
+    show was unseen.
+    """
     return any(
-        _WITNESS_FLAG.search(line)
+        _WITNESS_FLAG.search(line) or _PROMPT_WITNESS.search(line)
         for line in sbatch_text.splitlines()
         if not line.lstrip().startswith("#")
     )
@@ -370,14 +390,25 @@ def test_every_eval_sbatch_passes_the_split_witness() -> None:
     # each job's text: the cluster files themselves are never edited to make a point.
     for path in jobs:
         without_the_flag = "\n".join(
-            f"# {line}" if "--train-episodes" in line else line
+            f"# {line}" if ("--train-episodes" in line
+                            or "make_t041_eval_prompts.py" in line) else line
             for line in path.read_text().splitlines()
         )
-        assert "--train-episodes" in without_the_flag, path.name
+        # Whichever witness this job uses, its text must still mention it — otherwise the
+        # mutation below proves nothing about this file.
+        assert ("--train-episodes" in without_the_flag
+                or "make_t041_eval_prompts.py" in without_the_flag), path.name
         assert not _passes_the_witness(without_the_flag), path.name
 
     # A flag with nothing after it is not a witness either — verify_split needs the file.
     assert not _passes_the_witness("srun python eval_t16.py --train-episodes\n")
+    # ...and neither route may be satisfied by prose. A job that only *talks* about its witness
+    # is the exact regression this test exists for, in both dialects.
+    assert not _passes_the_witness("# runs make_t041_eval_prompts.py to prove the split\n")
+    assert not _passes_the_witness("#   --train-episodes configs/splits/i8_train_362.txt\n")
+    # Each accepted form must be sufficient on its own, or one of them is decoration.
+    assert _passes_the_witness('python "${WAM}/scripts/make_t041_eval_prompts.py" --corpus x\n')
+    assert _passes_the_witness("python eval_t16.py --train-episodes splits/t.txt\n")
 
 
 def test_skip_split_check_scores_but_marks_the_output(
