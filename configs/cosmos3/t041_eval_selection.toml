@@ -1,0 +1,60 @@
+# T-041 / PR-09 §5 — how the 30 held-out eval prompts are chosen, and how both arms generate.
+#
+# THIS FILE IS THE PRE-COMMITMENT, NOT THE PROMPTS. The prompt text is a structured-JSON caption
+# produced by 93_caption_corpus.sbatch, so it cannot exist before the corpus is captioned. What
+# can — and must — exist beforehand is the *selection*, because the failure this guards against is
+# choosing prompts after seeing base-model output to flatter the result.
+#
+# The selection is a deterministic function of (val split, seed, N) and nothing else. Anyone can
+# recompute it: `scripts/make_t041_eval_prompts.py` emits the same 30 uuids from the same corpus,
+# and writes the sha256 of the resulting file into the verdict. A prompt set that does not match
+# that hash was not the pre-registered one.
+#
+# Every generation setting below is fixed here too. Both arms use them identically — a difference
+# in steps, guidance, resolution or seed between base and lora would make the paired comparison a
+# comparison of samplers.
+
+[selection]
+# Deterministic and boring on purpose: sort the val clips by uuid, take the first N. No sampling,
+# no seed of its own — the randomness already happened in prepare_cosmos_corpus.py's split, and a
+# second layer of it would only add a knob that could be turned after the fact.
+rule = "sorted-by-uuid-first-n"
+n = 30
+# Must equal the seed 92_fetch_g1_corpus.sbatch passed to prepare_cosmos_corpus.py. The script
+# reads the corpus manifest and FAILS if they differ, rather than silently selecting from a
+# different holdout than the one the training run excluded.
+corpus_seed = 0
+
+[generation]
+# From the audiovisual cookbook's own payload example, Super's settings. Held identical across arms.
+model_mode = "text2video"
+num_steps = 35
+guidance = 6.0
+shift = 10.0
+fps = 24
+num_frames = 189
+resolution = "720"
+aspect_ratio = "16,9"
+enable_sound = false
+seed = 0
+parallelism_preset = "throughput"
+
+[calibration]
+# PR-09 §6 G0b. Positives are real held-out G1 + Dex3 clips; negatives are real footage of a
+# manipulator that is definitively NOT a G1 Dex3. Both are REAL, so the answer is known without
+# anyone adjudicating a generated frame — which is the point: a rubric that cannot do this on real
+# video cannot be trusted on generated video. It is a necessary check, not a sufficient one, and
+# PR-09 §9 says so.
+n_positive = 10
+n_negative = 10
+negative_repo = "nvidia/BridgeData2-Subset-Synthetic-Captions"
+negative_note = "WidowX arm, the recipe's own SFT dataset. Unambiguously not a G1 Dex3."
+
+[judge]
+# Same reasoner as the captioner, so the cluster holds one model family, not two.
+model = "Qwen/Qwen3-VL-8B-Instruct-FP8"
+# The scorer never sees which arm produced a clip: scripts/eval_t041_embodiment.py --build-sheet
+# writes a shuffled sheet plus a separate key, and --verdict is the only step that joins them.
+# Because the two steps are separate files, a human can score the sheet instead and the same rule
+# applies unchanged. That is the fallback if G0b fails.
+blind = true
