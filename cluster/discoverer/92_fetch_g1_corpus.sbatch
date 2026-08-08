@@ -93,19 +93,30 @@ REPOS=(
 CAMERA_KEYS=${CAMERA_KEYS:-}
 
 # -- 1. fetch: meta + videos only. The parquet is state and action, which a generator never sees.
+#
+# THE GUARD IS A COMPLETION SENTINEL, NOT meta/info.json. `hf download` fetches `meta/*` before
+# `videos/**`, so a run killed partway — walltime, preemption, a dropped connection — leaves a
+# perfectly valid info.json next to an incomplete video tree. Keying the skip on that file made
+# the retry declare the repo "present" and move on, handing step 2 a partial set it has no way to
+# detect: episodes.jsonl lists episodes whose mp4s are missing, the manifest counts only what it
+# found, and the run trains on a silently truncated corpus that still looks clean in every
+# artifact. This file is written only after hf exits 0, so a resume re-enters exactly the repos
+# that did not finish, and hf's own resume makes that cheap — completed files are not re-fetched.
 for repo in "${REPOS[@]}"; do
   dest=${RAW}/$(basename "${repo}")
-  if [[ ! -f "${dest}/meta/info.json" ]]; then
-    echo "=== downloading ${repo}"
-    # ONE --include per pattern. The hf CLI is click-based, so `--include a b` binds only `a`
-    # to the flag and leaves `b` as a positional *filename*, which silently switches the whole
-    # command into explicit-file mode ("Ignoring --include since filenames have been explicitly
-    # set") and then 404s on a literal file named `videos/**`. That is what killed job 186283.
-    uvx hf@latest download --repo-type dataset "${repo}" \
-        --include 'meta/*' --include 'videos/**' --local-dir "${dest}"
-  else
-    echo "=== ${dest} present"
+  if [[ -f "${dest}/.download-complete" ]]; then
+    echo "=== ${dest} complete"
+    continue
   fi
+  echo "=== downloading ${repo}"
+  # ONE --include per pattern. The hf CLI is click-based, so `--include a b` binds only `a`
+  # to the flag and leaves `b` as a positional *filename*, which silently switches the whole
+  # command into explicit-file mode ("Ignoring --include since filenames have been explicitly
+  # set") and then 404s on a literal file named `videos/**`. That is what killed job 186283.
+  uvx hf@latest download --repo-type dataset "${repo}" \
+      --include 'meta/*' --include 'videos/**' --local-dir "${dest}"
+  # set -e means we only reach this line when hf exited 0.
+  touch "${dest}/.download-complete"
 done
 
 echo "=== video feature keys per repo (name one per repo in CAMERA_KEYS if any has >1)"
@@ -135,11 +146,30 @@ for repo in "${REPOS[@]}"; do
   i=$((i + 1))
 done
 
-python "${PREPARE}" "${ARGS[@]}" \
-    --out "${CORPUS}" --val-episodes "${VAL_EPISODES}" --seed "${SEED}"
+# Skip when a previous job in the chain already laid the corpus out. This exists so this job can
+# be chained to itself with `afterany` and run under a short walltime: the first attempt does the
+# work, and any follow-up that finds everything finished becomes a fast no-op instead of recopying
+# 77 GB. Only a manifest written AFTER the last download counts — an older one was built from a
+# corpus that has since grown, and re-running is then the correct thing to do.
+# `|| true` because `set -o pipefail` is on: with no sentinels `ls` exits 2, head swallows it, the
+# pipeline still reports 2, and the bare assignment would take the whole job down on a condition
+# that is merely "nothing downloaded yet".
+NEWEST_SENTINEL=$(ls -t "${RAW}"/*/.download-complete 2>/dev/null | head -1 || true)
+if [[ -f "${CORPUS}/manifest.json" && -n ${NEWEST_SENTINEL:-} \
+      && "${CORPUS}/manifest.json" -nt "${NEWEST_SENTINEL}" ]]; then
+  echo "=== ${CORPUS}/manifest.json is newer than every download — layout already done, skipping"
+else
+  python "${PREPARE}" "${ARGS[@]}" \
+      --out "${CORPUS}" --val-episodes "${VAL_EPISODES}" --seed "${SEED}"
+fi
 
-cat >> "${PROJ}/cosmos_env.sh" <<EOF
+# grep -q first: this job can run more than once in a chain, and cosmos_env.sh is sourced by every
+# later job. Appending the same export on each pass would leave a file that still works but reads
+# like a log, and the duplicate would hide a real change to CORPUS.
+if ! grep -q "^export CORPUS=${CORPUS}$" "${PROJ}/cosmos_env.sh" 2>/dev/null; then
+  cat >> "${PROJ}/cosmos_env.sh" <<EOF
 export CORPUS=${CORPUS}
 EOF
+fi
 echo "CORPUS OK -> ${CORPUS}"
 echo "next: sbatch 93_caption_corpus.sbatch"
