@@ -92,6 +92,35 @@ one and does not inherit this rule.
 >
 > The §6 rule, the statistic, the N=30, and the §5 selection rule are all unchanged.
 
+> **Amended again 2026-08-08 — the addition above is withdrawn and the corpus reverts to the
+> fourteen repos this section originally pre-registered.** Still before any training: jobs
+> 186348–186350 downloaded footage and nothing was captioned or trained, so this remains a
+> pre-commit edit. `T041_RULE_V1` has never run.
+>
+> **The reason is operational, not a reversal of OD-09.** The HF Hub rate-limited
+> `USC-PSI-Lab/Humanoid-Everyday-G1` with HTTP 429 on three consecutive jobs — 186348 after
+> 13 m 37 s, 186349 after 7 m 59 s, 186350 after 5 m 1 s having transferred nothing at all. The
+> other fourteen repos completed (70 GB, 14/14). Fetching the fifteenth needs an authenticated
+> token, and the operator chose to drop it rather than put a personal credential on a shared
+> EuroHPC filesystem for a corpus that was optional to begin with. **OD-09's licence reasoning is
+> not retracted** — it was never the reason for this removal, and it stands as recorded should the
+> corpus be wanted again.
+>
+> **What this restores, at no cost to the goal:** reason 3 above is back in force, so the LoRA
+> carries no OD-09 asterisk; the `egocentric` viewpoint no longer dominates the pool; and the
+> corpus is roughly a quarter the episode count, so the "undertrained at 500 iterations"
+> alternative explanation flagged above is substantially weaker. All three were listed as accepted
+> costs of the addition. Withdrawing it withdraws them.
+>
+> **One measurement that changes how the addition should have been read.** Humanoid Everyday is
+> ~2.5 GB against the fourteen repos' 70 GB, because its clips are far shorter. The note above
+> says it "roughly quadruples the corpus", which was true by *episode count* and badly misleading
+> as a proxy for training signal. Recorded here rather than corrected in place, per §3 of
+> `docs/handoff.md`.
+>
+> Nothing else moves: the goal, the §6 rule, the statistic, the N=30, and the §5 selection rule
+> are all still unchanged.
+
 ## 3. The recipe is NVIDIA's, run unmodified — checked against source 2026-08-07
 
 Verified from `NVIDIA/cosmos@main` and `NVIDIA/cosmos-framework@main`, not from a card or a blog:

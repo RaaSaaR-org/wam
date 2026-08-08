@@ -13,11 +13,14 @@
 # corpus: AppleToPlate (CC-BY-4.0) plus the 13 unitreerobotics/G1_Dex3_* sets (Apache-2.0), all of
 # them the exact G1 + Dex3 embodiment the priors render as a generic manipulator.
 #
-# Humanoid Everyday was added on top by operator decision (OD-09, 2026-08-07) — see the note on
-# its entry below and the dated amendment in PR-09 §2. It is UNLICENSED, and it was originally
-# excluded here as the VARIETY corpus for a goal PR-09 §2 dropped. Nothing else may be swapped in
-# on that precedent: a different corpus changes which experiment this is and needs its own
-# pre-registration. The amendment records what the addition costs, which is not nothing.
+# Humanoid Everyday was added on top by operator decision (OD-09, 2026-08-07) and REMOVED again on
+# 2026-08-08 — see PR-09 §2, which carries both dated notes. The removal is operational, not a
+# reversal of OD-09: the HF Hub rate-limited the repo (429) on three consecutive attempts and the
+# last made no progress at all, so it could not be fetched without authenticating. The corpus is
+# therefore the one PR-09 §2 pre-registered in the first place, which is the happier outcome.
+#
+# Nothing may be swapped in on the precedent of that addition: a different corpus changes which
+# experiment this is and needs its own pre-registration.
 #
 # CAMERA KEYS ARE NOT GUESSED. The sets do not agree on names, and a generator trained on a wrist
 # camera when we meant the head view is a finite, plausible, wrong run. Step 1 prints every video
@@ -71,22 +74,11 @@ REPOS=(
   unitreerobotics/G1_Dex3_PickSnack_Dataset
   unitreerobotics/G1_Dex3_PickTissue_Dataset
   unitreerobotics/G1_Dex3_PickDoll_Dataset
-  # Added 2026-08-07 by operator decision, before any job of this chain had started (all four
-  # were still PENDING) — a pre-commit edit, not an amendment to a rule that had already run.
-  # UNLICENSED. No LICENSE file, no license: field, no card metadata; the GitHub API 404s and
-  # the paper's CC BY 4.0 covers the manuscript, not the data. docs/outbound/ holds an unsent
-  # request asking USC PSI Lab to fix that. The operator's call is that this is an internal
-  # test, so no weight from it is published or redistributed. See PR-09 §2.
-  # Shape: LeRobot v2.1, 4064 episodes, chunk size 1000 — it roughly triples the corpus alone.
-  # Its single camera key is `egocentric`. That is unambiguous, so step 2 would not refuse over
-  # it, but CAMERA_KEYS is positional: once ANY repo needs an entry the array must be full
-  # length, so `egocentric` is still the 15th value the operator passes.
-  #
-  # The viewpoint is the cost. `egocentric` is head-mounted and mostly shows hands and the
-  # object, where the 13 Unitree sets' `cam_left_high` shows the arms and torso. For "are these
-  # Dex3 hands" that is on target; for "is this a G1" it contributes little, and it now dominates
-  # the pool by episode count. PR-09 §2's amendment records this as accepted, not overlooked.
-  USC-PSI-Lab/Humanoid-Everyday-G1
+  # USC-PSI-Lab/Humanoid-Everyday-G1 was the 15th entry on 2026-08-07 and is deliberately absent
+  # again. Do not re-add it without reading PR-09 §2's second dated note: it is unlicensed, its
+  # `egocentric` head-mounted view answers "are these Dex3 hands" but not "is this a G1", and the
+  # Hub 429s it without a token. Measured before it was dropped: ~2.5 GB against this corpus's
+  # 70 GB, so it added far less signal than its 4064-episode count suggested.
 )
 # Operator-supplied, space-separated, one per repo above and in that order. Leave empty on the
 # first run: step 1 prints the keys and step 2 refuses with the list.
