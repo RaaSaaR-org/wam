@@ -267,3 +267,51 @@ def test_not_a_lerobot_root_is_fatal(tmp_path):
     with pytest.raises(SystemExit) as e:
         pcc.main(["--source", str(tmp_path / "empty"), "--out", str(tmp_path / "o")])
     assert "LeRobot" in str(e.value)
+
+
+def _retag(root: Path, version: str) -> Path:
+    """Rewrite only codebase_version, leaving the v2.1 layout in place.
+
+    Deliberate: it reproduces what is NOT true of the real repos, so the test can prove the
+    refusal comes from the declared version rather than from a file that happens to be missing.
+    """
+    p = root / "meta" / "info.json"
+    info = json.loads(p.read_text())
+    info["codebase_version"] = version
+    p.write_text(json.dumps(info))
+    return root
+
+
+@pytest.mark.parametrize("version", ["v3.0", "v1.6", "unknown"])
+def test_refuses_any_codebase_version_it_cannot_read(tmp_path, version):
+    """All 13 unitreerobotics/G1_Dex3_* sets are v3.0, which this script cannot read.
+
+    v3.0 concatenates episodes into a few large mp4s and moves the boundaries into
+    meta/episodes/*/*.parquet, so a clip has to be CUT OUT by timestamp. Jobs 186353 and 186354
+    died on a FileNotFoundError for episodes.jsonl, which reads like a broken download and cost
+    real time pointed at the fetch step. The refusal has to name the format.
+    """
+    root = _retag(make_root(tmp_path, "src", [200, 200]), version)
+    with pytest.raises(SystemExit) as e:
+        pcc.main(["--source", str(root), "--out", str(tmp_path / "o")])
+    msg = str(e.value)
+    assert version in msg and "v2.1" in msg
+    # Naming the version is not enough — it must say what is different, or the reader is left
+    # thinking a re-download will fix it.
+    assert "timestamp" in msg
+
+
+def test_the_supported_version_is_not_merely_whatever_the_fixture_says(tmp_path):
+    """Guard against the check passing because both sides read the same field.
+
+    An untagged root is refused too, so `codebase_version` absent can never be mistaken for
+    compatible — which is how a hand-assembled corpus would most plausibly slip through.
+    """
+    root = make_root(tmp_path, "src", [200, 200])
+    info = json.loads((root / "meta" / "info.json").read_text())
+    assert info["codebase_version"] == pcc._SUPPORTED_CODEBASE == "v2.1"
+    del info["codebase_version"]
+    (root / "meta" / "info.json").write_text(json.dumps(info))
+    with pytest.raises(SystemExit) as e:
+        pcc.main(["--source", str(root), "--out", str(tmp_path / "o")])
+    assert "unknown" in str(e.value)

@@ -122,6 +122,33 @@ def video_shape(info: dict, key: str) -> tuple[int, int]:
     return (int(shape[1]), int(shape[0]))
 
 
+#: Everything below assumes LeRobot v2.1: one mp4 per episode at
+#: ``videos/chunk-NNN/<key>/episode_NNNNNN.mp4``, and one JSON object per episode in
+#: ``meta/episodes.jsonl``. v3.0 breaks both. It CONCATENATES episodes into a few large files at
+#: ``videos/<key>/chunk-NNN/file-NNN.mp4`` — 301 episodes of G1_Dex3_BlockStacking live in 19 of
+#: them — and moves the per-episode boundaries into ``meta/episodes/chunk-NNN/file-NNN.parquet``
+#: as ``videos/<key>/from_timestamp`` and ``.../to_timestamp``.
+#:
+#: Supporting it is not a path fix, it is an extraction pass: every clip has to be cut out of a
+#: concatenated file by timestamp. Until that exists, say so in one line. The alternative is what
+#: actually happened on jobs 186353/186354 — a FileNotFoundError traceback pointing at
+#: episodes.jsonl, which reads like a broken download rather than an unsupported format, and sent
+#: me looking at the fetch step for a problem that was never there.
+_SUPPORTED_CODEBASE = "v2.1"
+
+
+def require_v21(info: dict, source_id: str) -> None:
+    version = str(info.get("codebase_version") or "unknown")
+    if version != _SUPPORTED_CODEBASE:
+        raise SystemExit(
+            f"FATAL: {source_id} is LeRobot {version}; this script reads {_SUPPORTED_CODEBASE} only.\n"
+            f"       {version} packs many episodes into one mp4 and keeps the boundaries in\n"
+            f"       meta/episodes/*/*.parquet, so each clip must be cut out by timestamp — a\n"
+            f"       conversion step this script does not have. The download is fine; the format\n"
+            f"       is not the one prepare_cosmos_corpus.py was written for."
+        )
+
+
 def episode_video_path(root: Path, key: str, episode_index: int, chunk_size: int) -> Path:
     chunk = episode_index // max(chunk_size, 1)
     return root / "videos" / f"chunk-{chunk:03d}" / key / f"episode_{episode_index:06d}.mp4"
@@ -132,6 +159,7 @@ def scan_source(
 ) -> tuple[list[Clip], dict[str, int]]:
     """Enumerate the episodes of one LeRobot root that survive the loader's filters."""
     info = json.loads((root / "meta" / "info.json").read_text())
+    require_v21(info, source_id)
     episodes = _read_jsonl(root / "meta" / "episodes.jsonl")
     key = resolve_camera(info, camera_key, source_id)
     fps = float(info.get("fps") or info["features"][key].get("info", {}).get("video.fps") or 0.0)

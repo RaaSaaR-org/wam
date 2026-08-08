@@ -202,13 +202,19 @@ layer via the arm64 container (T-25a). What is left genuinely needs the robot.
   frozen, PR-07 itself unedited. Jobs still refuse to run unless `T041_FREEZE_LIFTED` names a
   reason, which lands verbatim in the artifact. **PR-09 §8 is closed except item 6**, which is a
   measurement the mandatory probe takes: 8-GPU VRAM on dgx1. **Status:** env built and weights
-  staged (jobs 186281/186282, COMPLETED); **corpus 14/14 repos downloaded, 70 GB** across the
-  self-resuming chain 186348–186350; layout + captioning still to run. The probe is the next gate
-  and needs a human to read `PROBE.json`; job 95 additionally needs 20 calibration clips nobody
-  has picked yet. **Open before the run:** the corpus is 640×480 4:3 throughout while §5 generates
-  720p 16:9; and whether 500 iterations is even one epoch cannot be read off the config — NVIDIA's
-  `PackingDataLoader` batches by a 45 056-token budget with no sample cap, so the probe has to
-  measure clips-per-iteration)*
+  staged (jobs 186281/186282, COMPLETED); **corpus 14/14 repos downloaded, 69 GB** across the
+  self-resuming chain 186348–186350. **BLOCKED 2026-08-08: the 13 `G1_Dex3_*` sets are LeRobot
+  v3.0 and `prepare_cosmos_corpus.py` reads v2.1 only** (jobs 186353/186354 FAILED in 4 s).
+  v3.0 concatenates episodes into a few large mp4s — BlockStacking's 301 episodes live in 19
+  files — and moves the boundaries into `meta/episodes/*/*.parquet` as `from_timestamp` /
+  `to_timestamp`, so every clip must be **cut out by timestamp**: an extraction pass over 69 GB,
+  not the symlink the v2.1 path does. Only AppleToPlate (402 ep) is v2.1 and usable today. The
+  script now refuses with a message naming the format instead of a `FileNotFoundError`. **Decision
+  pending:** write v3.0 support, or run the pipeline end-to-end on AppleToPlate alone. **Also open
+  before any run:** the corpus is 640×480 4:3 throughout while §5 generates 720p 16:9; and whether
+  500 iterations is even one epoch cannot be read off the config — NVIDIA's `PackingDataLoader`
+  batches by a 45 056-token budget with no sample cap, so the probe has to measure
+  clips-per-iteration. Job 95 additionally needs 20 calibration clips nobody has picked yet)*
 
 ## Open decisions (PRD §16) — resolved 2026-07-26
 
