@@ -36,6 +36,19 @@ set -euo pipefail
 source /valhalla/projects/ehpc-aif-2026pg01-905/caches.sh
 source "${PROJ}/cosmos_env.sh"
 
+# SMOKE=1 OVERLAYS the rehearsal environment on the real one — FRAMEWORK, BASE_CHECKPOINT_PATH and
+# the caches still come from the actual build; only CORPUS moves. It has to be sourced AFTER
+# cosmos_env.sh: that file carries `export CORPUS=` for the registered corpus, which would
+# otherwise win over anything passed on the sbatch command line and caption the wrong tree.
+SMOKE=${SMOKE:-0}
+ENV_OUT=${PROJ}/cosmos_env.sh
+if [[ ${SMOKE} == 1 ]]; then
+  ENV_OUT=${PROJ}/cosmos_env.smoke.sh
+  [[ -f ${ENV_OUT} ]] || { echo "FATAL: ${ENV_OUT} missing — run 92 with SMOKE_SOURCES first."; exit 1; }
+  source "${ENV_OUT}"
+  echo "=== REHEARSAL: CORPUS=${CORPUS}  (registered corpus and cosmos_env.sh untouched)"
+fi
+
 : "${T041_FREEZE_LIFTED:?PR-07 §7 freezes Cosmos3-Super. Set T041_FREEZE_LIFTED to the reason.}"
 echo "=== freeze lifted: ${T041_FREEZE_LIFTED}"
 
@@ -131,7 +144,8 @@ PY
 done
 
 # What the trainer will consume. The framework resolves <DATASET_PATH>/train/video_dataset_file.jsonl.
-cat >> "${PROJ}/cosmos_env.sh" <<EOF
+# ENV_OUT, not cosmos_env.sh: a rehearsal's DATASET_PATH must not become the one 94 picks up.
+cat >> "${ENV_OUT}" <<EOF
 export DATASET_PATH=${CORPUS}
 export CORPUS_MANIFEST_SHA256=$(cat "${CORPUS}/MANIFEST_SHA256")
 EOF

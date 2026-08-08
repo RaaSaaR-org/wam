@@ -53,6 +53,10 @@ RAW=${PROJ}/data/raw
 CORPUS=${CORPUS:-${PROJ}/data/cosmos-g1-embodiment}
 VAL_EPISODES=${VAL_EPISODES:-30}
 SEED=${SEED:-0}
+# Where the CORPUS export lands. Indirected so a rehearsal cannot overwrite the variable the real
+# chain reads: 93 and 94 source cosmos_env.sh, and a smoke path written there would be picked up
+# silently by a job that believes it is training on the pre-registered corpus.
+ENV_OUT=${ENV_OUT:-${PROJ}/cosmos_env.sh}
 PREPARE=${PROJ}/wam/scripts/prepare_cosmos_corpus.py
 [[ -f "${PREPARE}" ]] || { echo "FATAL: ${PREPARE} missing — run sync.sh from the Mac."; exit 1; }
 mkdir -p "${RAW}"
@@ -83,6 +87,28 @@ REPOS=(
 # Operator-supplied, space-separated, one per repo above and in that order. Leave empty on the
 # first run: step 1 prints the keys and step 2 refuses with the list.
 CAMERA_KEYS=${CAMERA_KEYS:-}
+
+# -- rehearsal mode --------------------------------------------------------------------------
+# SMOKE_SOURCES REPLACES the corpus with a named subset, to prove the pipeline end to end before
+# committing to the full one. It is NOT the pre-registered corpus and must never be mistaken for
+# it, so three things are forced rather than defaulted:
+#
+#   1. a distinct CORPUS directory, so the registered tree cannot be overwritten;
+#   2. a distinct ENV_OUT, so `export CORPUS=` for a rehearsal never reaches cosmos_env.sh, which
+#      is what 93 and 94 read;
+#   3. a SMOKE marker inside the corpus, so anything downstream can see what it is holding.
+#
+# It replaces rather than filters on purpose: CAMERA_KEYS is positional against REPOS, and quietly
+# dropping entries from one list and not the other is precisely how the wrong camera gets trained
+# on. Supply both, and prepare_cosmos_corpus.py enforces that the counts agree.
+SMOKE_SOURCES=${SMOKE_SOURCES:-}
+if [[ -n ${SMOKE_SOURCES} ]]; then
+  read -r -a REPOS <<< "${SMOKE_SOURCES}"
+  CORPUS=${PROJ}/data/cosmos-smoke
+  ENV_OUT=${PROJ}/cosmos_env.smoke.sh
+  echo "=== REHEARSAL: corpus replaced by ${#REPOS[@]} source(s): ${REPOS[*]}"
+  echo "=== REHEARSAL: CORPUS=${CORPUS}  ENV_OUT=${ENV_OUT}  (registered corpus untouched)"
+fi
 
 # -- 1. fetch: meta + videos only. The parquet is state and action, which a generator never sees.
 #
@@ -155,11 +181,21 @@ else
       --out "${CORPUS}" --val-episodes "${VAL_EPISODES}" --seed "${SEED}"
 fi
 
-# grep -q first: this job can run more than once in a chain, and cosmos_env.sh is sourced by every
+# A rehearsal corpus says so on disk. The manifest already records which sources went in, but that
+# takes reading JSON; this is visible to `ls` and to any later job that wants to refuse.
+if [[ -n ${SMOKE_SOURCES} ]]; then
+  cat > "${CORPUS}/SMOKE" <<EOF
+Rehearsal corpus — NOT the PR-09 §2 pre-registered corpus.
+sources: ${REPOS[*]}
+No verdict under T041_RULE_V1 may be issued from anything trained on this.
+EOF
+fi
+
+# grep -q first: this job can run more than once in a chain, and the env file is sourced by every
 # later job. Appending the same export on each pass would leave a file that still works but reads
 # like a log, and the duplicate would hide a real change to CORPUS.
-if ! grep -q "^export CORPUS=${CORPUS}$" "${PROJ}/cosmos_env.sh" 2>/dev/null; then
-  cat >> "${PROJ}/cosmos_env.sh" <<EOF
+if ! grep -q "^export CORPUS=${CORPUS}$" "${ENV_OUT}" 2>/dev/null; then
+  cat >> "${ENV_OUT}" <<EOF
 export CORPUS=${CORPUS}
 EOF
 fi
