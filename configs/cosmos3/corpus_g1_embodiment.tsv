@@ -1,0 +1,48 @@
+# PR-09 §2's pre-registered embodiment-fidelity corpus for T-041.
+#
+# ONE ROW PER SOURCE:  <hf_repo_id>  <camera_key>  <licence>
+# Tab-separated. '#' comments and blank lines ignored.
+#
+# WHY THIS FILE EXISTS. The repo list and the camera list used to be two bash arrays in
+# 92_fetch_g1_corpus.sbatch, matched by POSITION. That is a data structure held together by
+# nothing: delete one line from either array and every source after it silently gets its
+# neighbour's camera. A generator trained on a wrist camera when we meant the head view is a
+# finite, plausible, wrong run that no metric flags. Pairing them on one line removes the failure
+# mode rather than warning about it. Both the cluster job and the workstation pipeline read this
+# file, so the two paths cannot disagree about what the corpus is either.
+#
+# THE CAMERA IS A CHOICE, NOT A DEFAULT. The Unitree sets ship 2 or 4 views. cam_left_high is the
+# head-mounted view: it sees the torso, both arms and the Dex3 hands doing the task, which is the
+# embodiment signal PR-09 §2 is buying. The wrist cameras see the object and almost nothing of the
+# robot, so they answer "what is being manipulated" rather than "which robot is manipulating it".
+# cam_right_high is the other half of the same stereo pair — usable, redundant, and mixing the two
+# would put near-duplicate frames in both the train and val splits.
+#
+# CODEC: every one of these is AV1 (checked 2026-08-08 in each meta/info.json). That is LeRobot's
+# default and it is NOT safely consumable — vLLM's OpenCV decoded zero frames from it and job
+# 186357 produced 0 captions from 372 clips without erroring. The corpus must be transcoded to
+# H.264 (prepare_cosmos_corpus.py --mode transcode) before anything reads it.
+#
+# FORMAT: AppleToPlate is LeRobot v2.1 (one mp4 per episode). All 13 Unitree sets are v3.0
+# (episodes concatenated, boundaries in meta/episodes/*/*.parquet). prepare_cosmos_corpus.py
+# dispatches on the declared codebase_version; it does not guess from the layout.
+#
+# NOT INTERCHANGEABLE. Swapping a source changes which experiment this is and needs its own
+# pre-registration. USC-PSI-Lab/Humanoid-Everyday-G1 was added by operator decision on 2026-08-07
+# and withdrawn on 2026-08-08 — see PR-09 §2, which carries both dated notes. Do not re-add it
+# without reading them.
+
+nvidia/GR00T-N1.7-AppleToPlate	observation.images.ego_view	CC-BY-4.0
+unitreerobotics/G1_Dex3_BlockStacking_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_CameraPackaging_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_GraspSquare_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_ObjectPlacement_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_Pouring_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_ToastedBread_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_PickApple_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_PickBottle_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_PickCharger_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_PickGum_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_PickSnack_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_PickTissue_Dataset	observation.images.cam_left_high	Apache-2.0
+unitreerobotics/G1_Dex3_PickDoll_Dataset	observation.images.cam_left_high	Apache-2.0

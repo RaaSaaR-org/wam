@@ -1,6 +1,20 @@
 #!/bin/bash
 # Step 16 — T-041 / PR-09: fetch the G1 corpus at SOURCE resolution and lay it out for captioning.
 #
+# SUPERSEDED 2026-08-08 BY workstation/10_fetch_corpus.sh AND workstation/20_prepare_corpus.sh.
+# Kept because the download it already performed is a usable cache, not because it should be run.
+# Two reasons it cannot finish the job:
+#
+#   1. It symlinks. 13 of the 14 sources are LeRobot v3.0, where a clip is a timestamp window
+#      inside a concatenated mp4 — there is no per-episode file to link to. Extraction needs
+#      ffmpeg, and this QoS has 2 CPUs.
+#   2. Every source is AV1. The captioner's OpenCV decodes none of it (job 186357: 372 clips,
+#      0 captions, exit 0), so the corpus has to be transcoded to H.264 before anything reads it.
+#
+# Both are ffmpeg-and-IO work with a fast edit loop, which is what a workstation is for and what a
+# GPU allocation is not. The corpus definition now lives in configs/cosmos3/corpus_g1_embodiment.tsv
+# and is read by both paths, so they cannot disagree about what the corpus is.
+#
 #   T041_FREEZE_LIFTED="<reason>" sbatch 92_fetch_g1_corpus.sbatch
 #
 # CPU-only QoS: no GPU hours. Downloads and symlinks only.

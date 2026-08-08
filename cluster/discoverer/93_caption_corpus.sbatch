@@ -1,6 +1,14 @@
 #!/bin/bash
 # Step 17 — T-041 / PR-09: caption the G1 corpus and build the SFT jsonl.
 #
+# SUPERSEDED 2026-08-08 BY workstation/30_caption_corpus.sh. This is the job that failed silently:
+# 186357 captioned 372 clips in two minutes, produced 0 captions, and exited having written 372
+# empty files. The cause was the corpus codec (AV1, which vLLM's OpenCV cannot decode), not this
+# script — but the lesson is that captioning is cheap, portable text generation with a fast failure
+# loop, and it does not need a Slurm reservation. The workstation version adds the gate this one
+# lacked: it refuses to start unless a decode report proves the clips are readable by the very
+# interpreter that is about to read them.
+#
 #   T041_FREEZE_LIFTED="<reason>" CORPUS=/path/to/cosmos-g1-embodiment \
 #       sbatch 93_caption_corpus.sbatch
 #
