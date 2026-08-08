@@ -25,8 +25,18 @@ depends_on: []
 # reason the user has already decided against.
 due_date: ''
 created: 2026-08-06
-updated: 2026-08-07
-status_note: "UNBLOCKED AND READY TO SUBMIT, 2026-08-07 — nothing has been submitted. The pipeline
+updated: 2026-08-08
+status_note: "PREPARATION MOVED OFF THE CLUSTER, 2026-08-08 — still no training submitted. Two
+  format blockers were found and fixed in code: the 13 G1_Dex3_* sets are LeRobot v3.0 (episodes
+  concatenated, boundaries in meta/episodes/*/*.parquet, cameras rolling over to new files
+  independently), and ALL 14 sources are AV1, which vLLM's OpenCV cannot decode — job 186357
+  captioned 372 clips, produced 0 captions and exited 0. `prepare_cosmos_corpus.py` now reads both
+  layouts and transcodes to H.264; `scripts/verify_clip_decode.py` gates captioning on the
+  captioner's OWN interpreter decoding every clip. Fetch/prepare/caption now run on a workstation
+  (`workstation/`), the corpus is defined once in
+  `configs/cosmos3/corpus_g1_embodiment.tsv`, and jobs 92/93 are marked superseded. Every T-041
+  failure so far has been IO, format or scheduling — none in training.
+  UNBLOCKED AND READY TO SUBMIT, 2026-08-07 — nothing has been submitted. The pipeline
   is `docs/preregistration/PR-09-cosmos-super-finetune.md` (rule `T041_RULE_V1`) plus
   `cluster/discoverer/90..95`, `scripts/prepare_cosmos_corpus.py`, `make_t041_eval_prompts.py`,
   `eval_t041_embodiment.py` and `configs/cosmos3/t041_eval_selection.toml` (51 tests).

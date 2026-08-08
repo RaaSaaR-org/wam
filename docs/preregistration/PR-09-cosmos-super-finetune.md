@@ -181,6 +181,42 @@ it and the run is reported as a 4-GPU run, never as "the recipe".
 threads and ≤257 GB per GPU. An 8-GPU job is therefore `--cpus-per-task=208 --mem=1800G`, which is
 essentially the whole node — and Slurm bills allocated, not used.
 
+> **Added 2026-08-08 — e. Two things about the *corpus* that break the recipe, and where
+> preparation now runs.**
+>
+> Both were found by running the pipeline, not by reading about it, and both produce a corpus that
+> trains rather than a job that crashes.
+>
+> **The sources are AV1.** All fourteen. LeRobot's default encoder is `libsvtav1` and none of them
+> overrode it. NVIDIA's captioner drives a vLLM server, and vLLM decodes video through OpenCV
+> only — every backend in its registry shares one OpenCV mixin. That build opened each file, read
+> the container header correctly (377 frames, 30 fps, 640×480) and then failed every `cap.grab()`.
+> Job 186357 sent 372 requests, received `array([], shape=(0, 480, 640, 3))` for each, logged
+> `0/372 videos were successfully captioned`, wrote 372 empty files and **exited 0**. `ffprobe`
+> called the corpus valid throughout, because "is this file well-formed" and "can the decoder that
+> will actually read it get pixels out" are different questions with, here, different answers.
+> **Handled:** `prepare_cosmos_corpus.py --mode transcode` writes H.264 yuv420p, and
+> `scripts/verify_clip_decode.py` re-checks every clip *with the captioner's own interpreter* —
+> verifying with any other `cv2` proves nothing, so the script prints which one it used.
+>
+> **Thirteen of the fourteen are LeRobot v3.0.** A clip is not a file there: episodes are
+> concatenated into a handful of mp4s and each is a `[from_timestamp, to_timestamp)` window in
+> `meta/episodes/*/*.parquet`. Three details each yield a plausible wrong corpus — cameras roll
+> over to new files **independently** (episode 50 of BlockStacking is in `file-001` for
+> `cam_left_high` and `file-000` for the other three), timestamps reset to `0.0` at each rollover,
+> and `to_timestamp` is **exclusive**, so cutting with ffmpeg's `-to` appends a frame of the next
+> episode to every clip. **Handled:** the reader resolves the file per (episode, camera) and cuts
+> with `-frames:v <length>`; each of the three has a test.
+>
+> **Preparation moved to a workstation** (`workstation/`). Every T-041 failure so far — the 429,
+> v3.0, the queue stall, the AV1 captioning — has been IO, format or scheduling, and each cost
+> hours of Slurm queue to learn something a workstation answers in seconds. This does not change
+> the experiment, the corpus, the recipe or the gate; it changes which machine does the ffmpeg. The
+> cluster's remaining job is training. **This affects §7's cost accounting favourably** — the 6
+> GPU-h budgeted for captioning is no longer drawn from the allocation — and the corpus is now
+> defined once, in `configs/cosmos3/corpus_g1_embodiment.tsv`, read by both paths so they cannot
+> disagree about what it is.
+
 ## 5. Arms
 
 | arm | what it is | why |
