@@ -93,6 +93,29 @@ def main(argv: list[str] | None = None) -> int:
     if leaked:
         raise SystemExit(f"FATAL: {len(leaked)} selected clips are in the TRAIN split: {leaked[:3]}")
 
+    # ...and the same question asked of the bytes, because a uuid is a filename. The prepared
+    # corpus shipped one source as a byte-copy of another, which put four val clips' pixels in
+    # train under a different name; the uuid test above passed on all four. Refusing here rather
+    # than dropping them is deliberate — the rule is "first n sorted by uuid" and n is
+    # pre-registered, so a prompt set silently one short is a different experiment.
+    unhashed = [c["uuid"] for c in manifest["clips"]["train"] + chosen if not c.get("sha256")]
+    if unhashed:
+        raise SystemExit(
+            f"FATAL: {len(unhashed)} clips carry no sha256 in the manifest ({unhashed[:3]}), so "
+            "the selection cannot be checked against train's *content*. Re-prepare the corpus "
+            "with prepare_cosmos_corpus.py; skipping this is how the duplicate source got through."
+        )
+    train_by_sha: dict[str, str] = {}
+    for c in manifest["clips"]["train"]:
+        train_by_sha.setdefault(c["sha256"], c["uuid"])
+    duplicated = [f"{c['uuid']} == {train_by_sha[c['sha256']]}"
+                  for c in chosen if c["sha256"] in train_by_sha]
+    if duplicated:
+        raise SystemExit(
+            f"FATAL: {len(duplicated)} selected clips are byte-identical to a TRAIN clip under a "
+            f"different uuid: {duplicated[:3]}. Run scripts/dedupe_cosmos_corpus.py first."
+        )
+
     captions_dir = args.corpus / "val" / "captions"
     lines = []
     for c in chosen:

@@ -248,8 +248,12 @@ def compute_verdict(key: dict, scores: dict[str, bool | None], run_meta: dict,
     g0a = base_failures >= G0A_MIN_BASE_FAILURES
 
     # --- G0c: the run has to have been a run.
+    # No default on resume_diffs_logged. It used to default to True, which inverted the gate's
+    # purpose: the one run_metadata.json that would omit the key is one written by a job that
+    # never tracked resumes at all, and that is precisely the run PR-09 §4a says not to trust.
+    # Absent evidence is not evidence of absence of the defect.
     g0c = (run_meta.get("iteration_reached") == N_MCNEMAR_ITERS
-           and bool(run_meta.get("resume_diffs_logged", True))
+           and bool(run_meta.get("resume_diffs_logged"))
            and bool(run_meta.get("export_nonempty")))
 
     b = sum(1 for v in complete.values() if v["base"] is False and v["lora"] is True)
@@ -303,6 +307,17 @@ def check_prompts_are_held_out(prompts_path: Path, corpus: Path) -> int:
     also writes the ``.sha256`` sidecar, so hash-matching only proves the file has not changed
     *since*, not that it ever came from that script. A hand-written pair passes that check. This
     one cannot be satisfied by anything except prompts that really are in the manifest's val list.
+
+    TWO KINDS OF DISJOINTNESS, BECAUSE A UUID IS A FILENAME AND A FILENAME IS NOT CONTENT. The
+    prepared T-041 corpus shipped ``g1-dex3-graspsquare-dataset`` as a byte-for-byte copy of
+    ``g1-dex3-blockstacking-dataset``, so four of the thirty registered prompts named a val clip
+    whose bytes were also sitting in train under the other source's name. Every uuid check this
+    repo owned passed, and the eval would have scored the adapter on footage it had memorised —
+    biased toward the registered hypothesis, which is the direction least likely to be questioned.
+    The manifest records a sha256 per clip (AC-04 provenance), so the content check costs one dict
+    and no hashing. Kept alongside the uuid check rather than in place of it: the uuid check is
+    what catches a prompt set assembled from the wrong split, and the sha check is what catches a
+    corpus that duplicates itself.
     """
     manifest = json.loads((corpus / "manifest.json").read_text())
     val = {c["uuid"] for c in manifest["clips"]["val"]}
@@ -321,6 +336,34 @@ def check_prompts_are_held_out(prompts_path: Path, corpus: Path) -> int:
             f"FATAL: {len(unknown)} eval prompts are in neither split of "
             f"{corpus}/manifest.json ({unknown[:3]}). The prompt set does not belong to the "
             "corpus this run trained on."
+        )
+
+    def recorded_sha(clip: dict) -> str:
+        sha = clip.get("sha256")
+        if not sha:
+            raise SystemExit(
+                f"FATAL: {corpus}/manifest.json records no sha256 for {clip['uuid']}, so the "
+                "content-level holdout check cannot run. Passing anyway is exactly how a corpus "
+                "that duplicated one source got past the uuid check. Re-prepare with "
+                "scripts/prepare_cosmos_corpus.py, which writes a sha256 per clip."
+            )
+        return sha
+
+    train_by_sha: dict[str, str] = {}
+    for clip in manifest["clips"]["train"]:
+        train_by_sha.setdefault(recorded_sha(clip), clip["uuid"])
+    val_by_uuid = {c["uuid"]: c for c in manifest["clips"]["val"]}
+    duplicated = sorted(
+        (u, train_by_sha[recorded_sha(val_by_uuid[u])])
+        for u in uuids if recorded_sha(val_by_uuid[u]) in train_by_sha
+    )
+    if duplicated:
+        raise SystemExit(
+            f"FATAL: {len(duplicated)} eval prompts name a val clip that is BYTE-IDENTICAL to a "
+            f"train clip ({['%s == %s' % p for p in duplicated[:3]]}). Their uuids are disjoint "
+            "and their pixels are not, so the adapter was trained on the footage it is about to "
+            "be scored on. Run scripts/dedupe_cosmos_corpus.py over the corpus; do not drop the "
+            "affected prompts, because n is pre-registered."
         )
     return len(uuids)
 
