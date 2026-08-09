@@ -18,6 +18,7 @@ clone. The mp4s are byte blobs; nothing here decodes video.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -244,6 +245,25 @@ def test_manifest_hash_changes_when_a_clip_changes(tmp_path):
     second = tmp_path / "o2"
     pcc.main(["--source", str(root), "--out", str(second), "--val-episodes", "1", "--seed", "0"])
     assert (second / "MANIFEST_SHA256").read_text() != before
+
+
+def test_manifest_hash_is_the_hash_of_the_bytes_on_disk(tmp_path):
+    """`sha256sum manifest.json` must reproduce MANIFEST_SHA256 — that IS the check.
+
+    The writer used to hash `body` while writing `body + "\\n"`, so the recorded digest could never
+    be reproduced by the obvious command, and 92b_register_corpus.sbatch — which runs exactly that
+    command to decide whether the shipped corpus is the prepared one — would have refused every
+    corpus we ever produced. Off by one byte, fatal at the gate.
+    """
+    root = make_root(tmp_path, "src", [100] * 3)
+    out = tmp_path / "out"
+    pcc.main(["--source", str(root), "--out", str(out), "--val-episodes", "1", "--seed", "0"])
+
+    raw = (out / "manifest.json").read_bytes()
+    recorded = (out / "MANIFEST_SHA256").read_text().strip()
+    assert hashlib.sha256(raw).hexdigest() == recorded
+    # And specifically not the newline-stripped variant, which is the bug reintroducing itself.
+    assert hashlib.sha256(raw.rstrip(b"\n")).hexdigest() != recorded
 
 
 def test_copy_mode_produces_real_files_not_links(tmp_path):
@@ -655,3 +675,40 @@ def test_the_supported_version_is_not_merely_whatever_the_fixture_says(tmp_path)
     with pytest.raises(SystemExit) as e:
         pcc.main(["--source", str(root), "--out", str(tmp_path / "o")])
     assert "unknown" in str(e.value)
+
+
+class TestVideoShape:
+    """`shape` is not reliably [H, W, C], and guessing by position fails silently.
+
+    Half our 14 G1 sources declare [C, H, W]. Reading index 1 as the width turned [3, 480, 640]
+    into (480, 3) — finite, plausible, wrong — and put it in 1712 of 3462 manifest entries. The
+    manifest is the provenance record AC-04 rests on, so every layout below must resolve, and a
+    wrong answer here has no downstream symptom to catch it.
+    """
+
+    def test_probed_stream_info_wins_over_a_declared_shape(self):
+        info = {"features": {"k": {"shape": [3, 480, 640],
+                                   "info": {"video.width": 640, "video.height": 480}}}}
+        assert pcc.video_shape(info, "k") == (640, 480)
+
+    @pytest.mark.parametrize(
+        "shape,names",
+        [
+            ([3, 480, 640], ["channels", "height", "width"]),
+            ([480, 640, 3], ["height", "width", "channels"]),
+        ],
+    )
+    def test_declared_axis_names_are_honoured(self, shape, names):
+        info = {"features": {"k": {"shape": shape, "names": names}}}
+        assert pcc.video_shape(info, "k") == (640, 480)
+
+    @pytest.mark.parametrize("shape", [[3, 480, 640], [480, 640, 3]])
+    def test_channel_axis_is_located_rather_than_assumed(self, shape):
+        """No names and no probe: the 3 is the channel axis wherever it sits."""
+        info = {"features": {"k": {"shape": shape}}}
+        assert pcc.video_shape(info, "k") == (640, 480)
+
+    def test_the_regression_itself(self):
+        """The exact input that produced (480, 3) must never do so again."""
+        info = {"features": {"k": {"shape": [3, 480, 640]}}}
+        assert pcc.video_shape(info, "k") != (480, 3)
