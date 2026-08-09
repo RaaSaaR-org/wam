@@ -28,6 +28,12 @@
 #SBATCH --partition=common
 #SBATCH --account=ehpc-aif-2026pg01-905
 #SBATCH --qos=ehpc-aif-2026pg01-905
+# 4 h is the QoS ceiling, not a choice — `ehpc-aif-2026pg01-905` has MaxWall 04:00:00
+# (docs/discoverer.md:117-119), so "ask for a longer wall" is not on the table and a job that does
+# not fit here has to be split across submissions. With generation batched to two checkpoint loads
+# (see step 2) the honest estimate is ~1.4 h — ~0.6 h of generation and ~0.8 h of judge — so the
+# arms stay in one job. If the judge phase ever grows past ~2 h, split the arms rather than the
+# scoring: two submissions of step 2 need no code change, because the missing-list is the resume.
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -108,10 +114,80 @@ echo "=== prompts $(wc -l < "${PROMPTS}")  sha256 $(cat "${PROMPTS}.sha256")"
 
 # -- 2. generate, both arms, same seed ----------------------------------------------------------
 cd "${FRAMEWORK}"
+
+# ONE torchrun PER ARM, NOT ONE PER CLIP, and the reason is now measured instead of guessed. This
+# loop used to launch torchrun once per payload — 30 per arm, 60 in all. The PR-09 §7 probe (job
+# 186663, PROBE.json) separated the constant from the per-iteration cost by subtraction across a
+# 5-iteration and a 25-iteration run and reported load_seconds = 494.8: 8.25 MINUTES of cold start
+# (imports, an 8-rank NCCL world, a 64.6 GB DCP read) before the first denoising step. 60 × 494.8 s
+# = 8.25 h of checkpoint loading alone, inside a job whose wall is 4 h, with generation still to
+# pay on top. No number of requeues fixes a per-pass cost that is dominated by a constant repeated
+# 60 times: each restart only saves the clips the previous one finished, so the job would need
+# ~10 resubmissions to grind through well under an hour of actual sampling. 60 loads become 2,
+# ≈16.5 min, and that is an UPPER bound — 494.8 s was a *training* load (model + optimiser + EMA
+# shards) and inference reads only <ckpt>/model (utils/generator/model_loader.py:380-382).
+#
+# THE BATCHED PATH IS READ OUT OF THE FRAMEWORK, NOT ASSUMED. `-i` is a list and its docstring
+# states the property this depends on — "the model will be loaded once and all the samples will be
+# run sequentially" (scripts/inference.py:22-27). Under parallelism_preset = "throughput" the eight
+# ranks now hold eight DIFFERENT samples instead of duplicating one: cp = cfgp = 1
+# (inference/args.py:1364-1378) makes replica_size = 1, so num_replicas = world_size = 8
+# (inference/inference.py:1966-1980) and create_batches mod-shards the sample list across ranks
+# (inference/inference.py:1410). Short ranks are padded with a discarded 1-step dummy batch
+# (inference/inference.py:1471-1486) and the per-step collectives are held in lockstep by the
+# dp_shard all-reduce at inference/inference.py:1648-1676, which the framework wrote for exactly
+# this case. 30 clips per arm therefore cost ceil(30/8) = 4 sequential generations per rank, not 30
+# — the ~8× the "throughput" preset always promised and that one-payload-per-launch threw away.
+# max_num_seqs defaults to 1 (inference/common/args.py:820), so a rank still samples one clip at a
+# time: this buys throughput, not per-rank activation memory, and does not change what fits in VRAM.
+#
+# THE ARMS STAY TWO PROCESSES. Each launch carries its own --checkpoint-path, so no rank ever holds
+# base weights while writing a lora clip. That is why this is two loads and not one; merging them
+# would save ~8 min and cost the only property the paired test cannot survive losing.
+
+# RESTART-SAFETY, MOVED RATHER THAN LOST. The old loop skipped a clip whose .mp4 was already on
+# disk, one clip at a time. A batched launch cannot skip mid-flight, so the skip moves into the
+# *input list*: harvest() files everything already finished and leaves the rest in the missing
+# list, and only that list is handed to torchrun. A requeue regenerates exactly what is absent.
+#
+# harvest() also rescues clips the framework finished but the job died before they were filed, and
+# it uses the framework's own completion marker to do it: sample_outputs.json is written strictly
+# after `assert vision_file.is_file()` (inference/inference.py:1752-1784), so mp4-plus-marker means
+# the encode returned, while an mp4 truncated by a SIGKILL has no marker beside it. The marker is
+# also written with status "error" by _handle_sample_exception (inference/inference.py:1953), which
+# is why the status is read and not merely the file counted.
+harvest() {  # payload-dir  raw-dir  dest-dir  missing-list-to-write
+python - "$1" "$2" "$3" "$4" <<'PY'
+import json, pathlib, shutil, sys
+pay, raw, dest, out = (pathlib.Path(a) for a in sys.argv[1:5])
+missing = []
+for p in sorted(pay.glob("*.json")):
+    if (dest / f"{p.stem}.mp4").is_file():
+        continue
+    # <-o>/<payload "name">/vision.mp4 — output_dir is the sample's own name
+    # (scripts/inference.py:52) and the extension follows num_frames (inference/args.py:437-439).
+    src, rec = raw / p.stem / "vision.mp4", raw / p.stem / "sample_outputs.json"
+    ok = False
+    if src.is_file() and rec.is_file():
+        try:
+            ok = json.loads(rec.read_text()).get("status") == "success"
+        except ValueError:
+            ok = False
+    if ok:
+        shutil.move(str(src), str(dest / f"{p.stem}.mp4"))
+    else:
+        missing.append(p.stem)
+out.write_text("".join(f"{u}\n" for u in missing))
+print(f"harvest: {len(list(dest.glob('*.mp4')))} clips filed, {len(missing)} to generate")
+PY
+}
+
 for ARM in base lora; do
   CKPT=$([[ "${ARM}" == base ]] && echo "${BASE_CHECKPOINT_PATH}" || echo "${LORA_MODEL}")
   DEST=${EVAL}/clips/${ARM}
-  mkdir -p "${DEST}" "${EVAL}/payloads/${ARM}"
+  RAW=${DEST}/_raw
+  MISSING=${EVAL}/payloads/${ARM}.missing
+  mkdir -p "${DEST}" "${RAW}" "${EVAL}/payloads/${ARM}"
   echo "=== generating arm ${ARM} from ${CKPT}"
   # One payload per prompt, built from the committed settings. Identical across arms by
   # construction: the same file writer, the same config, the same seed. A sampler difference
@@ -120,6 +196,7 @@ for ARM in base lora; do
 import json, pathlib, sys, tomllib
 prompts, cfg_path, dest = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
 g = tomllib.loads(pathlib.Path(cfg_path).read_text())["generation"]
+n = 0
 for line in pathlib.Path(prompts).read_text().splitlines():
     if not line.strip():
         continue
@@ -130,22 +207,42 @@ for line in pathlib.Path(prompts).read_text().splitlines():
                "fps": g["fps"], "num_frames": g["num_frames"], "resolution": g["resolution"],
                "aspect_ratio": g["aspect_ratio"], "seed": g["seed"]}
     (dest / f"{p['uuid']}.json").write_text(json.dumps(payload, indent=2) + "\n")
-print("payloads:", len(list(dest.glob('*.json'))))
+    n += 1
+# THE ONE-TO-ONE MAPPING IS ASSERTED HERE BECAUSE THE FRAMEWORK DOES NOT ASSERT IT. Batch mode
+# derives each output directory from the payload's "name" (scripts/inference.py:52), so two
+# payloads sharing a name would share an output directory and the second would silently overwrite
+# the first — a clip filed under the wrong uuid, which is the one failure that produces a plausible
+# verdict from shuffled labels. from_files LOOKS like it guards this ("Duplicate name" at
+# inference/common/args.py:897) but the `names` set it tests against is never added to (:889), so
+# at FRAMEWORK_SHA 12a9a81 the check cannot fire. Here it can: name == filename stem by
+# construction, so a repeated uuid loses a file and this count catches it. A stale payload from a
+# different prompt set — which harvest() would otherwise hand to the generator — trips it too.
+written = len(list(dest.glob('*.json')))
+assert written == n, f"{n} prompts but {written} payloads: duplicate uuid, or stale payloads in {dest}"
+print("payloads:", written)
 PY
   SEED=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('${CONFIG}').read_text())['generation']['seed'])")
   PRESET=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('${CONFIG}').read_text())['generation']['parallelism_preset'])")
-  for PAY in "${EVAL}/payloads/${ARM}"/*.json; do
-    UUID=$(basename "${PAY}" .json)
-    [[ -f "${DEST}/${UUID}.mp4" ]] && continue
+  harvest "${EVAL}/payloads/${ARM}" "${RAW}" "${DEST}" "${MISSING}"
+  if [[ -s "${MISSING}" ]]; then
+    TODO=()
+    while IFS= read -r U; do TODO+=("${EVAL}/payloads/${ARM}/${U}.json"); done < "${MISSING}"
+    echo "=== arm ${ARM}: one load, ${#TODO[@]} clips"
     torchrun --nproc-per-node="${NPROC}" -m cosmos_framework.scripts.inference \
-        --parallelism-preset="${PRESET}" -i "${PAY}" -o "${DEST}/_raw/${UUID}" \
+        --parallelism-preset="${PRESET}" -i "${TODO[@]}" -o "${RAW}" \
         --checkpoint-path "${CKPT}" --seed="${SEED}"
-    # The inference script names its output by the payload's "name"; normalise to <uuid>.mp4 so
-    # build-sheet's neutral tree has exactly one file per (arm, prompt).
-    FOUND=$(find "${DEST}/_raw/${UUID}" -name '*.mp4' | head -1)
-    [[ -n "${FOUND}" ]] || { echo "FATAL: no mp4 for ${ARM}/${UUID}"; exit 1; }
-    mv "${FOUND}" "${DEST}/${UUID}.mp4"
-  done
+    # Second pass files what the launch produced. -o is the arm's own tree, so the mapping back to
+    # clips/${ARM}/<uuid>.mp4 is a named lookup, not the find|head it replaces — that could return
+    # any mp4 under the directory, and "any mp4, renamed to a uuid" is precisely how a correctly
+    # named clip ends up holding the wrong prompt's frames.
+    harvest "${EVAL}/payloads/${ARM}" "${RAW}" "${DEST}" "${MISSING}"
+  else
+    echo "=== arm ${ARM}: every clip already on disk — no checkpoint load"
+  fi
+  if [[ -s "${MISSING}" ]]; then
+    echo "FATAL: arm ${ARM} still missing $(wc -l < "${MISSING}") clips after generation:"
+    head -5 "${MISSING}"; exit 1
+  fi
   echo "=== arm ${ARM}: $(find "${DEST}" -maxdepth 1 -name '*.mp4' | wc -l) clips"
 done
 
