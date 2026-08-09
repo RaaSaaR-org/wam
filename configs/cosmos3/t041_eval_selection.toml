@@ -31,10 +31,107 @@ model_mode = "text2video"
 num_steps = 35
 guidance = 6.0
 shift = 10.0
-fps = 24
-num_frames = 189
-resolution = "720"
-aspect_ratio = "16,9"
+# AMENDED 2026-08-09, before any clip was generated. Was fps = 24, carried over from the cookbook
+# payload example. Training conditioned on 30.0: vision_sft_super.py:266 sets conditioning_fps=-1,
+# so sft_dataset.py:297 passes the clip's OWN fps through, and our corpus is 30.0 fps throughout
+# (decode_report.json, 3432/3432 clips). That value reaches mRoPE as a temporal stride of
+# base_fps/fps = 24/30 = 0.8 per latent frame (mrope.py:169-174, enable_fps_modulation=True).
+# Generating at 24 would ask for a stride of 1.0 — a 25% mismatch against everything the adapter
+# was fit on, in the one axis a video model is most sensitive to. It is legal (args.py:377 allows
+# 1..30) and it would have produced plausible video, which is exactly why it needed checking.
+fps = 30
+# AMENDED 2026-08-09, before any clip was generated, closing the item the 2026-08-09 resolution/fps
+# amendment deliberately left open. Was 189 — the cookbook payload example's value (README.md:64),
+# 4*47+1 so args.py:536-538 left it unrounded, and 6.3 s at 30 fps.
+#
+# IT WAS SHORTER THAN EVERY CLIP THE ADAPTER TRAINS ON, measured rather than asserted. The training
+# corpus is 3432 clips, all 30.0 fps, and `num_video_frames = -1` (vision_sft_super.py:271) puts the
+# dataset in native-chunk mode, so the whole window enters at temporal_interval 1
+# (sft_dataset.py:215-219, captions_to_sft_jsonl.py:172-174) — the manifest's frame counts ARE the
+# training durations. From manifest.json: min 249, p05 356, p25 464, median 693.5, p75 911, max 1819
+# frames = 8.3 s to 60.6 s. Nothing at or below 189. The eval would have asked for a duration the
+# LoRA never saw, in the same axis the two notes around this one spend their length arguing about.
+#
+# 397 = 4*99+1, the largest legal value inside the 256 bucket's recommended range. THAT RANGE IS NOT
+# A CAP, and the open note called it one: MAX_NUM_FRAMES["256"] = 400 (args.py:146) is only compared
+# in a `log.warning` (args.py:529-532); nothing clamps num_frames except the 4N+1 round-up at
+# args.py:536-538. 397 is chosen to stay inside the vendor's stated range, not because anything
+# would have stopped us leaving it — and leaving it would be inventing evidence NVIDIA has not given.
+#
+# WHY 397 AND NOT A SAFER 4N+1. Of the legal values only 397 is inside the training distribution
+# rather than at its edge: 13.0% of train clips are <= 397, against 4.2% at 349, 0.20% at 297, and
+# 0.03% — one clip out of 3432 — at 249. "Exactly the shortest training clip" is the boundary, not
+# the interior, and a boundary is what this file just rejected. The prompt argues the same way: the
+# eval prompt IS the structured caption (make_t041_eval_prompts.py), whose media dict carries the
+# source clip's duration, and the val split's median is 759.5 frames = 25.3 s. 13.2 s is the closest
+# this API can come to the text it is generating from; 6.3 s is a quarter of it.
+#
+# COST, BACK-OF-ENVELOPE AND LABELLED AS SUCH. Per clip the sampler carries 1+(F-1)/4 latent frames
+# at (320/32)*(256/32) = 80 tokens each (patch_spatial=2, batchers.py:205,264): 3840 tokens at 189,
+# 8000 at 397, a factor of 2.08. Anchor: inference_benchmarks.md, Cosmos3-Super t2v, H200 141 GB,
+# 256p, 189 frames. THE 8-GPU COLUMN DOES NOT APPLY TO US — `parallelism_preset = "throughput"`
+# forces cp = cfgp = 1 (args.py:1364-1378) with dp_shard = world (args.py:1354-1360), and
+# 95_eval_t041_embodiment.sbatch:137-140 hands torchrun ONE payload per launch, so the eight ranks
+# shard parameters and duplicate the sample. The single-GPU column is the honest anchor: ~26-31 s at
+# 320x192, ~40 s at our 320x256, ~85 s at 397 frames. Over 60 clips that is ~40 min at 189 against
+# ~85 min at 397. Neither is what threatens the 4 h wall: 60 cold torchrun launches, each loading a
+# 64.6 GB DCP checkpoint, are ~90-180 min and are INDEPENDENT of this setting. Buying 6.9 s more
+# evidence per clip for ~45 min of a job whose fixed cost is three times that is worth it, and the
+# job is restart-safe by construction (95:139 skips clips already written, judge --resume,
+# --requeue) — an overrun costs a resubmission, not the verdict. PR-09 §5 carries the arithmetic,
+# the assumptions, and what would falsify them.
+num_frames = 397
+# AMENDED 2026-08-08, before any clip was generated and before any job was submitted. Was
+# resolution = "720", aspect_ratio = "16,9" — the cookbook payload example's values, carried over
+# without checking them against our own corpus.
+#
+# THE CORPUS IS 640x480 4:3 THROUGHOUT. Every one of the 14 sources records at that geometry, and
+# prepare_cosmos_corpus.py preserves source resolution deliberately. Generating at 720p 16:9 asked
+# a LoRA trained only on 4:3 480p to express what it learned in a geometry and a scale it never
+# saw. Both arms would still have used identical settings, so this could never have manufactured a
+# false P — what it could produce is an ambiguous N, where "the adapter did not fix the embodiment
+# defect" is indistinguishable from "it did, but not at 16:9 720p". Removing that before the run
+# is the whole point of pre-registering the settings.
+#
+# The second reason is the judge. PR-09 §6 G0b calibrates the rubric on REAL held-out clips, which
+# are 640x480 because that is what the robot recorded. Generating at 1280x720 would have handed the
+# judge generated clips at one scale and calibration clips at another; the rubric has to work at
+# 640x480 or G0b fails and there is no verdict at all, so matching the generated clips to it costs
+# nothing and removes a difference.
+#
+# CORRECTED 2026-08-09. The paragraphs above are right about WHY geometry matters and wrong about
+# the mechanism, and the error mattered: `resolution` is NOT the output height. It is a key into
+# VIDEO_RES_SIZE_INFO (cosmos_framework/data/generator/utils.py:42-74), whose 4:3 entries are
+#     "256" -> (320, 256)      "480" -> (736, 544)      "720" -> (1104, 832)
+# so "480" + "4,3" generates 736x544, not 640x480. THERE IS NO 640x480 IN THE TABLE — the corpus
+# geometry is not reachable through this API at all, so "no resampling anywhere" was never on
+# offer. args.py:415-434 resolves it and 95_eval_t041_embodiment.sbatch passes it straight into the
+# payload, so 736x544 is what would have been generated.
+#
+# Given that, the choice is which mismatch to accept, and the answer is to match TRAINING:
+# vision_sft_super.py:272 pins resolution="256" for the SFT dataset, and the TOML cannot override
+# it (DataloaderTrainConfig has four fields and forbids extras, sft_config.py:624-665). Every
+# 640x480 clip is scaled by 0.533 to 341x256 and centre-cropped to 320x256 (sft_dataset.py:192-195,
+# 255, 278). So 320x256 IS the geometry the adapter learned in; 736x544 is a scale it never saw —
+# the same objection this file already raised against 720p 16:9, which is why it applies here too.
+#
+# WHAT THIS COSTS, stated plainly: the G0b argument above — that generated and calibration clips
+# should share a geometry — can no longer be satisfied by choosing a bucket, because the
+# calibration clips are real 640x480 footage. Matching them is impossible; matching training is
+# possible. The remaining difference has to be removed on the calibration side, by downscaling
+# those clips to 320x256 before the judge sees them.
+#
+# DONE 2026-08-09 by scripts/build_t041_calibration.py, which puts both sides of the calibration
+# set through the dataloader's own scale-to-cover-then-centre-crop onto 320x256 and refuses to
+# write a clip ffprobe does not confirm at that geometry. This paragraph used to end "THAT IS NOT
+# DONE YET, and G0b should not be run until it is", and it stayed there after the work was done —
+# a blocker that is no longer true is worse than no blocker, because the next person to read it
+# either waves it through or stops for nothing. See [calibration] for what the built set pins.
+#
+# T041_RULE_V1 (§6) is UNCHANGED: the verdict rule is McNemar over the G0 gates and never mentioned
+# resolution. This is a sampler setting, amended before any measurement existed to be flattered.
+resolution = "256"
+aspect_ratio = "4,3"
 enable_sound = false
 seed = 0
 parallelism_preset = "throughput"
@@ -45,10 +142,69 @@ parallelism_preset = "throughput"
 # anyone adjudicating a generated frame — which is the point: a rubric that cannot do this on real
 # video cannot be trusted on generated video. It is a necessary check, not a sufficient one, and
 # PR-09 §9 says so.
+#
+# BUILT BY scripts/build_t041_calibration.py, which is the executable form of everything below and
+# writes MANIFEST.json next to the clips: every selection, every skip with its measured reason, the
+# ffmpeg filter chain, and the sha256 of each output. The set that G0b scores is the one whose
+# MANIFEST.json names this file's sha256 and the corpus manifest's; anything else is a different
+# set wearing the same directory name.
 n_positive = 10
 n_negative = 10
 negative_repo = "nvidia/BridgeData2-Subset-Synthetic-Captions"
 negative_note = "WidowX arm, the recipe's own SFT dataset. Unambiguously not a G1 Dex3."
+# Pinned because "the negatives came from BridgeData2" does not identify a set of files. The repo
+# is live and its train listing is the selection rule's input: sorted, first n. A re-upload that
+# adds one file sorting before episode_000015 silently changes which clips were calibrated on. The
+# builder refuses if the hub resolves anything else.
+negative_revision = "e841d88db9f36caa4c805c31509712676c0fda0e"
+
+# POSITIVES COME FROM TRAIN, NOT VAL, and that is forced rather than chosen. [selection] above
+# consumes the val split whole — 30 clips, and scripts/make_t041_eval_prompts.py takes the first 30
+# sorted by uuid, which is all of them. A positive drawn from val would be a clip the eval also
+# generates from, so the rubric would be calibrated on the very footage whose generated counterpart
+# it then scores. Train is the only pool left. The builder makes the disjointness content-level
+# rather than name-level — it excludes any train clip whose sha256 appears in val — because this
+# corpus shipped one source as a byte-copy of another and a uuid is only a filename.
+positive_split = "train"
+# One clip per G1_Dex3_* source, sources alphabetical, first uuid within each. Diversity of task,
+# not of frame: ten clips from one source would be ten views of one manipulation. The tie-break
+# when sources outnumber slots is the alphabet and nothing else, so it cannot be turned after
+# seeing how the judge scored. 13 G1_Dex3_* sources exist; g1-dex3-graspsquare-dataset contributes
+# zero train clips since scripts/dedupe_cosmos_corpus.py removed all of them as byte-duplicates, so
+# 12 are eligible for 10 slots and g1-dex3-pouring/-toastedbread are simply not reached. A source
+# with nothing selectable is skipped for the next one rather than being fatal, because the
+# alternative is that re-running the dedupe tool breaks the calibration build.
+positive_rule = "one clip per G1_Dex3_* source, sources alphabetical, first uuid within each"
+# gr00t-n1-7-appletoplate is in the same corpus and is a humanoid, which is exactly why it is named
+# here: it is NOT a G1 with Dex3 hands, and a positive set that quietly included it would calibrate
+# the rubric against the wrong ground truth. The builder filters on the LeRobot root directory name
+# rather than the source id, so a re-spelled id cannot let it through.
+positive_excludes_source = "gr00t-n1-7-appletoplate"
+
+# BOTH SIDES ARE NORMALISED TO 320x256 — see the [generation] resolution note for the mechanism.
+# The reason it belongs here too: positives are 640x480 from our own robot and negatives are
+# 256x256 from BridgeData2, so an un-normalised set is separable by frame size alone. A rubric that
+# cannot see a hand at all would score 20/20 by reading the resolution, G0b would pass, and it
+# would have certified nothing. The transform is the training dataloader's own scale-to-cover then
+# centre-crop, applied identically to both sides, so it cannot itself become the difference.
+normalise_to = "320x256"
+
+# WINDOW LENGTH IS DERIVED FROM [generation] num_frames, NOT SET HERE. num_frames / fps seconds,
+# cut from the centre of each source; the builder reads this file rather than carrying a number of
+# its own. It is written this way because the two have already desynchronised once: the set was
+# built at 189 frames = 6.3 s, num_frames was amended to 397 = 13.23 s on 2026-08-09, and nothing
+# in the calibration set objected. A judge whose rubric was calibrated on 6.3 s of footage and then
+# applied to 13.23 s of it was calibrated on a different measurement than the one it makes. Centre
+# and not start, because the opening seconds of a teleoperated episode are the arm leaving home.
+#
+# The consequence of a longer window is that source length now bites. BridgeData2 episodes are
+# 13-19 s, so 13.23 s is inside them but not comfortably, and 443 of the 3133 train clips are
+# shorter than 397 frames. The builder screens both sides against the window before encoding, skips
+# what cannot fill it and takes the next candidate from the same sorted list, records every skip in
+# MANIFEST.json, and asserts the frame count and duration of every written clip — ffmpeg exits 0
+# when the input runs out before -frames:v is satisfied, so a short clip is a silent failure unless
+# something checks. A clip of the wrong length is a cue the judge can score instead of a hand.
+window_seconds_from = "generation.num_frames / generation.fps"
 
 [judge]
 # Same reasoner as the captioner, so the cluster holds one model family, not two.

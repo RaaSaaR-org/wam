@@ -271,13 +271,27 @@ def test_build_sheet_refuses_a_missing_generated_clip(tmp_path):
 # --- disjointness, re-derived rather than trusted ---------------------------------------------
 
 
-def write_corpus(tmp_path, train_uuids, val_uuids):
+def write_corpus(tmp_path, train_uuids, val_uuids, shas=None, drop_sha=()):
+    """A manifest stub. Every clip gets its own sha256 unless ``shas`` says two uuids share one.
+
+    Sharing has to be expressible, because the shipped T-041 corpus really did carry one source's
+    pixels twice under two names — that is the case the content check exists for. ``drop_sha``
+    names clips whose sha256 the manifest omits entirely.
+    """
+    shas = shas or {}
+
+    def clip(u):
+        c = {"uuid": u}
+        if u not in drop_sha:
+            c["sha256"] = shas.get(u, f"sha-of-{u}")
+        return c
+
     root = tmp_path / "corpus"
     root.mkdir(exist_ok=True)
     (root / "manifest.json").write_text(json.dumps({
         "seed": 0,
-        "clips": {"train": [{"uuid": u} for u in train_uuids],
-                  "val": [{"uuid": u} for u in val_uuids]}}))
+        "clips": {"train": [clip(u) for u in train_uuids],
+                  "val": [clip(u) for u in val_uuids]}}))
     return root
 
 
@@ -308,6 +322,60 @@ def test_disjointness_catches_a_prompt_from_another_corpus_entirely(tmp_path):
     with pytest.raises(SystemExit) as e:
         ev.check_prompts_are_held_out(prompts, corpus)
     assert "neither split" in str(e.value)
+
+
+def test_disjointness_catches_a_prompt_whose_BYTES_are_in_train(tmp_path):
+    """The defect that shipped: unique uuid, duplicated pixels, and every uuid check passes.
+
+    ``g1-dex3-graspsquare-dataset`` was a byte-copy of ``g1-dex3-blockstacking-dataset``, so a val
+    clip's content sat in train under the other source's name. Scoring the adapter on that is a
+    training score, and the bias runs toward the pre-registered hypothesis.
+    """
+    corpus = write_corpus(
+        tmp_path,
+        ["graspsquare_ep000077", "t1"],
+        ["blockstacking_ep000077", "v1"],
+        shas={"graspsquare_ep000077": "identical-bytes",
+              "blockstacking_ep000077": "identical-bytes"},
+    )
+    prompts = write_prompts(tmp_path, ["blockstacking_ep000077", "v1"])
+    with pytest.raises(SystemExit) as e:
+        ev.check_prompts_are_held_out(prompts, corpus)
+    msg = str(e.value)
+    assert "BYTE-IDENTICAL" in msg
+    # ...and it names both halves of the pair, because "one prompt is contaminated" is not
+    # actionable and "this val clip is that train clip" is.
+    assert "blockstacking_ep000077 == graspsquare_ep000077" in msg
+
+
+def test_the_uuid_check_still_fires_on_its_own(tmp_path):
+    """Mutant: replacing the uuid check with the sha check. They catch different defects.
+
+    Here the content is disjoint — every clip has its own bytes — and the prompt set simply names
+    a train clip. Nothing about sha256 would notice.
+    """
+    corpus = write_corpus(tmp_path, ["t0", "t1"], ["v0"])
+    prompts = write_prompts(tmp_path, ["v0", "t1"])
+    with pytest.raises(SystemExit) as e:
+        ev.check_prompts_are_held_out(prompts, corpus)
+    assert "TRAINING split" in str(e.value)
+    assert "BYTE-IDENTICAL" not in str(e.value)
+
+
+def test_content_disjointness_passes_on_a_clean_corpus(tmp_path):
+    """The check must be silent on the corpus we actually have. Defence in depth, not a new gate."""
+    corpus = write_corpus(tmp_path, [f"t{i}" for i in range(5)], ["v0", "v1", "v2"])
+    prompts = write_prompts(tmp_path, ["v0", "v1", "v2"])
+    assert ev.check_prompts_are_held_out(prompts, corpus) == 3
+
+
+def test_a_manifest_without_hashes_refuses_rather_than_skipping_the_content_check(tmp_path):
+    """Fail closed. A missing sha256 is the check not running, and that is the state we were in."""
+    corpus = write_corpus(tmp_path, ["t0"], ["v0"], drop_sha=("t0",))
+    prompts = write_prompts(tmp_path, ["v0"])
+    with pytest.raises(SystemExit) as e:
+        ev.check_prompts_are_held_out(prompts, corpus)
+    assert "no sha256" in str(e.value)
 
 
 # --- answer parsing --------------------------------------------------------------------------

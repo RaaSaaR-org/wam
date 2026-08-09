@@ -42,6 +42,18 @@ set -euo pipefail
 source /valhalla/projects/ehpc-aif-2026pg01-905/caches.sh
 source "${PROJ}/cosmos_env.sh"
 
+# Guarded explicitly rather than left to `set -u`, and here rather than at first use: unset,
+# DATASET_PATH dies fifty lines below at the prompt step and BASE_CHECKPOINT_PATH just after it
+# inside the arm loop — both with a bare "unbound variable", and both after Slurm has already
+# handed this job 8 H200s on the paid QoS. That is precisely the failure 92b_register_corpus.sbatch
+# was written to prevent for 94, and 95 reads the same registered corpus and the same staged
+# weights while carrying none of 94's guards.
+: "${FRAMEWORK:?90_build_cosmos_env.sbatch has not run — no cosmos-framework checkout or venv.}"
+: "${UV_INSTALL_DIR:?90_build_cosmos_env.sbatch has not run — no uv, so no judge server.}"
+: "${FFMPEG_PREFIX:?90_build_cosmos_env.sbatch has not run — no ffmpeg.}"
+: "${BASE_CHECKPOINT_PATH:?91_stage_cosmos_weights.sbatch has not run — no DCP checkpoint, no base arm.}"
+: "${DATASET_PATH:?no corpus registered — run sync.sh --corpus then sbatch 92b_register_corpus.sbatch}"
+
 : "${T041_FREEZE_LIFTED:?PR-07 §7 freezes Cosmos3-Super. Set T041_FREEZE_LIFTED to the reason.}"
 echo "=== freeze lifted: ${T041_FREEZE_LIFTED}"
 
@@ -64,6 +76,7 @@ WAM=${PROJ}/wam
 CONFIG=${WAM}/configs/cosmos3/t041_eval_selection.toml
 PROMPTS=${EVAL}/t041_eval_prompts.jsonl
 PORT=${PORT:-8000}
+CAL=${CAL:-${PROJ}/data/t041-calibration}
 
 [[ -f "${OUT}/DONE" ]] || { echo "FATAL: ${OUT}/DONE missing — training did not complete."; exit 1; }
 [[ -f "${OUT}/run_metadata.json" ]] || { echo "FATAL: no run_metadata.json — the run is not scorable."; exit 1; }
@@ -73,6 +86,14 @@ PORT=${PORT:-8000}
   echo "  python -m cosmos_framework.scripts.export_model --checkpoint-path \$CKPT \\"
   echo "      --config-file ${RUN_DIR}/config.yaml -o ${LORA_MODEL}"
   exit 1; }
+# Checked here and not at its point of use in step 3: nothing before the blinding needs the
+# calibration footage, but the check used to sit AFTER both arms had generated 60 clips on 8 GPUs
+# — so a directory that was never shipped cost the entire generation budget to discover, and the
+# job then died holding 60 clips and no verdict. The same two stats cost nothing here.
+[[ -d "${CAL}/positive" && -d "${CAL}/negative" ]] || {
+  echo "FATAL: ${CAL} must hold positive/ (real held-out G1+Dex3 clips) and negative/ (real"
+  echo "       non-G1 manipulator clips, e.g. BridgeData2's WidowX). Without it G0b cannot run"
+  echo "       and PR-09 §6 issues no verdict."; exit 1; }
 mkdir -p "${EVAL}"
 source "${FRAMEWORK}/.venv/bin/activate"
 
@@ -129,11 +150,7 @@ PY
 done
 
 # -- 3. blind ------------------------------------------------------------------------------------
-CAL=${CAL:-${PROJ}/data/t041-calibration}
-[[ -d "${CAL}/positive" && -d "${CAL}/negative" ]] || {
-  echo "FATAL: ${CAL} must hold positive/ (real held-out G1+Dex3 clips) and negative/ (real"
-  echo "       non-G1 manipulator clips, e.g. BridgeData2's WidowX). Without it G0b cannot run"
-  echo "       and PR-09 §6 issues no verdict."; exit 1; }
+# ${CAL} was checked in the preflight above, before a single GPU-second was spent generating.
 python "${WAM}/scripts/eval_t041_embodiment.py" --config "${CONFIG}" --out "${EVAL}" \
     build-sheet --prompts "${PROMPTS}" --clips "${EVAL}/clips" --calibration "${CAL}"
 
