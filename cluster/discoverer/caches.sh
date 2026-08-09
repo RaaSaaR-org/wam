@@ -19,11 +19,19 @@ export MPLCONFIGDIR=${WORK}/mpl
 export PIP_CACHE_DIR=${WORK}/pip_cache
 export CONDA_PKGS_DIRS=${PROJ}/conda/pkgs
 export TMPDIR=${PROJ}/tmp
+# uv, explicitly. It honours XDG_CACHE_HOME above only for its cache, and NOT for downloaded
+# interpreters, which go to ~/.local/share/uv/python — a few hundred MB and thousands of inodes
+# in a 2 GiB, ~100k-inode /home. 90_build_cosmos_env.sbatch set both, but only wrote UV_CACHE_DIR
+# into cosmos_env.sh, so every later job (91/92/94/95) lost UV_PYTHON_INSTALL_DIR and re-resolved
+# a fresh interpreter into $HOME. Owning both here means no job can miss them.
+export UV_CACHE_DIR=${WORK}/uv_cache
+export UV_PYTHON_INSTALL_DIR=${PROJ}/uv_python
 
 mkdir -p "${WORK}" "${HF_HUB_CACHE}" "${TMPDIR}" "${PROJ}/logs" \
          "${TORCH_HOME}" "${XDG_CACHE_HOME}" "${TRITON_CACHE_DIR}" \
          "${CUDA_CACHE_PATH}" "${MPLCONFIGDIR}" "${PIP_CACHE_DIR}" \
-         "${CONDA_PKGS_DIRS}" "${PROJ}/conda/envs"
+         "${CONDA_PKGS_DIRS}" "${PROJ}/conda/envs" \
+         "${UV_CACHE_DIR}" "${UV_PYTHON_INSTALL_DIR}"
 
 # Scratch under $PROJ is reaped after 61 days of no access — checkpoints belong in
 # ${PROJ}/runs, not ${WORK}.

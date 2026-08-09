@@ -43,6 +43,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --mem=1800G                  # 8 x 257G is the billing-neutral ceiling; the node has ~2 TB
 #SBATCH --requeue
+#SBATCH --signal=B:USR1@300
 #SBATCH --open-mode=append
 #SBATCH -o /valhalla/projects/ehpc-aif-2026pg01-905/logs/t041.%j.out
 
@@ -75,12 +76,21 @@ RUN_DIR=${OUT}/train/cosmos3/sft/vision_sft_super
 PREREG=${PROJ}/wam/docs/preregistration/PR-09-cosmos-super-finetune.md
 # PR-09 §7. 3 passes x 4 h x 8 GPUs = 96 GPU-h. A pre-registered term, not a convenience.
 CEILING_GPU_H=${CEILING_GPU_H:-96}
-MAX_RESTARTS=2
+# ONE number, used by both the probe gate and the runtime rail. It used to be MAX_RESTARTS=2
+# tested with `>=`, which permits two passes while the log line printed "of 3" and the probe gate
+# rejected anything needing more than 3 — three different budgets from one pre-registered term.
+MAX_PASSES=${MAX_PASSES:-3}
 
 for f in "${TOML_SRC}" "${PREREG}"; do
   [[ -f "${f}" ]] || { echo "FATAL: ${f} missing (run sync.sh / 90_build_cosmos_env first)."; exit 1; }
 done
-: "${DATASET_PATH:?93_caption_corpus.sbatch has not run — no captioned corpus.}"
+# The old message here named 93_caption_corpus.sbatch, which is superseded and must NOT be run:
+# it would re-caption the untranscoded tree. Preparation now happens on the workstation and the
+# corpus is shipped with sync.sh --corpus, then registered by 92b_register_corpus.sbatch.
+: "${DATASET_PATH:?no corpus registered — run sync.sh --corpus then sbatch 92b_register_corpus.sbatch}"
+# Guarded explicitly rather than left to `set -u`: unset, this dies 150 lines later with a bare
+# "unbound variable" inside a heredoc, after the 8 GPUs are already allocated.
+: "${CORPUS_MANIFEST_SHA256:?no corpus manifest sha — run sbatch 92b_register_corpus.sbatch}"
 : "${BASE_CHECKPOINT_PATH:?91_stage_cosmos_weights.sbatch has not run — no DCP checkpoint.}"
 : "${WAN_VAE_PATH:?91_stage_cosmos_weights.sbatch has not run — no VAE.}"
 [[ -f "${DATASET_PATH}/train/video_dataset_file.jsonl" ]] || {
@@ -104,6 +114,20 @@ cd "${FRAMEWORK}"
 # resumed from, and the real run would silently start at iteration 10 of 500.
 # -------------------------------------------------------------------------------------------
 if [[ "${PROBE}" != "0" ]]; then
+  # The restart rail below lives in the TRAIN section, which the probe never reaches — so a
+  # preempted probe requeued itself onto 8 H200s with no bound at all. It also redid completed
+  # work: PROBE.json already written means there is nothing left to measure.
+  if [[ -f "${OUT}/PROBE.json" ]]; then
+    echo "=== ${OUT}/PROBE.json already exists — probe already passed, nothing to measure:"
+    cat "${OUT}/PROBE.json"
+    exit 0
+  fi
+  PROBE_RESTARTS=${SLURM_RESTART_COUNT:-0}
+  if (( PROBE_RESTARTS >= 2 )); then
+    echo "FATAL: the probe has been requeued ${PROBE_RESTARTS} times without producing"
+    echo "       ${OUT}/PROBE.json. Something is wrong with the measurement, not the queue."
+    exit 1
+  fi
   N1=${N1:-5}; N2=${N2:-25}
   declare -A WALL
   for N in "${N1}" "${N2}"; do
@@ -123,11 +147,11 @@ if [[ "${PROBE}" != "0" ]]; then
   done
 
   python - "${WALL[${N1}]}" "${WALL[${N2}]}" "${N1}" "${N2}" "${NPROC}" "${CEILING_GPU_H}" \
-           "${OUT}/PROBE.json" <<'PY'
+           "${OUT}/PROBE.json" "${MAX_PASSES}" <<'PY'
 import json, math, sys
-t1, t2, n1, n2, nproc, ceiling, out = (
+t1, t2, n1, n2, nproc, ceiling, out, max_passes = (
     float(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]),
-    int(sys.argv[5]), float(sys.argv[6]), sys.argv[7])
+    int(sys.argv[5]), float(sys.argv[6]), sys.argv[7], int(sys.argv[8]))
 step = (t2 - t1) / (n2 - n1)
 load = t1 - n1 * step
 if step <= 0:
@@ -142,11 +166,12 @@ passes = math.ceil(train_s / usable)
 gpu_h = passes * (load + min(usable, train_s)) / 3600 * nproc
 report = {"seconds_per_iter": round(step, 2), "load_seconds": round(load, 1),
           "iters": 500, "passes_needed": passes, "nproc": nproc,
-          "estimated_gpu_hours": round(gpu_h, 1), "ceiling_gpu_hours": ceiling}
+          "estimated_gpu_hours": round(gpu_h, 1), "ceiling_gpu_hours": ceiling,
+          "max_passes": max_passes}
 print(json.dumps(report, indent=2))
 open(out, "w").write(json.dumps(report, indent=2) + "\n")
-if passes > 3:
-    sys.exit(f"PROBE FAILS: 500 iters needs {passes} passes of 4 h; PR-09 §7 allows 3. "
+if passes > max_passes:
+    sys.exit(f"PROBE FAILS: 500 iters needs {passes} passes of 4 h; PR-09 §7 allows {max_passes}. "
              "The ceiling is a pre-registered term — do not raise it to fit the recipe. "
              "Record the shortfall and take the pre-registered alternative (Cosmos3-Edge).")
 if gpu_h > ceiling:
@@ -168,14 +193,30 @@ fi
 }
 cat "${OUT}/PROBE.json"
 
+# DONE is written at the end of a successful run but was never read: a resubmission after the run
+# had already finished would load the checkpoint and train past 500. Cheapest possible check first.
+if [[ -f "${OUT}/DONE" ]]; then
+  echo "T-041 already complete — ${OUT}/DONE exists. Nothing to do."
+  exit 0
+fi
+
+# Pass accounting is persisted, not inferred from SLURM_RESTART_COUNT alone. scontrol requeue keeps
+# the job id and increments that counter, but a MANUAL resubmit after a walltime kill starts a new
+# job at restart 0 — and manual resubmission is exactly what a 4 h cap on a multi-pass run
+# produces. Counting only requeues means the pre-registered 3-pass ceiling silently never binds.
+PASSES_LOG=${OUT}/passes.jsonl
+mkdir -p "${OUT}"
+PRIOR=$( [[ -f "${PASSES_LOG}" ]] && wc -l < "${PASSES_LOG}" || echo 0 )
+PASS_NO=$((PRIOR + 1))
 RESTARTS=${SLURM_RESTART_COUNT:-0}
-if (( RESTARTS >= MAX_RESTARTS )); then
-  echo "FATAL: ${RESTARTS} restarts and still no ${OUT}/DONE — stopping at the PR-09 §7 ceiling"
-  echo "       of ${CEILING_GPU_H} GPU-h. If the recipe genuinely needs more, that is a finding to"
-  echo "       record before the number is raised."
+if (( PASS_NO > MAX_PASSES )); then
+  echo "FATAL: ${PRIOR} passes already recorded in ${PASSES_LOG} and still no ${OUT}/DONE —"
+  echo "       stopping at the PR-09 §7 ceiling of ${CEILING_GPU_H} GPU-h (${MAX_PASSES} passes)."
+  echo "       If the recipe genuinely needs more, that is a finding to record before the number"
+  echo "       is raised. Inspect ${PASSES_LOG} and the earlier ${PROJ}/logs/t041.*.out first."
   exit 1
 fi
-echo "=== pass $((RESTARTS + 1)) of $((MAX_RESTARTS + 1)) on $(hostname) at $(date -Is)"
+echo "=== pass ${PASS_NO} of ${MAX_PASSES} (slurm restarts=${RESTARTS}) on $(hostname) at $(date -Is)"
 
 LATEST=${RUN_DIR}/checkpoints/latest_checkpoint.txt
 if [[ -f "${LATEST}" ]]; then
@@ -191,6 +232,9 @@ if [[ -f "${LATEST}" ]]; then
       "${TOML_SRC}" > "${TOML}"
   echo "=== RESUME from ${ITER}; TOML delta against the shipped recipe:"
   diff -u "${TOML_SRC}" "${TOML}" || true
+  RESUMED=true
+  RESUME_DIFF_LOGGED=true
+  RESUMED_FROM=${ITER}
   # Scoped to the one line. "lora_" legitimately appears elsewhere — [optimizer].keys_to_select =
   # ["lora_"] is what restricts training to the adapter, and removing it would train the whole 32B
   # tower. Grepping the file as a whole would either always fire or hide that distinction.
@@ -213,16 +257,59 @@ else
   TOML=${TOML_SRC}
   echo "=== COLD START from ${BASE_CHECKPOINT_PATH}; TOML is the shipped recipe, unmodified:"
   echo "    $(sha256sum "${TOML_SRC}")"
+  RESUMED=false
+  # A cold start has nothing to diff: the shipped TOML is used byte-identical, which is the point.
+  # G0c asks whether every pass THAT RESUMED logged its diff, so this pass is vacuously fine.
+  RESUME_DIFF_LOGGED=true
+  RESUMED_FROM=none
 fi
 
+# One line per pass, written BEFORE the trainer starts. If this pass is SIGKILLed at the wall the
+# record still exists and still counts against MAX_PASSES — the whole point of persisting it.
+python - "${PASSES_LOG}" "${PASS_NO}" "${RESTARTS}" "${SLURM_JOB_ID:-none}" "${RESUMED}" \
+         "${RESUMED_FROM}" "${RESUME_DIFF_LOGGED}" "${TOML}" "${NPROC}" <<'PY'
+import datetime, hashlib, json, pathlib, sys
+log, pass_no, restarts, jobid, resumed, resumed_from, diff_logged, toml, nproc = sys.argv[1:10]
+sha = hashlib.sha256(pathlib.Path(toml).read_bytes()).hexdigest()
+with open(log, "a") as f:
+    f.write(json.dumps({
+        "pass": int(pass_no), "slurm_restart_count": int(restarts), "job_id": jobid,
+        "started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "hostname": __import__("socket").gethostname(),
+        "resumed": resumed == "true", "resumed_from": resumed_from,
+        "resume_diff_logged": diff_logged == "true",
+        "toml_sha256": sha, "nproc_per_node": int(nproc),
+    }) + "\n")
+PY
+echo "=== recorded pass ${PASS_NO} in ${PASSES_LOG}"
+
 START=${SECONDS}
-set +e
+# NEVER run the trainer in the foreground here. A foreground torchrun makes the 4-hour wall a DEAD
+# END rather than a link in the chain: --requeue covers preemption and node failure, but a job that
+# simply runs out of walltime is killed outright, so the `scontrol requeue` at the bottom of this
+# file is never reached and the run stops one pass in. PR-09 §7 budgets three passes; without this
+# the second one only ever happens because a human noticed. --signal=B:USR1@300 buys 5 minutes,
+# and the trap only fires while the shell is sitting in `wait`. Same pattern as 50_train_t16.sbatch.
 IMAGINAIRE_OUTPUT_ROOT="${OUT}/train" torchrun --nproc_per_node="${NPROC}" \
-    -m cosmos_framework.scripts.train --sft-toml="${TOML}"
-RC=$?
-set -e
+    -m cosmos_framework.scripts.train --sft-toml="${TOML}" &
+PY=$!
+
+# The Cosmos trainer documents no SIGUSR1 handler, so there is no graceful "stop at a step
+# boundary" to ask for. SIGTERM is the honest option: it costs at most the iterations since the
+# last save_iter=100 checkpoint — the same 99 the requeue message below already accounts for —
+# and it buys an orderly requeue instead of a SIGKILL that ends the chain.
+GOT_USR1=0
+trap 'GOT_USR1=1; echo "=== USR1 at $(date -Is): 5 min to the wall. Terminating pid ${PY} so this
+      pass requeues instead of being killed."; kill -TERM "${PY}" 2>/dev/null || true' USR1
+
+# A trap makes `wait` return early (128+signal) with the child still alive, and `set -e` would
+# abort on that status — hence the loop and the `&& / ||`.
+RC=0
+while kill -0 "${PY}" 2>/dev/null; do
+  wait "${PY}" && RC=0 || RC=$?
+done
 ELAPSED=$((SECONDS - START))
-echo "trainer exited ${RC} after ${ELAPSED}s at $(date -Is)"
+echo "trainer pid ${PY} exited ${RC} after ${ELAPSED}s at $(date -Is) (usr1=${GOT_USR1})"
 
 REACHED=$( [[ -f "${LATEST}" ]] && cat "${LATEST}" || echo none )
 echo "=== latest checkpoint: ${REACHED}"
@@ -230,10 +317,49 @@ echo "=== latest checkpoint: ${REACHED}"
 # 500 is [trainer].max_iter in the shipped TOML; the counter lives in the DCP's trainer/ state,
 # so this is the run's own report of where it got to, not an inference from wall time.
 if [[ "${REACHED}" == *000000500 ]]; then
+  # The adapter export used to be printed as instructions for a human to run. That left
+  # 95_eval's G0c key `export_nonempty` with nobody to write it, so the verdict gate could never
+  # pass however good the run was. Do the export here and report what actually happened.
+  CKPT=${RUN_DIR}/checkpoints/${REACHED}
+  EXPORTED=${RUN_DIR}/model
+  echo "=== exporting adapter from ${CKPT}"
+  set +e
+  python -m cosmos_framework.scripts.export_model \
+      --checkpoint-path "${CKPT}" \
+      --config-file "${RUN_DIR}/config.yaml" \
+      -o "${EXPORTED}"
+  EXPORT_RC=$?
+  set -e
+  if [[ ${EXPORT_RC} -eq 0 ]] && [[ -d "${EXPORTED}" ]] && \
+     [[ -n "$(find "${EXPORTED}" -type f -size +0 -print -quit 2>/dev/null)" ]]; then
+    EXPORT_NONEMPTY=true
+  else
+    EXPORT_NONEMPTY=false
+  fi
+  echo "=== export rc=${EXPORT_RC} nonempty=${EXPORT_NONEMPTY} -> ${EXPORTED}"
+
   python - "${OUT}" "${MODEL_ID}" "${MODEL_REVISION}" "${COSMOS_SHA}" "${FRAMEWORK_SHA}" \
-           "${CORPUS_MANIFEST_SHA256}" "${NPROC}" "${RUN_DIR}" "${T041_FREEZE_LIFTED}" <<'PY'
-import json, sys, pathlib
-out, model, rev, csha, fsha, corpus, nproc, run_dir, freeze = sys.argv[1:10]
+           "${CORPUS_MANIFEST_SHA256}" "${NPROC}" "${RUN_DIR}" "${T041_FREEZE_LIFTED}" \
+           "${REACHED}" "${PASSES_LOG}" "${EXPORT_NONEMPTY}" <<'PY'
+import json, re, sys, pathlib
+(out, model, rev, csha, fsha, corpus, nproc, run_dir, freeze,
+ reached, passes_log, export_nonempty) = sys.argv[1:13]
+
+# 95_eval_t041_embodiment.py's G0c compares iteration_reached to N_MCNEMAR_ITERS as an INT.
+# "iter_000000500" is a string and would never equal 500, so parse the digits out.
+m = re.search(r"(\d+)\s*$", reached)
+iteration_reached = int(m.group(1)) if m else None
+
+# G0c's resume_diffs_logged is only meaningful across the whole chain: one pass that resumed
+# without printing its TOML diff is enough to make the adapter suspect (PR-09 §4a), even if
+# every other pass was clean. Compute it from the persisted record, not from this pass.
+passes = []
+p_log = pathlib.Path(passes_log)
+if p_log.is_file():
+    passes = [json.loads(l) for l in p_log.read_text().splitlines() if l.strip()]
+resumes = [p for p in passes if p.get("resumed")]
+resume_diffs_logged = bool(passes) and all(p.get("resume_diff_logged") for p in resumes)
+
 p = pathlib.Path(out) / "run_metadata.json"
 p.write_text(json.dumps({
     "task": "T-041", "prereg": "docs/preregistration/PR-09-cosmos-super-finetune.md",
@@ -241,26 +367,45 @@ p.write_text(json.dumps({
     "cosmos_sha": csha, "framework_sha": fsha, "corpus_manifest_sha256": corpus,
     "nproc_per_node": int(nproc), "run_dir": run_dir,
     "freeze_lifted_reason": freeze,
+    # --- the three keys 95_eval's G0c reads. Absent, the verdict can never pass. ---
+    "iteration_reached": iteration_reached,
+    "resume_diffs_logged": resume_diffs_logged,
+    "export_nonempty": export_nonempty == "true",
+    # --- the per-pass record PR-09 §6 requires regardless of verdict ---
+    "passes": passes,
+    "pass_count": len(passes),
     "recipe_toml": "vision_sft_super.toml, byte-identical on cold start; resume copy differs "
                    "only in checkpoint.keys_to_skip_loading (PR-09 §4a), diffed into the job log",
 }, indent=2) + "\n")
 print("wrote", p)
+print(f"  iteration_reached={iteration_reached} resume_diffs_logged={resume_diffs_logged} "
+      f"export_nonempty={export_nonempty} passes={len(passes)}")
 PY
   touch "${OUT}/DONE"
-  echo "T-041 TRAINING COMPLETE"
-  echo "export the adapter, then: sbatch 95_eval_t041_embodiment.sbatch"
-  echo "  CKPT=${RUN_DIR}/checkpoints/${REACHED}"
-  echo "  python -m cosmos_framework.scripts.export_model --checkpoint-path \$CKPT \\"
-  echo "      --config-file ${RUN_DIR}/config.yaml -o ${RUN_DIR}/model"
+  if [[ "${EXPORT_NONEMPTY}" != "true" ]]; then
+    echo "TRAINING COMPLETE but the adapter export FAILED (rc=${EXPORT_RC}). The checkpoint at"
+    echo "${CKPT} is intact and DONE is written, so nothing needs re-training — but 95_eval's G0c"
+    echo "will refuse this run until the export succeeds. Fix the export and re-run this job;"
+    echo "it will exit early on DONE, so re-export by hand:"
+    echo "  python -m cosmos_framework.scripts.export_model --checkpoint-path ${CKPT} \\"
+    echo "      --config-file ${RUN_DIR}/config.yaml -o ${EXPORTED}"
+    exit 1
+  fi
+  echo "T-041 TRAINING COMPLETE — adapter exported to ${EXPORTED}"
+  echo "next: sbatch 95_eval_t041_embodiment.sbatch"
   exit 0
 fi
 
-if [[ "${RC}" -eq 0 && "${ELAPSED}" -lt 300 ]]; then
+if [[ "${RC}" -eq 0 && "${GOT_USR1}" -eq 0 && "${ELAPSED}" -lt 300 ]]; then
   echo "FATAL: exited 0 after ${ELAPSED}s without reaching iteration 500 — that is a no-op, not"
   echo "       an interrupted slice. Refusing to requeue."
   exit 1
 fi
-if [[ "${RC}" -ne 0 ]]; then
+# A non-zero RC means "requeueing only rebuilds the same crash" ONLY when the trainer chose to
+# exit. When we sent the SIGTERM ourselves, the non-zero status is OUR doing (143) and says
+# nothing about the run's health — treating it as a crash here would turn the walltime handling
+# above into an elaborate way of stopping after one pass.
+if [[ "${RC}" -ne 0 && "${GOT_USR1}" -eq 0 ]]; then
   echo "FATAL: trainer failed with ${RC} — requeueing only rebuilds the same crash."
   exit "${RC}"
 fi

@@ -25,7 +25,10 @@
 #SBATCH --partition=common
 #SBATCH --account=ehpc-aif-2026pg01-905
 #SBATCH --qos=2cpu-single-host
-#SBATCH --time=03:00:00
+# 4 h, not 3. The 2cpu-single-host QoS caps at 4 h and this job is free on it; asking for 3 threw
+# away a quarter of the available window and the header's remedy for running out was to move to
+# the PAID GPU QoS. Use the free hour first.
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=1
@@ -70,6 +73,28 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 uv --version
 
+# -- toolchain -------------------------------------------------------------------------------------
+# ffmpeg: docs/discoverer.md §3 records that this cluster has no ffmpeg module and no root, so
+# apt-get from the framework's setup guide is not available. It comes from conda, and the
+# captioner and the video loader both need it.
+#
+# THIS BLOCK RUNS BEFORE THE CLONES, and that ordering is load-bearing. cosmos-framework LFS-tracks
+# assets/** and every media extension, so without git-lfs on PATH `git checkout` dies half-way and
+# leaves a repo with a valid .git and a gutted working tree — `git rev-parse HEAD` still prints the
+# right SHA, so the "=== framework @ <sha>" line below lies. It used to be installed after the
+# clones, which is exactly late enough to be useless.
+export FFMPEG_PREFIX=${PROJ}/tools/ffmpeg
+if [[ ! -x "${FFMPEG_PREFIX}/bin/ffmpeg" ]]; then
+  conda create --prefix "${FFMPEG_PREFIX}" -c conda-forge -y --solver=libmamba ffmpeg git-lfs
+fi
+export PATH=${FFMPEG_PREFIX}/bin:${PATH}
+ffmpeg -version | head -1
+git-lfs version
+
+# The clips come from our own corpus, not from the repo. Skipping the smudge filter avoids pulling
+# demo media we never open, while still letting checkout resolve the pointers cleanly.
+export GIT_LFS_SKIP_SMUDGE=1
+
 # -- sources ---------------------------------------------------------------------------------------
 clone_at() {  # repo_url dest sha
   local url=$1 dest=$2 sha=$3
@@ -77,8 +102,17 @@ clone_at() {  # repo_url dest sha
     git clone --filter=blob:none "${url}" "${dest}"
   fi
   git -C "${dest}" fetch --depth=1 origin "${sha}" || git -C "${dest}" fetch origin
-  git -C "${dest}" checkout --detach "${sha}"
-  echo "=== $(basename "${dest}") @ $(git -C "${dest}" rev-parse HEAD)"
+  git -C "${dest}" checkout --force --detach "${sha}"
+  # A half-applied checkout leaves HEAD correct and the files missing, so the SHA alone proves
+  # nothing. A clean porcelain does: it means every tracked path is present as committed.
+  local dirty
+  dirty=$(git -C "${dest}" status --porcelain | wc -l)
+  [[ ${dirty} -eq 0 ]] || {
+    echo "FATAL: ${dest} checked out ${sha} but ${dirty} tracked paths do not match it."
+    git -C "${dest}" status --porcelain | head -5
+    exit 1
+  }
+  echo "=== $(basename "${dest}") @ $(git -C "${dest}" rev-parse HEAD) (tree clean)"
 }
 clone_at https://github.com/NVIDIA/cosmos.git "${COSMOS}" "${COSMOS_SHA}"
 clone_at https://github.com/NVIDIA/cosmos-framework.git "${FRAMEWORK}" "${FRAMEWORK_SHA}"
@@ -92,16 +126,6 @@ for f in "${RECIPE_DIR}/launch_sft_vision_super.sh" \
 done
 
 # -- install ---------------------------------------------------------------------------------------
-# ffmpeg: docs/discoverer.md §3 records that this cluster has no ffmpeg module and no root, so
-# apt-get from the framework's setup guide is not available. It comes from conda, and the
-# captioner and the video loader both need it.
-export FFMPEG_PREFIX=${PROJ}/tools/ffmpeg
-if [[ ! -x "${FFMPEG_PREFIX}/bin/ffmpeg" ]]; then
-  conda create --prefix "${FFMPEG_PREFIX}" -c conda-forge -y --solver=libmamba ffmpeg git-lfs
-fi
-export PATH=${FFMPEG_PREFIX}/bin:${PATH}
-ffmpeg -version | head -1
-
 cd "${FRAMEWORK}"
 uv sync --all-extras --group="${UV_GROUP}"
 

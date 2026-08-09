@@ -24,6 +24,14 @@ source "${ENV_FILE}"
 
 REASONER=${REASONER:-Qwen/Qwen3-VL-8B-Instruct-FP8}
 VLLM_VERSION=${VLLM_VERSION:-0.19.0}
+VLLM_PYTHON=${VLLM_PYTHON:-3.12}
+# Qwen3-VL declares max_seq_len=262144, which needs 36 GiB of KV cache. No 32 GB card has that, so
+# vLLM refuses to start at the default — this is a property of the model, not of a busy GPU.
+# 32768 is sized from the corpus: the longest clip is 60.6 s and p95 is 45.7 s (decode_report.json),
+# which at Qwen3-VL's video sampling is ~12k tokens for the worst case. That leaves ~2.5x headroom
+# and keeps enough KV free for MAX_WORKERS concurrent requests. If a clip ever does overflow, the
+# request fails loudly and the manifest-vs-jsonl count check at the end of this script catches it.
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-32768}
 PORT=${PORT:-8000}
 MAX_WORKERS=${MAX_WORKERS:-16}
 # -1 = all frames, matching the recipe's window setting. It also sets the frame floor the converter
@@ -63,8 +71,21 @@ LOGDIR=${WORK}/logs
 mkdir -p "${LOGDIR}"
 SERVER_LOG=${LOGDIR}/vllm.$(date +%Y%m%d-%H%M%S).log
 echo "=== starting ${REASONER} on :${PORT} (log ${SERVER_LOG})"
-uvx "vllm@${VLLM_VERSION}" serve "${REASONER}" \
+# --python and --managed-python are both load-bearing, and they fix two DIFFERENT failures.
+#
+# --python: uvx otherwise picks the newest interpreter it can find (3.14 here, via anaconda), and
+# vllm pulls numba -> llvmlite, which ships no 3.14 wheel. uv falls back to building it from source
+# and dies in setuptools with "spawn() got an unexpected keyword argument 'dry_run'" — a traceback
+# that names llvmlite and distutils and never mentions the interpreter.
+#
+# --managed-python: with only --python, uv resolves 3.12 to /usr/bin/python3.12, which has no dev
+# headers. vLLM then downloads the model, loads it, and dies 90 seconds later during the KV-cache
+# profile run when Triton JIT-compiles cuda_utils.c: "Python.h: No such file or directory". The
+# uv-managed build ships its own headers. Failing this late looks like a GPU/model problem and is
+# not one.
+uvx --managed-python --python "${VLLM_PYTHON}" "vllm@${VLLM_VERSION}" serve "${REASONER}" \
     --tensor-parallel-size 1 \
+    --max-model-len "${MAX_MODEL_LEN}" \
     --port "${PORT}" \
     --allowed-local-media-path / > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

@@ -3,6 +3,7 @@
 #
 #   ./cluster/discoverer/sync.sh              # push repo + jobs + caches.sh
 #   ./cluster/discoverer/sync.sh --data       # also push the 81 MB converted dataset
+#   ./cluster/discoverer/sync.sh --corpus     # push the 14 GB captioned T-041 corpus (then 92b)
 #   ./cluster/discoverer/sync.sh --pull       # pull every run's artifacts back
 #   ./cluster/discoverer/sync.sh --pull t16-lora-seed0   # ...or just one run
 #
@@ -86,6 +87,37 @@ if [[ "${1:-}" == "--data" ]]; then
   echo "==> dataset -> ${PROJ}/data/gr00t-apple-full"
   "${RSYNC[@]}" "${ROOT}/datasets/gr00t-apple-full/" \
     "${HOST}:${PROJ}/data/gr00t-apple-full/"
+fi
+
+if [[ "${1:-}" == "--corpus" ]]; then
+  # The T-041 corpus is built and captioned on the workstation (workstation/20,30), so nothing on
+  # the cluster produces it any more — and nothing shipped it either. 94_train reads DATASET_PATH
+  # out of cosmos_env.sh, whose only writer was 93_caption_corpus.sbatch, which is superseded.
+  # Without this, 94 is allocated all 8 GPUs of dgx1 and then exits in under a second at its
+  # DATASET_PATH guard. This is the missing half of that path; 92b_register_corpus.sbatch is the
+  # other half and must run after it.
+  CORPUS_SRC=${CORPUS_SRC:-${HOME}/wam-t041/cosmos-g1-embodiment}
+  DEST=${PROJ}/data/cosmos-g1-embodiment
+  [[ -d "${CORPUS_SRC}" ]] || { echo "FATAL: ${CORPUS_SRC} missing. Set CORPUS_SRC."; exit 1; }
+  for f in manifest.json MANIFEST_SHA256 train/video_dataset_file.jsonl val/video_dataset_file.jsonl; do
+    [[ -f "${CORPUS_SRC}/${f}" ]] || {
+      echo "FATAL: ${CORPUS_SRC}/${f} missing — the corpus is not captioned yet."
+      echo "       Run workstation/30_caption_corpus.sh to completion first."; exit 1; }
+  done
+  # Ship straight to the FINAL path. Never stage elsewhere under /valhalla and move it into place:
+  # project IDs live on the inode and survive a rename, so an intra-/valhalla mv leaves the data
+  # charged to the wrong project with nothing to show that it happened.
+  ssh "${HOST}" "mkdir -p ${DEST}"
+  echo "==> corpus -> ${DEST}  ($(du -sh "${CORPUS_SRC}" | cut -f1))"
+  # vision_path in the jsonl is stored RELATIVE to the jsonl's own directory
+  # (captions_to_sft_jsonl.py:_relativize_vision_path), so the tree relocates as-is — provided
+  # the train/videos <-> train/video_dataset_file.jsonl layout is preserved. Ship the whole tree.
+  "${RSYNC[@]}" "${CORPUS_SRC}/" "${HOST}:${DEST}/"
+  echo
+  echo "shipped. Now register it (free QoS, no GPU):"
+  echo "  ssh ${HOST}"
+  echo "  cd ${PROJ}/wam/cluster/discoverer && sbatch 92b_register_corpus.sbatch"
+  exit 0
 fi
 
 echo "done. Next:  ssh ${HOST}  then  cd ${PROJ}/wam/cluster/discoverer && sbatch 10_build_env.sbatch"
