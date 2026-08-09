@@ -128,14 +128,37 @@ def resolve_camera(info: dict, requested: str | None, source_id: str) -> str:
 
 
 def video_shape(info: dict, key: str) -> tuple[int, int]:
-    """(width, height) from the feature's declared shape, which LeRobot writes as [H, W, C]."""
+    """(width, height) for a video feature.
+
+    ``shape`` is NOT reliably [H, W, C]. Half our sources write [C, H, W], and reading index 1 as
+    the width then yields (480, 3) — a plausible-looking pair that is silently wrong, which went
+    into 1712 of 3462 manifest entries before anyone looked. The manifest is the provenance record
+    AC-04 depends on, so guessing by position is not good enough.
+
+    Order of preference: the probed stream info (every one of our 14 sources supplies it and it
+    comes from the file itself), then the declared axis ``names``, and only then ``shape`` — and
+    then only by locating the channel axis rather than assuming where it sits.
+    """
     feature = info["features"][key]
-    shape = feature.get("shape") or []
+    probed = feature.get("info") or {}
+    w, h = int(probed.get("video.width") or 0), int(probed.get("video.height") or 0)
+    if w and h:
+        return (w, h)
+
+    shape = [int(x) for x in (feature.get("shape") or [])]
+    names = [str(n).lower() for n in (feature.get("names") or [])]
+    if len(names) == len(shape) and "height" in names and "width" in names:
+        return (shape[names.index("width")], shape[names.index("height")])
+
+    if len(shape) == 3:
+        # No names and no probe: find the channel axis (3 or 1) and take the other two in order.
+        chan = next((i for i, v in enumerate(shape) if v in (1, 3)), None)
+        if chan is not None:
+            hw = [v for i, v in enumerate(shape) if i != chan]
+            return (hw[1], hw[0])
     if len(shape) >= 2:
-        return (int(shape[1]), int(shape[0]))
-    # Fallback for roots that carry the dimensions only in the probed stream info.
-    probed = feature.get("info", {})
-    return (int(probed.get("video.width") or 0), int(probed.get("video.height") or 0))
+        return (shape[1], shape[0])
+    return (0, 0)
 
 
 #: The two LeRobot layouts this reads, and they are genuinely different formats rather than
@@ -590,8 +613,13 @@ def main(argv: list[str] | None = None) -> int:
         "clips": {k: [asdict(c) for c in v] for k, v in placed.items()},
     }
     args.out.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(manifest, indent=2, sort_keys=True)
-    (args.out / "manifest.json").write_text(body + "\n")
+    # Hash the BYTES ON DISK, trailing newline included. This used to hash `body` while writing
+    # `body + "\n"`, so MANIFEST_SHA256 recorded a digest that `sha256sum manifest.json` could
+    # never reproduce — and `sha256sum manifest.json` is exactly what 92b_register_corpus.sbatch
+    # runs to decide whether the shipped corpus is the one that was prepared. A provenance hash
+    # nobody can recompute with the obvious command is not provenance, it is decoration.
+    body = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    (args.out / "manifest.json").write_text(body)
     digest = hashlib.sha256(body.encode()).hexdigest()
     (args.out / "MANIFEST_SHA256").write_text(digest + "\n")
     print(f"wrote {args.out}/manifest.json  sha256={digest}", file=sys.stderr)
