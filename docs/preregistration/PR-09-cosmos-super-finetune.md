@@ -610,6 +610,32 @@ outcome and only against it: **`Cosmos3-Edge`** (2B dense, full fine-tune, fits 
 identical corpus, prompts and rule — reported as **attempt 2 of 2**, never as attempt 1. There is no
 attempt 3.
 
+> **Amended 2026-08-10 — the probe ran, it passed, and the number it produced condemned job `95`
+> as written.** The gate is discharged, not renegotiated: job `186663`, 28 minutes wall on 8 GPUs
+> (**3.7 GPU-h** against the 8 budgeted above), `PROBE.json` = `seconds_per_iter 21.85`,
+> `load_seconds 494.8`, `passes_needed 1`, `estimated_gpu_hours 25.4` against `ceiling 96`. One
+> pass, 3.03 h of iteration plus one 8.2-minute load inside a 4 h wall, at **26 %** of the training
+> ceiling. Nothing in the table is raised and the `MAX_PASSES = 3` enforcement is untouched.
+>
+> **`load_seconds` is the finding, not `seconds_per_iter`.** 494.8 s is the cold constant — imports,
+> an 8-rank NCCL world, a 64.6 GB DCP read — before the first denoising step, and it is paid per
+> `torchrun`, not per clip. Job `95` launched one `torchrun` per payload: 60 × 494.8 s = **8.25 h of
+> checkpoint loading alone**, inside the same 4 h wall, generation still to pay. That job could not
+> have finished, and requeueing does not repair a per-pass cost dominated by a constant repeated
+> sixty times — each restart banks only what the last one completed, so it would have taken ~10
+> resubmissions to grind through well under an hour of real sampling. Batched to one launch per arm
+> it is 2 loads, and step 2 falls from ~9.7 h to ~30 min.
+>
+> **This closes the item §5's third amendment left open, but not at 8 GPU-h.** That note recorded
+> the eval at 25–35 GPU-h against §7's registered 8 and refused to resolve it; the honest figure now
+> is **~1.4 h × 8 GPUs ≈ 11 GPU-h** — still above the line, and recorded as still above it rather
+> than rounded onto it. The dominant remaining waste is not generation: the judge holds all 8 GPUs
+> while vLLM serves on `--tensor-parallel-size 1`. That is a real 8-GPU-hour-class inefficiency, it
+> is **not** fixed here, and it is what stands between ~11 GPU-h and the registered 8.
+>
+> **Revised total, measured where measurable:** `91` + `93` as budgeted, probe **3.7**, train
+> **≤ 25.4**, eval **≈ 11** — comfortably inside the **122 GPU-h** ceiling, which is unchanged.
+
 ## 8. What must exist before anything is submitted
 
 1. ✅ `scripts/prepare_cosmos_corpus.py` + `tests/test_prepare_cosmos_corpus.py` (20 tests)
