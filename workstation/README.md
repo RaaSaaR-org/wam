@@ -85,6 +85,23 @@ nothing of the robot.
   uses the GPU; the `libx264` default is better per bit and fast enough at 640×480.
 - ~150 GB free: roughly 35 GB of single-camera downloads plus the transcoded corpus.
 - `hf` CLI, `python3` with `pyarrow` (v3.0 boundaries are parquet).
+- `git-lfs`. cosmos-framework LFS-tracks `assets/**` and every media extension; without it the
+  clone succeeds and the **checkout** dies half-way, leaving a repo that reports the right SHA over
+  an empty working tree.
+- A C compiler on PATH as `cc`. `uv sync --all-extras` reaches evdev (via lerobot → pynput), which
+  ships no wheel. Nothing here uses evdev, but `--all-extras` gives no way to decline it.
+
+None of these need root. This machine has no `sudo`, and all three of ffmpeg, git-lfs and gcc came
+from conda-forge envs symlinked into `~/.local/bin` — the same trick `90_build_cosmos_env.sbatch`
+uses on Discoverer+, for the same reason.
+
+A **CUDA toolkit is deliberately not required.** The driver is enough, and step 00 patches the one
+place that assumes otherwise: transformer_engine probes for a system toolkit via nvrtc and curand,
+and when both are missing re-loads cudart from the pip wheels under the CUDA 13 directory name
+(`nvidia/cuda_cudart`) while the cu12 wheel installs to `nvidia/cuda_runtime`. Discoverer+ has a
+CUDA 12.8 module so it never reaches that branch; a driver-only workstation always does, and the
+error — `cudart shared object not found`, eleven frames into a megatron import — names neither
+CUDA nor the toolkit. Step 00 aliases the directory.
 
 Set `WORK=` to choose where everything lands (default `~/wam-t041`).
 

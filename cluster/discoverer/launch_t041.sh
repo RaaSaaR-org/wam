@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Launch the T-041 Cosmos3-Super chain on Discoverer+. Runs on the Mac, not on the cluster.
 #
-#   ./cluster/discoverer/launch_t041.sh             # sync, then submit 90 -> 93
+#   ./cluster/discoverer/launch_t041.sh             # sync, then submit 90 -> 91
 #   ./cluster/discoverer/launch_t041.sh --status    # show the queue and what has landed
-#   CAMERA_KEYS="a b ..." ./cluster/discoverer/launch_t041.sh --corpus   # resubmit 92, chain 93
-#   ./cluster/discoverer/launch_t041.sh --probe     # the 8-GPU gate, after 91 and 93 are DONE
+#   ./cluster/discoverer/launch_t041.sh --corpus    # ship the captioned corpus, then register it
+#   ./cluster/discoverer/launch_t041.sh --probe     # the 8-GPU gate, after 91 and --corpus
 #
 # Everything this runs on the login node is sbatch, squeue, and file management — exactly
 # docs/discoverer.md §2's permitted set ("checking the allocation, and managing files under
@@ -85,7 +85,10 @@ echo "== today"
 sacct -u ffromm -S today -X -o 'JobID%10,JobName%22,State%20,Elapsed%10,ExitCode%8' 2>/dev/null | tail -20
 echo
 echo "== artifacts"
-for f in "$PROJ/cosmos_env.sh" "$PROJ/data/t041-corpus/manifest.json" \
+# t041-corpus/ was never a path any job wrote — the status probe reported "absent" forever and
+# meant nothing by it. 94's actual precondition is the registered jsonl, so check that.
+for f in "$PROJ/cosmos_env.sh" "$PROJ/data/cosmos-g1-embodiment/manifest.json" \
+         "$PROJ/data/cosmos-g1-embodiment/train/video_dataset_file.jsonl" \
          "$PROJ/runs/$RUN_ID/PROBE.json" "$PROJ/runs/$RUN_ID/DONE"; do
   if [[ -e $f ]]; then echo "  present  $f"; else echo "  absent   $f"; fi
 done
@@ -101,17 +104,15 @@ case "${1:-}" in
     need_key; queue; exit 0 ;;
 
   --corpus)
-    # Job 92 stops and prints every repo's video feature keys when any repo exposes more than
-    # one. That is designed: a generator trained on a wrist camera when you meant the head view
-    # is finite, plausible and wrong — the shape of failure that cost us T-37. Name them here.
-    : "${CAMERA_KEYS:?set CAMERA_KEYS to the per-repo keys job 92 printed, space separated}"
+    # Corpus preparation and captioning moved to the workstation (PR-09 §4e). This used to submit
+    # 92 + 93; both are superseded, and 93 in particular runs on the PAID GPU QoS and re-captions
+    # the untranscoded tree — the exact run that produced 372 clips and 0 captions. Submitting it
+    # from here would spend an H200 reproducing a known failure.
     need_key
-    echo "==> resubmitting 92 with CAMERA_KEYS=${CAMERA_KEYS}"
-    ssh "${HOST}" "cd ${JOBS} && export T041_FREEZE_LIFTED='${T041_FREEZE_LIFTED}' \
-      CAMERA_KEYS='${CAMERA_KEYS}' && \
-      J92=\$(sbatch --parsable 92_fetch_g1_corpus.sbatch) && \
-      J93=\$(sbatch --parsable --dependency=afterok:\$J92 93_caption_corpus.sbatch) && \
-      echo \"92=\$J92 93=\$J93\""
+    echo "==> shipping the captioned corpus from this machine (14 GB, resumable)"
+    "${ROOT}/cluster/discoverer/sync.sh" --corpus
+    echo "==> registering it on the cluster (free QoS, no GPU)"
+    ssh "${HOST}" "cd ${JOBS} && sbatch --parsable 92b_register_corpus.sbatch"
     queue; exit 0 ;;
 
   --probe)
@@ -131,20 +132,20 @@ echo "==> syncing the working tree (rsync, not git — uncommitted edits go too,
 "${ROOT}/cluster/discoverer/sync.sh"
 
 echo
-echo "==> submitting 90 -> 93"
-# afterok, not afterany. If the env build fails there is nothing to stage weights into, and if
-# the corpus fetch stops on an ambiguous camera key there is nothing to caption. A dependency
-# that is never satisfied costs zero GPU-hours and leaves the job visible in the queue as
-# DependencyNeverSatisfied, which is a better signal than a job that starts and dies.
+echo "==> submitting 90 -> 91"
+# afterok, not afterany. If the env build fails there is nothing to stage weights into. A
+# dependency that is never satisfied costs zero GPU-hours and leaves the job visible in the queue
+# as DependencyNeverSatisfied, which is a better signal than a job that starts and dies.
 #
-# 91 and 92 both hang off 90 rather than off each other: weight staging and corpus fetching are
-# independent, and the queue caps at 4 running / 8 submitted, so there is room to overlap them.
+# 92 and 93 are NOT submitted here any more. Fetching and captioning the corpus moved to the
+# workstation (PR-09 §4e, workstation/20 and workstation/30); the corpus arrives via
+# `sync.sh --corpus` and is registered by 92b_register_corpus.sbatch. Leaving 93 in this chain
+# meant one `launch_t041.sh` with no arguments spent a paid H200 re-captioning the untranscoded
+# tree, and it had been superseded for a day by then.
 ssh "${HOST}" "cd ${JOBS} && export T041_FREEZE_LIFTED='${T041_FREEZE_LIFTED}' && \
   J90=\$(sbatch --parsable 90_build_cosmos_env.sbatch) && \
   J91=\$(sbatch --parsable --dependency=afterok:\$J90 91_stage_cosmos_weights.sbatch) && \
-  J92=\$(sbatch --parsable --dependency=afterok:\$J90 92_fetch_g1_corpus.sbatch) && \
-  J93=\$(sbatch --parsable --dependency=afterok:\$J92 93_caption_corpus.sbatch) && \
-  echo \"90=\$J90 (env, free)  91=\$J91 (weights, 1 GPU)  92=\$J92 (corpus, free)  93=\$J93 (captions, 1 GPU)\""
+  echo \"90=\$J90 (env, free)  91=\$J91 (weights, 1 GPU)\""
 
 echo
 queue
@@ -153,8 +154,8 @@ cat <<EOF
 
 next:
   $0 --status                     # poll
-  CAMERA_KEYS="..." $0 --corpus   # if 92 stopped on an ambiguous camera key
-  $0 --probe                      # once 91 and 93 are done — the gate before any real run
+  $0 --corpus                     # ship + register the workstation corpus (needed by 94)
+  $0 --probe                      # once 91 and --corpus are done — the gate before any real run
 
 still needs a human, before job 95 can issue a verdict at all:
   ${PROJ}/data/t041-calibration/positive   10 real held-out G1 + Dex3 clips  (must score YES)

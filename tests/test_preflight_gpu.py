@@ -344,7 +344,9 @@ def test_extras_parse_against_the_real_pyproject() -> None:
     # wam.interfaces.versioning — it used to arrive only via pydantic.
     assert extras["(core)"] == ("numpy", "pydantic", "pyyaml", "typing-extensions")
     assert extras["data"] == ("pyarrow", "opencv-python", "av")
-    assert extras["dev"] == ("pytest", "ruff", "peft")
+    # imageio/imageio-ffmpeg are dev-only on purpose: nothing in src/ imports them, but
+    # tests/test_cosmos3_probe.py imports the probe script to check its frame arithmetic.
+    assert extras["dev"] == ("pytest", "ruff", "peft", "imageio", "imageio-ffmpeg")
     assert "diffusers" in extras["wan"] and "transformers" in extras["wan"]
     # `local` is the one-bracket install docs/local_gpu.md §0 prescribes. It has to be a superset
     # of what the runbook actually runs, or the runbook is back to failing on import.

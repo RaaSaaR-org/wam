@@ -59,7 +59,11 @@ isaac = []
 # in docs/anim/ with no source change (docs/handoff.md §4). 0.16.0 is what uv.lock already resolved
 # (uv.lock:1750) and what .venv/bin/ruff reports; the pin freezes that, and [tool.ruff.lint] names
 # the rules so neither half of the claim can drift on its own. Bump both together, deliberately.
-dev = ["pytest", "ruff==0.16.0", "peft>=0.14"]
+# imageio is here and not in `data` because nothing in src/ imports it — the probe scripts declare
+# it in their own PEP 723 header and run standalone on HF Jobs. But tests/test_cosmos3_probe.py
+# imports the probe to check its frame arithmetic, so without it two tests fail locally on an
+# ImportError that says nothing about the code under test.
+dev = ["pytest", "ruff==0.16.0", "peft>=0.14", "imageio", "imageio-ffmpeg"]
 # Everything ONE local GPU box needs to run docs/local_gpu.md end to end, in one bracket.
 #
 # This exists because the runbook used to say `pip install -e '.[dev]'`, and dev is
@@ -103,6 +107,8 @@ local = [
     # dev — §0 tells you to run the test suite before trusting a GPU number from this repo
     "pytest",
     "ruff==0.16.0",  # pinned; see the dev extra for why, and [tool.ruff.lint] for the rule set
+    "imageio",       # tests/test_cosmos3_probe.py imports the probe; see the dev extra
+    "imageio-ffmpeg",
 ]
 
 [build-system]
