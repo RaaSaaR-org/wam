@@ -25,8 +25,124 @@ depends_on: []
 # reason the user has already decided against.
 due_date: ''
 created: 2026-08-06
-updated: 2026-08-08
-status_note: "PREPARATION MOVED OFF THE CLUSTER, 2026-08-08 — still no training submitted. Two
+updated: 2026-08-09
+status_note: "CORPUS DEDUPLICATED, 2026-08-09 — a fourth dated amendment, and the first against
+  PR-09 §2 rather than §5: train 3432 → 3133 clips, 14 training sources → 13, val untouched at 30.
+  Still nothing generated, nothing trained, T041_RULE_V1 still never run; this precedes every
+  measurement. `g1-dex3-graspsquare-dataset` is a byte-for-byte copy of
+  `g1-dex3-blockstacking-dataset` — the same six cam_left_high mp4s by sha256, the same episode
+  boundaries in 79 of 80 metadata columns over 301 episodes, differing in exactly one column: the
+  LeRobot task string, which reads 'camera packaging'. A third dataset's label, on a second
+  dataset's name, over the first dataset's pixels. 299 duplicate pairs; 3462 clips, 3163 unique
+  sha256. THE WEIGHTING WAS NOT THE PROBLEM. Four of the thirty pre-registered eval prompts — 13% of
+  the eval set — were byte-identical to TRAIN clips (blockstacking 000077/000126 == graspsquare
+  000077/000126, graspsquare 000224/000239 == blockstacking 000224/000239), so the LoRA would have
+  been scored on footage it had memorised. Only the LoRA arm memorised it, so the bias ran TOWARD
+  the registered hypothesis — the direction least likely to be questioned when the number comes back
+  and the most expensive to have believed. It passed because check_prompts_are_held_out
+  (eval_t041_embodiment.py:303-329 as it stood) and make_t041_eval_prompts.py:91-94 both compare
+  UUIDS, and the uuids really were disjoint. scripts/dedupe_cosmos_corpus.py deletes from TRAIN
+  ONLY — rule 1 the 4 contaminating clips, rule 2 the 295 remaining duplicates keeping the
+  lexicographically smallest uuid — so val is byte-identical to what was registered and n=30 plus
+  G0a's >=15/30 stand as registered instead of being renegotiated after the defect was known.
+  No unique content was lost: corpus-wide unique sha256 is 3163 before AND after. GraspSquare now
+  contributes ZERO train clips (all 297 were duplicates); the 14th source was never a distinct
+  source. Its 2 val clips stay — removing them is a re-split by another name, and their captions
+  were generated from the pixels, so the prompts describe what is on screen. MANIFEST_SHA256 is now
+  2af81b9997f0de42e3fee01600bf34c67b7cdcb86b8ac5ab1094e21dcf77c63e, re-measured with sha256sum; the
+  pre-dedupe stamp 6bec507e2816… is quoted, not re-measured, because that manifest is gone.
+  THE GATE IS
+  HARDENED AT BOTH ENDS: check_prompts_are_held_out (eval_t041_embodiment.py:303-368) and
+  make_t041_eval_prompts.py:96-117 now also refuse a prompt whose clip sha256 appears anywhere in
+  train, read from the sha256 the manifest already records so nothing is hashed at eval time. The
+  uuid check is KEPT, not replaced — it catches a prompt set built from the wrong split, which a
+  sha comparison would not notice. Confirmed it cannot change the current outcome: it passes against
+  the real manifest (30 prompts, all in val, none byte-identical to train) and names all four pairs
+  against a reconstruction of the corpus as it was. Four new tests in
+  tests/test_eval_t041_embodiment.py:327-378.
+  ===
+  NUM_FRAMES REGISTERED, 2026-08-09 — `num_frames` 189 → 397, closing the FIRST of the
+  two items the geometry/fps amendment left open. Still nothing generated, nothing trained,
+  T041_RULE_V1 still never run. Measured, not asserted: vision_sft_super.py:271 sets
+  num_video_frames=-1 (native-chunk mode, sft_dataset.py:215-219) and captions_to_sft_jsonl.py:172-174
+  writes every window as start 0 / end total-1 / temporal_interval 1, so the manifest's frame counts
+  ARE the training sequence lengths — 3432 train clips at 30.0 fps, min 249 / p05 356 / p25 464 /
+  median 693.5 / p75 911 / max 1819 (8.3 s to 60.6 s), and NOTHING at or below 189 in either split.
+  Correction to the open note: the 256 bucket's 400 is NOT a cap. MAX_NUM_FRAMES[\"256\"]=400
+  (args.py:146) is only compared in a log.warning (args.py:529-532); the sole rewrite is the 4N+1
+  round-up at args.py:536-538. 397 is chosen to stay inside a range NVIDIA states, not because
+  anything would reject 401. Of the legal 4N+1 values only 397 is in the distribution's interior —
+  12.97% of train clips are <=397, against 4.22% at 349, 0.20% at 297 and 0.03% (ONE clip) at 249 —
+  and 13.2 s is the closest this API comes to the duration the structured-JSON prompt itself states
+  (val median 25.3 s). COST, back-of-envelope and labelled so in PR-09 §5: the 8-GPU benchmark column
+  does not apply, because parallelism_preset=\"throughput\" forces cp=cfgp=1 (args.py:1364-1378) with
+  dp_shard=world and 95:137-140 hands torchrun ONE payload per launch, so ~40 s/clip at 189 and
+  ~85 s/clip at 397 — a marginal ~45 min (~6 GPU-h) over 60 clips. What actually threatens the 4 h
+  wall is the 60 COLD torchrun launches, each loading a 64.6 GB DCP checkpoint, ~90-180 min and
+  independent of num_frames; no measurement of that startup exists yet. Accepted because the job is
+  restart-safe by construction (95:139 skips written clips, judge --resume, --requeue); mitigations
+  are named in PR-09 §5 and NONE is applied — batching the payloads into one torchrun
+  (scripts/inference.py:22-27 takes -i as a glob list) is the highest-leverage and is deliberately
+  not made under cover of a frame-count decision. Also recorded and NOT resolved: §7 budgets job 95
+  at 8 GPU-h = one hour on 8 GPUs, and every branch of the estimate puts the eval at 25-35 GPU-h at
+  189 as much as at 397.
+  ===
+  GEOMETRY AND FPS CORRECTED, 2026-08-09 — still nothing generated, still nothing
+  trained. The 2026-08-08 entry below is WRONG ON THE MECHANISM and is left standing, superseded by
+  the dated amendment in PR-09 §5: `resolution` is not an output height, it is a key into
+  `VIDEO_RES_SIZE_INFO` (cosmos_framework/data/generator/utils.py:42-74), whose only 4:3 buckets are
+  256→320×256, 480→736×544 and 720→1104×832. `480`/`4,3` is 736×544, NOT the 'exactly 640×480' that
+  entry and PR-09 §5 both claimed, and there is no 640×480 bucket at all — the corpus geometry is
+  unreachable through this API, so the registered value could never have done what it was registered
+  to do. The settings now match TRAINING instead: vision_sft_super.py:272 pins `resolution=\"256\"`
+  and the TOML cannot override it (DataloaderTrainConfig forbids extras, sft_config.py:624-665), so
+  320×256 is the only geometry the adapter ever sees; `max_sequence_length=45056` is sized for that
+  bucket, and at 736×544 the median 693-frame clip needs ~68k tokens and would be dropped SILENTLY
+  by PackingDataLoader. `fps = 24` → 30 in the same amendment, on its own evidence rather than under
+  cover of the first: conditioning_fps=-1 passes each clip's own fps, the corpus is 30.0 throughout,
+  and 24 would have asked mRoPE for a 1.0 temporal stride against the 0.8 training was fit on.
+  T041_RULE_V1 untouched. TWO ITEMS OPEN AND WRITTEN DOWN AS OPEN: `num_frames = 189` is shorter
+  than the shortest training clip (249; median 693) and no replacement is registered — the largest
+  legal 4N+1 under the 256 bucket's cap of 400 is 397 [CLOSED the same day, see the entry above:
+  397 registered, and the '400 cap' is a warning rather than a cap]; and G0b's calibration clips are
+  real 640×480 footage that no bucket reproduces, so they must be downscaled to 320×256 before the
+  judge sees them, which is NOT DONE and blocks G0b — STILL OPEN.
+  WORKSTATION ENV BUILT, 2026-08-08 — step 00 runs green and idempotent; both repos at
+  their pinned SHAs with clean working trees; torch 2.10.0+cu128 sees the RTX 5090 as sm_120; both
+  captioner entry points import. Three prerequisites were undeclared, and each failed while naming
+  the wrong culprit. (1) No git-lfs: cosmos-framework LFS-tracks assets/** and every media
+  extension, so the clone succeeded and the CHECKOUT died half-way, leaving a repo where
+  `git rev-parse HEAD` printed the pinned SHA over a gutted tree — the '=== framework @ <sha>' line
+  was a lie. `clone_at` now requires a clean porcelain, in cluster/discoverer/90 as well, WHERE THE
+  git-lfs INSTALL SAT AFTER THE CLONES IT WAS NEEDED FOR and would have reproduced this at Slurm
+  queue cost. (2) No C compiler: `uv sync --all-extras` builds evdev from source (lerobot → pynput →
+  evdev, a keyboard-teleop transitive nothing here uses, which --all-extras gives no way to decline)
+  and failed ten minutes into a multi-GB resolve. (3) transformer_engine probes for a system CUDA
+  toolkit via nvrtc and curand and, finding neither, re-loads cudart from the pip wheels under the
+  CUDA 13 directory name `nvidia/cuda_cudart` while the cu12 wheel installs `nvidia/cuda_runtime`.
+  This can only fire where there is no toolkit — Discoverer+ loads a CUDA 12.8 module, a driver-only
+  workstation has no /usr/local/cuda — so the cluster recipe was never wrong, it just never reached
+  that branch. Step 00 aliases the directory. Separately the `curl -LsSf astral.sh | sh` uv
+  bootstrap was deleted rather than repaired: an unpinned installer that silently changes what
+  `uv sync` resolves is the one unversioned component in a pipeline whose whole premise is that
+  every part is named by SHA. uv is a prerequisite now. Also added imageio to the dev extra, which
+  clears the two long-standing test_cosmos3_probe failures — the T-041 suites are 86/86 green.
+  ===
+  RESOLUTION MISMATCH CLOSED + CORPUS FETCHED, 2026-08-08 [SUPERSEDED 2026-08-09 — the
+  `480`/`4,3` = 'exactly 640×480' below is false and the fps item is no longer open; see the top
+  entry and PR-09 §5's 2026-08-09 amendment] — still no training
+  submitted. PR-09 §5 generated 720p 16:9 against a corpus that is 640×480 4:3 throughout; the
+  settings came from the cookbook's payload example and were never checked against our own data.
+  Both arms shared them, so a false P was never possible — the risk was an ambiguous N, where 'the
+  LoRA does not fix the embodiment defect' and 'it does, but not at 16:9 720p' return the same
+  verdict. `t041_eval_selection.toml` now generates `480`/`4,3` = exactly 640×480, matching both
+  the corpus and G0b's real calibration clips; `T041_RULE_V1` is unchanged and the amendment is
+  dated in PR-09 §5, taken before any clip existed. Moving the corpus instead was rejected:
+  pillarboxing teaches the adapter to draw bars, cropping to 640×360 discards the torso/arms/hands
+  that `cam_left_high` was chosen for. `fps = 24` vs a 30 fps corpus is the same class of mismatch
+  and is left OPEN on purpose. Workstation now has ffmpeg 8.1.2 (libdav1d + libx264/nvenc) and the
+  full corpus: 14/14 sources, 26 GB, one camera each.
+  PREPARATION MOVED OFF THE CLUSTER, 2026-08-08 — still no training submitted. Two
   format blockers were found and fixed in code: the 13 G1_Dex3_* sets are LeRobot v3.0 (episodes
   concatenated, boundaries in meta/episodes/*/*.parquet, cameras rolling over to new files
   independently), and ALL 14 sources are AV1, which vLLM's OpenCV cannot decode — job 186357

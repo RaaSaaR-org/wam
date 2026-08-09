@@ -220,12 +220,81 @@ layer via the arm64 container (T-25a). What is left genuinely needs the robot.
   2026-08-08** (`workstation/`, `configs/cosmos3/corpus_g1_embodiment.tsv`): all four failures so
   far were IO, format or scheduling, each costing hours of queue to learn something a workstation
   answers in seconds, and transcoding video is not what a GPU allocation is for. Jobs 92/93 are
-  marked superseded, not deleted — their 69 GB download is a usable cache. **Still open before any
-  run:** the corpus is 640×480 4:3 throughout while §5 generates 720p 16:9; whether 500 iterations
-  is even one epoch cannot be read off the config — NVIDIA's `PackingDataLoader` batches by a
-  45 056-token budget with no sample cap, so the probe has to measure clips-per-iteration; how the
-  prepared corpus reaches Discoverer+ depends on the workstation's upstream and is undecided. Job
-  95 additionally needs 20 calibration clips nobody has picked yet)*
+  marked superseded, not deleted — their 69 GB download is a usable cache. **Corpus fetched to the
+  workstation 2026-08-08: 14/14 sources, 26 GB** — one camera per source rather than the cluster's
+  2–4, which is where the 69→26 GB comes from. **The resolution mismatch is closed (2026-08-08):**
+  §5 generated 720p 16:9 against a corpus that is 640×480 4:3 throughout, so the adapter would have
+  been evaluated in a geometry and scale it never trained on. Both arms shared the settings, so a
+  false **P** was never possible — the risk was an **ambiguous N**, and G0b's real calibration
+  clips are 640×480 besides. `t041_eval_selection.toml` now generates `480` / `4,3` = exactly
+  640×480; moving the corpus instead was rejected (pillarboxing teaches black bars, cropping to
+  640×360 discards the torso/arms/hands the `cam_left_high` choice exists to capture).
+  `T041_RULE_V1` is unchanged — the verdict rule never mentioned resolution — and the amendment is
+  dated in PR-09 §5, taken before any clip was generated. **Corrected 2026-08-09 by a second dated
+  amendment in PR-09 §5:** `resolution` is not an output height but a key into
+  `VIDEO_RES_SIZE_INFO`, whose 4:3 buckets are 320×256 / 736×544 / 1104×832 — `480`/`4,3` is
+  736×544 and **there is no 640×480 bucket at all**, so the value registered above could never have
+  done what it was registered to do. The settings now match TRAINING instead: `256`/`4,3` = 320×256,
+  the geometry `vision_sft_super.py:272` pins and the TOML cannot override, and the one
+  `max_sequence_length = 45056` is sized for. `fps` 24 → 30 in the same amendment, on its own
+  evidence. Two items were left open in writing; **the first is now closed by a third dated
+  amendment, 2026-08-09: `num_frames` 189 → 397.** The training durations were measured rather than
+  quoted — `num_video_frames = -1` puts the loader in native-chunk mode and every window is written
+  as the whole clip at interval 1, so the manifest's counts *are* the sequence lengths: 3432 train
+  clips at 30 fps, min 249 / median 693.5 / max 1819, and **nothing at or below 189 in either
+  split**. The "cap of 400" is also not a cap — `MAX_NUM_FRAMES["256"]` is only compared inside a
+  `log.warning`, so 397 is chosen to stay inside a range NVIDIA states, not because anything would
+  reject more. Of the legal `4N+1` values only 397 is in the distribution's interior (12.97 % of
+  train clips are ≤ 397, against 4.22 % at 349, 0.20 % at 297 and **one clip** at 249), and 13.2 s is
+  the closest reachable to the duration the structured-JSON prompt itself states (val median 25.3 s).
+  The cost estimate is a back-of-envelope and says so: the 8-GPU benchmark column does not apply
+  because `parallelism_preset = "throughput"` forces `cp = cfgp = 1` and the sbatch sends one payload
+  per `torchrun`, giving ~40 s/clip at 189 against ~85 s/clip at 397 — a marginal **~45 min ≈ 6
+  GPU-h** over 60 clips, while the term that actually threatens the 4 h wall is the **60 cold
+  torchrun launches** (~90–180 min, unmeasured, and unmoved by frame count). Accepted because the job
+  is restart-safe by construction (generation skips clips already written, the judge takes
+  `--resume`, the job is `--requeue`); the mitigations are named in PR-09 §5 and **none is applied**.
+  **Still open:** G0b's calibration clips are real 640×480 footage that must be downscaled to 320×256
+  before the judge sees them — not done, and it blocks G0b. **Also recorded and not resolved:** §7
+  budgets job `95` at 8 GPU-h = one hour on 8 GPUs, and every branch of the estimate puts the eval at
+  25–35 GPU-h at 189 frames as much as at 397. **The corpus was deduplicated 2026-08-09 and a
+  fourth dated amendment records it, this one against PR-09 §2 — train 3432 → 3133 clips, 14
+  training sources → 13, val untouched at 30.** `g1-dex3-graspsquare-dataset` is a byte-for-byte
+  copy of `g1-dex3-blockstacking-dataset`: the same six source mp4s by sha256, the same episode
+  boundaries in 79 of 80 metadata columns over 301 episodes, differing only in the `tasks` string
+  — which reads `"camera packaging"`, a third dataset's label. 299 duplicate pairs; 3462 clips,
+  3163 unique sha256. **The weighting was not the problem. Four of the thirty pre-registered eval
+  prompts (13 %) were byte-identical to TRAIN clips**, so the LoRA would have been scored on
+  footage it had memorised — and only the LoRA arm, so the bias ran *toward* the registered
+  hypothesis. Both holdout checks compared **uuids**, which really were disjoint.
+  `scripts/dedupe_cosmos_corpus.py` deleted from train only (4 contaminating, then 295 redundant,
+  keeping the lexicographically smallest uuid of each pair) precisely so `n = 30` and G0a's
+  `>= 15/30` survive as registered instead of being renegotiated after the fact. No unique content
+  was lost — corpus-wide unique sha256 is 3163 before and after — and GraspSquare now contributes
+  zero train clips, its 2 val clips left in place because removing them is a re-split by another
+  name. `MANIFEST_SHA256` is now
+  `2af81b9997f0de42e3fee01600bf34c67b7cdcb86b8ac5ab1094e21dcf77c63e` (re-measured; the pre-dedupe
+  `6bec507e2816…` is quoted rather than re-measured, that manifest being gone). The gate is hardened both
+  ends: `check_prompts_are_held_out` and `make_t041_eval_prompts.py` now also refuse a prompt whose
+  clip sha256 appears anywhere in train, from the sha256 the manifest already records. It passes on
+  the current corpus and catches all four pairs on a reconstruction of the old one.
+  **Workstation env built 2026-08-08**
+  (step 00 green, idempotent, both repos at their pinned SHAs with clean trees, torch 2.10.0+cu128
+  on an RTX 5090 sm_120). Three prerequisites were undeclared and each failed in a way that named
+  the wrong culprit: no `git-lfs`, so the framework's *checkout* half-failed while `rev-parse` still
+  reported the right SHA — `clone_at` now verifies a clean porcelain instead of trusting the SHA,
+  in the cluster script too, **where the git-lfs install sat after the clones it was needed for**;
+  no C compiler, so `uv sync --all-extras` died ten minutes in building evdev, a keyboard-teleop
+  transitive that `--all-extras` gives no way to decline; and transformer_engine's no-toolkit path,
+  which only triggers on a machine without a system CUDA toolkit — Discoverer+ has a module, a
+  driver-only workstation does not — and looks for cudart under the CUDA 13 wheel name. The
+  `curl | sh` uv bootstrap was removed rather than fixed: it was the one unpinned component in a
+  pipeline whose premise is that everything is named by SHA. **Still open before any run:**
+  whether 500 iterations is even one epoch cannot be read
+  off the config — NVIDIA's `PackingDataLoader` batches by a 45 056-token budget with no sample
+  cap, so the probe has to measure clips-per-iteration; how the prepared corpus reaches Discoverer+
+  depends on the workstation's upstream and is undecided. Job 95 additionally needs 20 calibration
+  clips nobody has picked yet)*
 
 ## Open decisions (PRD §16) — resolved 2026-07-26
 
