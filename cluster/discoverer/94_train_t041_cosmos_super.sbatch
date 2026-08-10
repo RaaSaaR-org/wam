@@ -63,6 +63,19 @@ export OMP_NUM_THREADS=26
 # host CUDA libs cleared and the expandable allocator to fit at all.
 export LD_LIBRARY_PATH=""
 export PYTORCH_ALLOC_CONF=expandable_segments:True
+# Job 186740 died 17 minutes in, and the log could not say why. Rank 0's watchdog fired on a
+# 1-element ALLREDUCE over mesh_cp after the 600 s default, and the framework printed exactly one
+# useful line: "Stack trace of the failed collective not found, potentially because FlightRecorder
+# is disabled." The ranks that did not hang had ENQUEUED one more collective than rank 0 had
+# (4127 vs 4126), so rank 0 was stalled in CPU/IO work before it ever reached the collective the
+# others were waiting in — a dataloader read off /valhalla, not a GPU fault. Two other 8-GPU jobs
+# from a different user failed on dgx1 in the same window with the same ~17 min lifetime, which is
+# what makes this look like the shared filesystem rather than this recipe.
+#
+# That diagnosis is an inference from which ranks were where, and it should not have to be. The
+# recorder costs a ring buffer and turns a second occurrence into a stack trace instead of another
+# afternoon of reading rank counters.
+export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 source "${FRAMEWORK}/.venv/bin/activate"
 nvidia-smi -L
 
