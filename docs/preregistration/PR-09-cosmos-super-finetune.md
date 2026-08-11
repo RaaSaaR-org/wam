@@ -636,6 +636,50 @@ attempt 3.
 > **Revised total, measured where measurable:** `91` + `93` as budgeted, probe **3.7**, train
 > **≤ 25.4**, eval **≈ 11** — comfortably inside the **122 GPU-h** ceiling, which is unchanged.
 
+> **Amended 2026-08-12 — `seconds_per_iter` was wrong by 52 %. The gate's decision was not.**
+> Recorded because the number was wrong, not because the gate was: on the corrected arithmetic the
+> probe still passes, on the same pre-registered criterion, and nothing in §7 moves.
+>
+> The measurement was internally exact and externally false. Job `186663` timed two `torchrun`s at
+> 604 s (N=5) and 1041 s (N=25); `(1041−604)/20 = 21.85`, `604 − 5×21.85 = 494.8`. Its own log
+> refutes both figures: **iterations 2–25 of the 25-iteration run averaged 33.25 s** (min 27.97,
+> max 38.72), and the production run later held the same rate. 21.85 s was never a per-iteration
+> time, and 494.8 s was never a checkpoint read.
+>
+> **The error is structural, not noise.** `t = load + n·step` assumes both runs pay identical
+> one-off costs. They could not: they ran back-to-back on one node against the same 64.6 GB DCP
+> checkpoint, so the second read a warm page cache.
+>
+> | one-off cost | run 1 (N=5, cold) | run 2 (N=25, warm) |
+> |---|---|---|
+> | start → first iteration begins | 124.7 s | 34.0 s |
+> | first iteration (compile + warmup) | 198.3 s | 144.0 s |
+> | last iteration → process exit | 158 s | 65 s |
+> | **total one-off** | **481.0 s** | **243.0 s** |
+>
+> Run 2 was **238 s cheaper in costs that have nothing to do with its 20 extra iterations**, and the
+> subtraction charged every second of that saving against those 20: `−238/20 = −11.9 s/iter`, which
+> is the entire gap between 33.25 and 21.85. Both wall times close to the second —
+> `124.7 + 198.3 + 122.8 + 158 = 603.7 ≈ 604` and `34.0 + 144.0 + 798.0 + 65 = 1041.0 = 1041`. The
+> residual was pushed into `load`, which is why 494.8 s exceeds the true 124.7 s cold setup: it
+> absorbed the first-iteration compile and the teardown as well.
+>
+> **What the gate should have printed.** `500 × 33.25 s = 4.62 h`; cold overhead ≈ 448 s; usable
+> ≈ 13 952 s per 4 h pass ⇒ **`passes_needed = 2`, `estimated_gpu_hours ≈ 64`** against
+> `max_passes 3` and `ceiling 96`. **PASS.** The 2026-08-10 amendment's `25.4` is superseded by
+> **≈ 64**; `passes_needed 1` by **2**.
+>
+> **The argument that condemned job `95` survives, at a smaller magnitude.** It needed only that a
+> per-`torchrun` constant is paid 60 times, and the constant is real — 330–480 s per launch (cold
+> setup + first iteration + teardown), not 494.8 s. Sixty launches is 5.5–8 h against a 4 h wall
+> instead of 8.25 h. Still impossible, still one launch per arm.
+>
+> **Actual spend, closing the estimate:** probe 3.7 + crashed pass 2.3 + pass 2 32 + pass 3 16 =
+> **54.0 GPU-h**, under the corrected 64 for training alone. Waste recorded rather than smoothed:
+> pass 2 reached iteration **396** but banked iteration **300** (`save_iter = 100`), discarding 96
+> iterations ≈ 55 min × 8 ≈ **7 GPU-h**. That discard is also what produced the coverage limitation
+> recorded in §9.
+
 ## 8. What must exist before anything is submitted
 
 1. ✅ `scripts/prepare_cosmos_corpus.py` + `tests/test_prepare_cosmos_corpus.py` (20 tests)
@@ -687,3 +731,34 @@ one that cannot be closed off-cluster: it is a measurement, and the probe is how
   not open), and `scoring_sheet.jsonl` + `items/` are a **human-rescoreable artifact** — a person
   can score the same 80 blinded clips and `--verdict` applies the identical rule to their
   `scores.jsonl`. If G0b fails, that is not a fallback, it is the required path.
+
+> **Amended 2026-08-12 — 500 optimiser steps, but at most 300 distinct batches.** Written before
+> the eval job (`187078`) started, so it cannot be read as an excuse fitted to a result: at the
+> time of writing no clip has been generated and no verdict exists.
+>
+> On the pass 2 → pass 3 resume the framework asked `iter_000000300` for the `dataloader` key and
+> **all 8 ranks reported it absent** — `Checkpoint …/iter_000000300/dataloader does not exist, skip
+> loading dataloader.` Model, optimiser, scheduler and trainer state restored; sampler position did
+> not. The 32 dataloader worker seeds logged in pass 3 are **set-identical** to pass 2's. A sampler
+> restarted from position 0, under the same seeds, over the same corpus, draws the same order — so
+> iterations **301–500 re-drew the sample order of iterations 1–200**.
+>
+> The run is therefore 500 gradient steps over **300 distinct packed batches**
+> (`tokens_after_packing = 45056`), the first 200 of which contributed twice. What fraction of the
+> 3133 train clips those 300 batches touch is **not stated**, because the log records no
+> per-iteration sample identity — no clip uuids, no mp4 paths — and the number is not recoverable
+> after the fact. The bound is 300 batches, not 500.
+>
+> **This is an inference, and its weakest link is named.** Identical seeds plus absent sampler state
+> is strong evidence of a replay, not a direct observation of one. Direct verification would have
+> needed per-sample logging that this recipe does not emit.
+>
+> **How it bears on the verdict, in the direction that matters.** Under-training biases toward
+> **N**, not toward **P** — seeing less of the corpus is not a route to a false positive. So a **P**
+> stands, with the effect size read as a **floor** rather than an estimate. An **N** is the reading
+> that is compromised: it would be partly a statement about a run that saw less than 500 steps
+> implies, and is *not* clean evidence about what Cosmos3-Super can reach on this corpus.
+>
+> **Not repaired.** Repair means checkpointing the dataloader and re-running, and a re-run is a
+> second attempt that §6 does not permit — the same constraint that makes **I** terminal. Recorded
+> as a limitation of this run, which is the only honest option left once the run has happened.
