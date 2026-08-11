@@ -77,7 +77,9 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 # afternoon of reading rank counters.
 export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 source "${FRAMEWORK}/.venv/bin/activate"
-nvidia-smi -L
+# Not fatal under `set -e`: the export re-entry below is a legitimate GPU-less submission of this
+# same file, and dying at the inventory line before reaching it would be an absurd way to fail.
+nvidia-smi -L || echo "=== no GPUs visible (expected only for a --gres=NONE export re-entry)"
 
 NPROC=${NPROC:-8}
 PROBE=${PROBE:-0}
@@ -206,19 +208,194 @@ fi
 }
 cat "${OUT}/PROBE.json"
 
-# DONE is written at the end of a successful run but was never read: a resubmission after the run
-# had already finished would load the checkpoint and train past 500. Cheapest possible check first.
-if [[ -f "${OUT}/DONE" ]]; then
-  echo "T-041 already complete — ${OUT}/DONE exists. Nothing to do."
-  exit 0
-fi
-
 # Pass accounting is persisted, not inferred from SLURM_RESTART_COUNT alone. scontrol requeue keeps
 # the job id and increments that counter, but a MANUAL resubmit after a walltime kill starts a new
 # job at restart 0 — and manual resubmission is exactly what a 4 h cap on a multi-pass run
 # produces. Counting only requeues means the pre-registered 3-pass ceiling silently never binds.
+# Assigned HERE, above the DONE check, because the export re-entry below writes to it too.
 PASSES_LOG=${OUT}/passes.jsonl
 mkdir -p "${OUT}"
+
+# -------------------------------------------------------------------------------------------
+# EXPORT + ARTIFACT — a function, because it has TWO callers: the end of a completed training
+# pass, and the DONE re-entry immediately below. It was inline with one caller, and that is
+# precisely what made a failed export unrecoverable: DONE is written whether or not the export
+# worked (correctly — the 500 iterations are real and must never be paid for twice), so the only
+# way back in was the by-hand command this script printed. A by-hand command is not a step: it is
+# not logged here, it does not rewrite run_metadata.json, and 95_eval's G0c reads run_metadata,
+# not the filesystem. The export must be re-runnable BY THIS SCRIPT or the artifact and the
+# directory drift apart.
+# -------------------------------------------------------------------------------------------
+export_and_record() {
+  local REACHED=$1
+  local CKPT=${RUN_DIR}/checkpoints/${REACHED}
+  local EXPORTED=${RUN_DIR}/model
+  local EXPORT_RC EXPORT_NONEMPTY
+  echo "=== exporting adapter from ${CKPT}"
+
+  # ---- WHY THE DOCUMENTED SINGLE-PROCESS EXPORT COULD NEVER HAVE WORKED FOR THIS RECIPE ----
+  # NVIDIA documents exactly one export command — a plain `python -m ...export_model`, no torchrun
+  # (docs/training.md §"Export checkpoint to Hugging Face safetensors", README.md §"Export and
+  # Convert Checkpoints", and all three finetune cookbooks). It is correct for every recipe they
+  # ship it beside, and it cannot work for this one. export_model rebuilds the model from the run's
+  # own config.yaml; vision_sft_super.toml sets context_parallel_shard_degree = 2.
+  # OmniMoTModel.set_up_parallelism builds ParallelDims with
+  #     world_size = torch.distributed.get_world_size() if initialised else 1
+  # (model/generator/omni_mot_model.py:435-442), and ParallelDims._validate then demands that
+  # cfgp*cp divide world_size (utils/generator/parallelism.py:125-131). 1 % 2 != 0, so the export
+  # dies in the model constructor, before it opens a single .distcp shard:
+  #     ValueError: Invalid parallel dims: rest(0) * cfgp(1) * cp(2) != WORLD_SIZE(1)
+  # Nothing about this is transient, ours, or fixable by re-running: EVERY single-process export of
+  # ANY cp>1 recipe fails identically. Single-process IS the intended launch — NVIDIA's own
+  # distillation cookbook pins WORLD_SIZE=1/RANK=0 around this same script
+  # (cookbooks/cosmos3/generator/audiovisual/distill/common.sh:170-180) — the documentation simply
+  # never met a CP=2 recipe. The next person to export a Super run will land here too.
+  #
+  # CP=1 FOR THE EXPORT CHANGES NO EXPORTED WEIGHT. Context parallelism is an overlay axis over
+  # RANKS, not over parameters (parallelism.py:14-22). With cp>1 the framework installs a
+  # parameter-free ContextParallelDispatch in front of each attention layer
+  # (model/generator/mot/parallelize_unified_mot.py:43-93, 321-357) and shards the SEQUENCE inside
+  # forward; the export runs no forward. LoRA is injected before parallelisation, on the meta
+  # device (omni_mot_model.py:257-267), so the adapter tensors and their FQNs are byte-for-byte the
+  # same either way — and DCP resharding is what makes an 8-rank checkpoint loadable into a 1-rank
+  # model in the first place. The one thing that does change is the integer recorded in the
+  # exported config.json, and that field is overwritten at load time from the inference CLI's
+  # --cp-size (inference/model.py:527 via inference/inference.py:1145-1151), so it is never
+  # load-bearing. The alternative — torchrun --nproc_per_node=2 — would also be weight-identical,
+  # but it costs 2 idle GPUs on the paid QoS, doubles host RAM (one full CPU copy per rank), and
+  # routes the whole thing through FSDP2-over-gloo on a CPU device mesh, which nothing in this
+  # framework tests. Fewer moving parts wins.
+  #
+  # AND IT MUST BE --experiment-overrides, NOT --cp-size. export_model inherits ParallelismOverrides
+  # and therefore ADVERTISES --cp-size in its --help, but it never calls build_parallelism(): the
+  # flag is parsed, accepted and ignored. `--cp-size 1` fails with the identical traceback and looks
+  # like the fix did not take. --experiment-overrides is an OmegaConf dotlist merged into config.yaml
+  # before the model dict is built (inference/common/args.py:379-391), so the key is the path from
+  # the FILE root, and it is recorded in the exported checkpoint.json's own copy of the invocation.
+  # data_parallel_shard_degree is deliberately left alone: the TOML sets it to -1, which ParallelDims
+  # auto-infers to world_size (parallelism.py:99-102) and is therefore already correct at 1. Only cp
+  # is pinned to a number a single process cannot satisfy.
+  #
+  # No GPU is used here whatever the allocation says: export_model's init_script pins
+  # COSMOS_DEVICE=cpu (scripts/export_model.py:8-13), and build_net skips init_weights off CUDA
+  # because that path exists "only for checkpoint conversion" (omni_mot_model.py:279-288). What it
+  # does need is HOST RAM for one bf16 copy of the model — the probe measured the base DCP read at
+  # 64.6 GB (PR-09 §7 amendment) — plus the ViT merge and the safetensors writer. --mem here is
+  # sized for the trainer and covers it; a standalone re-export must ask for >= 128G.
+  set +e
+  python -m cosmos_framework.scripts.export_model \
+      --checkpoint-path "${CKPT}" \
+      --config-file "${RUN_DIR}/config.yaml" \
+      --experiment-overrides model.config.parallelism.context_parallel_shard_degree=1 \
+      -o "${EXPORTED}"
+  EXPORT_RC=$?
+  set -e
+
+  # `find -size +0` alone is too weak to be a gate: export_model writes config.json BEFORE it
+  # instantiates the model, so the run that failed above ALREADY left a non-empty file in this
+  # directory. checkpoint.json is written last, explicitly "to indicate that the model is
+  # complete" (scripts/export_model.py), so that is the file to test. Re-exporting into the same
+  # -o directory is safe by design — clean_stale_export_artifacts drops a prior attempt's leavings.
+  if [[ ${EXPORT_RC} -eq 0 ]] && [[ -s "${EXPORTED}/checkpoint.json" ]] && \
+     [[ -n "$(find "${EXPORTED}" -name '*.safetensors' -size +0 -print -quit 2>/dev/null)" ]]; then
+    EXPORT_NONEMPTY=true
+  else
+    EXPORT_NONEMPTY=false
+  fi
+  echo "=== export rc=${EXPORT_RC} nonempty=${EXPORT_NONEMPTY} -> ${EXPORTED}"
+
+  python - "${OUT}" "${MODEL_ID}" "${MODEL_REVISION}" "${COSMOS_SHA}" "${FRAMEWORK_SHA}" \
+           "${CORPUS_MANIFEST_SHA256}" "${NPROC}" "${RUN_DIR}" "${T041_FREEZE_LIFTED}" \
+           "${REACHED}" "${PASSES_LOG}" "${EXPORT_NONEMPTY}" <<'PY'
+import json, re, sys, pathlib
+(out, model, rev, csha, fsha, corpus, nproc, run_dir, freeze,
+ reached, passes_log, export_nonempty) = sys.argv[1:13]
+
+# 95_eval_t041_embodiment.py's G0c compares iteration_reached to N_MCNEMAR_ITERS as an INT.
+# "iter_000000500" is a string and would never equal 500, so parse the digits out.
+m = re.search(r"(\d+)\s*$", reached)
+iteration_reached = int(m.group(1)) if m else None
+
+# G0c's resume_diffs_logged is only meaningful across the whole chain: one pass that resumed
+# without printing its TOML diff is enough to make the adapter suspect (PR-09 §4a), even if
+# every other pass was clean. Compute it from the persisted record, not from this pass.
+passes = []
+p_log = pathlib.Path(passes_log)
+if p_log.is_file():
+    passes = [json.loads(l) for l in p_log.read_text().splitlines() if l.strip()]
+resumes = [p for p in passes if p.get("resumed")]
+resume_diffs_logged = bool(passes) and all(p.get("resume_diff_logged") for p in resumes)
+
+p = pathlib.Path(out) / "run_metadata.json"
+p.write_text(json.dumps({
+    "task": "T-041", "prereg": "docs/preregistration/PR-09-cosmos-super-finetune.md",
+    "rule": "T041_RULE_V1", "model_id": model, "model_revision": rev,
+    "cosmos_sha": csha, "framework_sha": fsha, "corpus_manifest_sha256": corpus,
+    "nproc_per_node": int(nproc), "run_dir": run_dir,
+    "freeze_lifted_reason": freeze,
+    # --- the three keys 95_eval's G0c reads. Absent, the verdict can never pass. ---
+    "iteration_reached": iteration_reached,
+    "resume_diffs_logged": resume_diffs_logged,
+    "export_nonempty": export_nonempty == "true",
+    # --- the per-pass record PR-09 §6 requires regardless of verdict ---
+    "passes": passes,
+    "pass_count": len(passes),
+    "recipe_toml": "vision_sft_super.toml, byte-identical on cold start; resume copy differs "
+                   "only in checkpoint.keys_to_skip_loading (PR-09 §4a), diffed into the job log",
+    # The export is NOT the shipped command. Recorded here because the artifact has to say so.
+    "export_overrides": ["model.config.parallelism.context_parallel_shard_degree=1"],
+}, indent=2) + "\n")
+print("wrote", p)
+print(f"  iteration_reached={iteration_reached} resume_diffs_logged={resume_diffs_logged} "
+      f"export_nonempty={export_nonempty} passes={len(passes)}")
+PY
+  touch "${OUT}/DONE"
+  if [[ "${EXPORT_NONEMPTY}" != "true" ]]; then
+    echo "TRAINING COMPLETE but the adapter export FAILED (rc=${EXPORT_RC}). The checkpoint at"
+    echo "${CKPT} is intact and DONE is written, so nothing needs re-training — but 95_eval's G0c"
+    echo "will refuse this run until the export succeeds. Fix the cause, then re-submit THIS job:"
+    echo "it now re-enters at the export when DONE exists and the export is incomplete. The export"
+    echo "touches no GPU, so submit it cheaply rather than on 8 H200s:"
+    echo "  sbatch --qos=2cpu-single-host --gres=NONE --ntasks-per-node=2 --cpus-per-task=1 \\"
+    echo "         --mem=192G --time=04:00:00 94_train_t041_cosmos_super.sbatch"
+    echo "If that QoS refuses the memory (its published limit is cpu=2,node=1 — memory is not in"
+    echo "it, but nothing here has ever asked it for more than 32G), fall back to the PAID QoS with"
+    echo "one idle GPU, because a CPU-only job under the project QoS is REJECTED (discoverer.md"
+    echo "§QoS). That bills ~1 GPU-h and must be recorded against PR-09 §7:"
+    echo "  sbatch --gres=gpu:1 --cpus-per-task=26 --mem=250G --time=04:00:00 \\"
+    echo "         94_train_t041_cosmos_super.sbatch"
+    exit 1
+  fi
+  echo "T-041 TRAINING COMPLETE — adapter exported to ${EXPORTED}"
+  echo "next: sbatch 95_eval_t041_embodiment.sbatch"
+  exit 0
+}
+
+# DONE is written at the end of a successful run but was never read: a resubmission after the run
+# had already finished would load the checkpoint and train past 500. Cheapest possible check first.
+#
+# But DONE is written even when the EXPORT failed — deliberately, since the 500 iterations are real
+# and must not be re-paid. So "DONE exists" and "there is a scorable artifact" are two different
+# facts, and this check used to conflate them: after job 94's export died on the CP=2 constructor,
+# every re-submission printed "already complete — nothing to do" and exited 0, while G0c had
+# export_nonempty=false and 95_eval would refuse the run forever. The way out was a by-hand command
+# in the log. Split the two facts: complete means DONE **and** a finished export.
+if [[ -f "${OUT}/DONE" ]]; then
+  if [[ -s "${RUN_DIR}/model/checkpoint.json" ]]; then
+    echo "T-041 already complete — ${OUT}/DONE and a finished export. Nothing to do."
+    exit 0
+  fi
+  LATEST=${RUN_DIR}/checkpoints/latest_checkpoint.txt
+  [[ -f "${LATEST}" ]] || {
+    echo "FATAL: ${OUT}/DONE exists but ${LATEST} does not. Nothing to export and nothing this"
+    echo "       job can repair — the run directory has been moved or deleted."; exit 1; }
+  echo "=== DONE exists but ${RUN_DIR}/model holds no finished export. RE-EXPORTING ONLY:"
+  echo "    no trainer is started, no pass is recorded against the PR-09 §7 ceiling of"
+  echo "    ${MAX_PASSES}, and ${RUN_DIR}/checkpoints is read, never written."
+  export_and_record "$(cat "${LATEST}")"
+  # unreachable: export_and_record always exits
+fi
+
 PRIOR=$( [[ -f "${PASSES_LOG}" ]] && wc -l < "${PASSES_LOG}" || echo 0 )
 PASS_NO=$((PRIOR + 1))
 RESTARTS=${SLURM_RESTART_COUNT:-0}
@@ -332,81 +509,10 @@ echo "=== latest checkpoint: ${REACHED}"
 if [[ "${REACHED}" == *000000500 ]]; then
   # The adapter export used to be printed as instructions for a human to run. That left
   # 95_eval's G0c key `export_nonempty` with nobody to write it, so the verdict gate could never
-  # pass however good the run was. Do the export here and report what actually happened.
-  CKPT=${RUN_DIR}/checkpoints/${REACHED}
-  EXPORTED=${RUN_DIR}/model
-  echo "=== exporting adapter from ${CKPT}"
-  set +e
-  python -m cosmos_framework.scripts.export_model \
-      --checkpoint-path "${CKPT}" \
-      --config-file "${RUN_DIR}/config.yaml" \
-      -o "${EXPORTED}"
-  EXPORT_RC=$?
-  set -e
-  if [[ ${EXPORT_RC} -eq 0 ]] && [[ -d "${EXPORTED}" ]] && \
-     [[ -n "$(find "${EXPORTED}" -type f -size +0 -print -quit 2>/dev/null)" ]]; then
-    EXPORT_NONEMPTY=true
-  else
-    EXPORT_NONEMPTY=false
-  fi
-  echo "=== export rc=${EXPORT_RC} nonempty=${EXPORT_NONEMPTY} -> ${EXPORTED}"
-
-  python - "${OUT}" "${MODEL_ID}" "${MODEL_REVISION}" "${COSMOS_SHA}" "${FRAMEWORK_SHA}" \
-           "${CORPUS_MANIFEST_SHA256}" "${NPROC}" "${RUN_DIR}" "${T041_FREEZE_LIFTED}" \
-           "${REACHED}" "${PASSES_LOG}" "${EXPORT_NONEMPTY}" <<'PY'
-import json, re, sys, pathlib
-(out, model, rev, csha, fsha, corpus, nproc, run_dir, freeze,
- reached, passes_log, export_nonempty) = sys.argv[1:13]
-
-# 95_eval_t041_embodiment.py's G0c compares iteration_reached to N_MCNEMAR_ITERS as an INT.
-# "iter_000000500" is a string and would never equal 500, so parse the digits out.
-m = re.search(r"(\d+)\s*$", reached)
-iteration_reached = int(m.group(1)) if m else None
-
-# G0c's resume_diffs_logged is only meaningful across the whole chain: one pass that resumed
-# without printing its TOML diff is enough to make the adapter suspect (PR-09 §4a), even if
-# every other pass was clean. Compute it from the persisted record, not from this pass.
-passes = []
-p_log = pathlib.Path(passes_log)
-if p_log.is_file():
-    passes = [json.loads(l) for l in p_log.read_text().splitlines() if l.strip()]
-resumes = [p for p in passes if p.get("resumed")]
-resume_diffs_logged = bool(passes) and all(p.get("resume_diff_logged") for p in resumes)
-
-p = pathlib.Path(out) / "run_metadata.json"
-p.write_text(json.dumps({
-    "task": "T-041", "prereg": "docs/preregistration/PR-09-cosmos-super-finetune.md",
-    "rule": "T041_RULE_V1", "model_id": model, "model_revision": rev,
-    "cosmos_sha": csha, "framework_sha": fsha, "corpus_manifest_sha256": corpus,
-    "nproc_per_node": int(nproc), "run_dir": run_dir,
-    "freeze_lifted_reason": freeze,
-    # --- the three keys 95_eval's G0c reads. Absent, the verdict can never pass. ---
-    "iteration_reached": iteration_reached,
-    "resume_diffs_logged": resume_diffs_logged,
-    "export_nonempty": export_nonempty == "true",
-    # --- the per-pass record PR-09 §6 requires regardless of verdict ---
-    "passes": passes,
-    "pass_count": len(passes),
-    "recipe_toml": "vision_sft_super.toml, byte-identical on cold start; resume copy differs "
-                   "only in checkpoint.keys_to_skip_loading (PR-09 §4a), diffed into the job log",
-}, indent=2) + "\n")
-print("wrote", p)
-print(f"  iteration_reached={iteration_reached} resume_diffs_logged={resume_diffs_logged} "
-      f"export_nonempty={export_nonempty} passes={len(passes)}")
-PY
-  touch "${OUT}/DONE"
-  if [[ "${EXPORT_NONEMPTY}" != "true" ]]; then
-    echo "TRAINING COMPLETE but the adapter export FAILED (rc=${EXPORT_RC}). The checkpoint at"
-    echo "${CKPT} is intact and DONE is written, so nothing needs re-training — but 95_eval's G0c"
-    echo "will refuse this run until the export succeeds. Fix the export and re-run this job;"
-    echo "it will exit early on DONE, so re-export by hand:"
-    echo "  python -m cosmos_framework.scripts.export_model --checkpoint-path ${CKPT} \\"
-    echo "      --config-file ${RUN_DIR}/config.yaml -o ${EXPORTED}"
-    exit 1
-  fi
-  echo "T-041 TRAINING COMPLETE — adapter exported to ${EXPORTED}"
-  echo "next: sbatch 95_eval_t041_embodiment.sbatch"
-  exit 0
+  # pass however good the run was. Do the export here and report what actually happened. The body
+  # lives in export_and_record() above, next to the DONE re-entry that is its other caller; it
+  # always exits, so nothing follows this call.
+  export_and_record "${REACHED}"
 fi
 
 if [[ "${RC}" -eq 0 && "${GOT_USR1}" -eq 0 && "${ELAPSED}" -lt 300 ]]; then
