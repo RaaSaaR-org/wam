@@ -57,7 +57,7 @@ source "${PROJ}/cosmos_env.sh"
 : "${FRAMEWORK:?90_build_cosmos_env.sbatch has not run — no cosmos-framework checkout or venv.}"
 : "${UV_INSTALL_DIR:?90_build_cosmos_env.sbatch has not run — no uv, so no judge server.}"
 : "${FFMPEG_PREFIX:?90_build_cosmos_env.sbatch has not run — no ffmpeg.}"
-: "${BASE_CHECKPOINT_PATH:?91_stage_cosmos_weights.sbatch has not run — no DCP checkpoint, no base arm.}"
+: "${BASE_CHECKPOINT_PATH:?91_stage_cosmos_weights.sbatch has not run — no staged weights, no base arm.}"
 : "${DATASET_PATH:?no corpus registered — run sync.sh --corpus then sbatch 92b_register_corpus.sbatch}"
 
 : "${T041_FREEZE_LIFTED:?PR-07 §7 freezes Cosmos3-Super. Set T041_FREEZE_LIFTED to the reason.}"
@@ -78,6 +78,23 @@ OUT=${PROJ}/runs/${RUN_ID}
 EVAL=${OUT}/eval
 RUN_DIR=${OUT}/train/cosmos3/sft/vision_sft_super
 LORA_MODEL=${LORA_MODEL:-${RUN_DIR}/model}
+# THE BASE ARM READS THE HF DOWNLOAD, NOT THE DCP CONVERSION, and the two are the same bytes:
+# 91_stage downloaded nvidia/Cosmos3-Super@e0262be9 to Cosmos3-Super-hf and converted *that* to
+# the DCP tree at ${BASE_CHECKPOINT_PATH}, which exists because 94 trains from DCP. Inference
+# cannot read it. A DCP checkpoint leaves config_file at the default .py module, and the module
+# path then needs a Hydra experiment name inferred by regex from the checkpoint path
+# (inference/common/args.py:598-606) — `/<experiment>/checkpoints/iter_<N>/`, which a staged tree
+# named for its model does not match. Job 187078 died there in 1:42. The experiment the regex
+# wants is `cosmos3_ga_64bm32b_v3_midtrain` (named in inference/configs/model/Cosmos3-Super.yaml)
+# and it is NOT in the OSS Hydra store, so naming it explicitly would only move the failure.
+#
+# The HF tree needs none of it: CheckpointType.from_path returns `hf`, config_file falls back to
+# the checkpoint's own config.json, and no experiment is consulted. That is also the arm the
+# exported adapter takes, so both arms now enter through one code path instead of two — the DCP
+# path additionally honours `use_ema_weights` (default True, load_ema_to_reg at
+# inference/inference.py:1193) and the HF path has no such switch, an asymmetry between arms that
+# no rubric could have caught downstream.
+BASE_MODEL=${BASE_MODEL:-${PROJ}/checkpoints/Cosmos3-Super-hf}
 WAM=${PROJ}/wam
 CONFIG=${WAM}/configs/cosmos3/t041_eval_selection.toml
 PROMPTS=${EVAL}/t041_eval_prompts.jsonl
@@ -85,6 +102,13 @@ PORT=${PORT:-8000}
 CAL=${CAL:-${PROJ}/data/t041-calibration}
 
 [[ -f "${OUT}/DONE" ]] || { echo "FATAL: ${OUT}/DONE missing — training did not complete."; exit 1; }
+# Both arms are asserted loadable BEFORE any GPU-second, and by the property that actually failed:
+# a config.json at the root is what makes CheckpointType.from_path return `hf` and what the
+# config_file fallback reads. A directory that is merely present is not a checkpoint.
+[[ -f "${BASE_MODEL}/config.json" ]] || {
+  echo "FATAL: ${BASE_MODEL}/config.json missing — that is the HF download from 91_stage, not the"
+  echo "       DCP tree at ${BASE_CHECKPOINT_PATH}. Inference cannot read the DCP tree; see the"
+  echo "       BASE_MODEL comment above."; exit 1; }
 [[ -f "${OUT}/run_metadata.json" ]] || { echo "FATAL: no run_metadata.json — the run is not scorable."; exit 1; }
 [[ -d "${LORA_MODEL}" ]] || {
   echo "FATAL: ${LORA_MODEL} missing. Export the adapter first:"
@@ -183,7 +207,7 @@ PY
 }
 
 for ARM in base lora; do
-  CKPT=$([[ "${ARM}" == base ]] && echo "${BASE_CHECKPOINT_PATH}" || echo "${LORA_MODEL}")
+  CKPT=$([[ "${ARM}" == base ]] && echo "${BASE_MODEL}" || echo "${LORA_MODEL}")
   DEST=${EVAL}/clips/${ARM}
   RAW=${DEST}/_raw
   MISSING=${EVAL}/payloads/${ARM}.missing
