@@ -252,9 +252,20 @@ PY
     TODO=()
     while IFS= read -r U; do TODO+=("${EVAL}/payloads/${ARM}/${U}.json"); done < "${MISSING}"
     echo "=== arm ${ARM}: one load, ${#TODO[@]} clips"
+    # --no-guardrails, for two reasons, and it is one flag on one line shared by both arms so it
+    # cannot differ between them. (1) It has to be: guardrails load nvidia/Cosmos-Guardrail1, which
+    # is a GATED repo — job 187249 died there, `x-error-code: GatedRepo`, after fetching only the
+    # README. Access needs an accepted NVIDIA licence and an HF token, and there is none on this
+    # allocation. NVIDIA documents this exact flag as the offline configuration (packages/cosmos3/
+    # docs/inference.md:251). (2) It should be anyway: the stack ends in a RetinaFace face-blur
+    # POST-processor that rewrites the returned frames (_run_video_guardrail replaces vision_cthw,
+    # inference/inference.py:1735). A false positive on 320x256 robot footage blurs the gripper —
+    # the one region every rubric item in §6 is about — and a filter that silently edits the
+    # evidence is worse here than no filter. The prompts are 30 captions of a G1 arm moving fruit
+    # and tissues; nothing in the set gives the text or video classifiers legitimate work.
     torchrun --nproc-per-node="${NPROC}" -m cosmos_framework.scripts.inference \
         --parallelism-preset="${PRESET}" -i "${TODO[@]}" -o "${RAW}" \
-        --checkpoint-path "${CKPT}" --seed="${SEED}"
+        --checkpoint-path "${CKPT}" --seed="${SEED}" --no-guardrails
     # Second pass files what the launch produced. -o is the arm's own tree, so the mapping back to
     # clips/${ARM}/<uuid>.mp4 is a named lookup, not the find|head it replaces — that could return
     # any mp4 under the directory, and "any mp4, renamed to a uuid" is precisely how a correctly
