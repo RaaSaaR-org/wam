@@ -164,11 +164,24 @@ points explicitly at *"the **kind** of data — PR-04's collection spec"* as the
 further G1 tasks with recorded actions bear directly on both, and nobody has to collect them.
 
 **This is not a free win and must not be written up as one.** The 28-dim Dex3 vocabulary is not the
-43-dim AppleToPlate one, `convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers, and
-T-042's own block-order trap applies (`action[0:14]` ↔ hand vs `action[14:28]` ↔ arm — get it
-backwards and every number is finite, plausible and wrong, which is T-37's lesson). A converter and
-its mutant tests are real work. But it is *conversion* work on *recorded* labels, which is route 1,
-not route 3b. Tracked as **T-043**.
+43-dim AppleToPlate one, `convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers and reads
+LeRobot v2.1 where these sets are v3.0, and this corpus carries **no waist column** where the
+canonical space has one. A converter and its mutant tests are real work. But it is *conversion*
+work on *recorded* labels, which is route 1, not route 3b. Tracked as **T-043**.
+
+> **Correction, 2026-08-15 — the block-order trap was pointed the wrong way here.** An earlier
+> version of this paragraph carried T-041's `action[0:14]` ↔ hand / `action[14:28]` ↔ arm finding
+> across to these sets. **That finding is real but belongs to a different corpus**
+> (`USC-PSI-Lab/Humanoid-Everyday-G1`, LeRobot v2.1, separate `arm_joints`/`leg_joints`/
+> `hand_joints` fields). The `unitreerobotics/G1_Dex3_*` sets are **LeRobot v3.0 with a flat 28-dim
+> state, and they are ARM-FIRST: `[0:14]` arm, `[14:28]` hand.** Measured 2026-08-15 from
+> `meta/stats.json` of all 13 sets — **zero** one-sided dims in `[0:14]` against **4–10** in
+> `[14:28]`, the latter railing at a clean 100.0° or 120.0° mechanical limit, which is a finger and
+> not a shoulder — and independently confirmed by `vla-training/groot/modality_g1_dex3.json`, which
+> declares `arms {0,14}` / `hands {14,28}` for this same convention. Both facts are true of their
+> own corpus; carrying one across to the other would have produced precisely the silent
+> transposition the warning exists to prevent. Detail and the open intra-block questions:
+> **T-043 §1**.
 
 ## 4. The action *port* on Predict2 — an input, and only that
 

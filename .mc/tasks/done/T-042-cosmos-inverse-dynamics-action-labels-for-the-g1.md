@@ -92,6 +92,9 @@ someone reads NVIDIA's front page.
   not the output.
 - **Block order is a known trap.** T-041 measured `action[0:14]` ↔ hand and `action[14:28]` ↔ arm
   by correlating against the recorded state — the README's example builds arm-first and is wrong.
+  **Scope note added 2026-08-15:** that measurement is on `USC-PSI-Lab/Humanoid-Everyday-G1`
+  (LeRobot v2.1) and does **not** transfer to the `unitreerobotics/G1_Dex3_*` sets, which are
+  v3.0 and **arm-first**. See T-043 §1 — the trap is real, and it is per-corpus.
   Getting this backwards produces a model that trains, converges and is silently useless.
 - **Canonical mapping stays in one place.** Whatever Cosmos emits is robot-specific; conversion to
   `ActionMode.JOINT_DELTA` belongs in the same converter path as route 1, never duplicated
@@ -161,9 +164,10 @@ unresolved" worry resolves into an account-holder question, not a labelling one.
 from scratch. Labelled, Apache-2.0, 647 MB away. That bears directly on PR-07 §1's standing
 "402 success-only episodes of one task is not enough", and it is **conversion work on recorded
 labels — route 1, not route 3b**. Not a free win: 28-dim Dex3 ≠ 43-dim AppleToPlate,
-`convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers, and this task's own block-order
-trap (`action[0:14]` ↔ hand vs `action[14:28]` ↔ arm) applies to the converter. Tracked as
-**T-043**.
+`convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers and reads v2.1 where these sets
+are v3.0, and the corpus carries no waist column. **The block order for these sets is arm-first —
+`[0:14]` arm, `[14:28]` hand** (measured 2026-08-15; the hand-first figure belongs to
+Humanoid-Everyday-G1, a different corpus). Tracked as **T-043**.
 
 **No GPU hour was spent, and PR-10 was never written** — the pre-registration was gated behind a
 *go* from step 0 that never came.
