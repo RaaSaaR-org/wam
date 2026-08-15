@@ -22,11 +22,21 @@ mc show T-16     # the whole T-16 record
 > [`subprojects/README.md`](subprojects/README.md). `T-040`/`T-041`/`T-042` stay here and are cited
 > from there by ID. **No sub-project starts a training run before T-39 reports.**
 
-> **Build status (2026-08-06):** M0–M4 code-complete and tested — **1 618 tests green, 0 skipped,
-> 57 s** (`.venv/bin/python -m pytest -q`, with the optional `mujoco` extra installed; without it
-> the MuJoCo module skips cleanly). Earlier figures in this file and in `README.md` — 583, 604,
-> 617, 861, 1 091 — are the counts at the dates they were written and are left where they sit as
-> part of those entries' record; **this line is the current one.** The closed
+> **Build status (2026-08-15):** M0–M4 code-complete and tested — **1 638 passed, 32 skipped,
+> 6 failed, 10 errors, 19 min 49 s** (`.venv/bin/python -m pytest -q`). **Every one of the 16
+> non-passes is a missing gitignored local artifact, not a code regression**, and they are listed
+> here so the next clone does not re-derive them: 10 errors + 2 failures
+> (`tests/test_kinematics.py`, `test_versioning.py::…test_view_sim_honours_every_robot_config_field…`)
+> want the vendor MuJoCo model `assets/mujoco/unitree_g1/g1_with_hands.xml` —
+> `.venv/bin/python scripts/fetch_g1_model.py` fetches it; 4 failures (`tests/test_runtime.py`,
+> the rollout-CLI contract tests) want `runs/d1-overfit-seed0/checkpoint.safetensors`. Both
+> `assets/` and `runs/` are gitignored, so **a fresh checkout cannot be green** — these tests fail
+> rather than skip, which is a wart worth fixing, not evidence of breakage. Two further traps cost
+> real time on 2026-08-15 and are recorded rather than re-learned: **`python` is anaconda's, not
+> the project's — always `.venv/bin/python`**, and **piping pytest to `tail` masks its exit code**
+> (use `${PIPESTATUS[0]}`). Earlier figures in this file and in `README.md` — 583, 604,
+> 617, 861, 1 091, 1 618 — are the counts at the dates they were written and are left where they
+> sit as part of those entries' record; **this line is the current one.** The closed
 > loop now also runs on **MuJoCo contact physics + rendered pixels** (T-25, `docs/sim.md`) and the
 > DDS wire layer is exercised in an arm64 container (T-25a, `docker/dds/README.md`) — but neither
 > is covered by the test suite, and neither replaces real teleop data (D1/D2).
@@ -313,20 +323,23 @@ layer via the arm64 container (T-25a). What is left genuinely needs the robot.
   cap, so the probe has to measure clips-per-iteration; how the prepared corpus reaches Discoverer+
   depends on the workstation's upstream and is undecided. Job 95 additionally needs 20 calibration
   clips nobody has picked yet)*
-- [ ] **[T-042](.mc/tasks/todo/T-042-cosmos-inverse-dynamics-action-labels-for-the-g1.md)** Cosmos
-  inverse dynamics — action labels for the G1 *(**todo**, written 2026-08-15. The follow-up
-  `docs/backbone-eval.md` §3 never got: Cosmos 3's action port is **bidirectional** — forward
-  dynamics, **inverse dynamics** (frames → the trajectory that produced them) and policy — so it
-  is a real video-to-action labeller, and §4's input-only framing is correct for Predict2 but wrong
-  for Cosmos 3. Three bounds keep it honest: the supported action vocabulary has **no humanoid, no
-  G1, no 28-dim Dex3**; NVIDIA's route to adding one is post-training **on action-labelled data**,
-  so it amortises labels we already hold rather than creating any; and it must never be pointed at
-  generated frames (PR-06's 39 %). All twelve action cookbooks are **Nano**, the only `finetune/`
-  recipe is Nano-Policy-DROID, and Super ships `action_gen=True` with no recipe — so this is
-  Nano-scale. **Step 0 is free and decides the task: count the unlabelled real G1 footage.** Every
-  corpus here is action-labelled by construction, so the labeller may have nothing to do; if the
-  count is ~zero the task closes as a paragraph. No GPU before step 0 and a `PR-10-*.md`. Standing
-  explanation: `docs/action-labels.md` §3b)*
+- [x] **[T-042](.mc/tasks/done/T-042-cosmos-inverse-dynamics-action-labels-for-the-g1.md)** Cosmos
+  inverse dynamics — action labels for the G1 *(**closed 2026-08-15 by its own step 0**, written
+  the same day. It was the follow-up `docs/backbone-eval.md` §3 never got: Cosmos 3's action port
+  is **bidirectional** — forward dynamics, **inverse dynamics** (frames → the trajectory that
+  produced them) and policy — so it is a real video-to-action labeller, and §4's input-only framing
+  is correct for Predict2 but wrong for Cosmos 3. **Step 0 was free and decided the task: the count
+  of real G1 footage we hold that is unlabelled and unlabellable is 0 clips.** The 3 554 episodes
+  looked unlabelled only because `92_fetch_g1_corpus.sbatch` and `workstation/10_fetch_corpus.sh`
+  fetched `meta/` + `videos/` and skipped `data/`; upstream all 14 repos publish the action
+  parquets — 415 files, 647 MB, verified through the HF tree API without downloading. Recovering
+  labels a fetch flag would download is not amortisation, and inferred labels are strictly worse
+  than recorded ones. **No GPU hour spent, `PR-10` never written** — it was gated behind a *go*
+  that never came. Step 0 also returned an answer it was not asked for: **3 152 of those episodes
+  are the 13 `unitreerobotics/G1_Dex3_*` sets, every one `action float32[28]`** — the exact
+  vocabulary this task meant to teach from scratch, already recorded and Apache-2.0. That is
+  conversion work on recorded labels — route 1 — and is tracked as **T-043**. Re-open the day
+  teleop produces video faster than it produces labels. Receipts: `docs/action-labels.md` §3b)*
 
 ## Open decisions (PRD §16) — resolved 2026-07-26
 
