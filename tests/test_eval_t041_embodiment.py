@@ -92,12 +92,14 @@ def make_case(n_pairs=30, base_right=0, lora_right=0, cal_correct=20,
     for i in range(n_pairs):
         uuid = f"clip{i:03d}"
         for arm, right in (("base", i < base_right), ("lora", i < lora_right)):
-            iid = f"item_{idx:04d}"; idx += 1
+            iid = f"item_{idx:04d}"
+            idx += 1
             items.append({"kind": "paired", "arm": arm, "uuid": uuid,
                           "path": f"/x/{arm}/{uuid}.mp4", "item_id": iid})
             scores[iid] = None if unscored > 0 and idx <= unscored else right
     for k in range(20):
-        iid = f"item_{idx:04d}"; idx += 1
+        iid = f"item_{idx:04d}"
+        idx += 1
         expected = k < 10
         items.append({"kind": "cal_pos" if expected else "cal_neg", "arm": None,
                       "uuid": f"cal{k}", "path": f"/x/cal{k}.mp4",
@@ -216,7 +218,7 @@ def test_the_scoring_sheet_carries_no_arm_label(tmp_path):
     sheet_text = (out / "scoring_sheet.jsonl").read_text()
     assert "base" not in sheet_text and "lora" not in sheet_text
     assert "expected" not in sheet_text
-    rows = [json.loads(l) for l in sheet_text.splitlines() if l.strip()]
+    rows = [json.loads(ln) for ln in sheet_text.splitlines() if ln.strip()]
     assert len(rows) == 3 * 2 + 20
     assert set(rows[0]) == {"item_id", "path"}
     # The path is part of the label: clips/base/c0.mp4 names the arm in the string a human
