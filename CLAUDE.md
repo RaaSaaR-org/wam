@@ -26,7 +26,13 @@ src/wam/
   runtime/      closed-loop executor, inference server
   evaluation/   E0 unit → E1 replay → E2 sim → E3 real robot → E4 generalization
 configs/        versioned robot/model/training configs
+subprojects/    the two halves (2026-08-15) — see subprojects/README.md
+  edge-wam/     image in, action out, on the robot (Cosmos3-Edge 4B) — tasks E-NN
+  data-factory/ more/better training data from real episodes (Super/Nano) — tasks D-NN
 ```
+
+`src/wam/` is **shared and unforked** by both sub-projects — the canonical schema, the safety layer
+and the robot HAL are contracts, and two drifting copies is the expensive failure.
 
 ## Conventions
 
@@ -34,5 +40,15 @@ configs/        versioned robot/model/training configs
   IDs stay `T-NN`; see `.mc/README.md`). `TASKS.md` is the milestone index over them — milestones
   M0–M4 map to the PRD roadmap. `mc task next` gives the next actionable task, `mc show T-16` the
   full record. Edit the task file, not the index; run `mc index` afterwards.
+- **Three task namespaces since 2026-08-15.** `T-NN` (root, `.mc/tasks/`, driven by `mc`), `E-NN`
+  (`subprojects/edge-wam/tasks/`) and `D-NN` (`subprojects/data-factory/tasks/`). The sub-project
+  files use the same frontmatter shape plus a `subproject:` field and a `## Notes / Report` section
+  carrying the result. **`mc task next` only sees `T-NN`** — each sub-project's `TASKS.md` is its
+  own hand-maintained index, which is the accepted cost of the split. Existing `T-040`/`T-041`/
+  `T-042` were deliberately **not** migrated: their pre-registrations, sbatch files and commit
+  subjects all cite them where they are.
+- **No sub-project starts a training run before T-39 reports.** The positive control asks whether
+  this corpus's own action column clears L1 under our scorer; if it does not, no policy trained on
+  it can, and both sub-projects share that corpus.
 - Every rollout must be traceable to checkpoint + dataset snapshot + config hash (AC-04).
 - Milestone order is strict: overfit a small task first (D1), only then scale (P6).
