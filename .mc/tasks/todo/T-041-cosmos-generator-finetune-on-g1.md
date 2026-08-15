@@ -485,13 +485,110 @@ not issue.**
 | **verdict** | **VOID on G0b** — the VLM judge did not reach 20/20 on the calibration set |
 | spend | ~59 of §7's 122 GPU-h, incl. the apple run below |
 
-**G0b failing is the pre-registered path, not an accident.** PR-09 §6 anticipated it in writing:
+**G0b failing is the pre-registered path, not an accident.** PR-09 anticipated it in writing:
 *"If G0b fails, that is not a fallback, it is the required path."* `scoring_sheet.jsonl` + `items/`
 are a human-rescoreable artifact, and `--verdict` applies the identical rule to a person's
 `scores.jsonl`. So the open decision is narrower than it looks: **a human scoring the same 80
 blinded clips needs no amendment**; repairing the VLM judge and re-running it does, because that
 would be a rule change made after seeing the rule fail. PR-09 §6's VOID row stands until one or
 the other happens — and §6 forbids reading a VOID as a weaker pass.
+
+> **Citation correction, 2026-08-15.** The quoted sentence is **§9**'s final bullet, not §6's, and
+> the three-step `build-sheet`/`judge`/`verdict` split that makes it possible is registered in **§8
+> item 4**. §6 says only what G0b *is* and that any G0 failure is VOID. This file and
+> `docs/handoff.md` both attributed it to §6. The claim is unaffected; the pointer was wrong.
+
+### Why the judge failed — diagnosed 2026-08-15, from recorded output only
+
+Forensics over `scores.jsonl`, `key.json`, the vLLM server log and the corpus captions. **No frame
+was viewed**, and the diagnosis did not need one.
+
+**The judge answered the literal string `"NO"` to all 80 items.** Not one `YES`, not one
+unparseable reply, not one abstention (`unscored_items: 0`). It was a constant classifier.
+
+That single fact reframes the whole run:
+
+| recorded | what it actually means |
+|---|---|
+| `calibration_correct: 10/20` | the ten negatives are "right" only because a constant NO scores 10/10 on a NO-labelled set. The instrument has zero discriminative output |
+| `base_failures: 30` → `G0a_defect_present: true` | **vacuous.** 30/30 because everything scored NO. G0a did not pass, it failed to be tested |
+| `b = c = 0`, `mcnemar_p_one_sided: 1.0` | both arms received the same constant. The test compared nothing |
+
+**G0b is the only gate in this run that measured anything**, and what it measured is the scorer.
+That is exactly the job PR-09 §6 gives it — *"a rubric that cannot separate a real Dex3 from a
+recorded failure cannot adjudicate a generated one"* — so the pre-registration worked as designed.
+
+**It is a defect of judgement, not of plumbing**, and the mechanical explanations were excluded
+positively rather than assumed away: every raw reply is one clean token that `parse_answer` reads
+correctly; the server log has exactly 80 × `200 OK` and no exceptions; per-request prompt tokens
+(~1 130–1 540 against ~155 for the rubric alone) show a ~32-frame video actually reached the model,
+with `MM cache hit rate: 0.0%` proving 80 *distinct* media items; all 80 symlinks dereference to
+343 KB–8 MB of real H.264; and `build_sheet`'s shuffle was reproduced byte-for-byte from
+`random.Random(0)`, so item→label pairing is sound. No off-by-one, no dangling path, no swallowed
+API error.
+
+**The mechanism is the rubric meeting this model.** The rubric (`eval_t041_embodiment.py:45-57`)
+says *"Answer NO if the end effector is a two-jaw parallel gripper, a suction cup, a **five-fingered
+hand**, an industrial claw, or if no end effector is visible. Answer NO if you are unsure."* The
+judge is `Qwen/Qwen3-VL-8B-Instruct-FP8` — **the same model job `93` used as the corpus captioner**.
+Its own free-form captions of the same real Dex3 footage, at 640×480 rather than the judge's
+320×256 and with no yes/no framing, are the evidence: 0 of 30 captions say "three-finger", "Dex3",
+"Unitree", "G1" or "thumb"; on the only two occasions it counted fingers at all it counted **five**
+(*"Each hand has five fingers with black finger tips"*). So the model reads a Dex3 as a five-fingered
+hand, which the rubric instructs it to answer NO to, and where it is unsure the rubric instructs NO
+again. **Constant NO is the predicted output of this instrument on this footage.** A rubric tweak at
+320×256 is therefore unlikely to be sufficient on its own.
+
+**This was never validated.** The model had only ever been used as a captioner; nothing in the repo
+had tested it as a discriminator, and no pre-flight or test catches a constant-label judge before
+3.5 GPU-h are spent. That gap is being closed as detection only — it must not, and does not, change
+this run's recorded VOID.
+
+### Two divergences from PR-09 as written, found during the same forensics
+
+Neither caused the failure. Both are recorded because whichever path is chosen re-uses these same
+20 calibration items and inherits them.
+
+1. **The negatives are not the ones §6 registered.** §6 says *"ten `embodiment_grid.png`
+   negatives"*. What was built is **ten real BridgeData2 WidowX clips**
+   (`nvidia/BridgeData2-Subset-Synthetic-Captions` @ `e841d88d`), per
+   `configs/cosmos3/t041_eval_selection.toml` `[calibration]`. The words "Bridge" and "WidowX"
+   appear nowhere in PR-09. The substitution is argued in the config and in `95_*.sbatch:20-25`
+   (real footage on both sides, so nobody adjudicates a generated frame) and it makes the negative
+   side *easier* than registered — but **it was never recorded as an amendment**, so the gate that
+   failed is not literally the gate that was registered. Rebuilding the negatives to match the text
+   is **not** a free correction: it would change the calibration set after seeing it fail.
+2. **The two sides are not normalised in time.** Positives are 397 frames at 30 fps, negatives 66
+   frames at 5 fps — both 13.2 s, both 320×256. Geometry was normalised; frame rate and count were
+   not, leaving a latent cue in the instrument's own test set.
+
+### What each path costs — no path is GPU-bound
+
+≈63 of §7's 122 GPU-h remain, and every clip already exists (`eval/items/`, 80/80 symlinks intact).
+The binding costs are pre-registration and a person's attention, not compute.
+
+| path | GPU-h | pre-registration cost |
+|---|---|---|
+| **A** a human scores the same 80 blinded items, re-run `--verdict` | **0** | **none** — registered at §9 and §8 item 4 |
+| **B** repair the judge and re-run only the judge step | ~0.2 (1 GPU) | **`T041_RULE_V2` alongside V1**, V1's VOID left standing |
+| **C** record the VOID as the finding and stop | 0 | none — §6's VOID row already licenses it |
+| **D** regenerate or retrain | — | **not available.** §6: *"there is no second run under this rule"*; §7: *"There is no attempt 3."* |
+
+Three things path A's "a person's time" understates, and they are the reason this is the user's
+call and not an obvious default:
+
+- **The human must themselves clear 20/20** on the same calibration items — `compute_verdict` is
+  identical for a person's `scores.jsonl`. A human who misses one positive re-issues VOID.
+- **It is ~17.6 min of video** (80 × 13.2 s), realistically 1.5–3 h of careful scoring.
+- **It permanently ends the "nobody has looked" discipline.** That is inherent to the registered
+  path, not an objection to it, but it is not recoverable and should not be started casually.
+
+On path B, the earlier framing here — "repairing the judge needs an amendment" — is right in
+substance but understates the form. `docs/handoff.md` §3's standing rule is *"rules are versioned,
+never edited in place"*, with `T30_RULE_V2` and PR-05's G2 as precedent. The registered remedy is a
+**`T041_RULE_V2` recorded beside V1 with V1's VOID left visible**, not an edit to V1 and not a
+re-run under a patched V1. And a rubric chosen because it passes G0b has been selected for passing
+G0b — PR-09 §2's named failure mode, which no amendment erases.
 
 ### The export is not portable, and that was not anticipated
 
