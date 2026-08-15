@@ -85,9 +85,17 @@ this file and of `backbone-eval.md` §4 both did — is wrong.
    *"Input action is only supported for compatible embodiments, including general camera motion
    (9D), autonomous vehicle (9D), egocentric motion (57D), single Franka Panda arm with RobotiQ
    gripper (10D), dual Franka Panda arm with RobotiQ gripper (20D), Agibot (29D), UR (10D), Google
-   robot (10D), WidowX 250 (10D), UMI (9D)."* No humanoid, no G1, no 28-dim Dex3. An action is not
+   robot (10D), WidowX 250 (10D), UMI (9D)."* **No G1 and no 28-dim Dex3.** An action is not
    a universal format — a 10D WidowX vector means ten specific things — so there is no G1 output to
    request. The shipped inverse-dynamics example is autonomous-vehicle only.
+
+   > **Corrected 2026-08-15: this used to read "no humanoid, no G1, no 28-dim Dex3", and the first
+   > third was wrong** — contradicted by the same sentence it sits in. **AgiBot is a humanoid, and
+   > it is supported at 29D**, on Edge as well as Super. The bound that survives is "no G1, no
+   > Dex3", and the difference is load-bearing: a supported **29D humanoid** is a much closer
+   > neighbour to a **28D G1** than "no humanoid at all" implies. Whether that neighbourhood is
+   > worth anything — a config entry versus a new action head — is
+   > `subprojects/edge-wam/tasks/E-02-*.md`, and is not yet answered.
 
 2. **Adding an embodiment costs the thing we are short of.** NVIDIA's route is action
    post-training: *"Developers can post-train Cosmos 3 on action-labeled data."* To make it emit G1
@@ -113,6 +121,54 @@ from the cookbook filenames alone.
 **The task this implies is T-042**, and its honest blocker is not the model: it is that nobody has
 counted how much *unlabelled real* G1 footage we hold. With none, an inverse-dynamics post-train
 labels nothing.
+
+> **Counted 2026-08-15. The answer is zero, and T-042 is closed.**
+>
+> **Clips of real G1 footage we hold that have video, no actions, and no way to get them: 0.**
+>
+> The naive on-disk reading looked promising — 3 554 real G1 episodes / ~25.5 h across the 14
+> sources, 3 163 clips in `cosmos-g1-embodiment`, and not one `actions.parquet` beside them. But
+> they are unlabelled *only because two fetch scripts skipped a directory*:
+> `92_fetch_g1_corpus.sbatch` passes `--include 'meta/*' --include 'videos/**'`, and
+> `workstation/10_fetch_corpus.sh` narrows further to one camera. Upstream, all 14 repos publish
+> the action parquets — **415 files, 647 MB total**, in the same Apache-2.0 and CC-BY-4.0
+> repositories we already pulled 69 GB of video from. Verified through the HF tree API without
+> downloading anything.
+>
+> So the premise fails. Building a labeller to recover labels that `--include 'data/**'` would
+> download is not amortisation, it is reconstructing something we chose not to copy — and the
+> recovered labels would be strictly worse than the recorded ones. The two outside-chance pools
+> close the same way: `USC-PSI-Lab/humanoid-everyday` (8 949 eps) and `Humanoid-Everyday-G1`
+> (4 064 eps) are both fully action-labelled upstream and **neither is gated** — the earlier
+> "licence unresolved" worry resolves as *the parent is Apache-2.0, and the G1 subset declares no
+> licence at all*, which is an account-holder question and not a labelling one. Even resolving it
+> would hand us labelled data. (`$PROJ/hf_cache/.../Humanoid-Everyday-G1` holds **0 bytes** — the
+> 2026-08-07 fetch 429'd and nothing was ever obtained.)
+>
+> The only pool that would make this task real is teleop recorded after M1/D2, and it does not
+> exist yet. **Re-open T-042 the day teleop produces video faster than it produces labels** — not
+> before.
+
+### The thing the count actually found — 3 152 labelled G1 episodes we already had access to
+
+Step 0 was asked a narrow question and returned a wider answer, so it is recorded here rather than
+lost in a closed task. Of those 3 554 real G1 episodes, **3 152 are the 13 `unitreerobotics/G1_Dex3_*`
+sets, every one declaring `action float32[28]` — the exact 28-dim G1 + Dex3 vocabulary** T-042 was
+going to teach Cosmos from scratch. They are labelled, they are Apache-2.0, and the labels are
+647 MB away.
+
+Every recorded number in this project comes from **402 episodes of one task**
+(`nvidia/GR00T-N1.7-AppleToPlate`, 43-dim). The standing explanation for fourteen negatives is
+"402 success-only episodes of one task is not enough" (PR-07 §1), and PR-07 §6's **N** verdict
+points explicitly at *"the **kind** of data — PR-04's collection spec"* as the next move. Thirteen
+further G1 tasks with recorded actions bear directly on both, and nobody has to collect them.
+
+**This is not a free win and must not be written up as one.** The 28-dim Dex3 vocabulary is not the
+43-dim AppleToPlate one, `convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers, and
+T-042's own block-order trap applies (`action[0:14]` ↔ hand vs `action[14:28]` ↔ arm — get it
+backwards and every number is finite, plausible and wrong, which is T-37's lesson). A converter and
+its mutant tests are real work. But it is *conversion* work on *recorded* labels, which is route 1,
+not route 3b. Tracked as **T-043**.
 
 ## 4. The action *port* on Predict2 — an input, and only that
 
@@ -155,6 +211,11 @@ the verdict:
 > Super's card lists supported action inputs — camera 9D, AV 9D, egocentric 57D, Franka 10/20D,
 > Agibot 29D, UR/Google/WidowX 10D, UMI 9D. **No humanoid, no G1, no 28-dim Dex3.** The
 > action-conditioned SFT cookbooks are `..._nano.sh` only.
+
+**The quote is left as written, and its "no humanoid" is wrong** (annotated 2026-08-15, see §3b
+above): AgiBot at 29D *is* a humanoid. The bound PR-09 §9 actually needed — no G1, no Dex3 — holds,
+so the verdict it qualifies is unaffected. Rules and records are versioned here, never edited in
+place, which is why the correction sits beside the quote rather than inside it.
 
 So the T-041 checkpoint is a **video** fine-tune and cannot become an action-conditioned G1 world
 model by that route. Clips generated from it — including `$PROJ/runs/t041-apple-variations/` — have
