@@ -1,12 +1,20 @@
 # Handoff — resume here
 
-Last session: **2026-08-06**. Branch `feat/local-gpu-and-isaac`. Live task: **T-39**, the positive
-control (`docs/preregistration/PR-07-positive-control.md`).
+Last session: **2026-08-15**. Branch `t041-cosmos-super-finetune`, PR
+[#1](https://github.com/RaaSaaR-org/wam/pull/1) open. Live task: **T-041**, which has **run and
+returned VOID** (`docs/preregistration/PR-09-cosmos-super-finetune.md` §6, G0b).
 
 This file is the cold-start entry point: what state the tree is in, what the next action is, which
 decisions are already made and must not be re-litigated, and which facts were expensive to
-establish so they are not re-derived. It is a working note, not a record — when T-39 reports, the
-result goes in `.mc/tasks/todo/T-39-*.md` and `PR-07-RESULT.md`, and this file gets rewritten.
+establish so they are not re-derived. It is a working note, not a record — results go in the task
+files and the `PR-*-RESULT.md` documents, and this file gets rewritten.
+
+**Two things block everything, and neither is code:**
+
+1. **Discoverer+ is locked out** since 2026-08-15 — key offered, server rejects it. LDAP-side, not
+   fixable from here, needs a helpdesk ticket **from the account holder's address**
+   (`docs/discoverer.md` §1).
+2. **T-041's VOID needs one decision**, and it is narrower than it looks — see §1.
 
 **Tasks moved (2026-08-06).** `TASKS.md` is now a milestone index; each task is its own file under
 `.mc/tasks/{todo,done}/` in MissionControl format, prose carried over unchanged. `mc task next`
@@ -17,26 +25,54 @@ answers "what now" (→ T-39, with T-32 correctly filtered out as blocked). Conv
 
 ## 0. Read this before touching anything
 
-**The branch has zero commits. All the work is in the working tree** — 25 modified files, 31
-untracked. `git log main..HEAD` is empty. That spans three separate efforts (local-GPU/Isaac, the
-backbone eval, T-39), none of them checkpointed.
+**The 2026-08-06 state of this section is gone: the branch is committed and pushed.** `git log`
+shows the T-041 chain from `2d1c934` (PR-09) through `e63da4c`, and PR #1 is open against `main`.
+The old warning — "zero commits, 56 working-tree entries, committing is the first thing to ask
+about" — is discharged and is left here only so nobody re-derives it from a stale copy.
 
 ```bash
-git status --short          # 56 entries
+git status --short          # expect: clean, or only the current session's edits
 git stash list              # must stay empty — nothing here is stashed
+git log --oneline main..HEAD
 ```
 
-Nothing is committed, pushed, submitted to Slurm, or deployed. **Committing is the first thing to
-ask about tomorrow**, before any new file is added to the pile. Splitting it into three commits
-along those three efforts is the obvious shape; it has not been done because commits were never
-authorised.
+Auth for push is **not** ordinary git: the repo has no `gh` login, no `~/.git-credentials` and no
+`GH_TOKEN`. It is a GitHub App under `~/.config/emai-zema-bot/`, driven by `git-push-bot` /
+`gh-bot` in `~/.local/bin`.
 
 ---
 
 ## 1. The next action
 
-**T-39 is written and deliberately not runnable.** The gate is in git before the cluster is
-touched, which was the point:
+**T-041 ran, and the verdict is VOID on G0b** — the VLM judge could not clear the 20/20
+calibration set, so no reading of the 60 paired clips is licensed. PR-09 §6 forbids treating a
+VOID as a weaker pass.
+
+**The decision is narrower than "authorise a rescore", and half of it needs no authorisation.**
+PR-09 §6 wrote the failure path in advance:
+
+> "If G0b fails, that is not a fallback, it is the required path."
+
+`scoring_sheet.jsonl` + `items/` are a **human-rescoreable artifact** — the judge never saw which
+arm produced a clip, and `--verdict` applies the identical rule to a person's `scores.jsonl`. So:
+
+| path | needs an amendment? | cost |
+|---|---|---|
+| **a human scores the same 80 blinded clips** | **no — pre-registered** | a person's time, 0 GPU-h |
+| repair the VLM judge and re-run it | **yes** | ~0.2 GPU-h + a registered PR-09 amendment |
+
+The second needs an amendment precisely because it changes the instrument *after* watching it
+fail, which is the shape `docs/handoff.md` §3 forbids ("rules are versioned, never edited in
+place"). Neither can start while the cluster is locked out — but the human path never needed the
+cluster for the *scoring*, only for the artifact, which already exists on `$PROJ`.
+
+**Also open, and free:** T-042 step 0 — count the unlabelled real G1 footage. If it is ~zero, T-042
+closes as a paragraph and the "use Cosmos to label video" idea stops being re-proposed.
+
+### T-39 — still the critical control, still not submittable
+
+Unchanged from 2026-08-06 except that OD-10 removed it as a *blocker* for T-041 (not as a
+dependency for reading T-041's result). The artifacts are written and the gate is in git:
 
 | artifact | state |
 |---|---|
@@ -47,8 +83,7 @@ touched, which was the point:
 | `scripts/eval_t39_baseline.py` | ✅ 2026-08-06 — the adapter, the four arms, both bench specs |
 | `tests/test_t39_baseline.py` | ✅ 2026-08-06 — 31 tests, 12 mutants introduced and killed |
 
-**Three of the six prerequisites are done (PR-07 §8). Three remain, and T-39 is still not
-submittable:**
+**Three of the six prerequisites are done (PR-07 §8). Three remain:**
 
 4. `$PROJ/virt_envs/t39` on Discoverer+ — a separate venv. The vendored trainer pins its own torch
    and attention kernels; `70_*.sbatch` exits FATAL if it is missing rather than importing into the
@@ -89,6 +124,11 @@ Worth knowing before reading the code, because both are corrections to yesterday
 - T-39's ceiling is **12 GPU-h**, enforced by `MAX_RESTARTS=2` (3 × 4 h). T-32 by comparison is
   ~109 GPU-h and is **blocked behind T-39** — that ordering is pre-registered, not a preference.
 - Compute nodes have Internet; the login node does not. Weights must be staged, hence `MODEL_DIR`.
+- **T-041 has spent ~59 of PR-09 §7's 122 GPU-h ceiling**; ~4 879 of the 5 000 allocation hours
+  remain. `dgx1` has `gpu:8`, `dgx2` has `gpu:7,gpu_biz:1` — **any 8-GPU job can only land on
+  dgx1**, and `sinfo`'s `-` state suffix means PLANNED, not DRAIN.
+- **Locked out since 2026-08-15** (`docs/discoverer.md` §1). Server-side key rejection; a helpdesk
+  ticket from the account holder is the only route. Do not burn a session re-diagnosing the agent.
 
 ## 3. Decisions already made — do not reopen
 
@@ -112,6 +152,16 @@ Each of these was argued out and written down. Reopening one costs a session.
   "stop trying methods on this corpus"), so N needs the material margin *and* the `train40` arm.
 - **Exactly one conditional second candidate** (`lerobot/pi05_base`, only on N, "attempt 2 of 2").
   There is no attempt 3 under this pre-registration. This is what closes the p-hacking path.
+- **A VOID is not a weak pass** (PR-09 §6). T-041's 60 paired clips exist and are tempting; they
+  are not readable until G0b is satisfied by one of the two paths in §1. Nobody on this project has
+  looked at the frames, deliberately — forming an impression first and rescoring afterwards would
+  make the rescore a presentation of a conclusion already reached.
+- **Generated video is not training data, and nothing infers actions from it** — `docs/sim.md` /
+  T-25 for sim frames, PR-06's 39 % for dreams, and now `docs/action-labels.md` as the single
+  index over the whole question. That doc's §3b records the one *open* route (Cosmos inverse
+  dynamics on real unlabelled footage, T-042) and the three bounds on it, so the correction is
+  recorded rather than the topic being closed too broadly. Route 2 (Transfer2.5, PR-08) keeps
+  labels because it restyles a real episode, not because generation acquired them.
 
 ## 4. Facts established the hard way
 
@@ -129,6 +179,23 @@ Verified with receipts. Do not re-derive, and do not trust older prose that cont
 - **The frame-mode confound is backbone-specific**: 10.65 pp for Wan, ~0.03 pp for `tiny`.
 - **Test suite: 1 618 passed, 0 skipped, ~58 s.** Older counts (583/604/617/861/1 091) are left in
   `TASKS.md` as period record — they are history, not current.
+- **The T-041 export is a merged full model, 121 GB / 27 shards — not an adapter.** So it runs
+  nowhere but Discoverer+: 4× over the 5090's 32 GB at bf16, ~2× at FP8, and INT4's ~31 GB leaves
+  nothing for activations while destroying the fine spatial detail the experiment measures. 93 GB
+  host RAM is under the model, so CPU offload does not close it. ZeroGPU (48 GB) cannot cold-start
+  the pull. HF Jobs *would* fit at ~\$15/run and is not worth it against 4 879 free GPU-h.
+- **`--no-guardrails` is mandatory on Cosmos inference.** `nvidia/Cosmos-Guardrail1` is a **gated**
+  repo (job 187249 died on it), and accepting a licence is the account holder's act, not an
+  agent's. Its RetinaFace post-processor also rewrites returned frames, blurring the hand — i.e. it
+  edits the evidence this experiment is about (commit `e63da4c`).
+- **Cosmos 3's action port is bidirectional, and §4 of `backbone-eval.md` says otherwise.** Checked
+  against the model card and cookbooks 2026-08-15: the family ships forward dynamics, **inverse
+  dynamics** (frames → trajectory) and policy. The input-only framing is correct for *Predict2* and
+  wrong for *Cosmos 3*; the paragraph is annotated rather than rewritten, and
+  `docs/action-labels.md` §3b carries the full version. The bounds that keep it from being a free
+  lunch: no humanoid/G1/28-dim Dex3 in the supported vocabulary, adding one requires post-training
+  *on action-labelled data*, and all twelve action cookbooks are **Nano** (only `finetune/` recipe:
+  Nano-Policy-DROID; Super ships `action_gen=True` with no recipe).
 - **`ruff check .` passes again, and now says what it checked** (fixed 2026-08-06). The 10 errors
   were never a source regression — the bare `[tool.ruff]` named no rules, so the repo inherited
   whatever ruff's default was that week, and 0.16.0's default is a different set. The fix is the
@@ -164,7 +231,25 @@ Verified with receipts. Do not re-derive, and do not trust older prose that cont
 
 ## 5. Loose ends, ranked
 
-1. **Commit the branch** (§0). Highest value, needs one word of approval.
+**Current, 2026-08-15** — items 1–5 below this block are the 2026-08-06 list, all closed, kept as
+record:
+
+1. **Get Discoverer+ access back.** Blocks every other cluster item. Needs a helpdesk ticket from
+   the account holder — not something this workstation can send (§2, `docs/discoverer.md` §1).
+2. **Decide T-041's G0b path** (§1). The human rescore is already pre-registered and costs no GPU
+   hours; only the judge-repair route needs a PR-09 amendment.
+3. **T-042 step 0** — count the unlabelled real G1 footage. Free, off-cluster, and it either opens
+   the task or closes it (`.mc/tasks/todo/T-042-*.md`).
+4. **PR-09 has no `-RESULT.md` yet.** Deliberate: writing the result before the G0b path is chosen
+   would either pre-empt the decision or need rewriting. T-041's task file carries the run record
+   in the meantime.
+5. **`scripts/export_lora.py` against the T-041 tree is untested.** If it can recover a standalone
+   ~45 MB adapter from the merged export, the portability problem in §4 mostly dissolves. The
+   45 MB figure is an estimate from optimiser-state size, not verified against checkpoint keys.
+
+### Closed 2026-08-06
+
+1. ~~**Commit the branch** (§0)~~ — **done.** The branch is committed and PR #1 is open.
 2. ~~`docs/anim/` lint~~ — **done 2026-08-06**, by pinning *and* naming the rules (§4). It left five
    `ignore` codes behind; the three source-fixable ones (E731/E741/E702, 5 sites) were then **fixed
    in source the same day** and their entries deleted — `def` instead of lambda
