@@ -340,6 +340,36 @@ layer via the arm64 container (T-25a). What is left genuinely needs the robot.
   vocabulary this task meant to teach from scratch, already recorded and Apache-2.0. That is
   conversion work on recorded labels — route 1 — and is tracked as **T-043**. Re-open the day
   teleop produces video faster than it produces labels. Receipts: `docs/action-labels.md` §3b)*
+- [ ] **[T-043](.mc/tasks/todo/T-043-convert-the-3152-g1-dex3-episodes-recorded-28-dim-labels.md)**
+  Convert the 3 152 G1+Dex3 episodes — recorded 28-dim labels, route 1 *(**todo**, opened
+  2026-08-15 out of T-042's step 0. **Measured from local metadata the same day, before writing
+  code, and the measurement corrected a claim five documents were carrying.** The corpus: 13
+  `unitreerobotics/G1_Dex3_*` sets, **3 152 episodes · 2 587 515 frames · 23.96 h @ 30 fps** —
+  7.8× AppleToPlate's episode count and thirteen further tasks — Apache-2.0, LeRobot **v3.0**,
+  `observation.state`/`action` both flat `float32[28]`, and **`cam_left_high` natively
+  `[480, 640, 3]`**, which is exactly the GR00T N1.7 `ego_view` contract fixed the same day, so
+  unlike `datasets/gr00t-apple-full/` (120×160) it feeds the consumer without re-derivation. It
+  splits into two variants that may not be poolable: 6 sets `robot_type: Unitree_G1` / 4 cameras /
+  hand limit **120°**, and 7 sets `Unitree_G1_Dex3` / 2 cameras / hand limit **100°** — different
+  hand hardware, not different formatting. **THE BLOCK ORDER IS ARM-FIRST: `[0:14]` arm,
+  `[14:28]` hand.** Every doc that mentioned this corpus said hand-first, carrying T-041's finding
+  across from `USC-PSI-Lab/Humanoid-Everyday-G1` — a *different* corpus, LeRobot v2.1, separate
+  `arm_joints`/`leg_joints`/`hand_joints` fields. Both facts are true of their own corpus, and the
+  transplant would have caused the exact silent arm/hand transposition the warning exists to
+  prevent. Two independent lines: `meta/stats.json` across all 13 sets gives **zero** one-sided
+  dims in `[0:14]` against **4–10** in `[14:28]` railing at a clean 100.0°/120.0° mechanical limit
+  (a finger, not a shoulder), and `vla-training/groot/modality_g1_dex3.json` independently declares
+  `arms {0,14}` / `hands {14,28}`. **Left/right and intra-hand order stay unverified** — three
+  mutually inconsistent orderings are on record, and a source wrong about the block order earns no
+  trust about the finger order. Three structural gaps for the converter: the corpus has **no waist
+  column** where canonical `g1.yaml` has one (a schema decision, not a coding one);
+  `convert_lerobot_g1.py` is a **v2.1** reader while these are v3.0 (reuse
+  `prepare_cosmos_corpus.py`, which already handles the independent per-camera file rollover); and
+  the T-31 gripper apparatus must be **re-derived** for a different hand across two variants, never
+  inherited. **Blocked on one thing, and it is not code: the action parquets were never
+  downloaded** — the fetch scripts took `meta/` + `videos/` and skipped `data/`. 415 files, 647 MB,
+  Apache-2.0, and an ask before it happens. **Not a substitute for T-39** — a bigger corpus under a
+  recipe never shown to work is the same experiment at greater cost)*
 
 ## Open decisions (PRD §16) — resolved 2026-07-26
 

@@ -113,12 +113,22 @@ And **3 152 of those episodes are the 13 `unitreerobotics/G1_Dex3_*` sets, every
 `action float32[28]`** — the exact 28-dim G1 + Dex3 vocabulary. Against the 402 episodes of one task
 that every number in this project rests on, that is thirteen more G1 tasks with recorded actions,
 already accessible. It is *conversion* work on *recorded* labels, not generation — route 1, and
-firmly inside this sub-project's charter. Tracked as **T-043**, which has no task file yet.
+firmly inside this sub-project's charter. Tracked as **T-043**.
 
 **It is not a free win and must not be written up as one:** 28-dim Dex3 ≠ 43-dim AppleToPlate,
-`convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers, and the block-order trap
-(`action[0:14]` hand vs `action[14:28]` arm) makes a wrong converter produce numbers that are
-finite, plausible and wrong.
+`convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers and reads LeRobot v2.1 where these
+sets are v3.0, and the corpus has **no waist column** where the canonical space has one.
+
+**The block order is `[0:14]` arm, `[14:28]` hand — arm-first, measured 2026-08-15.** An earlier
+version of this section said the opposite. The hand-first finding is real but belongs to
+`USC-PSI-Lab/Humanoid-Everyday-G1`, a different corpus in a different LeRobot version; it was
+carried across to these sets and would have caused the exact silent arm/hand transposition it was
+written to warn about. Evidence and the still-open intra-block questions: **T-043 §1**.
+
+**One thing here is a free hit, though:** `cam_left_high` ships at **`[480, 640, 3]`** in all 13
+sets — natively the GR00T N1.7 `ego_view` contract fixed below. Where
+`datasets/gr00t-apple-full/` is 120×160 and unusable as a source, this corpus needs no
+re-derivation to feed the consumer.
 
 Those three keep their `T-NN` IDs in `.mc/tasks/` — they were not migrated, because their
 pre-registrations, sbatch files and commit history all cite them there. This sub-project owns the

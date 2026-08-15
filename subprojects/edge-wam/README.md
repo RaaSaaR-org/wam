@@ -44,8 +44,11 @@ Nothing has run. The sub-project is five open questions and a gate.
 real G1 episodes declaring `action float32[28]`** — the exact 28-dim G1 + Dex3 vocabulary Cosmos
 does not ship — Apache-2.0, in repos we already hold the video for. Adding a G1 embodiment by
 NVIDIA's own route (post-training on action-labelled data) now has data behind it. Conversion is
-tracked as **T-043**; the block-order trap (`action[0:14]` hand vs `action[14:28]` arm) is the part
-that makes a wrong converter produce plausible, wrong numbers.
+tracked as **T-043**. **The block order is arm-first — `[0:14]` arm, `[14:28]` hand**, measured
+2026-08-15 across all 13 sets; the hand-first figure this line used to carry belongs to a different
+corpus (`Humanoid-Everyday-G1`) and pointed the trap the wrong way. See **T-043 §1**. Left/right and
+intra-hand order are still unverified, with three conflicting orderings on record — that is where
+the plausible-wrong-numbers risk actually lives now.
 
 ## Tasks
 

@@ -271,6 +271,11 @@ if depth is actually wanted (it is, for [[T-040]] — see there).
   version gets arm and hand silently transposed. Since the block order in the README is wrong, the
   *intra-hand* order it documents (thumb-first, symmetric) is **not** to be trusted either without
   the same kind of check.
+  **THIS FINDING IS ABOUT THIS CORPUS ONLY — added 2026-08-15 after it was carried across and got
+  five documents wrong.** It holds for `USC-PSI-Lab/Humanoid-Everyday-G1` (LeRobot v2.1, separate
+  `arm_joints`/`leg_joints`/`hand_joints`). The `unitreerobotics/G1_Dex3_*` sets are LeRobot v3.0
+  with a flat 28-dim state and are **arm-first** — `[0:14]` arm, `[14:28]` hand (T-043 §1). Block
+  order is a per-corpus measurement, never an inherited constant.
 
 ### From the README (not independently verified)
 

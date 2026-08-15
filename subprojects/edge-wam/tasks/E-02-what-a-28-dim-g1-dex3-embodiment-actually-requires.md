@@ -41,9 +41,16 @@ status_note: "Not started. Reading task, no GPU. The answer sets the size of the
 found **3 152 real G1 episodes across the 13 `unitreerobotics/G1_Dex3_*` sets, every one declaring
 `action float32[28]`** — exactly this vocabulary, Apache-2.0, 647 MB of action parquets in repos we
 have already pulled video from. NVIDIA's stated route for a new embodiment is post-training on
-action-labelled data; that is no longer the blocker it was this morning. Note the block-order trap
-that comes with it (`action[0:14]` hand vs `action[14:28]` arm) — get it backwards and every number
-is finite, plausible and wrong. Conversion is tracked as **T-043**.
+action-labelled data; that is no longer the blocker it was this morning. Conversion is tracked as
+**T-043**.
+
+**The block order is `[0:14]` arm, `[14:28]` hand — arm-first, measured 2026-08-15 across all 13
+sets** (`meta/stats.json`: zero one-sided dims in `[0:14]`, 4–10 in `[14:28]` railing at a clean
+100°/120° mechanical limit; independently confirmed by `vla-training/groot/modality_g1_dex3.json`).
+This line previously said hand-first, carried over from `Humanoid-Everyday-G1` — a different corpus
+in a different LeRobot version. Getting *that* backwards is the "finite, plausible and wrong" risk,
+and it was pointed the wrong way here. **Left/right and intra-hand order remain unverified**, with
+three mutually inconsistent orderings on record. Detail: **T-043 §1**.
 
 **But `docs/action-labels.md` §3b overstates it.** It says "no humanoid/G1/28-dim Dex3". *AgiBot is
 a humanoid, supported at 29D.* So the honest statement is "no G1, no Dex3" — and the difference is
