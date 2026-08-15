@@ -229,7 +229,7 @@ def test_every_per_clip_artifact_follows_the_deleted_clips(tmp_path):
     dcc.main([str(root)])
     survivors = {"a_episode_000001_clip000", "c_episode_000001_clip000"}
     jsonl = root / "train" / "video_dataset_file.jsonl"
-    rows = [json.loads(l) for l in jsonl.read_text().splitlines() if l.strip()]
+    rows = [json.loads(ln) for ln in jsonl.read_text().splitlines() if ln.strip()]
     assert {r["uuid"] for r in rows} == survivors
     assert {p.name for p in (root / "train" / "captions").iterdir()} == survivors
     report = json.loads((root / "train" / "decode_report.json").read_text())
@@ -247,8 +247,8 @@ def test_surviving_jsonl_lines_are_byte_preserved(tmp_path):
         val={"v_episode_000001_clip000": b"unique"},
     )
     jsonl = root / "train" / "video_dataset_file.jsonl"
-    kept_line = next(l for l in jsonl.read_text().splitlines(keepends=True)
-                     if "a_episode_000001_clip000" in l)
+    kept_line = next(ln for ln in jsonl.read_text().splitlines(keepends=True)
+                     if "a_episode_000001_clip000" in ln)
     dcc.main([str(root)])
     assert jsonl.read_text() == kept_line
 

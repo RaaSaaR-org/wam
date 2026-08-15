@@ -149,8 +149,8 @@ def filter_jsonl(path: pathlib.Path, keep: set[str]) -> int:
     only copy of it that the trainer reads. Re-serialising them would change whitespace, which
     changes the token count, which is a real bound in the recipe.
     """
-    lines = [l for l in path.read_text().splitlines(keepends=True) if l.strip()]
-    kept = [l for l in lines if json.loads(l)["uuid"] in keep]
+    lines = [ln for ln in path.read_text().splitlines(keepends=True) if ln.strip()]
+    kept = [ln for ln in lines if json.loads(ln)["uuid"] in keep]
     path.write_text("".join(kept))
     return len(lines) - len(kept)
 
@@ -242,7 +242,7 @@ def verify(root: pathlib.Path, manifest: dict, sha: dict[str, dict[str, str]]) -
             )
         jsonl = root / split / "video_dataset_file.jsonl"
         if jsonl.is_file():
-            rows = sum(1 for l in jsonl.read_text().splitlines() if l.strip())
+            rows = sum(1 for ln in jsonl.read_text().splitlines() if ln.strip())
             if rows != len(expected):
                 raise SystemExit(f"FATAL: {jsonl} has {rows} records for {len(expected)} clips.")
 

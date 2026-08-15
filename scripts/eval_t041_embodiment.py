@@ -97,7 +97,7 @@ def verdict_from(b: int, c: int, p: float) -> tuple[str, str]:
 def build_sheet(args) -> int:
     cfg = tomllib.loads(args.config.read_text())
     cal = cfg["calibration"]
-    prompts = [json.loads(l) for l in args.prompts.read_text().splitlines() if l.strip()]
+    prompts = [json.loads(ln) for ln in args.prompts.read_text().splitlines() if ln.strip()]
 
     items: list[dict] = []
     for p in prompts:
@@ -184,13 +184,13 @@ def judge(args) -> int:
 
     cfg = tomllib.loads(args.config.read_text())
     model = cfg["judge"]["model"]
-    sheet = [json.loads(l) for l in (args.out / "scoring_sheet.jsonl").read_text().splitlines()
-             if l.strip()]
+    sheet = [json.loads(ln) for ln in (args.out / "scoring_sheet.jsonl").read_text().splitlines()
+             if ln.strip()]
 
     out = args.out / "scores.jsonl"
     done = set()
     if out.exists() and args.resume:
-        done = {json.loads(l)["item_id"] for l in out.read_text().splitlines() if l.strip()}
+        done = {json.loads(ln)["item_id"] for ln in out.read_text().splitlines() if ln.strip()}
         print(f"resuming: {len(done)} already scored", file=sys.stderr)
 
     with out.open("a" if args.resume else "w") as fh:
@@ -322,8 +322,8 @@ def check_prompts_are_held_out(prompts_path: Path, corpus: Path) -> int:
     manifest = json.loads((corpus / "manifest.json").read_text())
     val = {c["uuid"] for c in manifest["clips"]["val"]}
     train = {c["uuid"] for c in manifest["clips"]["train"]}
-    uuids = [json.loads(l)["uuid"]
-             for l in prompts_path.read_text().splitlines() if l.strip()]
+    uuids = [json.loads(ln)["uuid"]
+             for ln in prompts_path.read_text().splitlines() if ln.strip()]
     leaked = sorted(u for u in uuids if u in train)
     if leaked:
         raise SystemExit(
