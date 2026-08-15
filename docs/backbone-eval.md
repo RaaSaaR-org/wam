@@ -90,6 +90,19 @@ It passes S4: Cosmos 3 takes JSON action arrays in and emits action states out. 
 used that port** — it packed clean conditioning frames behind a tokenized instruction and
 hooked the generation-pathway residual stream. The action port is untested.
 
+> **Followed up 2026-08-15, against the model card and cookbooks rather than this paragraph.**
+> "Emits action states out" is not a throwaway: the family ships **three** action modes — forward
+> dynamics (actions → frames), **inverse dynamics (frames → the trajectory that produced them)**
+> and policy (observation + prompt → actions). Inverse dynamics is a video-to-action labeller, and
+> §4 below is written as though the port were input-only, which is wrong for Cosmos 3 (it remains
+> correct for Predict2, a different model). Two bounds keep this from being a free lunch: the
+> supported action vocabulary lists no humanoid, no G1 and no 28-dim Dex3, and NVIDIA's route to
+> adding one is post-training *on action-labelled data* — so it amortises labels we already have
+> rather than creating any. All twelve action notebooks in
+> `cookbooks/cosmos3/generator/action/` are **Nano**; the only `finetune/` recipe is
+> Nano-Policy-DROID; Super ships `action_gen=True` with no recipe and a 121 GB export. Written up
+> as **T-042**, with `docs/action-labels.md` §3b as the standing explanation.
+
 ### Cosmos-Predict2.5 (2B / 14B) — **the only candidate that passes all four**
 
 NVIDIA Open Model License; 2B is ~4 GB of BF16 weights, trivially inside the 5090; diffusers

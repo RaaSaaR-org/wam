@@ -189,8 +189,18 @@ layer via the arm64 container (T-25a). What is left genuinely needs the robot.
   The 4 open AC need the cluster or a written contract: H200 throughput, the chunked sbatch, the
   `emai/vla-training` consumer contract, and the measured `GEOM_TOL` / `EST_DRIFT_P95`)*
 - [ ] **[T-041](.mc/tasks/todo/T-041-cosmos-generator-finetune-on-g1.md)** Fine-tune a Cosmos
-  generator on G1 data *(**in progress** — pre-registered and built 2026-08-07, **prep running on
-  Discoverer+ since 2026-08-07; no training started**.
+  generator on G1 data *(**RAN — verdict VOID on G0b, 2026-08-15.** Training completed to iteration
+  500 with resume diffs and a non-empty export (G0c satisfied); the eval generated all 60 paired
+  clips; the **VLM judge did not reach G0b's 20/20 on the calibration set**, so no verdict issues
+  and PR-09 §6 forbids reading a VOID as a weaker pass. **The failure path was pre-registered** —
+  §6: "If G0b fails, that is not a fallback, it is the required path" — so a **human scoring the
+  same 80 blinded clips needs no amendment**, while repairing the judge and re-running it does.
+  ~59 of §7's 122 GPU-h spent. The export is a **merged full model, 121 GB / 27 shards, not an
+  adapter**, so it runs nowhere but Discoverer+. An exploratory apple pick-and-place set (job
+  187623, 15 prompts × 2 arms, ~1.7 GPU-h) lives in `runs/t041-apple-variations/` and is **not
+  PR-09 evidence** — `blinded: false, scored: false`, chosen after seeing the eval. Full record in
+  the task file. Historical detail from the build-out follows.
+  Pre-registered and built 2026-08-07.
   `docs/preregistration/PR-09-cosmos-super-finetune.md`, rule `T041_RULE_V1`;
   `scripts/prepare_cosmos_corpus.py` + 20 tests; `cluster/discoverer/90..95`. Recipe verified from
   `NVIDIA/cosmos@f76cd870` — LoRA rank 16 on the generation tower, revision pinned. **Goal fixed:
@@ -295,6 +305,20 @@ layer via the arm64 container (T-25a). What is left genuinely needs the robot.
   cap, so the probe has to measure clips-per-iteration; how the prepared corpus reaches Discoverer+
   depends on the workstation's upstream and is undecided. Job 95 additionally needs 20 calibration
   clips nobody has picked yet)*
+- [ ] **[T-042](.mc/tasks/todo/T-042-cosmos-inverse-dynamics-action-labels-for-the-g1.md)** Cosmos
+  inverse dynamics — action labels for the G1 *(**todo**, written 2026-08-15. The follow-up
+  `docs/backbone-eval.md` §3 never got: Cosmos 3's action port is **bidirectional** — forward
+  dynamics, **inverse dynamics** (frames → the trajectory that produced them) and policy — so it
+  is a real video-to-action labeller, and §4's input-only framing is correct for Predict2 but wrong
+  for Cosmos 3. Three bounds keep it honest: the supported action vocabulary has **no humanoid, no
+  G1, no 28-dim Dex3**; NVIDIA's route to adding one is post-training **on action-labelled data**,
+  so it amortises labels we already hold rather than creating any; and it must never be pointed at
+  generated frames (PR-06's 39 %). All twelve action cookbooks are **Nano**, the only `finetune/`
+  recipe is Nano-Policy-DROID, and Super ships `action_gen=True` with no recipe — so this is
+  Nano-scale. **Step 0 is free and decides the task: count the unlabelled real G1 footage.** Every
+  corpus here is action-labelled by construction, so the labeller may have nothing to do; if the
+  count is ~zero the task closes as a paragraph. No GPU before step 0 and a `PR-10-*.md`. Standing
+  explanation: `docs/action-labels.md` §3b)*
 
 ## Open decisions (PRD §16) — resolved 2026-07-26
 
