@@ -14,6 +14,14 @@ mc task board    # backlog / todo / done
 mc show T-16     # the whole T-16 record
 ```
 
+> **This index covers `T-NN` only.** Since 2026-08-15 there are two sub-projects with their own task
+> namespaces and their own indexes, which `mc` does not see:
+> **[`subprojects/edge-wam/`](subprojects/edge-wam/TASKS.md)** (`E-NN` — image in, action out, on the
+> robot) and **[`subprojects/data-factory/`](subprojects/data-factory/TASKS.md)** (`D-NN` — more and
+> better training data from real episodes). Overview:
+> [`subprojects/README.md`](subprojects/README.md). `T-040`/`T-041`/`T-042` stay here and are cited
+> from there by ID. **No sub-project starts a training run before T-39 reports.**
+
 > **Build status (2026-08-06):** M0–M4 code-complete and tested — **1 618 tests green, 0 skipped,
 > 57 s** (`.venv/bin/python -m pytest -q`, with the optional `mujoco` extra installed; without it
 > the MuJoCo module skips cleanly). Earlier figures in this file and in `README.md` — 583, 604,
