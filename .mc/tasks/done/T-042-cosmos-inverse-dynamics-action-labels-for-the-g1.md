@@ -5,7 +5,7 @@ aliases:
 - T-42
 title: "Cosmos inverse dynamics — action labels for the G1, if we have footage to label"
 slug: cosmos-inverse-dynamics-action-labels-for-the-g1
-status: todo
+status: done
 priority: 3
 owner: ''
 projects: []
@@ -20,12 +20,15 @@ depends_on: []
 due_date: ''
 created: 2026-08-15
 updated: 2026-08-15
-status_note: "Written 2026-08-15 after checking the Cosmos 3 card and cookbooks against a fair
-  objection — NVIDIA calls this a world *action* model, so why did T-041 train video only?
-  `docs/backbone-eval.md` §3 recorded the action port on 2026-08-05 and nothing followed it up.
-  This is that follow-up. **Step 0 is free and decides everything: count the unlabelled real G1
-  footage.** With none, an inverse-dynamics labeller labels nothing and this task closes as a
-  paragraph. No GPU until step 0 reports and a pre-registration exists."
+status_note: "**Closed 2026-08-15 by step 0, exactly as written: the count is zero.** Real G1
+  footage we hold with video, no actions and no way to get them: **0 clips**. The 3 554 episodes
+  looked unlabelled only because two fetch scripts passed `--include 'meta/*' --include 'videos/**'`
+  — upstream all 14 repos publish the action parquets (415 files, 647 MB), verified through the HF
+  tree API without downloading. A labeller built to recover labels that `--include 'data/**'` would
+  download is not amortisation, and its output would be strictly worse than the recording. No GPU
+  hour was spent and no pre-registration was needed. Receipts and the wider finding:
+  `docs/action-labels.md` §3b. **Re-open the day teleop produces video faster than it produces
+  labels** — not before."
 ---
 
 # Cosmos inverse dynamics — action labels for the G1, if we have footage to label
@@ -96,8 +99,14 @@ someone reads NVIDIA's front page.
 
 ## Acceptance criteria
 
-- [ ] **Step 0 reported**: a written count of unlabelled real G1 footage by pool, with the
+- [x] **Step 0 reported**: a written count of unlabelled real G1 footage by pool, with the
       licence status of each, and an explicit close-or-continue call. Free, no GPU.
+      **Done 2026-08-15 — the call is *close*.** `docs/action-labels.md` §3b.
+
+**The remaining criteria were conditional on step 0 saying *go*, and it said *stop*. They are
+unmet because they were never entered, not because they failed** — the distinction matters if this
+task is ever re-opened, at which point they still stand as written.
+
 - [ ] `docs/preregistration/PR-10-*.md` exists before any GPU hour — hypothesis, arms, gate,
       verdict table, and what each verdict forbids. Same shape as PR-06/PR-08/PR-09.
 - [ ] **The gate is a beat-the-baseline gate, and the baseline is not trivial.** This project has
@@ -127,4 +136,40 @@ Inverse dynamics is a different mechanism (a task the vendor pretrained for, not
 we bolted on), which is why it is worth a gate rather than a dismissal. It is not a reason to
 expect a win.
 
-%% mc-links: [[T-041]] [[T-040]] [[T-37]] [[T-39]] [[T-34]] %%
+## Report — 2026-08-15, closed
+
+**Step 0 ran, cost nothing, and killed the task.** That was the designed outcome of a cheap
+measurement, so it is recorded as a result rather than an abandonment.
+
+**The count.** Real G1 footage we hold with video, no actions, and no way to get them: **0 clips**.
+The naive on-disk reading suggested otherwise — 3 554 real G1 episodes / ~25.5 h across 14 sources,
+3 163 clips in `cosmos-g1-embodiment`, not one `actions.parquet` beside them. The cause was ours:
+`cluster/discoverer/92_fetch_g1_corpus.sbatch` passes `--include 'meta/*' --include 'videos/**'`
+and `workstation/10_fetch_corpus.sh` narrows to one camera. Upstream, all 14 repos publish the
+action parquets — **415 files, 647 MB**, same Apache-2.0 / CC-BY-4.0 repos we already pulled 69 GB
+of video from. Verified through the HF tree API, nothing downloaded.
+
+So the premise fails on its own terms: recovering labels that `--include 'data/**'` would download
+is not amortisation, and inferred labels are strictly worse than recorded ones. The two
+outside-chance pools close identically — `USC-PSI-Lab/humanoid-everyday` (8 949 eps) and
+`Humanoid-Everyday-G1` (4 064 eps) are fully action-labelled upstream, and the earlier "licence
+unresolved" worry resolves into an account-holder question, not a labelling one.
+
+**What step 0 found that it was not asked for**, kept here so it is not lost with the closure:
+**3 152 of those episodes are the 13 `unitreerobotics/G1_Dex3_*` sets, every one declaring
+`action float32[28]`** — the exact 28-dim G1 + Dex3 vocabulary this task proposed to teach Cosmos
+from scratch. Labelled, Apache-2.0, 647 MB away. That bears directly on PR-07 §1's standing
+"402 success-only episodes of one task is not enough", and it is **conversion work on recorded
+labels — route 1, not route 3b**. Not a free win: 28-dim Dex3 ≠ 43-dim AppleToPlate,
+`convert_lerobot_g1.py` targets canonical 15 joints + 2 grippers, and this task's own block-order
+trap (`action[0:14]` ↔ hand vs `action[14:28]` ↔ arm) applies to the converter. Tracked as
+**T-043**.
+
+**No GPU hour was spent, and PR-10 was never written** — the pre-registration was gated behind a
+*go* from step 0 that never came.
+
+**The re-open condition, stated so it is a trigger and not a mood:** the only pool that would make
+this task real is teleop recorded after M1/D2, and it does not exist yet. **Re-open the day teleop
+produces video faster than it produces labels.**
+
+%% mc-links: [[T-041]] [[T-040]] [[T-37]] [[T-39]] [[T-34]] [[T-043]] %%
