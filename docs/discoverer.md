@@ -55,26 +55,54 @@ Two things to know for later:
   `ssh-add -l` must list `SHA256:1WiG4/oXoh0I94LAAx49evKgazZZdpE/tE3v3AEZLn0`. A verbose trace
   saying `Server accepts key` followed by a denial means exactly this: right key, not unlocked.
 
-> **LOCKED OUT since 2026-08-15, and it is not the agent.** Four attempts, all
-> `Permission denied (publickey,gssapi-keyex,gssapi-with-mic)`. The distinguishing trace line is
-> **`Offering public key: … explicit`** with **no** `Server accepts key` after it — the key is
-> presented and the *server* rejects it, which is the opposite of the unlocked-agent case above.
-> `IdentitiesOnly yes` + an explicit `IdentityFile` means no agent is needed for this host, and
-> `ssh-add -l` reporting no agent is therefore **not** the cause. Config and key file are unchanged
-> (`-rw------- 464 B`, mtime 2026-08-08).
+> **It was never a lockout — it was the agent, and only for non-interactive use. Resolved
+> 2026-08-15.** For part of 2026-08-15 this section recorded a server-side key rejection needing a
+> helpdesk ticket. That was wrong, and it is left corrected rather than deleted because the wrong
+> version was about to cost a ticket sent from the wrong address for a non-problem.
 >
-> Reproduce:
+> **The line that settles it is `Server accepts key`.** The 389 Directory Server still returns our
+> key and sshd matches it — so LDAP was never the problem. The earlier note read the *absence* of
+> that line as server-side rejection, which is the one reading the evidence does not support.
+>
+> What actually failed is local. The workstation rebooted **2026-08-13**, taking the `ssh-agent`
+> with it; nothing on this box started one again; and the key is passphrase-protected. Under
+> `BatchMode=yes` ssh offers the key, the server accepts it, and ssh then has **nothing to sign the
+> challenge with** — it can never decrypt the private key. Interactive `ssh dplus` was unaffected
+> throughout: it prompts, and works. Only automated, non-interactive callers saw the denial, which
+> is why it looked like a lockout to an agent and like nothing at all to a human.
+>
+> **`IdentitiesOnly yes` + an explicit `IdentityFile` does not remove the need for an agent.** It
+> selects *which* identity is offered, not whether that identity can be *unlocked*. The earlier
+> note's central inference was this conflation.
+>
+> Proof the account was never restricted: job **187623** (`wam-t041-apple`) took 8 GPUs and
+> COMPLETED at 01:25 on 2026-08-15, hours into the supposed lockout. Usage at that point was 125 of
+> 5 000 GPU-hours and 5 777 of 330 900 billing-hours — 46.2 billing-h per GPU-h against the 66.18
+> fair-share rate, i.e. under the rate, in the safe direction.
+>
+> **The durable fix (installed 2026-08-15, workstation-side, not in this repo):** a `systemd --user`
+> unit at `~/.config/systemd/user/ssh-agent.service` runs an agent on the fixed socket
+> `${XDG_RUNTIME_DIR}/ssh-agent.socket`, `enable`d with `loginctl enable-linger` so it survives
+> logout. `~/.bashrc` exports `SSH_AUTH_SOCK` to that socket **above the interactive guard** —
+> non-interactive shells `return` at that guard, so anything below it never reaches automated
+> callers. The agent starts *empty*: no key material at rest.
+>
+> **After every reboot, once, in a real terminal:**
 >
 > ```bash
+> ssh-add ~/.ssh/id_ed25519_eu_ai_hub     # prompts; then all later sessions work non-interactively
+> ```
+>
+> **Diagnosing the next occurrence — check in this order:**
+>
+> ```bash
+> ssh-add -l                                                       # empty/no agent → just unlock, above
 > ssh -o BatchMode=yes -v dplus true 2>&1 | grep -E 'Offering|Server accepts|denied'
 > ```
 >
-> That leaves the LDAP side — the `AuthorizedKeysCommand` above is not returning our key. **We
-> cannot fix this**: keys live in the 389 Directory Server and cannot be installed or rotated from
-> here. It needs `helpdesk@discoverer.bg`, and **the ticket must come from the account holder's
-> address** — this workstation's git identity is a Gmail address and mailing them from it is
-> explicitly a never-do (§9). Everything cluster-side is blocked until it clears, including the
-> T-041 G0b decision (`.mc/tasks/todo/T-041-*.md`).
+> `Server accepts key` present → the key is published and matched; the problem is on this
+> workstation. `Server accepts key` **absent** → only then is the LDAP side a live hypothesis, and
+> only then does a helpdesk ticket from the account holder's address (§9) become the route.
 
 Published host key (only one algorithm is published) [doc]:
 `ecdsa-sha2-nistp521 SHA256:ceY8MM9O7KB7CipOOcm44wDboE+PyjGJlF5Xv6zM8Tw`
