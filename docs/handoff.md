@@ -9,12 +9,18 @@ decisions are already made and must not be re-litigated, and which facts were ex
 establish so they are not re-derived. It is a working note, not a record — results go in the task
 files and the `PR-*-RESULT.md` documents, and this file gets rewritten.
 
-**Two things block everything, and neither is code:**
+**One thing blocks everything, and it is not code and not the cluster:**
 
-1. **Discoverer+ is locked out** since 2026-08-15 — key offered, server rejects it. LDAP-side, not
-   fixable from here, needs a helpdesk ticket **from the account holder's address**
-   (`docs/discoverer.md` §1).
-2. **T-041's VOID needs one decision**, and it is narrower than it looks — see §1.
+1. **T-041's VOID needs one decision**, and it is narrower than it looks — see §1.
+
+**The "lockout" is withdrawn (2026-08-15).** Earlier the same day this list opened with "Discoverer+
+is locked out — LDAP-side, needs a helpdesk ticket." That was a misdiagnosis and **no ticket should
+be sent.** The cluster was up the whole time — job `187623` took 8 GPUs and COMPLETED at 01:25 that
+morning. The failure was local and non-interactive-only: the 2026-08-13 reboot killed the
+`ssh-agent`, and a passphrase-protected key under `BatchMode=yes` can be *offered* and *accepted*
+but never *signed with*. Fixed durably with a `systemd --user` agent + `SSH_AUTH_SOCK` above
+`~/.bashrc`'s interactive guard; costs one `ssh-add` per boot. Full account, and the
+`Server accepts key` test that tells the two cases apart: `docs/discoverer.md` §1.
 
 **Tasks moved (2026-08-06).** `TASKS.md` is now a milestone index; each task is its own file under
 `.mc/tasks/{todo,done}/` in MissionControl format, prose carried over unchanged. `mc task next`
@@ -63,8 +69,11 @@ arm produced a clip, and `--verdict` applies the identical rule to a person's `s
 
 The second needs an amendment precisely because it changes the instrument *after* watching it
 fail, which is the shape `docs/handoff.md` §3 forbids ("rules are versioned, never edited in
-place"). Neither can start while the cluster is locked out — but the human path never needed the
-cluster for the *scoring*, only for the artifact, which already exists on `$PROJ`.
+place"). Neither is blocked by access any more (the "lockout" was withdrawn — see the top of this
+file), and the human path never needed the cluster for the *scoring* anyway, only for the artifact.
+Both `scoring_sheet.jsonl` and `scores.jsonl` are confirmed present at
+`$PROJ/runs/t041-super-lora/eval/` (checked 2026-08-15). **What remains is the decision, not the
+access.**
 
 **Also open, and free:** T-042 step 0 — count the unlabelled real G1 footage. If it is ~zero, T-042
 closes as a paragraph and the "use Cosmos to label video" idea stops being re-proposed.
@@ -127,8 +136,10 @@ Worth knowing before reading the code, because both are corrections to yesterday
 - **T-041 has spent ~59 of PR-09 §7's 122 GPU-h ceiling**; ~4 879 of the 5 000 allocation hours
   remain. `dgx1` has `gpu:8`, `dgx2` has `gpu:7,gpu_biz:1` — **any 8-GPU job can only land on
   dgx1**, and `sinfo`'s `-` state suffix means PLANNED, not DRAIN.
-- **Locked out since 2026-08-15** (`docs/discoverer.md` §1). Server-side key rejection; a helpdesk
-  ticket from the account holder is the only route. Do not burn a session re-diagnosing the agent.
+- **Access is fine; the 2026-08-15 "lockout" was a local ssh-agent failure** (`docs/discoverer.md`
+  §1). One `ssh-add ~/.ssh/id_ed25519_eu_ai_hub` per boot, in a real terminal, and automated
+  sessions work. Before ever concluding "locked out" again, run the `Server accepts key` test in
+  §1 — that line present means the problem is on this workstation, not at the provider.
 
 ## 3. Decisions already made — do not reopen
 
