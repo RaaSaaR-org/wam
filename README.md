@@ -121,6 +121,7 @@ scripts/run_acceptance.py       M4: AC-01…07 acceptance report
 | `docker/dds/README.md` | DDS conformance + the ordered hardware bring-up checklist |
 | `docs/hf_jobs.md` | Free-tier GPU work: ZeroGPU Spaces and HF Jobs |
 | `docs/backbone-eval.md` | The backbone screen (licence / 5090 / harness / offers-something-missing) and the one probe worth running (T-37) |
+| `docs/action-labels.md` | Where motor values come from — the five routes, which are open, and why generated video has none |
 | `docs/teleop.md` | Teleop + calibration workflow |
 
 ## Next step
