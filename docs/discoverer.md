@@ -55,6 +55,27 @@ Two things to know for later:
   `ssh-add -l` must list `SHA256:1WiG4/oXoh0I94LAAx49evKgazZZdpE/tE3v3AEZLn0`. A verbose trace
   saying `Server accepts key` followed by a denial means exactly this: right key, not unlocked.
 
+> **LOCKED OUT since 2026-08-15, and it is not the agent.** Four attempts, all
+> `Permission denied (publickey,gssapi-keyex,gssapi-with-mic)`. The distinguishing trace line is
+> **`Offering public key: … explicit`** with **no** `Server accepts key` after it — the key is
+> presented and the *server* rejects it, which is the opposite of the unlocked-agent case above.
+> `IdentitiesOnly yes` + an explicit `IdentityFile` means no agent is needed for this host, and
+> `ssh-add -l` reporting no agent is therefore **not** the cause. Config and key file are unchanged
+> (`-rw------- 464 B`, mtime 2026-08-08).
+>
+> Reproduce:
+>
+> ```bash
+> ssh -o BatchMode=yes -v dplus true 2>&1 | grep -E 'Offering|Server accepts|denied'
+> ```
+>
+> That leaves the LDAP side — the `AuthorizedKeysCommand` above is not returning our key. **We
+> cannot fix this**: keys live in the 389 Directory Server and cannot be installed or rotated from
+> here. It needs `helpdesk@discoverer.bg`, and **the ticket must come from the account holder's
+> address** — this workstation's git identity is a Gmail address and mailing them from it is
+> explicitly a never-do (§9). Everything cluster-side is blocked until it clears, including the
+> T-041 G0b decision (`.mc/tasks/todo/T-041-*.md`).
+
 Published host key (only one algorithm is published) [doc]:
 `ecdsa-sha2-nistp521 SHA256:ceY8MM9O7KB7CipOOcm44wDboE+PyjGJlF5Xv6zM8Tw`
 

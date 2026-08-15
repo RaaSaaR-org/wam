@@ -472,11 +472,74 @@ resuming is not the exception. `94_*` generates the resume TOML with that one ke
 guard is scoped to that line only — `[optimizer].keys_to_select = ["lora_"]` must *stay*, or the
 run silently becomes a 32B full fine-tune.
 
+## What actually ran (2026-08-12 … 2026-08-15)
+
+The freeze was lifted by OD-10 and the chain ran. **The training half succeeded; the verdict did
+not issue.**
+
+| | |
+|---|---|
+| training | completed to iteration 500, resume diffs printed, export non-empty — **G0c satisfied** |
+| export | `runs/t041-super-lora/export/` — a **merged full model**, 121 GB / 27 shards. Not an adapter |
+| eval `95` | ran; 60 clips, both arms, blinded sheet built |
+| **verdict** | **VOID on G0b** — the VLM judge did not reach 20/20 on the calibration set |
+| spend | ~59 of §7's 122 GPU-h, incl. the apple run below |
+
+**G0b failing is the pre-registered path, not an accident.** PR-09 §6 anticipated it in writing:
+*"If G0b fails, that is not a fallback, it is the required path."* `scoring_sheet.jsonl` + `items/`
+are a human-rescoreable artifact, and `--verdict` applies the identical rule to a person's
+`scores.jsonl`. So the open decision is narrower than it looks: **a human scoring the same 80
+blinded clips needs no amendment**; repairing the VLM judge and re-running it does, because that
+would be a rule change made after seeing the rule fail. PR-09 §6's VOID row stands until one or
+the other happens — and §6 forbids reading a VOID as a weaker pass.
+
+### The export is not portable, and that was not anticipated
+
+Checked 2026-08-14 against the question "can we run this anywhere but Discoverer+". The answer is
+no, and the reason is the export shape rather than speed:
+
+- It is a **merged full model at 121 GB**, so there is no ~45 MB adapter to move. (The DCP
+  `iter_000000500/optim` at 177 MB implies ~22 M trainable params ≈ 45 MB bf16 — an *estimate* from
+  optimiser-state size, not verified against the checkpoint keys. `scripts/export_lora.py` exists;
+  whether it can recover a standalone adapter from this tree is untested.)
+- Against the workstation's 32 GB 5090: bf16 is 4× over, FP8 ~2× over, INT4 ~31 GB leaves nothing
+  for activations, the VAE or the vision tower — and 4-bit on a diffusion transformer destroys the
+  fine spatial detail (fingers) this experiment exists to measure. 93 GB host RAM is under the
+  model, so CPU offload does not close it either.
+- ZeroGPU is 48 GB and cannot cold-start a 121 GB pull inside the GPU window. HF Jobs *would* fit
+  (`rtx-pro-6000x2` 192 GB at \$5.50/h, ~\$15/run) and is **not recommended**: ~4 879 GPU-h remain
+  on Discoverer+ at zero marginal cost, and the checkpoint already sits on cluster-local storage.
+
+### The apple variation run — a demo, and deliberately not evidence
+
+`96_generate_apple_variations.sbatch` + `scripts/make_apple_variation_prompts.py`, job **187623**,
+**00:12:41** wall on 8×H200 (~1.7 GPU-h). 15 prompts × 2 arms = 30 clips, zero failures.
+
+Sampler settings are byte-identical to `95`'s so the clips are directly comparable; the one
+deliberate difference is a **per-prompt seed** instead of a global one, or the seed family would
+collapse to four identical clips. Four families: `real-heldout` (1 — pickapple has 197 train /
+**1** val), `real-train` (4, the reproduction floor, labelled so they cannot be read as held-out),
+`variation` (6 one-factor authored edits to a real caption), `seed` (4 seeds on one caption).
+
+**Isolated from PR-09 structurally**, not by intention: it writes to `runs/t041-apple-variations/`,
+never opens `runs/t041-super-lora/eval/`, runs no judge and no gate, and its `index.json` records
+`blinded: false, scored: false`. These 30 clips are the same *kind* of object as the eval's 60, and
+what makes the eval's set evidence is that its prompts, settings and rule were fixed before
+generation. These were chosen afterwards by someone who had seen the eval. Mixing them in would
+cost the other set its only claim to being evidence.
+
 ## Notes
 
-No longer just a written-down idea: the pipeline exists and is tested. It is still **not
-submitted**, and the only thing between here and `sbatch` is PR-07 §7. Frozen means frozen — but
-the freeze is now a named variable in five job scripts rather than an absence of code, so lifting
-it is one decision instead of a week.
+**The action question, answered against the card rather than against this file (2026-08-15).**
+§"What G1 data it would need" opens "Video, not actions", and §"Two things the recipe demands"
+records that Super's action-input list contains no humanoid. Both stand. But "no action port" —
+used loosely in review — is wrong: Super ships `action_gen=True`, and the family ships inverse
+dynamics, which *is* a video-to-action labeller. What Super lacks is our **vocabulary** and any
+published post-training recipe at its scale, not the machinery. The follow-up is **T-042**; the
+standing explanation is `docs/action-labels.md` §3b. Nothing here changes PR-09 §9's bound: this
+run was a video fine-tune and cannot be read as anything else.
+
+**Cluster access is down as of 2026-08-15** — the key is offered and rejected server-side
+(`docs/discoverer.md` §1). Nothing in the open decision above can be executed until it returns.
 
 %% mc-links: [[T-39]] [[T-040]] [[T-37]] %%
