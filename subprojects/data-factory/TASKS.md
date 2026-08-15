@@ -21,10 +21,18 @@ are. Referenced by ID:
 
 | id | state | why it matters here |
 |---|---|---|
-| **T-040** | written, not started | Transfer2.5 photoreal augmentation — the one route D-01 permits |
+| **T-040** | **`PR-08` + `T40_RULE_V1` in git, 9/13 acceptance closed** | **the main use case** — restyle real episodes, recorded actions carried over unchanged. Four items open, none a decision: the missing depth/segmentation conditioning, `GEOM_TOL`/`EST_DRIFT_P95`, H200 throughput + chunked sbatch, the `vla-training` consumer contract. Gated on T-39 by `PR-08` §1 |
 | **T-041** | ran, **verdict VOID** on G0b | the Super fine-tune; its VOID needs a decision, not a rescue |
 | **T-042** | **closed 2026-08-15** | step 0 counted zero unlabelled footage — and found 3 152 already-labelled 28-dim G1 episodes instead |
 | **T-043** | **referenced, no file yet** | convert those 3 152 `action float32[28]` episodes — recorded labels, route 1 |
+
+## The output target — fixed 2026-08-15
+
+Everything this sub-project emits feeds **NVIDIA Isaac GR00T N1.7** (`nvidia/GR00T-N1.7-3B`).
+Read off the ONNX export rather than from docs: the video input is **`ego_view`, float32
+`[1, 480, 640, 3]`** — **one** camera view at **640×480**. So restyled frames are produced at
+640×480, and `datasets/gr00t-apple-full/` (120×160) cannot be the source. Details and the artifact
+it was measured from: [`README.md`](README.md).
 
 ## Why D-01 comes first
 
