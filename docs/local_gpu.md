@@ -285,9 +285,15 @@ Two caveats that apply across the table and that no per-row number can express:
   number is the largest one here — it includes the load. On a card this tight the load, not the
   forward, may be what OOMs. Measure it: run §1 and watch
   `nvidia-smi --query-gpu=memory.used --format=csv -l 1` in another shell.
+  **"May be" became "was", on 2026-08-17: `train_t16_lora.py` OOM'd on a 32 GB 5090 during the
+  load, with `--offload-text` passed** — see the correction under the VRAM table below. Until
+  commit `df3387b` `--offload-text` could not lower a load peak at all, by construction, so on
+  this row it bought nothing. It can now.
 - **Nothing in this table was measured on a 5090.** The two cards it was measured on are an H200
   (141 GB) and a ZeroGPU RTX PRO 6000 (96 GB); neither was under memory pressure, so none of these
-  numbers is an *adaptive* peak.
+  numbers is an *adaptive* peak. **One row is now: the last row of the VRAM table below was
+  measured on this box's 5090 while a 12.70 GB co-tenant held the card**, which makes it the only
+  number here recorded under real memory pressure.
 
 ---
 
@@ -809,11 +815,34 @@ Where the memory goes, from the config header (all decimal GB):
 | trainable + grads + AdamW (measured, from the rung-362 checkpoint) | 1.32 | 1.32 |
 | **resident floor** | **25.50** | **14.14** |
 | + activations at batch 2 (CPU-profiled, extrapolated) + allocator + CUDA context | ~27.7 | ~15.9 |
+| **whole-process peak, `nvidia-smi`, 20 000-step run (MEASURED 2026-08-17)** | — | **15.63** |
 
-Both fit 34.36 GB. **`--offload-text` is helpful here, not required** — and it is nearly free,
-because this corpus has one distinct instruction (§0b), so the CPU umT5 forward is paid once in
-20 000 steps. Take it anyway: it turns a ~4 GB margin against the two unmeasured terms into a ~16 GB
-one. The runner sets `OFFLOAD_TEXT=1` by default.
+> **Correction, 2026-08-17 (commit `df3387b`). Until that commit the `--offload-text` column was
+> aspirational: the 12.82 frozen-weights cell was never observed at any instant, and every cell
+> below it inherited the error.** `--offload-text` moved the tower off the card *after* the load,
+> because it had to — `WanFlowBackbone._apply` forwards device moves to the held towers, so an
+> offload issued before `JointTrainer`'s trailing `.to(device)` is undone by it. Running last
+> means running once the tower is already resident, so the flag lowered the steady state and left
+> the **load peak at 24.18 GB in both columns**. The margin it was recommended for was therefore
+> ~8.9 GB in both columns, not 4 against 16.
+>
+> That was not merely academic: on 2026-08-17 this exact config OOM'd on a 32 GB RTX 5090 sharing
+> the card with a 12.70 GB co-tenant, **with `--offload-text` passed** — inside `attach()`'s
+> `module.to(self.device)`, 18.49 GB already held, umT5 still arriving. No `--batch-size` reduces
+> a weights-only term.
+>
+> `df3387b` adds a sticky CPU pin (`build_backbone(..., cpu_pinned=("text_encoder",))`) that keeps
+> the tower off the accelerator through load, `attach` and every later `.to()`. **The column is
+> now true rather than aspirational**, and the last row is the first measurement of it: the same
+> config, same box, same co-tenant, peaked at **14 906 MiB = 15.63 GB** whole-process — against a
+> ~15.9 GB estimate that included allocator slack and CUDA context, so the estimate was good and
+> only the path to it was broken. Sampled by `nvidia-smi` every 20 s, which is coarse enough to
+> miss a sub-interval spike; it is a floor on the peak, and it covers the load.
+
+Both fit 34.36 GB. **`--offload-text` is helpful on a 34 GB card, not required — and on a 32 GB
+card with any co-tenant it is required**, which is the case the correction above exists for. It is
+also nearly free, because this corpus has one distinct instruction (§0b), so the CPU umT5 forward
+is paid once in 20 000 steps. The runner sets `OFFLOAD_TEXT=1` by default.
 
 `BATCH=8 ACCUM=1` fits on paper too (~29.0 GB) and is the H200's own setting; it is not the default
 because 2.8 GB of margin is inside the error bar of the two terms nobody has measured — the cuDNN
