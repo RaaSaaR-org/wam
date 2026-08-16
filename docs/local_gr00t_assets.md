@@ -8,8 +8,11 @@ walking the filesystem. Every path, size and commit below was read off this disk
 > `third_party/isaac-gr00t` vendored at the pinned `1a1837f` and patched, `~/venvs/t39` built from
 > upstream's own `uv.lock` and smoke-tested green on the 5090, the `nvidia/GR00T-N1.7-3B` base
 > checkpoint downloaded at the exact HF revision the cluster staged, and both entrypoints read off
-> the vendor tree. §6 carries the item-by-item state. **The one thing still unmeasured is whether
-> 32 GB holds the recipe** — see §6, and note that the probe that would answer it was blocked for
+> the vendor tree. §6 carries the item-by-item state. Then the corpus was converted (§6) and **the
+> pre-registered T-39 dry run ran green end to end on this box** (§7): 362-episode subset, holdout
+> proven excluded, upstream's own normalization stats, the offline processor call that killed
+> cluster job 187802, and an AC-04 witness. **The one thing still unmeasured is whether 32 GB holds
+> the recipe** — see §6 question 3, and note the probe that would answer it was blocked for
 > permission, not skipped.
 
 **Why this page exists.** `PR-07 §8` items 4–6 have blocked T-39 since 2026-08-06, and all three
@@ -274,19 +277,87 @@ clone and a download.
    *blocked*, not as *skipped* — the difference matters, because a page that quietly omitted it
    would read as though 32 GB had been checked.
 
-### What is still genuinely missing for a local T-39
+### The converted corpus — built, 2026-08-16
 
-Not an item 4–6 blocker, but the next thing that bites: **the converted WAM corpus is not on this
-disk.** `70_train_t39_baseline.sbatch` passes two dataset paths — `--dataset` (the raw LeRobot
-source the trainer eats, present at `~/wam-t041/raw/GR00T-N1.7-AppleToPlate`) and `--wam-dataset`
-(the converted WAM episodes the snapshot hash is taken over). Only the first exists here; there is
-no local `gr00t-apple-full`. Without the second, `run_metadata.json` cannot be written in the shape
-`eval_t16.verify_split` consumes, and `71_eval_t39_control.sbatch` will refuse to score the result —
-correctly. Conversion is explicitly allowed ahead of T-39 and is the obvious next task.
+`70_train_t39_baseline.sbatch` passes **two** dataset paths, and only one of them was here:
+`--dataset` (the raw LeRobot source the trainer eats) and `--wam-dataset` (the converted WAM
+episodes the snapshot hash is taken over). The second now exists:
+
+```bash
+.venv/bin/python scripts/convert_lerobot_g1.py \
+    --source ~/wam-t041/raw/GR00T-N1.7-AppleToPlate \
+    --out datasets/gr00t-apple-full --episodes 402
+```
+
+402 episodes, 83 MB, 2 min 21 s, `legacy` gripper mapping **left at its default on purpose** — the
+converter retains it precisely so a re-run reproduces the dataset `runs/t16-lora-seed0`'s
+`dataset_snapshot_ref` is pinned to (`docs/benchmark.md:333` calls that directory immutable). The
+mapping is documented as wrong on this corpus and that is a separate, already-recorded finding
+(T-31); changing it here would silently make T-39 incomparable to every other number in the repo.
+`legacy_clipped_frac` did not rail, so the converter's refusal gate did not fire.
+
+FFmpeg prints `Your platform doesn't support hardware accelerated AV1 decoding` per episode. It is
+noise — software decode succeeds, and the output was checked rather than assumed: the written
+`ego.mp4` is 590 frames of h264 `160×120 yuv420p`, decodes through torchcodec, and frame 0 differs
+from the midpoint frame (so it is not a stuck or blank stream).
 
 ---
 
-## 7. Unrelated, found while measuring — headless rendering
+## 7. The T-39 dry run — green, locally, for the first time
+
+`73_dryrun_t39_subset.sbatch` exists to run everything in `70_*` that needs no GPU, so that a defect
+costs zero GPU-hours. Its local equivalent has now run end to end:
+
+```
+=== T-39 positive control (t39-baseline-seed0)
+    model      nvidia/GR00T-N1.7-3B  <- …/snapshots/2fc962b9…
+    train      362 episodes from i8_train_362.txt
+    holdout    40 episodes, excluded and NOT in the subset
+    subset     runs/t39-baseline-seed0/lerobot_subset (362 parquet, 362 mp4)
+    stats      new_embodiment over the subset, not the source
+    snapshot   sha256:6b8fe849cae1f22e13a89d6c2f1a16e855420095ce9142ebc7b819221b4166c2
+    witness    runs/t39-baseline-seed0/run_metadata.json (config 3749547d09b9)
+--dry-run: subset and witness written, trainer NOT invoked
+```
+
+The three failure modes that sbatch's header names as *"all quiet"* — a modality key `modality.json`
+does not define, `action_configs=None` making `generate_rel_stats` return early, a `delta_indices`
+horizon the parquet cannot serve — **none of them fired.** `meta/relative_stats.json` is present and
+correctly shaped: `left_arm` and `right_arm` at `mean shape [16, 7]`, which is the 16-step relative
+horizon over 7 arm joints, i.e. the arms-are-relative design actually took effect rather than
+silently degrading to absolute.
+
+**The processor probe passes offline too.** That is the call that killed cluster job 187802 at
+158 s: `build_processor("nvidia/Cosmos-Reason2-2B")` → `Qwen3VLProcessor.from_pretrained`, inside
+which transformers' `_patch_mistral_regex` calls `huggingface_hub.model_info()` on the *name*. With
+`GROOT_PATCH_MISTRAL=1` and `HF_HUB_OFFLINE=1` it returns `Qwen3VLProcessor` from the staged cache.
+
+The witness is AC-04-shaped: `checkpoint_ref` `nvidia/GR00T-N1.7-3B`, `dataset_snapshot_ref`
+`sha256:6b8fe849…`, `config_hash 3749547d…`, `git_commit`, `schema_version 0.1.0`,
+`interfaces_version 0.3.0`, and the ordered 362 `train_episode_ids` `eval_t16.verify_split` needs to
+prove the holdout unseen.
+
+> **One bug, found by running it: the driver requires ABSOLUTE paths.**
+> `scripts/train_t39_baseline.py:292` builds `stats_script = vendor_root / "gr00t/data/stats.py"`
+> and then `:316` runs it with `cwd=vendor_root`, so a *relative* `--vendor-root` is joined twice:
+> `third_party/isaac-gr00t/third_party/isaac-gr00t/gr00t/data/stats.py`, and the run dies with
+> `exited 2 — refusing to train against a dataset whose normalization statistics were not written`.
+> `--dataset-path` has the same exposure. It never surfaced on Discoverer+ because every path there
+> is an absolute `${PROJ}/…`. **Not fixed here** — that file has uncommitted concurrent changes; the
+> workaround is to pass absolute paths, which is what the sbatch already does.
+
+Also worth correcting against the first pass: `73_dryrun_t39_subset.sbatch:73` **already named**
+`gr00t/experiment/launch_finetune.py`. Item 6 was not open because nobody had written a plausible
+value down — it was open because PR-07 required one *verified from a primary source*, and an
+unverified value in our own sbatch is exactly what item 5 says a default is not. The value was
+right; it is now also confirmed. `train_t39_baseline.py:5`'s example was the one that was wrong.
+
+**What this leaves.** Every non-GPU stage of T-39 is now exercised on this box and green. The only
+thing between here and a local run of record is §6 question 3 — whether 32 GB holds it.
+
+---
+
+## 8. Unrelated, found while measuring — headless rendering
 
 `MUJOCO_GL=egl` is **required** on this box. Without it MuJoCo defaults to GLFW, which needs an X
 display this machine's shells do not have:
