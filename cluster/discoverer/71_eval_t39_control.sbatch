@@ -45,6 +45,22 @@ export PATH=${VIRTUAL_ENV}/bin:${PATH}
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+
+# GROOT_PATCH_MISTRAL=1 — the same export 70_train_t39_baseline.sbatch carries, and it was missing
+# here. NO THRESHOLD MOVED: this is an environment variable, not a constant of T39_RULE_V1, and the
+# rule block below is untouched. Recorded rather than quietly patched, per this file's own header.
+#
+# Why it is needed: the policy arm loads the processor through AutoProcessor.from_pretrained, and
+# transformers' _patch_mistral_regex calls huggingface_hub.model_info() on the model NAME during
+# tokenizer construction. Under HF_HUB_OFFLINE=1 that raises. Job 187802 died on exactly this at
+# 158 s, and job 187813 died on it again here — after both oracle arms had already reported, which
+# is why the two G0 numbers in that run are sound and only the policy arm is missing.
+#
+# It is upstream's own env-gated wrapper and is weight-neutral: its _safe path returns the tokenizer
+# untouched for any name that is a directory or lacks "mistral". It is NOT one of the two forbidden
+# escape hatches (GROOT_HF_LOCAL_FIRST / GROOT_SKIP_HF_MODEL_WEIGHTS), which zero the model.
+export GROOT_PATCH_MISTRAL=1
+export NO_ALBUMENTATIONS_UPDATE=1
 export WAM_GIT_COMMIT=$(cat "${PROJ}/wam/GIT_COMMIT" 2>/dev/null || true)
 
 nvidia-smi -L
@@ -89,20 +105,16 @@ common=(
   --device cuda
 )
 
-# Only the two POLICY arms need these; the oracle arms deliberately load no model at all, which is
-# why they can run first and veto the experiment for the price of reading parquet. No defaults, the
-# same rule as MODEL_ID (PR-07 §8) — the vendored inference API was never verified from a primary
-# source, so the operator states it and it is recorded in every arm's timing.json.
-POLICY_ENTRYPOINT=${POLICY_ENTRYPOINT:?set POLICY_ENTRYPOINT to 'module.path:factory' — see scripts/eval_t39_baseline.py}
-MODEL_DIR=${MODEL_DIR:?set MODEL_DIR to the staged weights used by 70_train_t39_baseline.sbatch}
-policy=(
-  --policy-entrypoint "${POLICY_ENTRYPOINT}"
-  --model-dir "${MODEL_DIR}"
-  --vendor-root "${PROJ}/wam/third_party/isaac-gr00t"
-)
-
 # -- G0 first. The oracle arms can VOID the whole experiment, and they cost no policy forward
 # passes at all, so they run before the thing they are able to invalidate. PR-07 §4.
+#
+# POLICY_ENTRYPOINT/MODEL_DIR ARE RESOLVED BELOW, NOT HERE. They used to be `:?`-required at this
+# point, which quietly contradicted the design: with either one unset the job died before G0a, so
+# the veto that is supposed to cost nothing could not be obtained at all without first having a
+# post-trained checkpoint and a written inference shim. `scripts/eval_t39_baseline.py` already
+# gets this right — it only demands them for `--arm policy` (see its argument check). Resolving
+# them after G0b means an operator with neither can still run the two oracle arms, read the VOID
+# gates, and stop; the job then exits non-zero on the missing variable with both reports on disk.
 echo "=== G0a oracle_state — the holdout's future EXECUTED STATES through the adapter."
 echo "===     This is the identity of our own label pipeline. Anything but ~perfect is OUR bug."
 python "${EVAL}" "${common[@]}" --arm oracle_state --out "${OUT}/eval-t39-oracle-state"
@@ -111,6 +123,28 @@ echo "=== G0b oracle_action — the holdout's native ACTION COLUMN through the a
 echo "===     This is the CEILING for any policy trained on that column. If it fails L1, no such"
 echo "===     policy can clear our bar and the finding is about our labels, not about GR00T."
 python "${EVAL}" "${common[@]}" --arm oracle_action --out "${OUT}/eval-t39-oracle-action"
+
+# T39_ORACLE_ONLY=1 stops here, cleanly and on purpose: the two gates above are the cheap veto,
+# and reading them before spending a GPU hour is the whole shape of PR-07 §4. The verdict block at
+# the end of this file needs all four arms, so it is not reached in this mode.
+if [[ "${T39_ORACLE_ONLY:-0}" == "1" ]]; then
+  echo "=== T39_ORACLE_ONLY=1 — oracle arms complete. Reports:"
+  echo "===   ${OUT}/eval-t39-oracle-state"
+  echo "===   ${OUT}/eval-t39-oracle-action"
+  echo "=== No policy arm, no verdict. Re-run without T39_ORACLE_ONLY once a policy exists."
+  exit 0
+fi
+
+# No defaults, the same rule as MODEL_ID (PR-07 §8) — the vendored inference API was never
+# verified from a primary source, so the operator states it and it is recorded in every arm's
+# timing.json.
+POLICY_ENTRYPOINT=${POLICY_ENTRYPOINT:?set POLICY_ENTRYPOINT to 'module.path:factory' — see scripts/eval_t39_baseline.py}
+MODEL_DIR=${MODEL_DIR:?set MODEL_DIR to the staged weights used by 70_train_t39_baseline.sbatch}
+policy=(
+  --policy-entrypoint "${POLICY_ENTRYPOINT}"
+  --model-dir "${MODEL_DIR}"
+  --vendor-root "${PROJ}/wam/third_party/isaac-gr00t"
+)
 
 echo "=== THE HEADLINE — the post-trained policy on the 40-episode holdout it never saw"
 python "${EVAL}" "${common[@]}" "${policy[@]}" --arm policy --out "${OUT}/eval-t39-holdout"
