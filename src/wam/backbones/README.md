@@ -1,6 +1,6 @@
 # `wam.backbones` — video backbones behind one interface
 
-**TL;DR** — Three interchangeable implementations of `BackboneAdapter` (FR-09/AC-05). Swapping
+**TL;DR** — Four interchangeable implementations of `BackboneAdapter` (FR-09/AC-05). Swapping
 one for another must not change the data schema or the robot API. Nothing here is hard-wired
 anywhere else — construct via `get_backbone(name, **cfg)`.
 
@@ -12,6 +12,7 @@ anywhere else — construct via `get_backbone(name, **cfg)`.
 | `tiny.py` | `tiny` — self-contained patchify transformer | **fully functional** |
 | `wan_i2v.py` | `wan2.1-i2v` — diffusers-backed open fallback | functional, needs weights |
 | `flux3.py` | `flux3-dev` — preferred backbone | stub, blocked on OD-06 |
+| `cosmos3_edge.py` | `cosmos3-edge` — edge sub-project target | skeleton, weights not staged |
 
 Factories import their module lazily, so listing or constructing a torch-free skeleton never
 pulls in torch. Construction never downloads weights.
@@ -88,3 +89,32 @@ Protocol-conformant placeholder. `name` and `feature_dim` work; everything else 
 the backbone-swap tests exercise a third name today. `feature_dim` defaults to 4096 — a
 placeholder, constructor-overridable, so downstream shape plumbing can already be tested. The
 planned integration surface is documented in the module docstring.
+
+## `cosmos3_edge.py`
+
+`nvidia/Cosmos3-Edge-Policy-DROID` (default) / `nvidia/Cosmos3-Edge` (base) — the 4B checkpoint
+`subprojects/edge-wam/` is built around. Torch- and diffusers-free at import; `load()` does the
+heavy lifting and raises an actionable `RuntimeError` until a ~9.2 GB snapshot is staged.
+
+`Cosmos3EdgeConfig` is a **stdlib frozen dataclass, deliberately not in the `BackboneConfig`
+union** — post-training a Cosmos 3 embodiment row is unpriced (E-02), so no training config may
+select this backbone yet. Verified constants: hidden size 2048 over 28 layers, global
+`action_dim` 64 shared by all embodiments, 32 embodiment rows, BF16 only.
+
+Three methods refuse instead of guessing, each naming what would settle it:
+
+- `condition_state()` — **always** raises. Neither `Cosmos3OmniPipeline.__call__` nor
+  `Cosmos3OmniTransformer.forward` has a proprioception input, even though NVIDIA's DROID
+  recipe trains with `use_state=true`. A fabricated state slot would run cleanly on nothing.
+- `features()` — raises "weights missing" unloaded, `NotImplementedError` loaded: the readout
+  *width* is known (2048), the readout *depth* is not, and Cosmos 3 publishes no recipe.
+- `require_raw_action_dim()` — raises until `raw_action_dim` is set explicitly. diffusers 0.39.0
+  says 10 for `droid_lerobot`; the model card says 8. `Cosmos3EdgeConfig.raw_action_dim` has no
+  default on purpose.
+
+`condition_text()` models E-01 honestly: text is **structurally required** (`prompt` is a
+required positional, `text_tokenizer` a required component, and action tokens cross-attend to
+text in every layer), so `""` is a *degraded* case rather than a null path and must be opted
+into with `allow_empty_instruction=True`. For a single-task MVP, pass a constant correct
+sentence. `condition_video()` selects the current frame (the last of the history) — Cosmos 3
+policy mode conditions on one image — and is weights-free.

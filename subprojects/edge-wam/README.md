@@ -22,20 +22,35 @@ the same forward pass.
 So the design is:
 
 > **image → action is an *interface* choice, not an architecture choice.** We simply do not decode
-> the video head. The world modelling stays, on-device, at 15 Hz. Removing it would leave a VLA,
-> which is the thing this project exists to be an alternative to.
+> the video head. The world modelling stays on-device. Removing it would leave a VLA, which is the
+> thing this project exists to be an alternative to.
+
+**Amended 2026-08-16, by E-01 and E-03 — two clauses of that paragraph did not survive contact
+with the code and the model cards.**
+
+- **"no VLA" holds as an interface, not as an architecture.** The caller supplies no language, but
+  the text tower and tokenizer stay resident: `text_tokenizer` is a required pipeline component,
+  `input_ids`/`und_len` are required positionals of `forward`, and a probe showed that changing
+  *only* the text tokens moves the predicted action. **Text reaches the action head**, not just the
+  video branch. The cheap route is a **constant** instruction, not an empty one. E-01.
+- **"at 15 Hz" was never ours to claim.** 15 Hz is published for exactly one part — Jetson AGX Thor
+  T5000 128 GB — and the next SKU down misses it. `Jetson AGX Orin` does not appear on the *policy*
+  variant's tested-hardware list at all. E-03.
 
 Full primary-source pass, with what is verified and what is not:
 [`research/2026-08-15-cosmos3-edge-and-dreamzero.md`](research/2026-08-15-cosmos3-edge-and-dreamzero.md).
 
-## State — 2026-08-15
+## State — 2026-08-16
 
-Nothing has run. The sub-project is five open questions and a gate.
+**E-01 and E-02 have reported; E-03 is answered except for the one part only a human can answer.**
+The code path exists: `wam.backbones.cosmos3_edge` (registry-constructible, no weights, no torch at
+module scope) and `wam.robot.g1_dex3_28` (the 28-dim ↔ canonical mapping) are in the shared tree
+with tests. No training has run and none may — T-39 still gates that.
 
 | | |
 |---|---|
-| model chosen | `Cosmos3-Edge` 4B — **not yet staged, not yet downloaded** |
-| target hardware | Jetson AGX Orin / Thor **[?] — we may not own one; E-03 establishes this** |
+| model chosen | `Cosmos3-Edge` 4B — **not yet staged, not yet downloaded**; 9.14 GB resident, measured from the safetensors headers |
+| target hardware | **[?] still open, and it is a purchasing question, not a research one.** `Jetson AGX Orin` is *absent* from the policy variant's tested-hardware list; the local RTX 5090 fits inference **and** LoRA |
 | training hardware | Discoverer+ (`ehpc-aif-2026pg01-905`), 4 875 of 5 000 GPU-h left |
 | blocked by | **T-39** for any training run |
 | corpus for a G1 embodiment | **3 152 episodes at `action float32[28]`** exist and are reachable (see below) |

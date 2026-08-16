@@ -3,7 +3,7 @@ id: E-01
 subproject: edge-wam
 title: "Can the Edge policy run without language, or is 'no VLA' a re-training job?"
 slug: can-the-edge-policy-run-without-language
-status: todo
+status: review
 priority: 1
 owner: ''
 tags:
@@ -16,8 +16,8 @@ blocks:
 - E-05
 - E-06
 created: 2026-08-15
-updated: 2026-08-15
-status_note: "Not started. No GPU needed to answer the first half (read the config schema and the inference entrypoint); a smoke run answers the second. This is the premise of the whole sub-project, so it goes first."
+updated: 2026-08-16
+status_note: "Verdict delivered 2026-08-16: outcome 2, accepted_but_degrades — text reaches the action head; 'constant instruction' works, 'empty' is off-distribution. AC-2 (GPU smoke run) still open."
 ---
 
 # Can the Edge policy run without language?
@@ -62,4 +62,58 @@ Any post-training run. This task reads and smoke-tests only.
 
 ## Notes / Report
 
-*(empty — fill in when the task runs; record the verdict, the file:line evidence, and the date)*
+**2026-08-16 — verdict: outcome 2, `accepted_but_degrades`.** Answered from code, in
+`diffusers 0.39.0` as installed (`.venv/.../pipelines/cosmos/pipeline_cosmos3_omni.py`,
+`.../models/transformers/transformer_cosmos3.py`), not from the model card. Independently
+re-verified by a second agent told to refute it: **not refuted, high confidence** — every code
+citation reproduced, corrections were line-number offsets only.
+
+**Outcome 3 is ruled out.** `prompt=""` is accepted: `check_inputs` only type-checks it
+(`pipeline_cosmos3_omni.py:963-966`; `None` raises, `""` passes). In action mode the string
+becomes the `description` field of the structured action-JSON caption and an empty description
+is emitted verbatim — confirmed by executing `_build_action_json_prompt('')`. A probe on the
+real `Cosmos3OmniTransformer` (CPU, tiny random init, `action_gen=True`) ran with `und_len=0`
+— zero text tokens — and returned a well-formed action prediction. Nothing crashes.
+
+**Outcome 1 is ruled out too, on two counts.**
+1. *Structurally, text is never absent from the plumbing.* `text_tokenizer` is a required
+   pipeline component (`:366`, not in `_optional_components`); `input_ids`/`text_indexes`/
+   `und_len` are required positionals of `forward` with no `None` branch
+   (`transformer_cosmos3.py:554-559`); the chat template plus two special tokens guarantee
+   `und_len >= 3` on every call even with an empty prompt (`:1128-1146`). Every generation
+   token — vision **and action** — cross-attends to the text keys/values in every layer
+   (`transformer_cosmos3.py:82-94, 683-692`). A probe holding vision, action latents, timestep
+   and seed fixed and changing **only** the text token ids moved the predicted action by
+   `max|Δ| = 0.787`: **text reaches the action head, not just the video branch.**
+2. *Behaviourally, NVIDIA's own numbers price it.* On RoboLab the Edge policy scores
+   **15.4 / 22.9 / 28.8 %** overall success for vague / default / specific instructions — a
+   ~47 % relative collapse from merely making the sentence less specific. All 120 RoboLab
+   tasks are language-conditioned; there is no no-language condition, so the empty case is
+   **unmeasured by the vendor**.
+
+**The refinement that matters for this sub-project: "empty" and "constant" are different
+bets.** With `prompt=""` the conditional stream is a metadata-only caption and the
+unconditional stream is the null string, so CFG amplifies only metadata and no task semantics
+survive — the policy falls back to its unconditional prior. A single **constant, task-correct**
+instruction is in-distribution and should land near the "Default" column at ~zero cost; a
+**truly empty** one is off-distribution and should be expected at or below the 15.4 % "Vague"
+number. Edge-WAM's MVP is one pick-and-place task, so the constant-instruction route is
+available and cheap — but it is a language-conditioned policy with a frozen sentence, which is
+an honest description the README should adopt.
+
+**Consequence for the premise.** "Image in, action out" survives as an *interface* — the caller
+supplies no language — but "no VLA" does not survive as an *architecture* claim: the text tower
+and tokenizer stay resident on the robot. `Cosmos3EdgeAdapter.condition_text` therefore models
+text as **constant, not absent** (`src/wam/backbones/cosmos3_edge.py`).
+
+**Acceptance: 1 ✅ (input contract from code), 3 ✅ (verdict + file:line), 4 ✅ (outcome 2 → E-05
+must pre-register it). AC-2 ❌ — no GPU smoke run; weights were deliberately not downloaded.**
+That is the one thing outstanding, and it is what would separate outcome 1 from outcome 2
+empirically: one DROID episode through the real checkpoint at `prompt=""` vs the true
+instruction, comparing emitted action chunks. Now feasible locally (see E-03).
+
+**Open [?] carried forward:** the served path NVIDIA supports is cosmos-framework / vLLM-Omni,
+not the diffusers pipeline everything above was read from; whether a zero-length `und` segment
+survives a fused/flash attention backend is untested (the probe used the default backend); and
+whether the policy was post-trained with the same 10 % text-dropout as pre-training is not
+stated — if it was not, the unconditional prior may be weaker than assumed.

@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from wam.backbones import available_backbones, get_backbone
+from wam.backbones.cosmos3_edge import Cosmos3EdgeAdapter
 from wam.backbones.flux3 import Flux3Adapter
 from wam.backbones.tiny import TinyBackboneConfig, TinyVideoBackbone
 from wam.backbones.wan_i2v import WAN_DIT_HIDDEN_DIM, WanI2VAdapter
@@ -49,7 +50,7 @@ def make_video(batch: int | None = 2, dtype=np.uint8) -> np.ndarray:
 
 
 def all_adapters() -> list[BackboneAdapter]:
-    return [make_tiny(), WanI2VAdapter(), Flux3Adapter()]
+    return [make_tiny(), WanI2VAdapter(), Flux3Adapter(), Cosmos3EdgeAdapter()]
 
 
 # ---- protocol / signature conformance (all three) ----------------------------------------
@@ -72,7 +73,7 @@ def test_signature_conformance_all_adapters():
 
 def test_adapter_names_are_distinct():
     names = {a.name for a in all_adapters()}
-    assert names == {"tiny", "wan2.1-i2v", "flux3-dev"}
+    assert names == {"tiny", "wan2.1-i2v", "flux3-dev", "cosmos3-edge"}
 
 
 # ---- tiny: end-to-end feature extraction --------------------------------------------------
@@ -254,12 +255,13 @@ def test_flux3_stub_raises_pending():
 
 
 def test_registry_lists_and_constructs_all():
-    assert available_backbones() == ("flux3", "tiny", "wan_i2v")
+    assert available_backbones() == ("cosmos3_edge", "flux3", "tiny", "wan_i2v")
     torch.manual_seed(0)
     tiny = get_backbone("tiny", **TINY_CFG)
     assert isinstance(tiny, TinyVideoBackbone) and tiny.feature_dim == 32
     assert isinstance(get_backbone("wan_i2v"), WanI2VAdapter)
     assert isinstance(get_backbone("FLUX3"), Flux3Adapter)  # case-insensitive
+    assert isinstance(get_backbone("cosmos3_edge"), Cosmos3EdgeAdapter)
     for name in available_backbones():
         torch.manual_seed(0)
         assert isinstance(get_backbone(name), BackboneAdapter)

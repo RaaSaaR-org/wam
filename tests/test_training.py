@@ -1232,7 +1232,7 @@ class TestBuildBackbone:
         # every adapter by name.
         from wam.backbones import available_backbones
 
-        assert available_backbones() == ("flux3", "tiny", "wan_i2v")
+        assert available_backbones() == ("cosmos3_edge", "flux3", "tiny", "wan_i2v")
 
 
 # -- backbone swappability (FR-09): module injection ------------------------------------------

@@ -51,10 +51,22 @@ def _make_flux3(**cfg: Any) -> BackboneAdapter:
     return Flux3Adapter(**cfg)
 
 
+def _make_cosmos3_edge(**cfg: Any) -> BackboneAdapter:
+    from wam.backbones.cosmos3_edge import Cosmos3EdgeAdapter, Cosmos3EdgeConfig
+
+    config = cfg.pop("config", None)
+    if config is not None:
+        if cfg:
+            raise TypeError(f"pass either config= or field kwargs, not both: {sorted(cfg)}")
+        return Cosmos3EdgeAdapter(config)
+    return Cosmos3EdgeAdapter(Cosmos3EdgeConfig(**cfg) if cfg else None)
+
+
 _FACTORIES: dict[str, Callable[..., BackboneAdapter]] = {
     "tiny": _make_tiny,
     "wan_i2v": _make_wan_i2v,
     "flux3": _make_flux3,
+    "cosmos3_edge": _make_cosmos3_edge,
 }
 
 
@@ -64,9 +76,10 @@ def available_backbones() -> tuple[str, ...]:
 
 
 def get_backbone(name: str, **cfg: Any) -> BackboneAdapter:
-    """Construct a backbone adapter by name ('tiny' | 'wan_i2v' | 'flux3'); ``cfg`` is passed
-    to the factory. Raises ValueError for unknown names. Construction never downloads weights
-    (wan_i2v/flux3 load lazily and raise until their integrations land)."""
+    """Construct a backbone adapter by name ('tiny' | 'wan_i2v' | 'flux3' | 'cosmos3_edge');
+    ``cfg`` is passed to the factory. Raises ValueError for unknown names. Construction never
+    downloads weights (wan_i2v/flux3/cosmos3_edge load lazily and raise until their
+    integrations land)."""
     key = name.lower()
     factory = _FACTORIES.get(key)
     if factory is None:

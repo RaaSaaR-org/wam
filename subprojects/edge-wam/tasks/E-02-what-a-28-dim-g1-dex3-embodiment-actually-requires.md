@@ -3,7 +3,7 @@ id: E-02
 subproject: edge-wam
 title: "What adding a 28-dim G1/Dex3 embodiment actually requires"
 slug: what-a-28-dim-g1-dex3-embodiment-actually-requires
-status: todo
+status: done
 priority: 1
 owner: ''
 tags:
@@ -17,8 +17,8 @@ blocks:
 - E-05
 - E-06
 created: 2026-08-15
-updated: 2026-08-15
-status_note: "Not started. Reading task, no GPU. The answer sets the size of the whole sub-project: a config entry is days, a new action head plus post-training is months."
+updated: 2026-08-16
+status_note: "Answered 2026-08-16: one new row in a 32-row trained table; 28<=64 so no architecture change. Measured from the weights — the released POLICY checkpoint has only ONE trained row (droid), AgiBot included in the untrained ones; warm start must come from the base."
 ---
 
 # What adding a 28-dim G1/Dex3 embodiment actually requires
@@ -73,4 +73,68 @@ consequence.)
 
 ## Notes / Report
 
-*(empty — fill in when the task runs)*
+**2026-08-16 — verdict: `new_action_head_plus_post_training`, but read the shape of it: the
+architecture already fits us with room to spare; the weights do not exist and must be earned.**
+A 28-dim G1/Dex3 embodiment is **one new row in an existing 32-row weight table**, trained by
+post-training. Independently re-verified by an agent told to refute it: **not refuted, high
+confidence**; the weights measurement reproduced by two independent routes.
+
+**1. The width question is settled and favourable — this kills `architecture_change`.**
+The action head is *not* per-embodiment-width. There is ONE global `action_dim = 64` for the
+whole model, identical in base and policy `transformer/config.json`; the training config names
+the same quantity `max_action_dim: 64`. Narrower domains are zero-padded on the channel axis
+and predictions sliced back down (`pipeline_cosmos3_omni.py:861-869`, `:1769-1770`), with a
+hard error above 64 (`:772-776`). **28 ≤ 64, so no tensor is resized and no module is added.**
+The 57-D `hand_pose` embodiment already rides the same head.
+
+**2. The mechanism is a learned table row — this kills `config_entry`.**
+Embodiment = *string* → *domain id* → *row index* into two `nn.Embedding` tables inside
+`DomainAwareLinear` (`transformer_cosmos3.py:154-177`, instantiated `:381-382`). The name→id
+map is ordinary Python (`cosmos_framework/.../domain_utils.py`), free to extend, with 14
+unassigned ids. The id→weights are **trained parameters**. Claiming a free row is a dict edit;
+making it emit G1 actions is not.
+
+**3. The measurement — and it kills the AgiBot warm-start hope where we assumed it lived.**
+Per-output-channel norms of each domain row against the untrained-row noise floor recover every
+embodiment's trained width. Reproduce in ~30 s, no checkpoint download (header + one 8 MB
+tensor over HTTP Range):
+
+```
+.venv/bin/python scripts/probe_cosmos3_domain_rows.py nvidia/Cosmos3-Edge
+.venv/bin/python scripts/probe_cosmos3_domain_rows.py nvidia/Cosmos3-Edge-Policy-DROID
+```
+
+Run on both 2026-08-16. The recovered widths reproduce NVIDIA's **published table exactly** —
+av 9, camera_pose 9, hand_pose 57, umi/bridge/droid/robomind-ur/fractal 10, franka-dual 20,
+agibotworld 29 — which is what makes the next line credible rather than merely asserted:
+
+- **base `Cosmos3-Edge`: 10 of 32 rows trained**, `agibotworld` at width 29 among them.
+- **released `Cosmos3-Edge-Policy-DROID`: exactly ONE row trained — d8 (droid), width 8.**
+  Every other row, **`agibotworld` included, is back at random init.**
+
+So the "start from the supported 29-D humanoid" route is **not available from the policy
+checkpoint**. It exists only in the base. Any G1 post-training that wants a humanoid warm start
+must start from `nvidia/Cosmos3-Edge`, not from the policy variant — and that is a decision
+E-05 has to pre-register, because the two have different action heads.
+
+**4. Two facts that make G1 a better fit than expected.** The DROID policy's action space is
+**absolute joint position** (`action_space=joint_pos`, 8-D incl. gripper, un-normalized, with
+`use_state` proprioception) — joint-space policies are a first-class supported mode, which is
+exactly what our canonical space is. Conversely **AgiBot's 29-D is end-effector pose**
+(9-D ego + 2×(9-D EE pose + 1-D gripper)) obtained by forward kinematics, *not* a joint vector
+— so its 29-D is not the near-neighbour of our 28-D that the README implied. Its arm state
+slice is nonetheless `slice(0, 14)`, 7 joints per arm, structurally identical to G1_Dex3's arm
+block.
+
+**Correction to the cost estimate carried into E-05/E-06:** the 256-GPU reference run cited in
+NVIDIA's post-training recipe is for **Cosmos3-Nano (16B)**, not the 4B Edge target. Do not
+size our allocation against it.
+
+**Consequence, implemented:** `src/wam/robot/g1_dex3_28.py` is the 28-dim ↔ canonical mapping,
+and `Cosmos3EdgeConfig` deliberately registers **no** G1 embodiment — per the above, a row that
+is not trained is not an embodiment, and naming one would be the fabrication this project is
+organised against.
+
+**Open [?]:** diffusers pins `_EMBODIMENT_TO_RAW_ACTION_DIM['droid_lerobot'] = 10` while the
+released checkpoint trained only 8 channels — 10 ≠ 8. `Cosmos3EdgeConfig.raw_action_dim` has no
+default and raises until a forward pass or cosmos-framework source settles it.
