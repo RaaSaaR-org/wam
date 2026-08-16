@@ -165,6 +165,7 @@ def test_mutant_shifting_the_anchor_too_is_not_what_we_do(fixture):
             out[int(t_ns)] = eval_t39.commanded_to_chunk(
                 action[start : start + CHUNK_STEPS],
                 state[start],  # <-- THE MUTATION: the anchor moves too
+                anchor_kind="state",
                 dt_s=DT_S,
                 mapping=mapping,
                 convert=convert,

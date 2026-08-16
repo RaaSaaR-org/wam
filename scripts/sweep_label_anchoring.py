@@ -118,6 +118,7 @@ def delayed_oracle_action_chunks(
         chunks[int(t_ns)] = eval_t39.commanded_to_chunk(
             action[start : start + chunk_steps],
             state[index],
+            anchor_kind="state",
             dt_s=float(chunk.dt_s),
             mapping=mapping,
             convert=convert,

@@ -733,3 +733,79 @@ def test_an_estop_landing_mid_chunk_stops_the_stream_and_leaves_no_carry() -> No
     q_before = float(fake.q[motor])
     adapter.execute(make_chunk(np.zeros((1, G1_SPEC.num_joints), dtype=np.float32)), 1)
     assert float(fake.motor_commands[0]["q_target"][motor]) == pytest.approx(q_before, abs=1e-6)
+
+
+def test_the_control_law_is_a_named_label_convention_and_the_window_selects_which() -> None:
+    """The runtime makes the SAME command-vs-state anchoring choice the eval adapter makes.
+
+    PR-12 (verdict ``C``) found that ``scripts/eval_t39_baseline.py``'s ``commanded_to_chunk``
+    built a chunk's step 0 as ``command - STATE`` while every other step was
+    ``command - command``, and that this single heterogeneous element carried ~90 % of the summed
+    per-step MSE. ``docs/preregistration/PR-12-RESULT.md`` then deliberately DEFERRED the runtime:
+
+        "There may be a separate step-0 question in prefix execution, but it is a different
+        question and must not be smuggled in under this one's name."
+
+    This is that question, answered, and the answer is that ``q_track_window`` IS the knob:
+
+    - ``w = 0``  -> ``_carry_in`` collapses to ``q_meas`` (``g1.py:342`` with a zero window), so
+      the chunk is integrated onto MEASURED STATE. Step 0 is state-anchored and steps 1.. chain
+      off the command. That is structurally ``anchor_kind="state"``.
+    - ``w`` large -> the carry survives the clamp and the chunk is integrated onto the PREVIOUS
+      COMMAND at every step. That is structurally ``anchor_kind="command"`` / V-chain.
+
+    **The two differ by the standing tracking error, exactly as they do in the label space.** The
+    one difference of form is where it lands: in a DELTA chunk the offset appears at step 0 and
+    only step 0 (rows 1.. cancel), while in the ABSOLUTE trajectory the integration carries it
+    forward, so every commanded position in the chunk shifts by it. Same degree of freedom, two
+    coordinate systems.
+
+    WHAT THIS TEST DOES NOT SAY. It does not say ``w = 0`` is wrong. The corpus on disk is
+    state-to-state at every step (``convert_lerobot_g1.relabel_chunks``), so ``w = 0`` is the
+    setting CONSISTENT with the labels we actually have, and ``docs/sim.md:531-535`` records why
+    hardware ships it: at ``g1.yaml``'s placeholder kp=20/kd=0.5 the arm sags ~0.17 rad, ~6x the
+    sim window, so a copied window would clamp every step. The finding this test pins is a
+    FORWARD constraint: **relabelling the corpus to V-chain without raising ``q_track_window``
+    would put a train/serve mismatch at exactly the element PR-12 showed dominates.**
+    """
+    idx, motor = CANON_IDX["left_elbow"], MOTOR_IDX["left_elbow"]
+    per_step, steps = 0.02, 4
+    deltas = np.zeros((steps, G1_SPEC.num_joints), dtype=np.float32)
+    deltas[:, idx] = per_step
+
+    def commanded_positions(window: float) -> tuple[float, float, list[float]]:
+        adapter, fake = connected_adapter(config=G1Config(**_window(window)))
+        # First chunk establishes a carry that has drifted away from measurement; without it
+        # `_q_cmd is None` and BOTH conventions trivially agree (g1.py:337-339).
+        adapter.execute(make_chunk(deltas), prefix_steps=steps)
+        q_meas = float(fake.q[motor])
+        prev_cmd = float(fake.motor_commands[-1]["q_target"][motor])
+        adapter.execute(make_chunk(deltas), prefix_steps=steps)
+        got = [float(c["q_target"][motor]) for c in fake.motor_commands[-steps:]]
+        return q_meas, prev_cmd, got
+
+    ramp = [per_step * (i + 1) for i in range(steps)]
+
+    q_meas, prev_cmd, off = commanded_positions(0.0)
+    gap = prev_cmd - q_meas
+    assert gap > 1e-4, (
+        "the fake transport tracked perfectly, so the two conventions coincide and this test "
+        "cannot separate them — the same blindness that hid the step-0 defect for a month"
+    )
+    # w = 0 -> integrated onto the MEASUREMENT.
+    for i, (got, want) in enumerate(zip(off, ramp, strict=True)):
+        assert got == pytest.approx(q_meas + want, abs=1e-6), f"step {i}"
+
+    q_meas_on, prev_cmd_on, on = commanded_positions(0.5)
+    # w large -> integrated onto the PREVIOUS COMMAND.
+    for i, (got, want) in enumerate(zip(on, ramp, strict=True)):
+        assert got == pytest.approx(prev_cmd_on + want, abs=1e-6), f"step {i}"
+
+    # ...and the separation between the two laws is EXACTLY the standing tracking error, at every
+    # step of the chunk rather than only its first — the absolute-trajectory form of the PR-12
+    # element. Computed within the w=0.5 run so both terms come from one trajectory.
+    gap_on = prev_cmd_on - q_meas_on
+    assert gap_on > 1e-4
+    for i, (got, want) in enumerate(zip(on, ramp, strict=True)):
+        state_anchored_would_be = q_meas_on + want
+        assert (got - state_anchored_would_be) == pytest.approx(gap_on, abs=1e-6), f"step {i}"

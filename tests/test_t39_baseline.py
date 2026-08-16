@@ -239,6 +239,7 @@ def _correct_chunk(recording, mapping, start: int) -> np.ndarray:
     return ev.commanded_to_chunk(
         recording["action"][start : start + CHUNK_STEPS],
         recording["state"][start],
+        anchor_kind="state",
         dt_s=DT,
         mapping=mapping,
         convert=convert,
@@ -273,6 +274,7 @@ def test_mis_anchored_deltas_are_killed(converted, recording, mapping, mutant):
         wrong = ev.commanded_to_chunk(
             action[start + 1 : start + 1 + CHUNK_STEPS],
             state[start],
+            anchor_kind="state",
             dt_s=DT,
             mapping=mapping,
             convert=convert,
@@ -281,6 +283,7 @@ def test_mis_anchored_deltas_are_killed(converted, recording, mapping, mutant):
         wrong = ev.commanded_to_chunk(
             action[start : start + CHUNK_STEPS],
             state[start + 1],
+            anchor_kind="state",
             dt_s=DT,
             mapping=mapping,
             convert=convert,
@@ -406,6 +409,7 @@ def test_commanded_to_chunk_refuses_a_wrong_width(recording, mapping):
         ev.commanded_to_chunk(
             recording["action"][:CHUNK_STEPS, :10],
             recording["state"][0],
+            anchor_kind="state",
             dt_s=DT,
             mapping=mapping,
             convert=convert,
@@ -1046,3 +1050,166 @@ def test_the_prompt_no_longer_sends_the_operator_to_the_base_weights():
         line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
     ]
     assert not [line for line in executable if "staged weights" in line]
+
+
+# ------------------------------------------------------- anchor_kind: the step-0 homogeneity fix
+#
+# PR-12 (verdict C) and PR-13 (verdict W) established that `commanded_to_chunk` built the chunk's
+# step 0 as `command - STATE` while every other step of both arms is `command - command`. That one
+# heterogeneous element carried ~90 % of the summed per-step MSE and 143x its neighbours, and
+# repairing it moved this corpus's own commanded column from -359.41 pp to +68.10 pp on T-39's own
+# holdout (docs/preregistration/PR-13-RESULT.md).
+#
+# The repair is one row. What these tests pin is not the arithmetic — it is the two properties that
+# would have made the defect visible in 2026-07 instead of 2026-08:
+#
+#   1. NO CALLER MAY PASS AN ANCHOR WITHOUT SAYING WHAT IT IS. The defect survived review because
+#      `anchor_state` accepted a state row and a command row interchangeably — both are [43] float32
+#      and no assertion can separate them. `anchor_kind` is a REQUIRED keyword for that reason and
+#      for no other; it changes no arithmetic.
+#   2. THE TWO KINDS AGREE EXACTLY UNDER THE PREMISE THE OLD CONVENTION ASSUMED. Under perfect
+#      tracking they are the same chunk, so the choice is invisible — which is precisely why it was
+#      invisible. They separate only when tracking is imperfect, and then at row 0 and ONLY row 0.
+
+
+def test_anchor_kind_is_a_required_keyword(recording, mapping):
+    """Omitting it must be a hard error, not a default.
+
+    A default is what the defect WAS: every call site silently inherited `command - state` without
+    anyone choosing it. If this test fails because someone added `anchor_kind="state"` as a default
+    for convenience, the convenience is the bug.
+    """
+    with pytest.raises(TypeError, match="anchor_kind"):
+        ev.commanded_to_chunk(
+            recording["action"][:CHUNK_STEPS],
+            recording["state"][0],
+            dt_s=DT,
+            mapping=mapping,
+            convert=convert,
+        )
+
+
+def test_anchor_kind_rejects_an_unknown_value(recording, mapping):
+    with pytest.raises(SystemExit, match="anchor_kind must be one of"):
+        ev.commanded_to_chunk(
+            recording["action"][:CHUNK_STEPS],
+            recording["state"][0],
+            anchor_kind="previous",
+            dt_s=DT,
+            mapping=mapping,
+            convert=convert,
+        )
+
+
+def _offset_recording(raw: dict[str, np.ndarray], offset: float) -> dict[str, np.ndarray]:
+    """`action[i] = state[i+1] + offset` — a constant steady-state tracking error.
+
+    This is the only thing that separates the two anchorings, and it is what a real position
+    controller under gravity load actually does: it settles a little short of what it was told.
+    """
+    shifted = dict(raw)
+    shifted["action"] = (raw["action"] + np.float32(offset)).astype(np.float32)
+    return shifted
+
+
+def test_the_two_anchor_kinds_agree_exactly_under_perfect_tracking(converted, recording, mapping):
+    """`action[i] == state[i+1]` makes `action[start-1]` and `state[start]` the SAME ROW.
+
+    So V-chain is not a different label convention under the premise the original docstring
+    argued from — it is the same chunk. That is the whole reason the defect was undetectable by
+    inspection, and pinning it here means a future change that makes the two disagree HERE is a
+    change to the convention itself, not a repair.
+    """
+    reader = _reader(converted)
+    by_state = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="state"
+    )
+    by_command = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="command"
+    )
+    shared = sorted(set(by_state) & set(by_command))
+    assert shared, "the two kinds share no chunk, so the comparison is vacuous"
+    for t_ns in shared:
+        np.testing.assert_array_equal(by_state[t_ns].targets, by_command[t_ns].targets)
+
+
+def test_a_tracking_offset_separates_them_at_row_zero_and_only_row_zero(
+    converted, recording, mapping
+):
+    """The PR-12 finding, reproduced in miniature on synthetic data.
+
+    A constant offset `c` cancels in every `command - command` difference and survives at full
+    magnitude in the single `command - state` element. So rows 1.. must be BIT-IDENTICAL and row 0
+    must differ by exactly `c` in canonical space — not approximately, exactly.
+    """
+    offset = 0.03
+    shifted = _offset_recording(recording, offset)
+    reader = _reader(converted)
+    by_state = ev.oracle_action_chunks(
+        reader, shifted, CHUNK_STEPS, mapping, convert, anchor_kind="state"
+    )
+    by_command = ev.oracle_action_chunks(
+        reader, shifted, CHUNK_STEPS, mapping, convert, anchor_kind="command"
+    )
+    shared = sorted(set(by_state) & set(by_command))
+    assert shared
+    for t_ns in shared:
+        s, c = by_state[t_ns].targets, by_command[t_ns].targets
+        np.testing.assert_array_equal(
+            s[1:], c[1:], err_msg="an offset leaked past row 0 — the chunk is not homogeneous"
+        )
+        delta = s[0] - c[0]
+        np.testing.assert_allclose(delta, np.full_like(delta, offset), rtol=0, atol=1e-6)
+        assert np.abs(delta).max() > 0, "row 0 did not move, so the two kinds are not distinct"
+
+
+def test_command_anchoring_drops_the_first_chunk_and_nothing_else(converted, recording, mapping):
+    """V-chain needs `start >= 1`, and the cost of that is not free or symmetric.
+
+    On the real corpus dropping each episode's first chunk moved the unmodified arm by 14.87 pp
+    from 40 of 1040 chunks (PR-13-RESULT). Two cells are comparable only if both were scored on
+    one set, so the size of this difference is a number a caller has to know rather than discover.
+    """
+    reader = _reader(converted)
+    by_state = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="state"
+    )
+    by_command = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="command"
+    )
+    missing = sorted(set(by_state) - set(by_command))
+    assert len(missing) == 1, f"expected exactly the episode's first chunk to drop, lost {missing}"
+    assert missing[0] == min(by_state), "the dropped chunk is not the earliest one"
+    assert not set(by_command) - set(by_state), "command anchoring invented a chunk"
+
+
+def test_the_default_is_still_the_archived_t39_convention(converted, recording, mapping):
+    """`oracle_action_chunks` must default to `state` so archived command lines reproduce.
+
+    PR-13's bridge cell reproduces PR-07's -359.41 to +0.002 pp THROUGH THIS DEFAULT. Changing it
+    silently would not fix a number; it would delete the ability to reproduce one.
+    """
+    reader = _reader(converted)
+    default = ev.oracle_action_chunks(reader, recording, CHUNK_STEPS, mapping, convert)
+    explicit = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="state"
+    )
+    assert set(default) == set(explicit)
+    for t_ns in default:
+        np.testing.assert_array_equal(default[t_ns].targets, explicit[t_ns].targets)
+
+
+def test_commanded_policy_refuses_command_anchoring_without_the_command_column(mapping):
+    with pytest.raises(SystemExit, match="needs raw_commands"):
+        ev.CommandedPolicy(
+            lambda _obs: np.zeros((CHUNK_STEPS, SOURCE_DIM), dtype=np.float32),
+            camera="ego",
+            chunk_steps=CHUNK_STEPS,
+            dt_s=DT,
+            mapping=mapping,
+            convert=convert,
+            raw_states={},
+            anchors={},
+            episode_id=EPISODE_ID,
+            anchor_kind="command",
+        )

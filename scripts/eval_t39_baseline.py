@@ -205,41 +205,72 @@ def gripper_mapping_from_manifest(manifest: Any, convert: Any) -> GripperMapping
     return GripperMapping(affine=affine, column=column)
 
 
+ANCHOR_KINDS = ("state", "command")
+
+
 def commanded_to_chunk(
     commanded: np.ndarray,
     anchor_state: np.ndarray,
     *,
+    anchor_kind: str,
     dt_s: float,
     mapping: GripperMapping,
     convert: Any,
 ) -> ActionChunk:
-    """[T, 43] COMMANDED absolute source positions + the [43] state they start from -> a chunk.
+    """[T, 43] COMMANDED absolute source positions + the [43] row they start from -> a chunk.
 
     This is the adapter, and the anchoring is the whole of it::
 
-        targets[t]        = canonical_q(commanded[t]) - canonical_q(state_at_step(t))
+        targets[t]        = canonical_q(commanded[t]) - canonical_q(from_at_step(t))
         gripper_target[t] = gripper channel of commanded[t]
 
-    with ``state_at_step(0) = anchor_state`` and ``state_at_step(t>0)`` the position the previous
-    command asked for. Why that and not something else:
+    with ``from_at_step(0) = anchor_state`` and ``from_at_step(t>0)`` the position the previous
+    command asked for.
 
-    ``convert_lerobot_g1.relabel_chunks`` builds the target as ``q[s+t+1] - q[s+t]`` — the
-    displacement the robot EXECUTED over step ``s+t``. The source ``action`` column holds the
-    absolute position the controller was TOLD to reach at step ``s+t``. Under position control
-    those are the same quantity measured at two points of one loop: the command issued at ``s+t``
-    is what produces the state at ``s+t+1``. So the commanded displacement over step ``s+t`` is
-    ``action[s+t] - q[s+t]``, and a dataset with perfect tracking (``action[i] == q[i+1]``) makes
-    the two identical. ``tests/test_t39_baseline.py`` pins exactly that, and kills the three
-    plausible mis-anchorings — ``action[t+1] - q[t]``, ``action[t] - q[t+1]`` and the
-    first-difference ``action[t+1] - action[t]`` — which all produce finite, plausible, wrong
-    numbers that no shape or range assertion catches. That is T-37's transposed-``xmat`` lesson,
-    and it is the reason the mutation test exists rather than an argument.
+    ``anchor_kind`` IS REQUIRED AND CHANGES NO ARITHMETIC. It declares which QUANTITY the caller
+    put in ``anchor_state``, and it exists because this function's one historical defect was
+    invisible for exactly as long as no caller had to say:
+
+    - ``"state"``   — a measured state row. Step 0 is then ``command - STATE`` while every
+      other step is ``command - command``. **The chunk is heterogeneous at step 0 and only
+      there**, and that is a defect, not a convention (PR-12, verdict ``C``).
+    - ``"command"`` — the PREVIOUS COMMAND row. Every step is then ``command - command``,
+      matching the homogeneous first difference the target side uses at every step
+      (``convert_lerobot_g1.relabel_chunks``: ``q[s+t+1] - q[s+t]``). This is "V-chain".
+
+    WHY THE ``"state"`` READING WAS ADOPTED, AND WHY IT IS WRONG. The source ``action`` column
+    holds the absolute position the controller was TOLD to reach at step ``s+t``; under position
+    control the command issued at ``s+t`` is what produces the state at ``s+t+1``, so the
+    commanded displacement over that step reads naturally as ``action[s+t] - q[s+t]``. Under
+    PERFECT TRACKING (``action[i] == q[i+1]``) that is identical to ``action[s+t] - action[s+t-1]``
+    and the choice is invisible. Tracking is not perfect. A steady-state tracking offset ``c``
+    cancels in every homogeneous difference and survives at full magnitude in the one
+    heterogeneous element — so step 0 carried **~90 % of the summed per-step MSE and 143x its
+    neighbours**, and repairing it moved this corpus's own commanded column from **-359.41 pp to
+    +68.10 pp** on T-39's own holdout (PR-12 / PR-13, ``docs/preregistration/PR-13-RESULT.md``).
+
+    ``"command"`` is available at inference: a policy always knows the command it last emitted.
+    It costs the chunk its only tie to measured state, which is a real trade leaning on FR-05's
+    re-observe/re-plan loop, and it is undefined for the FIRST chunk of an episode — where no
+    previous command exists and the caller must supply the state row and say ``"state"``, which
+    is exactly what ``robot/g1.py``'s ``_carry_in`` does when ``_q_cmd`` is ``None``.
+
+    ``tests/test_t39_baseline.py`` kills three plausible mis-anchorings — ``action[t+1] - q[t]``,
+    ``action[t] - q[t+1]`` and the forward first difference ``action[t+1] - action[t]`` — which
+    all produce finite, plausible, wrong numbers that no shape or range assertion catches. That is
+    T-37's transposed-``xmat`` lesson, and the reason a mutation test exists rather than an
+    argument. Note the third mutant LEADS by one step and is not ``"command"`` anchoring.
 
     Steps after the first chain through the commands rather than through unavailable future
     states: a policy emits an open-loop chunk, so by construction nothing observed the state at
     ``s+t`` for ``t > 0``. Chaining is what an open-loop chunk MEANS, and it is also what makes
     the sum of the chunk's deltas equal the total commanded displacement.
     """
+    if anchor_kind not in ANCHOR_KINDS:
+        raise SystemExit(
+            f"anchor_kind must be one of {ANCHOR_KINDS}, got {anchor_kind!r}. It declares which "
+            "quantity anchor_state holds; guessing is what made the step-0 defect invisible."
+        )
     commanded = np.asarray(commanded, dtype=np.float32)
     if commanded.ndim != 2 or commanded.shape[1] != convert.SOURCE_STATE_DIM:
         raise SystemExit(
@@ -302,6 +333,18 @@ class CommandedPolicy:
     that, once, and ``oracle_action`` calls the same function on the ground-truth column. That
     shared call is what makes the oracle a ceiling for this policy instead of a separate number
     that happens to sit nearby.
+
+    **THAT SHARED CALL IS ALSO WHY ``anchor_kind`` MUST MATCH THE ORACLE'S.** Scoring a policy
+    with ``"state"`` against an oracle measured with ``"command"`` compares a chunk carrying the
+    step-0 tracking offset against one that does not, and the ~90 %-of-MSE element (PR-12) lands
+    on the policy alone. The ceiling would stop being a ceiling.
+
+    Under ``"command"`` the anchor is the GROUND-TRUTH previous command, ``action[index - 1]``,
+    not the policy's own last output. That is deliberate and it is teacher forcing: it is the
+    same row ``oracle_action_chunks`` uses, which is what keeps the two arms one comparison.
+    Anchoring on the policy's own history would additionally measure drift compounding across
+    chunks — a real and separate question, and one the closed-loop executor asks (FR-05), not
+    this open-loop scorer.
     """
 
     def __init__(
@@ -316,7 +359,16 @@ class CommandedPolicy:
         raw_states: dict[str, np.ndarray],
         anchors: dict[tuple[str, int], int],
         episode_id: str,
+        anchor_kind: str = "state",
+        raw_commands: dict[str, np.ndarray] | None = None,
     ) -> None:
+        if anchor_kind not in ANCHOR_KINDS:
+            raise SystemExit(f"anchor_kind must be one of {ANCHOR_KINDS}, got {anchor_kind!r}")
+        if anchor_kind == "command" and raw_commands is None:
+            raise SystemExit(
+                "anchor_kind='command' needs raw_commands: the anchor is the ground-truth "
+                "previous command action[index-1], and there is nothing to read it from."
+            )
         self._infer = infer
         self._camera = camera
         self._chunk_steps = chunk_steps
@@ -326,6 +378,8 @@ class CommandedPolicy:
         self._raw_states = raw_states
         self._anchors = anchors
         self._episode_id = episode_id
+        self._anchor_kind = anchor_kind
+        self._raw_commands = raw_commands or {}
 
     def predict(self, observation: Observation) -> ActionChunk:
         images = observation.image_history or {}
@@ -362,9 +416,30 @@ class CommandedPolicy:
                 f"over {self._chunk_steps} steps. Padding the tail would score invented steps as "
                 "predictions; this is a mismatch to fix in the shim, not to absorb here."
             )
+        # `anchor` above is the MODEL'S state input and stays the measured state in both modes —
+        # the policy observes the robot, whatever the label convention is. The chunk anchor is a
+        # separate row, and conflating the two is how the model input would silently follow a
+        # label-space decision it has nothing to do with.
+        if self._anchor_kind == "command":
+            commands = self._raw_commands.get(self._episode_id)
+            if commands is None:
+                raise SystemExit(
+                    f"{self._episode_id}: anchor_kind='command' but no raw command column was "
+                    "supplied for this episode."
+                )
+            if index < 1:
+                raise SystemExit(
+                    f"{self._episode_id}: no command precedes raw index {index}, so the chunk "
+                    "cannot be anchored homogeneously. oracle_action_chunks skips these; the "
+                    "eval pairs must be built to skip them too rather than mixing conventions."
+                )
+            anchor_row = commands[index - 1]
+        else:
+            anchor_row = anchor
         return commanded_to_chunk(
             commanded[: self._chunk_steps],
-            anchor,
+            anchor_row,
+            anchor_kind=self._anchor_kind,
             dt_s=self._dt_s,
             mapping=self._mapping,
             convert=self._convert,
@@ -550,6 +625,7 @@ def oracle_action_chunks(
     offset: int = 0,
     margin: int = 0,
     co_shift: bool = False,
+    anchor_kind: str = "state",
 ) -> dict:
     """``{t_ns: chunk}`` built from the source ``action`` column via :func:`commanded_to_chunk`.
 
@@ -569,6 +645,16 @@ def oracle_action_chunks(
     as a delay. With ``margin = max|k|`` every cell of the grid is scored on one identical chunk
     set. It costs ``2*margin`` chunks per episode and it is why the sweep's own ``k = 0`` cell does
     not equal the archived −359.41 pp (PR-10 §2, written down before the grid was run).
+
+    ``anchor_kind`` DEFAULTS TO ``"state"``, which is the archived T-39 convention, so every
+    command line recorded before PR-12 still produces the number it recorded. ``"command"`` is
+    the V-chain repair and **changes the scored set**: it needs ``start >= 1``, so each episode's
+    FIRST chunk is dropped. That is not free and it is not symmetric — dropping those 40 chunks of
+    1040 moved the unmodified arm from −359.41 to −344.54, i.e. ~4 % of the set carried 14.87 pp
+    of the damage, exactly as an anchor defect at episode start predicts (PR-13-RESULT §"What the
+    set change actually cost"). **Two cells are only comparable if both were scored on one set**,
+    which is why ``rederive_t39_g0.py`` scores its control on the anchorable set too rather than
+    against the full-set bridge.
     """
     anchors = raw_anchor_indices(reader, raw)
     action = np.asarray(raw["action"], dtype=np.float32)
@@ -587,9 +673,20 @@ def oracle_action_chunks(
         anchor_index = start if co_shift else index
         if start < 0 or start + chunk_steps > n or not 0 <= anchor_index < n:
             continue
+        if anchor_kind == "command":
+            # The previous COMMAND, which is what step 0 must be differenced against for the
+            # chunk to be homogeneous. It does not exist before the episode's first command, so
+            # the chunk is skipped rather than silently falling back to the state row — a mixed
+            # set would put the defect back into exactly the chunks that carry the most of it.
+            if start < 1:
+                continue
+            anchor_row = action[start - 1]
+        else:
+            anchor_row = state[anchor_index]
         chunks[int(t_ns)] = commanded_to_chunk(
             action[start : start + chunk_steps],
-            state[anchor_index],
+            anchor_row,
+            anchor_kind=anchor_kind,
             dt_s=float(chunk.dt_s),
             mapping=mapping,
             convert=convert,
