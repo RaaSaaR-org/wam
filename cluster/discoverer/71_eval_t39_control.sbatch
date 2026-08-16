@@ -28,19 +28,31 @@
 #
 #   sbatch 71_eval_t39_control.sbatch
 #
-# One GPU, minutes per arm: 40 holdout episodes is 1 040 chunks and each is one forward pass.
-# No --requeue, same reason as 60_eval_t16.sbatch: idempotent, writes no DONE, re-scoring is cheap.
+# WALLTIME AND --requeue, both revised 2026-08-17. The two sentences that used to be here --
+# "minutes per arm" and "re-scoring is cheap" -- were true when only the ORACLE arms had ever run.
+# Those cost no forward passes at all (ChunkLookupPolicy is a table lookup), which is why job
+# 187813 got through both in under 108 s. The POLICY arms are two model loads plus 2 080 forward
+# passes of a 3B diffusion policy, sequential, and NO ms/chunk figure exists anywhere in this repo:
+# 74_probe_t39_policy_shim.sbatch does two forward passes and records no timing. Against the old
+# 02:00:00 wall the implied budget was 3.46 s/chunk, unverified, with the whole run lost if it was
+# optimistic. --time is not a constant of T39_RULE_V1/V2 -- no threshold moved -- so:
+#   - 04:00:00, the QoS MaxWall. Slurm bills elapsed time, so asking for headroom that goes unused
+#     costs nothing; asking for too little costs the entire run.
+#   - --requeue, because this QoS runs OverSubscribe=FORCE:4 with PreemptMode=REQUEUE and the job
+#     is now ~1 h rather than seconds. Re-scoring is deterministic and overwrites in place, so a
+#     requeue repeats work but cannot corrupt a result.
 #
 #SBATCH --job-name=wam-eval-t39
 #SBATCH --partition=common
 #SBATCH --account=ehpc-aif-2026pg01-905
 #SBATCH --qos=ehpc-aif-2026pg01-905
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=26
 #SBATCH --gres=gpu:1
 #SBATCH --mem=192G
+#SBATCH --requeue
 #SBATCH -o /valhalla/projects/ehpc-aif-2026pg01-905/logs/eval-t39.%j.out
 
 set -euo pipefail
