@@ -42,6 +42,14 @@ datasets/*
 # folder). Recreate with: .venv/bin/python scripts/fetch_g1_model.py
 assets/
 
+# Vendored third-party trainer trees. `third_party/patches/` IS tracked — the patches are the
+# provenance record (docs/handoff.md §3) — but the tree they apply to is a build artifact: a full
+# upstream clone at a pinned sha, rebuilt by cluster/discoverer/72_build_t39_env.sbatch there and
+# scripts/build_t39_env_local.sh here. Committing it would vendor NVIDIA's history into ours, and
+# PROVENANCE.json + the patch sha256 already pin exactly which tree was built.
+third_party/*
+!third_party/patches/
+
 # Internal documents (PRD etc.) — this repository is public
 idea/
 
