@@ -66,6 +66,30 @@ def config_hash(obj: Mapping[str, Any] | BaseModel) -> str:
     """SHA-256 hex digest of the canonical JSON form (sorted keys, no whitespace).
 
     Stable across dict key order and across pydantic-model vs plain-dict input.
+
+    ADDING A FIELD TO A HASHED CONFIG REPOINTS EVERY ARCHIVED HASH, EVEN IF ITS DEFAULT IS THE
+    OLD BEHAVIOUR. ``_canonicalize`` dumps pydantic models with ``model_dump(mode="json")``, which
+    emits defaults as ordinary keys — so a new field with a "changes nothing" default still enters
+    the JSON, still changes the digest, and every run already on record silently stops hashing to
+    the value its report cites. Nothing in the repo compares a freshly computed hash against a
+    stored one (``train_t16_lora``'s drift check recomputes both sides; ``rollout`` compares two
+    recorded values), so **no test goes red** — the damage is entirely to the human-level claim
+    that a cited hash identifies a reproducible configuration.
+
+    The rule this implies: a knob belongs in a hashed config when it is part of the EXPERIMENT,
+    and outside it when it is a property of the machine or of the invocation. Two near-misses on
+    2026-08-17, both caught only because someone went looking:
+
+    - a ``cpu_pinned`` VRAM knob on ``WanBackboneConfig`` — a property of which card the job
+      landed on. It went in as a runtime attribute on the adapter instead (``df3387b``), with the
+      fact recorded in the run's done-marker, which carries the provenance without touching the
+      digest. Had it been a field, ``t16-lora-seed0``'s ``45ee9e60…`` would have moved.
+    - a label-anchoring flag for T-39's re-run — a property of the label convention, not of the
+      model. As a config field it would have repointed every archived T-39 and PR-10 cell, and
+      those are precisely the numbers the new run must NOT be made silently comparable to.
+
+    ``RunMetadata`` is deliberately not an input here (see its docstring), which makes it the
+    right home for anything that must travel with a run without redefining its identity.
     """
     canonical = json.dumps(
         _canonicalize(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=False
