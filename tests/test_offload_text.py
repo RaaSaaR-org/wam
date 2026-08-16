@@ -790,3 +790,22 @@ class TestThePin:
             )  # fmt: skip
             assert rc == 0
             assert seen == [expected], f"flag={flag}"
+
+    def test_every_entry_point_pins_as_well_as_offloads(self) -> None:
+        """Source-level, because the runtime versions need real Wan weights.
+
+        ``--offload-text`` has two halves and they cannot be merged: the offload has to run last
+        or the trailing ``.to(device)`` undoes it, which means it can only ever lower the steady
+        state. A script that wires the offload and forgets the pin still OOMs during load on any
+        card that cannot hold all three towers — which is exactly the bug this suite was extended
+        for, and it was invisible for as long as the only assertion was 'the offload is wired'.
+        """
+        offenders = []
+        for name in ("eval_t16", "rollout", "serve_policy", "train_t16_lora"):
+            src = (_REPO_ROOT / "scripts" / f"{name}.py").read_text(encoding="utf-8")
+            if "offload_text_encoder(" in src and "cpu_pinned=" not in src:
+                offenders.append(name)
+        assert offenders == [], (
+            f"{offenders} offload the umT5 tower but never pin it, so they still pay the full "
+            '24.18 GB load peak. Pass cpu_pinned=("text_encoder",) when the flag is set.'
+        )

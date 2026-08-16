@@ -121,10 +121,19 @@ def _build_joint_policy(
     from wam.runtime.policies import load_joint_policy
 
     advise_alloc_conf(device)
-    policy = load_joint_policy(path, device=device, camera=camera, backbone_source=backbone_source)
+    policy = load_joint_policy(
+        path,
+        device=device,
+        camera=camera,
+        backbone_source=backbone_source,
+        # The load-time half: without it the umT5 tower is resident for the whole load, and the
+        # offload below cannot run until that has already happened.
+        cpu_pinned=("text_encoder",) if offload_text else (),
+    )
     if offload_text:
         # After the loader, which is where the .to(device) that WanFlowBackbone._apply forwards
-        # to the held towers happens; an offload before it would be silently undone.
+        # to the held towers happens; an offload before it would be silently undone. With the pin
+        # above this is a no-op move, kept for the loud non-Wan refusal.
         offload_text_encoder(policy, log=print)
     md = policy.metadata
     print(

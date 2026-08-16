@@ -409,12 +409,18 @@ def build_policy(
         backbone_source=backbone_source,
         flow_steps=flow_steps,
         flow_seed=flow_seed,
+        # The LOAD-time half of the same flag. Without it the umT5 tower is resident for the
+        # whole of load_joint_policy — ~24.18 GB of weights before a single activation — and the
+        # offload below cannot run until that has already happened.
+        cpu_pinned=("text_encoder",) if offload_text else (),
     )
     if offload_text:
         # After load_joint_policy, never before: JointCheckpointPolicy.__init__ does the
         # .to(device) that WanFlowBackbone._apply forwards to the held towers, so an earlier
-        # offload would be undone. Before the ControlArmPolicy wrap only for readability —
-        # the wrapper delegates .model, so either side would resolve.
+        # offload would be undone. With the pin above this is now a no-op move on a tower that
+        # is already parked; it stays because it is ALSO the loud refusal that catches
+        # --offload-text aimed at a non-Wan checkpoint. Before the ControlArmPolicy wrap only
+        # for readability — the wrapper delegates .model, so either side would resolve.
         offload_text_encoder(policy, log=print)
     if flow_mean_k != DEFAULT_FLOW_MEAN_K or flow_t0 != DEFAULT_FLOW_T0:
         policy = ControlArmPolicy(policy, mean_k=flow_mean_k, t0=flow_t0)

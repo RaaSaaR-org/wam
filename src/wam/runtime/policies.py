@@ -22,6 +22,7 @@ Contracts:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -97,6 +98,7 @@ def load_joint_policy(
     backbone_source: str | Path | None = None,
     flow_steps: int | None = None,
     flow_seed: int = 0,
+    cpu_pinned: Sequence[str] = (),
 ) -> JointCheckpointPolicy:
     """Load a joint checkpoint of EITHER kind, building the frozen base only when required.
 
@@ -142,7 +144,15 @@ def load_joint_policy(
             flow_seed=flow_seed,
         )
     backbone = build_backbone(
-        _relocate_backbone(config.backbone, source=backbone_source, device=device), load=True
+        _relocate_backbone(config.backbone, source=backbone_source, device=device),
+        load=True,
+        # The load-time half of --offload-text. The callers' post-hoc `offload_text_encoder` has
+        # to run after JointCheckpointPolicy.__init__'s .to(device) or that move undoes it, which
+        # means it always runs once the umT5 tower has already been resident — so it lowers the
+        # steady state and never the LOAD peak. Scoring a Wan checkpoint needs ~24.18 GB of
+        # weights before a single activation, so on a card that cannot hold all three towers the
+        # offload arrives long after the process is dead. Only this reaches that.
+        cpu_pinned=cpu_pinned,
     )
     return JointCheckpointPolicy(
         checkpoint_path,
