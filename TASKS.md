@@ -153,8 +153,9 @@ mc show T-16     # the whole T-16 record
   **Both follow-ups have since been answered, and the interpretation above is now measurement with
   its direction inverted — see T-046.**
 
-- [ ] **[T-046](.mc/tasks/todo/T-046-step-0-is-the-whole-defect-does-homogenising-it-repair-the-.md)**
-  Step 0 is the whole defect. Does making it homogeneous repair the labels? — pre-registered as
+- [x] **[T-046](.mc/tasks/done/T-046-step-0-is-the-whole-defect-does-homogenising-it-repair-the-.md)**
+  Step 0 is the whole defect. Does making it homogeneous repair the labels? — **reported
+  2026-08-16: `C`.** Pre-registered as
   [`PR-12`](docs/preregistration/PR-12-step-zero-anchor-heterogeneity.md), rule `T46_RULE_V1`,
   **claimed across live sessions before it was written**.
   **Read off the code, not hypothesised about the data**, which is what separates it from PR-10 and
@@ -178,6 +179,29 @@ mc show T-16     # the whole T-16 record
   premise but the same premise made robust to the premise failing; it is available at inference,
   since a policy knows its own last command; and its cost is that the chunk loses its only tie to
   the measured state.
+  **P2 HOLDS, AND THE WHOLE FINDING IS ONE LINE** — per-step MSE, half A, `d = −2`:
+  unmodified `[4.79e-04, 3.34e-06, 3.26e-06, …]`, V-chain `[3.51e-06, 3.34e-06, 3.26e-06, …]`.
+  **Step 0 carried 143× the error of its neighbours**, G0.3 measured rows 1–15 at exactly
+  `0.000e+00`, and that one element was **90.10 %** of the summed per-step MSE.
+  **Held-out half B: −379.68 → +69.15** (gain **448.82 pp**), and `skill_vs_zero` **+82.91** rules
+  out shrinkage — the repeat and zero baselines are *numerically identical* between cells, because
+  the targets never changed. Result in
+  [`PR-12-RESULT.md`](docs/preregistration/PR-12-RESULT.md), artifact `runs/t46-step-zero/probe.json`.
+  **Corroboration nobody aimed at:** PR-10 registered that a correct anchoring would drive
+  `horizon_ratio` toward 1.0 and recorded that the *delay* shift failed it; V-chain at `d = 0`
+  gives **1.0021**.
+  **It retires one of our own results:** under the unmodified anchoring `d = −2` beat `d = 0`, read
+  by both PR-10 runs as a real ~67 ms controller lead. Under V-chain the preference **flips**. So
+  **PR-10's ~11 % and PR-11's ~2 % were fractions of a deficit that was ~90 % a single
+  subtraction.**
+  Registered in advance and duly arrived: `smoothness_ratio` **0.276** is top-rung **L4** under spec
+  0.1.0 and *below* spec 0.2.0's two-sided floor — the command is ~3.6× **smoother** than the
+  executed trajectory over steps 1–15.
+  Licenses a defect report against `commanded_to_chunk`'s step-0 anchoring, carrying its stated
+  cost. Licenses **nothing** about GR00T or any policy, does **not** discharge T-39's `VOID`, and
+  touches neither `benchmark.py` nor `docs/benchmark.md`. **Next is a code question, not another
+  label experiment:** `commanded_to_chunk` is the *evaluation* adapter, and the same step-0 question
+  has to be asked of the **training** path and the **runtime executor**.
 
 **Exit:** ablation machinery ready; first real AC-07 verdict recorded — at tiny scale the video branch hurts, so "video helps" now rests on the pretrained prior (T-16 LoRA). T-26 tested the one confound that could have moved that premise and did not move it, so the burden on T-16 is confirmed rather than assumed. T-27 then re-scored both real runs against trivial baselines and raised the bar T-16 must clear: beating the action-only baseline is not enough, because that baseline itself loses to repeat-last-action. T-28 then closed the gap that would have made a finished T-16 unreadable: the trainer does no eval, so `eval_t16.py` is the step that turns a checkpoint into a scorable `predictions.jsonl` — and it refuses to score a holdout it cannot prove was excluded. Neither GPU nor code is the blocker any more — Discoverer+ is scripted (`cluster/discoverer/`) and T-16a is done.
 

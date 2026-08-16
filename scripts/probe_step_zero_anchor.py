@@ -268,9 +268,21 @@ def _verdict(cells: dict[str, dict[str, dict]], primary: int) -> dict[str, Any]:
     key = str(primary)
     unmod_b = cells["unmodified"][key + "|B"]
     chain_b = cells["v_chain"][key + "|B"]
-    mask_a = cells["v_mask"][key + "|A"]
 
-    share = mask_a["step_zero_share_pct"]
+    # THE SHARE IS A PROPERTY OF THE UNMODIFIED PROFILE, AND CAN ONLY BE.
+    #
+    # PR-12 §6 words verdict X as "V-mask's step-0 share of MSE", and read literally that is a
+    # quantity that cannot exist: V-mask's profile HAS no step 0 — dropping it is what V-mask is.
+    # `step_zero_share_pct` on a masked cell is the share of the first SURVIVING step, which is
+    # step 1, and it is ~6 % for the same reason every non-zero step is ~6 %. §4 names the
+    # registered quantity unambiguously — "step 0 dominating the MSE sum ... recorded, not
+    # predicted" — and it is a property of the unmodified per-step profile.
+    #
+    # The first run of this driver read the masked cell and returned X ("coherence failure") off a
+    # number that was definitionally the wrong one. That is recorded in the result document rather
+    # than quietly corrected: a verdict function that reads the wrong field produces a finite,
+    # plausible verdict, which is this project's recurring failure mode and not a footnote.
+    share = cells["unmodified"][key + "|A"]["step_zero_share_pct"]
     if share < COHERENCE_FLOOR_PCT:
         return {
             "verdict": "X",
@@ -440,9 +452,18 @@ def main(argv: list[str] | None = None) -> int:
         for entry in cache.values():
             unmod = chunks_for(entry, "unmodified", delay)
             chain = chunks_for(entry, "v_chain", delay)
-            if set(unmod) != set(chain):
+            # RESTRICTED TO THE SCORED TIMESTAMPS, and that restriction is the registered one.
+            # V-chain needs `start >= 1`, so at d = 0 it drops each episode's chunk at index 0 —
+            # which `trim_pairs` drops from scoring anyway, for every cell, before any number
+            # exists. Comparing the untrimmed dictionaries compares chunks that enter nothing.
+            # PR-12 §3 puts the requirement on the RETAINED count ("must match the unmodified
+            # cell's ... checked by G0.1"), and the retained set is what this now compares;
+            # `g0_scored_chunk_counts` below asserts that count directly, which is stricter than
+            # the key check was in the dimension the pre-registration actually names.
+            scored = {int(obs.state.timestamp_ns) for obs, _target, _eid in entry["pairs"]}
+            if (set(unmod) & scored) != (set(chain) & scored):
                 keys_match = False
-            for t_ns in sorted(set(unmod) & set(chain)):
+            for t_ns in sorted(set(unmod) & set(chain) & scored):
                 a = np.asarray(unmod[t_ns].targets, dtype=np.float64)
                 b = np.asarray(chain[t_ns].targets, dtype=np.float64)
                 row0_rms.append(float(np.sqrt(((a[0] - b[0]) ** 2).mean())))
@@ -503,6 +524,26 @@ def main(argv: list[str] | None = None) -> int:
                 f"G0.3 FAILED at d={delay:+d}: V-mask scored {masked_steps} steps against the "
                 f"unmodified {unmasked_steps}; it must be exactly one fewer."
             )
+
+        # PR-12 §3's actual retained-count requirement, asserted on the numbers themselves rather
+        # than on the chunk dictionaries that feed them. Three cells scored over different chunk
+        # sets are not a comparison, whatever their key sets looked like before trimming.
+        counts = {
+            cell: cells[cell][f"{delay}|{half}"]["num_chunks"]
+            for cell in ("unmodified", "v_mask", "v_chain")
+            for half in ("A", "B")
+        }
+        results.setdefault("g0_scored_chunk_counts", {})[str(delay)] = counts
+        for half in ("A", "B"):
+            scored = {
+                cell: cells[cell][f"{delay}|{half}"]["num_chunks"]
+                for cell in ("unmodified", "v_mask", "v_chain")
+            }
+            if len(set(scored.values())) != 1:
+                gates.append(
+                    f"G0.1 FAILED at d={delay:+d} half {half}: cells scored different chunk "
+                    f"counts {scored}. They are not a comparison."
+                )
 
         # G0.1, the bridge to T-44/T-45.
         for half in ("A", "B"):
