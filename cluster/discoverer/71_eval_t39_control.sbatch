@@ -8,7 +8,17 @@
 # L4 gate, and I8_RULE_V1->V3). If a constant genuinely has to change, version it: bump
 # RULE_VERSION, record what moved and why, say which runs scored under which. Never edit in place.
 #
-# The rule is T39_RULE_V1 (2026-08-06). It has not been revised, and no arm has reported.
+# The rule was T39_RULE_V1 (2026-08-06). It is now T39_RULE_V2 (2026-08-17,
+# docs/preregistration/PR-07-V2-repaired-anchoring.md), which is a revision of the INSTRUMENT and
+# of nothing else: every threshold above and below is quoted from V1 unchanged. What moved is
+# which quantity chunk step 0 is differenced against, because PR-12 measured the old one building
+# `command - STATE` where every other step is a homogeneous first difference, and PR-13 re-derived
+# G0 on the repair. V2 scores 1000 chunks where V1 scored 1040 — each episode's first chunk has no
+# preceding command — so V2 numbers are comparable only against other V2 numbers.
+#
+# Arms reported under V1: oracle_state (+100.00) and oracle_action (-359.41), job 187813, preserved
+# at ${PROJ}/runs/t39-baseline-seed0/_archive-187813-oracles/. The policy arms have NEVER run; that
+# job died at 108 s on a missing GROOT_PATCH_MISTRAL, after both oracles had written.
 #
 # SYMMETRY IS PART OF THE PRE-REGISTRATION, and here the NEGATIVE is the expensive conclusion:
 # verdict N licenses "stop trying methods on this corpus", which retires an entire class of future
@@ -95,6 +105,30 @@ if [[ ! -f "${OUT}/run_metadata.json" ]]; then
   exit 1
 fi
 
+# T39_RULE_V2 (docs/preregistration/PR-07-V2-repaired-anchoring.md, registered 2026-08-17) scores
+# T-39 under the REPAIRED step-0 anchoring. It lives in `common` on purpose: all four arms must
+# share it. CommandedPolicy's docstring states the constraint — the policy's anchor_kind must
+# match the oracle's or the oracle stops being a ceiling over it, and PR-07 §4's whole claim for
+# oracle_action is that it IS that ceiling. A per-arm override would be two adapters wearing one
+# rule.
+#
+# Default is `command`, not `state`, because `state` is the defect: it builds step 0 as
+# `command - STATE` while every other step is a homogeneous first difference. PR-12 measured that
+# one element at ~90 % of the summed per-step MSE. Under `state` the verdict block below reaches
+# `elif not L1_action:` and prints VERDICT VOID (labels) before any policy branch is evaluated —
+# so a run left on the old default would spend the GPU-h and re-print a conclusion PR-13 has
+# already withdrawn. Set T39_ANCHOR_KIND=state only to reproduce an archived cell.
+export T39_ANCHOR_KIND=${T39_ANCHOR_KIND:-command}
+case "${T39_ANCHOR_KIND}" in
+  command) echo "=== T39_RULE_V2 — anchor_kind=command, 1000 chunks (each episode's first drops)" ;;
+  state)   echo "=== !! T39_ANCHOR_KIND=state — the ARCHIVED T39_RULE_V1 convention and the"
+           echo "===    instrument PR-12 found defective. 1040 chunks. This reproduces"
+           echo "===    oracle_action ~-359.41 and will print VERDICT VOID (labels) regardless of"
+           echo "===    what the policy scores. Valid only for reproducing an archived cell." ;;
+  *)       echo "FATAL: T39_ANCHOR_KIND must be 'command' or 'state', got '${T39_ANCHOR_KIND}'."
+           exit 1 ;;
+esac
+
 common=(
   --run-dir "${OUT}"
   --dataset "${DATASET}"
@@ -103,6 +137,7 @@ common=(
   --train-episodes "${TRAIN}"
   --camera ego
   --device cuda
+  --anchor-kind "${T39_ANCHOR_KIND}"
 )
 
 # -- G0 first. The oracle arms can VOID the whole experiment, and they cost no policy forward
@@ -183,7 +218,7 @@ python "${EVAL}" "${common[@]}" "${policy[@]}" --arm policy --score-episodes "${
 echo
 echo "=== T39_RULE_V1 (docs/preregistration/PR-07-positive-control.md §5)"
 python - "${OUT}" <<'PY'
-import json, sys
+import json, os, sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------------------
@@ -201,7 +236,10 @@ from pathlib import Path
 # below what a correct adapter produces and is not a tuned threshold. A correct adapter does not
 # score 91; a broken one does not score 89.
 # ---------------------------------------------------------------------------------------
-RULE_VERSION = "T39_RULE_V1"
+# The rule version follows the anchoring, because they are the same decision. A verdict line
+# reading "T39_RULE_V1" over a 1000-chunk repaired set would misname the set it scored.
+_ANCHOR = os.environ.get("T39_ANCHOR_KIND", "command")
+RULE_VERSION = "T39_RULE_V2" if _ANCHOR == "command" else "T39_RULE_V1"
 HEADLINE = "skill_vs_repeat_pct"          # L1: better than repeating the last action
 CRITICAL = "ci_skill_vs_repeat_pct"       # L2: still better on the task-critical chunks
 ORACLE_STATE_FLOOR_PCT = 90.0
