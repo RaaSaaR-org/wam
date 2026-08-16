@@ -47,15 +47,28 @@ and the robot HAL are contracts, and two drifting copies is the expensive failur
   own hand-maintained index, which is the accepted cost of the split. Existing `T-040`/`T-041`/
   `T-042` were deliberately **not** migrated: their pre-registrations, sbatch files and commit
   subjects all cite them where they are.
-- **T-39 has reported, and the answer was `VOID (labels)`** (2026-08-16,
-  `docs/preregistration/PR-07-RESULT.md`). The positive control asked whether this corpus's own
-  action column clears L1 under our scorer. **It does not — −359.41 pp, while `oracle_state` scored
-  a bit-exact `mse 0.0`**, so the failure is our label space, not our plumbing. Therefore no policy
-  trained on these labels can clear the bar either, and both sub-projects share that corpus.
-  **This is not a discharged gate. Do not read VOID as permission to train** — the rule it replaces
-  said "no training run before T-39 reports", and what T-39 reported was that its own premise fails.
-  Whether training may start, and against which label space, is the project owner's call. It
-  licenses a defect report against the label pipeline and **forbids any statement about GR00T**
-  (the policy arm never ran); PR-07 §7's second model is licensed only on outcome N, not on VOID.
+- **T-39 reported `VOID (labels)` (2026-08-16), and PR-13 has since withdrawn that verdict's
+  premise by measurement.** The positive control asked whether this corpus's own action column
+  clears L1 under our scorer, and got **−359.41 pp** (`docs/preregistration/PR-07-RESULT.md`).
+  **That number was produced by a defective instrument, not by the labels.**
+  `commanded_to_chunk` built the chunk's step 0 as `command − STATE` while every other step of both
+  arms is a homogeneous first difference; that one element carried **~90 % of the summed per-step
+  MSE and 143× its neighbours** (PR-12, verdict `C`). Anchor it on the previous command instead and
+  the same column scores **+68.10 % on L1 and +75.40 % on L2 across T-39's own 40-episode holdout**,
+  reaching **L4** — PR-13, verdict `W`, `docs/preregistration/PR-13-RESULT.md`, with the unmodified
+  bridge reproducing `−359.41` to `+0.002 pp` in the same run. **So "no policy trained on these
+  labels can clear the bar" is withdrawn: it was a statement about our evaluation adapter.** The
+  blast radius is that adapter and the four sweeps importing it — **zero hits in `src/wam/`, zero in
+  the training path**, and `relabel_chunks` is homogeneous at every step, so the corpus on disk was
+  always clean and **the fourteen negatives in `docs/benchmark.md` stand.**
+  **THE GATE ITSELF IS UNCHANGED, AND CORRECTING A CLAIM IS NOT LIFTING ONE. This is not a
+  discharged gate. Do not read `C` or `W` as permission to train** — the rule it replaces said "no
+  training run before T-39 reports", T-39 reported, and its premise has now been withdrawn rather
+  than satisfied. **Whether training may start, and against which label space, is the project
+  owner's call**, and no session may edit this file to lift it. PR-07 §6 still **forbids any
+  statement about GR00T** (the policy arm never ran, job 187813 died at 108 s); PR-07 §7's second
+  model is licensed only on outcome N. What the corrected instrument means for `docs/benchmark.md`'s
+  L4 gate is a separate open decision — the repaired cell is L4 under spec 0.1.0 and below spec
+  0.2.0's two-sided floor, so the two specs disagree about it.
 - Every rollout must be traceable to checkpoint + dataset snapshot + config hash (AC-04).
 - Milestone order is strict: overfit a small task first (D1), only then scale (P6).

@@ -203,6 +203,31 @@ mc show T-16     # the whole T-16 record
   label experiment:** `commanded_to_chunk` is the *evaluation* adapter, and the same step-0 question
   has to be asked of the **training** path and the **runtime executor**.
 
+- [x] **[T-047](.mc/tasks/done/T-047-does-t-39-s-void-survive-its-instrument-being-repaired.md)**
+  Does T-39's `VOID` survive its instrument being repaired? — **reported 2026-08-16: `W`.**
+  Pre-registered as [`PR-13`](docs/preregistration/PR-13-t39-g0-rederivation.md), rule
+  `T47_RULE_V1`, with §4a's magnitude prediction committed **before the driver produced a cell**;
+  result in [`PR-13-RESULT.md`](docs/preregistration/PR-13-RESULT.md). Zero GPU-hours, ~2 min.
+  **All four gates passed on the first run, and the bridge reproduced `PR-07-RESULT.md`'s
+  `−359.41` to a drift of `+0.002 pp`** on the full 1 040 chunks — so one number in the artifact is
+  the archive's, produced by this driver.
+  On the anchorable set (1 000 = 1 040 − 40 episodes, both compared cells identical):
+  unmodified **−344.54**, **repaired +68.10 L1 / +75.40 L2 / +82.04 vs-zero**, `horizon_ratio`
+  **0.9717**, level **L4 moves-like-a-demo**.
+  **`T39_RULE_V1`'s G0 blocking clause does not fire on a repaired instrument, so the premise of
+  `VOID (labels)` is withdrawn by measurement.**
+  **The registered magnitude held:** §4a predicted +55 to +75 and *slightly below* PR-12's half-A,
+  because the anchorable set re-adds each episode's low-motion **last** chunk; measured **+68.10**.
+  **Newly measured:** dropping each episode's **first** chunk moves the unmodified arm −359.41 →
+  −344.54 — **14.87 pp from 40 of 1 040 chunks**, four percent of the set carrying a
+  disproportionate share, exactly as an anchor defect at episode start predicts.
+  **`W` is not a verdict on T-39 and cannot be** — `P`/`N`/`M`/`I` all require the policy arm, which
+  never ran. It licensed correcting the withdrawn claim in the root `CLAUDE.md`,
+  `subprojects/README.md` and `subprojects/edge-wam/CLAUDE.md`; **all three were corrected with the
+  gate text preserved verbatim, because correcting a claim is not lifting a gate.** The training
+  decision remains the project owner's. **Still unanswered:** whether a policy can *learn* these
+  labels — this scores oracles, and testing it is a training run.
+
 **Exit:** ablation machinery ready; first real AC-07 verdict recorded — at tiny scale the video branch hurts, so "video helps" now rests on the pretrained prior (T-16 LoRA). T-26 tested the one confound that could have moved that premise and did not move it, so the burden on T-16 is confirmed rather than assumed. T-27 then re-scored both real runs against trivial baselines and raised the bar T-16 must clear: beating the action-only baseline is not enough, because that baseline itself loses to repeat-last-action. T-28 then closed the gap that would have made a finished T-16 unreadable: the trainer does no eval, so `eval_t16.py` is the step that turns a checkpoint into a scorable `predictions.jsonl` — and it refuses to score a holdout it cannot prove was excluded. Neither GPU nor code is the blocker any more — Discoverer+ is scripted (`cluster/discoverer/`) and T-16a is done.
 
 **T-16 has now run (2026-07-30), the confound found afterwards has been cleared and priced

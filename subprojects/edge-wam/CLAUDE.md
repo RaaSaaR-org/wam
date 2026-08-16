@@ -78,17 +78,32 @@ not only in prose.
 
 ## Gates, in the order they bind
 
-1. **T-39 reported `VOID (labels)` on 2026-08-16** (`docs/preregistration/PR-07-RESULT.md`,
-   commit `8a4728c`). It asked whether this corpus's own action column clears L1 under our scorer.
-   **It does not — `oracle_action` came in at −359.41 pp, 4.59× worse than repeat-last-action,
-   while `oracle_state` scored a bit-exact `mse 0.0` and +100 % on every rung.** The adapter, joint
-   order, delta anchoring and gripper synergy are provably correct; the label *space* is what
-   disagrees with the corpus. So no policy post-trained on these labels can clear the bar — this one
-   included — and the correct response is to fix the label space, not to buy a better backbone.
-   **Do not read VOID as this sub-project being unblocked.** The gate reported with its own premise
-   failing, which is a decision point for the project owner, not a formality that has been
-   discharged. It forbids any statement about GR00T (the policy arm never ran). Probes, staging,
-   reading and pre-registration are fine, as they always were.
+1. **T-39 reported `VOID (labels)` on 2026-08-16 — and PR-13 has since withdrawn that verdict's
+   premise by measurement.** It asked whether this corpus's own action column clears L1 under our
+   scorer, and got **−359.41 pp** (`docs/preregistration/PR-07-RESULT.md`, commit `8a4728c`).
+   **That number was our evaluation adapter, not the labels.** `commanded_to_chunk`
+   (`scripts/eval_t39_baseline.py:254-255`) builds the chunk's step 0 as `command − STATE`, while
+   every other step of both arms — and every step of the target
+   (`scripts/convert_lerobot_g1.py:365`) — is a homogeneous first difference. **Step 0 is the only
+   element in the chunk that subtracts a quantity of one kind from a quantity of another**, so a
+   steady-state tracking offset cancels everywhere else and survives there at full magnitude. It
+   carried **~90 % of the summed per-step MSE and 143× its neighbours** (PR-12, verdict `C`).
+   Anchor it on the **previous command** (`targets[0] = q_cmd[0] − q_cmd[−1]`) — identical to the
+   current definition under perfect tracking, and available at inference — and the same column
+   scores **+68.10 % L1, +75.40 % L2, level L4** across T-39's own holdout (PR-13, verdict `W`,
+   `docs/preregistration/PR-13-RESULT.md`), with the unmodified bridge reproducing `−359.41` to
+   `+0.002 pp` in the same run. **So "no policy post-trained on these labels can clear the bar" is
+   withdrawn.** The delay reading is withdrawn too: PR-10's `d* = −2` / 67 ms lead was the grid
+   fitting the discontinuity, and under the repaired anchoring the preference flips to `d = 0`.
+   **The blast radius is the instrument, not the track record** — zero `commanded_to_chunk` in
+   `src/wam/`, zero in the training path, `relabel_chunks` homogeneous at every step, so **the
+   fourteen negatives stand** and nothing is retro-validated.
+   **THE GATE IS UNCHANGED. Correcting a claim is not lifting one, and `C`/`W` are not permission.**
+   Do not read either as this sub-project being unblocked: the gate reported with its own premise
+   failing, that premise has now been withdrawn rather than satisfied, and **which label space
+   training may start against is the project owner's decision**, not a session's. PR-07 §6 still
+   forbids any statement about GR00T (the policy arm never ran). Probes, staging, reading and
+   pre-registration are fine, as they always were.
 2. **E-01 and E-02 gate E-05 and E-06.** E-01 asks whether the Edge policy path can run with no
    text (the released `Cosmos3-Edge-Policy-DROID` is language-conditioned); E-02 asks what a 28-dim
    G1/Dex3 embodiment actually costs. Both are cheap and need no GPU, and between them decide
