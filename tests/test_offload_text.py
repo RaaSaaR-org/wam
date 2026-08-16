@@ -33,7 +33,7 @@ for _extra in (_REPO_ROOT / "src", _REPO_ROOT / "scripts", _REPO_ROOT / "tests")
     if str(_extra) not in sys.path:
         sys.path.insert(0, str(_extra))
 
-from test_wan_flow import joint_config, make_backbone
+from test_wan_flow import joint_config, make_backbone, wan_config
 
 from wam.backbones.registry import build_backbone
 from wam.backbones.tiny import TinyBackboneConfig
@@ -42,6 +42,7 @@ from wam.runtime.offload import (
     advise_alloc_conf,
     distinct_instructions,
     offload_text_encoder,
+    pin_text_encoder_to_cpu,
     resolve_wan_adapter,
 )
 from wam.training.joint import JointTrainingConfig, JointWorldActionModel
@@ -111,10 +112,31 @@ def spy_on_offload(adapter: Any, monkeypatch: pytest.MonkeyPatch) -> list[tuple[
 
 
 def spy_on_helper(module: Any, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Record what a script hands to ``offload_text_encoder``, without needing a Wan model."""
+    """Record what a script hands to ``offload_text_encoder``, without needing a Wan model.
+
+    ``pin_text_encoder_to_cpu`` is neutralized alongside it. ``train_t16_lora`` now calls BOTH —
+    the pin before ``load()``, the offload after ``.to(device)`` — and an unstubbed pin would
+    reach the real ``resolve_wan_adapter`` and refuse the tiny backbone these fixtures use. What
+    the pin receives is recorded separately by :func:`spy_on_pin`, so this list keeps meaning
+    exactly one thing: the objects handed to the offload.
+    """
     seen: list[Any] = []
     monkeypatch.setattr(
         module, "offload_text_encoder", lambda obj, **kwargs: seen.append(obj) or obj
+    )
+    monkeypatch.setattr(module, "pin_text_encoder_to_cpu", lambda obj, **kwargs: obj, raising=False)
+    return seen
+
+
+def spy_on_pin(module: Any, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Record what a script hands to ``pin_text_encoder_to_cpu``. Apply AFTER ``spy_on_helper``,
+    whose neutralizing stub it replaces."""
+    seen: list[Any] = []
+    monkeypatch.setattr(
+        module,
+        "pin_text_encoder_to_cpu",
+        lambda obj, **kwargs: seen.append(obj) or obj,
+        raising=False,
     )
     return seen
 
@@ -335,9 +357,7 @@ class TestOneNameForOneThing:
     def test_passing_it_turns_it_on_everywhere(self) -> None:
         assert ev._parse_args(["--run-dir", "x", "--offload-text"]).offload_text is True
         assert dr.parse_args(["--offload-text"]).offload_text is True
-        assert (
-            ro._parse_args(["--policy", "joint", "--offload-text"]).offload_text is True
-        )
+        assert ro._parse_args(["--policy", "joint", "--offload-text"]).offload_text is True
         assert (
             sp._parse_args(["--checkpoint", "c", "--joint", "--offload-text"]).offload_text is True
         )
@@ -602,3 +622,171 @@ class TestTheScriptsAreWired:
         assert len(seen) == expected
         if expected:
             assert hasattr(seen[0], "model"), "eval must offload through the loaded policy"
+
+
+# -- the pin: what an offload structurally cannot do -------------------------------------------
+
+
+class TestThePin:
+    """``offload`` frees VRAM a tower already holds. ``pin_to_cpu`` stops it ever holding any.
+
+    The distinction is not stylistic. ``offload_text_encoder`` has to run LAST — the module
+    docstring says so and ``scripts/train_t16_lora.py`` obeys it — because ``_apply`` forwards
+    every device move to the held towers and would otherwise undo it. Running last means running
+    after the umT5 tower has been resident once, so an offload can never lower the LOAD peak.
+    On a card where the three towers do not fit at once, that is the peak that matters, and the
+    process is dead before the offload is reached (measured 2026-08-17: OOM inside ``attach`` on
+    a 32 GB RTX 5090 with a 12.70 GB co-tenant, with ``--offload-text`` passed).
+    """
+
+    def test_the_pin_survives_a_device_move_and_an_offload_does_not(self) -> None:
+        """The regression test, written as a DIFFERENCE so it cannot pass for the wrong reason.
+
+        Both arms do the same thing in the same order; only the verb changes. If the pin were
+        also just a move, both arms would land on the same device and this fails.
+        """
+        offloaded = make_backbone()
+        offload_text_encoder(offloaded)
+        offloaded.to("meta")  # a device every machine has
+        assert {p.device.type for p in offloaded.adapter._text_encoder.parameters()} == {"meta"}, (
+            "an offload is supposed to be undone by a later device move — if this ever stops "
+            "being true, the pin's reason to exist has changed and this file must be rewritten"
+        )
+
+        pinned = make_backbone()
+        pin_text_encoder_to_cpu(pinned)
+        pinned.to("meta")
+        assert {p.device.type for p in pinned.adapter._text_encoder.parameters()} == {"cpu"}
+        # The control: everything NOT pinned must still follow the move, or the pin has bought
+        # peak VRAM by silently stranding the model on the CPU.
+        assert {p.device.type for p in pinned.adapter._transformer.parameters()} == {"meta"}
+        assert {p.device.type for p in pinned.adapter._vae.parameters()} == {"meta"}
+        assert pinned.adapter.device == "meta"
+
+    def test_the_pin_survives_a_joint_model_construction(self) -> None:
+        """The specific undo this exists to prevent.
+
+        ``JointTrainer.__init__`` ends in ``.to(self.device)``; the comment at
+        ``scripts/train_t16_lora.py`` calls that out as the reason the offload had to be last.
+        A pin applied before ``load()`` has to still be in force after the model around it is
+        built and moved — testing ``attach`` alone would not have caught the bug.
+        """
+        backbone = make_backbone()
+        pin_text_encoder_to_cpu(backbone)
+        model = JointWorldActionModel(joint_config(), backbone=backbone)
+        model.to("meta")
+        assert {p.device.type for p in backbone.adapter._text_encoder.parameters()} == {"cpu"}
+        assert {p.device.type for p in backbone.adapter._transformer.parameters()} == {"meta"}
+
+    def test_an_unpinned_backbone_moves_exactly_as_it_always_did(self) -> None:
+        """The default is a strict no-op: an empty pin set changes no placement anywhere."""
+        backbone = make_backbone()
+        assert backbone.adapter.cpu_pinned == frozenset()
+        backbone.to("meta")
+        assert all(next(m.parameters()).device.type == "meta" for m in backbone._held_modules())
+
+    def test_it_pins_exactly_the_text_tower_and_no_other(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CPU-only twin of the arms above: observe the SET, not a device transition."""
+        backbone = make_backbone()
+        pin_text_encoder_to_cpu(backbone)
+        assert backbone.adapter.cpu_pinned == frozenset({"text_encoder"})
+
+    def test_it_returns_the_adapter_it_acted_on(self) -> None:
+        backbone = make_backbone()
+        assert pin_text_encoder_to_cpu(backbone) is backbone.adapter
+
+    def test_a_tiny_backbone_is_refused_by_the_pin_too(self) -> None:
+        """The pin walks the same chain as the offload, so it must fail the same way — a tiny
+        backbone has no umT5 tower and a silent no-op would be a VRAM plan that never happened."""
+        tiny = build_backbone(TinyBackboneConfig(), load=False)
+        with pytest.raises(RuntimeError, match="needs a Wan-backed model"):
+            pin_text_encoder_to_cpu(tiny)
+
+    def test_the_prompt_cache_still_works_with_a_pinned_tower(self) -> None:
+        """A pinned tower encodes on the CPU exactly as an offloaded one does — the pin changes
+        WHEN the tower gets to the CPU, never what conditioning does once it is there."""
+        backbone = make_backbone()
+        pin_text_encoder_to_cpu(backbone)
+        first = backbone.adapter.condition_text("pick up the apple")
+        second = backbone.adapter.condition_text("pick up the apple")
+        assert first is second
+
+    def test_the_registry_pins_before_it_loads(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ordering IS the feature, so it is asserted rather than left to a comment.
+
+        A pin applied after ``load()`` would be an offload wearing a different name and would not
+        lower the load peak by one byte. ``build_backbone`` is the only place that owns the
+        window between construction and load, which is why the knob lives there.
+        """
+        from wam.backbones import wan_flow
+        from wam.backbones.wan_i2v import WanI2VAdapter
+
+        order: list[str] = []
+        monkeypatch.setattr(
+            WanI2VAdapter,
+            "pin_to_cpu",
+            lambda self, *c: order.append(f"pin{list(c)}"),
+        )
+        monkeypatch.setattr(
+            wan_flow.WanFlowBackbone, "load", lambda self, **kw: order.append("load")
+        )
+
+        build_backbone(wan_config(), load=True, cpu_pinned=("text_encoder",))
+
+        assert order == ["pin['text_encoder']", "load"]
+
+    def test_the_registry_pin_is_opt_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Omitting `cpu_pinned` must not touch the adapter at all — the default is what every
+        run already on record used, and it has to stay byte-identical."""
+        from wam.backbones import wan_flow
+        from wam.backbones.wan_i2v import WanI2VAdapter
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(WanI2VAdapter, "pin_to_cpu", lambda self, *c: calls.append(c))
+        monkeypatch.setattr(wan_flow.WanFlowBackbone, "load", lambda self, **kw: None)
+
+        backbone = build_backbone(wan_config(), load=True)
+
+        assert calls == []
+        assert backbone.adapter.cpu_pinned == frozenset()
+
+    def test_a_tiny_backbone_ignores_the_pin_rather_than_inventing_a_second_refusal(self) -> None:
+        """`cpu_pinned` on a tiny backbone is a no-op, and deliberately not an error here: the
+        loud refusal for `--offload-text` on a non-Wan checkpoint belongs to `resolve_wan_adapter`
+        and is asserted in TestTheChain. Two refusals in two wordings for one mistake is worse
+        than one."""
+        tiny = build_backbone(TinyBackboneConfig(), load=True, cpu_pinned=("text_encoder",))
+        assert not hasattr(tiny, "adapter")
+
+    @pytest.mark.skipif(not _MOCK_D1.is_dir(), reason="datasets/mock-d1 not present")
+    def test_train_asks_the_registry_to_pin_exactly_when_the_flag_is_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The script half: --offload-text must reach `build_backbone`, not only the post-hoc
+        offload. Parameterized on the flag so a hard-wired pin fails the second arm."""
+        seen: list[tuple] = []
+        real_build = tw.build_backbone
+
+        def recording(config, *, load: bool = False, cpu_pinned=()):
+            seen.append(tuple(cpu_pinned))
+            return real_build(config, load=load, cpu_pinned=cpu_pinned)
+
+        monkeypatch.setattr(tw, "build_backbone", recording)
+        spy_on_helper(tw, monkeypatch)
+        for flag, expected in ((["--offload-text"], ("text_encoder",)), ([], ())):
+            seen.clear()
+            rc = tw.main(
+                [
+                    "--training-config", str(_JOINT_YAML),
+                    "--dataset", str(_MOCK_D1),
+                    "--out-dir", str(tmp_path / f"run{len(flag)}"),
+                    "--steps", "2",
+                    "--batch-size", "4",
+                    "--device", "cpu",
+                    *flag,
+                ]
+            )  # fmt: skip
+            assert rc == 0
+            assert seen == [expected], f"flag={flag}"

@@ -24,6 +24,17 @@ offload issued BEFORE the final ``.to(device)`` is silently undone. Every caller
 offload after the model is resident — after ``load_joint_policy`` returns, or after
 ``JointTrainer.__init__`` (joint.py:711) has done its ``.to(self.device)``.
 
+...AND THAT IS WHY AN OFFLOAD CANNOT LOWER THE *LOAD* PEAK. Having to run last means running
+after the umT5 tower has already been on the accelerator once. On a card with room for all
+three towers that is merely wasteful; on a card without it, the process is already dead — the
+Wan weights are 24.18 GB (DiT 10.00 + umT5 11.36 + VAE 2.82) before a single activation, and no
+batch size touches that. Measured 2026-08-17 on a 32 GB RTX 5090 sharing the card with a
+12.70 GB co-tenant: ``torch.OutOfMemoryError`` inside ``WanI2VAdapter.attach``'s
+``module.to(self.device)``, this process holding 18.49 GB, with ``--offload-text`` passed.
+:func:`pin_text_encoder_to_cpu` is the fix and is the opposite discipline — it must run BEFORE
+``load()``, and the pin then survives every later ``.to(device)`` rather than being undone by
+it. Use the pin when the load has to fit; use the offload when only the steady state does.
+
 COST. ``condition_text`` runs the umT5 forward on whichever device the tower is on
 (``wan_i2v.py``: ``enc_device = self._device_of(self._text_encoder)``), so after an offload the
 instruction is encoded on the CPU. That is paid once per DISTINCT instruction, not once per
@@ -45,6 +56,7 @@ __all__ = [
     "advise_alloc_conf",
     "distinct_instructions",
     "offload_text_encoder",
+    "pin_text_encoder_to_cpu",
     "resolve_wan_adapter",
 ]
 
@@ -82,6 +94,24 @@ def resolve_wan_adapter(obj: Any) -> Any:
             "checkpoint has nothing to offload, so the flag would be a silent no-op."
         )
     return node
+
+
+def pin_text_encoder_to_cpu(obj: Any, *, log: Callable[[str], None] | None = None) -> Any:
+    """Pin the umT5 tower to the CPU so it never reaches the accelerator. Returns the adapter.
+
+    Call BEFORE the weights load — with ``build_backbone(..., load=False)``, then this, then
+    ``backbone.load()``. That ordering is the exact inverse of :func:`offload_text_encoder`'s,
+    and deliberately so: an offload has to run last to survive, a pin has to run first to help.
+    See the module docstring for why only the pin lowers the load peak.
+    """
+    adapter = resolve_wan_adapter(obj)
+    adapter.pin_to_cpu("text_encoder")
+    if log is not None:
+        log(
+            "[offload-text] umT5 pinned to CPU BEFORE load: it never reaches the accelerator, so "
+            "the load peak drops by the tower's 11.36 GB rather than only the steady state."
+        )
+    return adapter
 
 
 def offload_text_encoder(obj: Any, *, log: Callable[[str], None] | None = None) -> Any:

@@ -16,7 +16,7 @@ Two entry points, two audiences:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from wam.interfaces.protocols import BackboneAdapter
@@ -112,18 +112,32 @@ def build_backbone_config(data: Any) -> TinyBackboneConfig | WanBackboneConfig:
 
 
 def build_backbone(
-    config: TinyBackboneConfig | WanBackboneConfig, *, load: bool = False
+    config: TinyBackboneConfig | WanBackboneConfig,
+    *,
+    load: bool = False,
+    cpu_pinned: Sequence[str] = (),
 ) -> nn.Module:
     """Construct the ``FlowBackbone`` module for a tagged backbone config.
 
     ``load=False`` (the default) builds the module skeleton only — no weights, no downloads —
     which is what tests, config validation and checkpoint restore need. ``load=True`` pulls the
     real weights and is a heavyweight, network- and disk-touching operation.
+
+    ``cpu_pinned`` names towers that must never reach the accelerator (see
+    ``WanI2VAdapter.pin_to_cpu``). It lives HERE rather than in the config for two reasons. It is
+    a property of the machine the job happens to run on, not of the experiment — and
+    ``WanBackboneConfig`` is inside ``config_hash`` (``interfaces/versioning.py`` canonicalizes
+    every field, defaults included), so a config field would have silently repointed the hash of
+    every Wan run already on record. And the pin is only useful applied BETWEEN construction and
+    ``load()``, a window this function is the only thing that owns.
     """
     kind = config.kind
     if kind == "tiny":
         from wam.backbones.tiny import TinyVideoBackbone
 
+        # `cpu_pinned` is ignored here on purpose: a tiny backbone holds no separate towers, so
+        # there is nothing to pin, and refusing from the registry would duplicate — in different
+        # words — the loud refusal `resolve_wan_adapter` already owns for exactly this case.
         return TinyVideoBackbone(config)  # type: ignore[arg-type]
     if kind == "wan_i2v":
         try:
@@ -135,6 +149,12 @@ def build_backbone(
             ) from exc
 
         backbone = WanFlowBackbone(config)  # type: ignore[arg-type]
+        if cpu_pinned:
+            # BEFORE load(), and that ordering is the whole value: a tower pinned afterwards has
+            # already been resident once and has already cost its share of the load peak, which
+            # on a card that cannot hold every tower at once is the peak that decides whether
+            # the process survives at all.
+            backbone.adapter.pin_to_cpu(*cpu_pinned)
         if load:
             backbone.load()
         return backbone

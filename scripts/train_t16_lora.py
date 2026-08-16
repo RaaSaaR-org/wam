@@ -987,7 +987,18 @@ def main(argv: list[str] | None = None) -> int:
     # non-injected path would have used; JointTrainer re-seeds and builds the heads after.
     torch.manual_seed(config.seed)
     advise_alloc_conf(config.device)
-    backbone = build_backbone(config.backbone, load=True)
+    # `cpu_pinned` is the LOAD-time half of --offload-text; `offload_text_encoder` further down is
+    # the steady-state half. Both are needed and they cannot be merged, because the offload has to
+    # run LAST or JointTrainer's trailing .to(device) undoes it — which means it always runs after
+    # the umT5 tower has been resident once, and so can never lower the LOAD peak. On a card that
+    # cannot hold all three towers at once, that peak is the one that kills the process: measured
+    # 2026-08-17 on a 32 GB RTX 5090 sharing the card with a 12.70 GB co-tenant, OOM inside
+    # attach()'s `module.to(self.device)` with --offload-text passed, 18.49 GB already taken here.
+    backbone = build_backbone(
+        config.backbone,
+        load=True,
+        cpu_pinned=("text_encoder",) if args.offload_text else (),
+    )
     trainer = JointTrainer(config, backbone=backbone)
     feeder = EpochFeeder(
         dataset, batch_size=config.batch_size, seed=config.seed, device=trainer.device

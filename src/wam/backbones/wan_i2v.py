@@ -65,6 +65,12 @@ WAN_NUM_TRAIN_TIMESTEPS = 1000
 # with a CLIP image tower and are appended by add_lora() when config.added_kv_proj_dim is set.
 DEFAULT_LORA_TARGETS: tuple[str, ...] = ("to_q", "to_k", "to_v", "to_out.0", "net.0.proj", "net.2")
 
+#: Towers that can be kept off the accelerator, by name. ONE vocabulary, shared by
+#: :meth:`WanI2VAdapter.offload` (a move, after the weights are already resident) and
+#: :meth:`WanI2VAdapter.pin_to_cpu` (a placement rule, applied before they load). Two lists would
+#: drift and the drift would be silent, because both are string-keyed.
+OFFLOADABLE: tuple[str, ...] = ("text_encoder", "image_encoder", "vae", "transformer")
+
 _LORA_WEIGHT_NAME = "pytorch_lora_weights.safetensors"  # diffusers' save_lora_adapter layout
 
 _WEIGHTS_MISSING_MSG = (
@@ -196,6 +202,9 @@ class WanI2VAdapter:
         # smaller than the checkpoint (a stock 16 GB Space vs. a 34 GB Wan repo); worth it
         # anyway — it loads the 5B in 7.4 s where a CPU round-trip needs tens of seconds.
         self.device_map = device_map
+        # Empty by default, and an empty pin set is a strict no-op: `load`, `attach` and
+        # WanFlowBackbone._apply all behave byte-for-byte as they did before pins existed.
+        self._cpu_pinned: set[str] = set()
         self._loaded = False
         self._transformer: Any = None
         self._vae: Any = None
@@ -285,15 +294,24 @@ class WanI2VAdapter:
         weights = dict(common)
         if self.device_map:  # shards go straight to the device; host RAM stays flat
             weights["device_map"] = self.device_map
+
+        def _kw(component: str) -> dict[str, Any]:
+            """`from_pretrained` kwargs for one tower, minus `device_map` when it is pinned.
+
+            A pinned tower must never be handed to accelerate: `device_map` places its shards on
+            the accelerator as they stream, which is precisely the transit the pin forbids.
+            """
+            return dict(common) if component in self._cpu_pinned else weights
+
         # VAE stays fp32 (diffusers guidance: better encode/decode quality).
         vae = AutoencoderKLWan.from_pretrained(
-            source, subfolder="vae", torch_dtype=torch.float32, **weights
+            source, subfolder="vae", torch_dtype=torch.float32, **_kw("vae")
         )
         transformer = WanTransformer3DModel.from_pretrained(
-            source, subfolder="transformer", torch_dtype=torch_dtype, **weights
+            source, subfolder="transformer", torch_dtype=torch_dtype, **_kw("transformer")
         )
         text_encoder = UMT5EncoderModel.from_pretrained(
-            source, subfolder="text_encoder", torch_dtype=torch_dtype, **weights
+            source, subfolder="text_encoder", torch_dtype=torch_dtype, **_kw("text_encoder")
         )
         tokenizer = AutoTokenizer.from_pretrained(source, subfolder="tokenizer", **common)
         image_encoder = image_processor = None
@@ -301,7 +319,7 @@ class WanI2VAdapter:
             from transformers import CLIPImageProcessor, CLIPVisionModel
 
             image_encoder = CLIPVisionModel.from_pretrained(
-                source, subfolder="image_encoder", torch_dtype=torch.float32, **weights
+                source, subfolder="image_encoder", torch_dtype=torch.float32, **_kw("image_encoder")
             )
             image_processor = CLIPImageProcessor.from_pretrained(
                 source, subfolder="image_processor", **common
@@ -385,20 +403,67 @@ class WanI2VAdapter:
             if value:
                 setattr(self, attr, int(value))
 
-        for module in (transformer, vae, text_encoder, image_encoder):
+        for name, module in (
+            ("transformer", transformer),
+            ("vae", vae),
+            ("text_encoder", text_encoder),
+            ("image_encoder", image_encoder),
+        ):
             if module is None:
                 continue
             module.eval()
             module.requires_grad_(False)
+            if name in self._cpu_pinned:
+                # A pin outranks BOTH move_to_device and device_map. This is the line the
+                # post-hoc `offload()` could never reach: on a card too small to hold all three
+                # towers at once the load is the peak, and a tower that transits the device here
+                # has already OOM'd by the time anyone could move it back off.
+                module.to("cpu")
+                continue
             if move_to_device:
                 module.to(self.device)
         self._loaded = True
+
+    @property
+    def cpu_pinned(self) -> frozenset[str]:
+        """Components pinned to the CPU — read by ``WanFlowBackbone._apply`` to skip them."""
+        return frozenset(self._cpu_pinned)
+
+    def pin_to_cpu(self, *components: str) -> None:
+        """Keep named components on the CPU permanently, from ``load()`` onwards.
+
+        The difference from :meth:`offload` is *when*, and it is the whole point:
+
+        - ``offload`` is a **move**. It frees VRAM a tower already occupies, so it can only run
+          after ``load()`` has put it there, and a later ``.to(device)`` — which
+          ``WanFlowBackbone._apply`` forwards to every held tower — brings it straight back.
+        - ``pin_to_cpu`` is a **placement rule**. The tower is loaded on the CPU and stays there
+          through ``attach`` and through every subsequent device move.
+
+        On a card that cannot hold all three towers at once the load is the peak, so only the
+        pin helps: the three Wan towers are 24.18 GB of weights (DiT 10.00 + umT5 11.36 + VAE
+        2.82) before a single activation, and no batch size reduces that.
+
+        Call before ``load()``. Pinning after it is accepted and also moves the tower now, so
+        that the pin and the current placement never disagree.
+        """
+        for name in components:
+            if name not in OFFLOADABLE:
+                raise ValueError(f"unknown component {name!r}; known: {sorted(OFFLOADABLE)}")
+        self._cpu_pinned.update(components)
+        if self._loaded:
+            self.offload(*components)
 
     def offload(self, *components: str) -> None:
         """Move named components ('text_encoder', 'image_encoder', 'vae', 'transformer') to CPU.
 
         Peak-VRAM relief on 24 GB cards: the umT5 tower is only needed while encoding the
         instruction, which for a fixed task is done once per rollout.
+
+        This is a move and **it does not survive a later device move** — ``.to(device)`` on the
+        owning ``WanFlowBackbone`` forwards to every held tower and undoes it. It also cannot
+        lower the *load* peak, because the tower is already resident by the time it runs. When
+        either of those matters, use :meth:`pin_to_cpu` instead.
         """
         self._require_loaded()
         known = {
@@ -408,8 +473,8 @@ class WanI2VAdapter:
             "transformer": self._transformer,
         }
         for name in components:
-            if name not in known:
-                raise ValueError(f"unknown component {name!r}; known: {sorted(known)}")
+            if name not in OFFLOADABLE:
+                raise ValueError(f"unknown component {name!r}; known: {sorted(OFFLOADABLE)}")
             module = known[name]
             if module is not None:
                 module.to("cpu")

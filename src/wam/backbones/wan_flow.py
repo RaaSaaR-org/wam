@@ -143,8 +143,17 @@ class WanFlowBackbone(nn.Module):
 
     def _held_modules(self) -> tuple[nn.Module, ...]:
         """The attached, unregistered modules — the ones ``.to()`` would otherwise miss."""
-        modules = (getattr(self._adapter, attr) for attr in _HELD_MODULE_ATTRS)
-        return tuple(m for m in modules if m is not None)
+        return tuple(m for _, m in self._held_modules_by_name())
+
+    def _held_modules_by_name(self) -> tuple[tuple[str, nn.Module], ...]:
+        """``(component_name, module)`` for each attached held module.
+
+        The name is what ``_apply`` needs to honour ``WanI2VAdapter.cpu_pinned``: the attribute
+        is ``_text_encoder``, the pin vocabulary says ``text_encoder``, and stripping the one
+        leading underscore is the whole mapping.
+        """
+        pairs = ((attr.lstrip("_"), getattr(self._adapter, attr)) for attr in _HELD_MODULE_ATTRS)
+        return tuple((name, m) for name, m in pairs if m is not None)
 
     # ---- setup ---------------------------------------------------------------------------
 
@@ -262,7 +271,13 @@ class WanFlowBackbone(nn.Module):
         module = super()._apply(fn, recurse=recurse)
         device = self._moved_device(fn)
         if device is not None:
-            for held in self._held_modules():
+            pinned = self._adapter.cpu_pinned
+            for name, held in self._held_modules_by_name():
+                if name in pinned:
+                    # THE line that used to undo an early offload: JointTrainer.__init__ ends in
+                    # .to(self.device), which lands here and dragged the umT5 tower back onto the
+                    # card. A pin has to survive this, not just attach(), or it buys nothing.
+                    continue
                 held.to(device)
             # The adapter places its own intermediates (pixels, the readout timestep) on this
             # string; leaving it behind would split the batch across devices.
@@ -286,8 +301,16 @@ class WanFlowBackbone(nn.Module):
             # accelerate already placed every shard, possibly across several devices; a blanket
             # .to() would undo that and, on the hardware that needs device_map, OOM.
             return None
-        modules = self._held_modules()
+        # Probe an UNPINNED tower. A pinned one is parked on the CPU by construction, so probing
+        # it would read "cpu" as the current device and report every .to("cuda") as a move for
+        # towers that are already there — and, worse, report a genuine .to("cuda") on an
+        # already-resident model as a no-op once the pinned tower and the target agree. The
+        # unpinned towers are the ones this device actually describes.
+        pinned = self._adapter.cpu_pinned
+        modules = [m for name, m in self._held_modules_by_name() if name not in pinned]
         if not modules:
+            # Everything is pinned: there is nothing left for a device move to move, so there is
+            # no move to report. Returning None here is what makes that literally true.
             return None
         current = next(modules[0].parameters()).device
         with torch.no_grad():
