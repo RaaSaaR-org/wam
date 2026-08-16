@@ -137,14 +137,29 @@ def trim_pairs(pairs: list[Any]) -> list[Any]:
     return pairs[1:-1]
 
 
-def _score(predictions: list[Any], run_name: str) -> dict[str, float]:
-    """The two ladder rungs plus the two diagnostics, under bench spec 0.1.0.
+BENCH_SPECS = ("0.1.0", "0.2.0")
+"""Both, because PR-10 §5 says "under both bench specs" and that is not optional.
 
-    0.1.0 and not 0.2.0: it is the spec every archived number in this repo was scored under and
-    the one ``T39_RULE_V1`` read, so it is the one a comparison to PR-07-RESULT has to use.
-    """
-    bench = bench_metrics(predictions, run_name=run_name, spec_version="0.1.0")
+**0.1.0 is what the rule reads.** It is the spec every archived number in this repo was scored
+under and the one ``T39_RULE_V1`` read, so it is the one a comparison to PR-07-RESULT has to use;
+every verdict-bearing number below is 0.1.0's. 0.2.0 is written beside it — one extra call over
+predictions already in memory — so the two-sided L4 band is on record without a re-score, exactly
+as ``eval_t39_baseline.BENCH_SPECS_WRITTEN`` does it. Deciding afterwards which spec to report
+would not be free."""
+
+
+def _score(predictions: list[Any], run_name: str) -> dict[str, Any]:
+    """The two ladder rungs plus the two diagnostics, under both bench specs."""
+    bench = bench_metrics(predictions, run_name=run_name, spec_version=BENCH_SPECS[0])
+    alt = bench_metrics(predictions, run_name=run_name, spec_version=BENCH_SPECS[1])
     return {
+        "spec_0_2_0": {
+            "skill_vs_repeat_pct": float(alt.skill_vs_repeat_pct),
+            "ci_skill_vs_repeat_pct": float(alt.ci_skill_vs_repeat_pct),
+            "smoothness_ratio": float(alt.smoothness_ratio),
+            "level_name": str(alt.level_name),
+            "score": float(alt.score),
+        },
         "num_chunks": int(bench.num_predictions),
         "num_episodes": int(bench.num_episodes),
         "skill_vs_repeat_pct": float(bench.skill_vs_repeat_pct),

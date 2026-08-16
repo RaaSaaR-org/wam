@@ -5,7 +5,7 @@ aliases:
 - T-044
 title: "Is the label/command mismatch a timing convention, or is it the space?"
 slug: is-the-label-command-mismatch-a-timing-convention
-status: todo
+status: done
 priority: 1
 owner: ''
 projects: []
@@ -21,7 +21,7 @@ depends_on:
 due_date: ''
 created: 2026-08-16
 updated: 2026-08-16
-status_note: "Pre-registered 2026-08-16 as PR-10, rule T44_RULE_V1, BEFORE any sweep is run. Zero GPU-hours: an offline re-score of artifacts already on disk, no cluster, no allocation, no download. Named by PR-07-RESULT as the follow-up that distinguishes its one un-established reading. Not yet implemented: PR-10 §8 lists the three things that must exist first — the driver importing commanded_to_chunk rather than re-implementing it, the two mutants, and the d=0 bridge against PR-07's -359.41."
+status_note: "RAN 2026-08-16, verdict J. Zero GPU-hours, CPU only, 40 holdout episodes. Both G0 gates passed: oracle_state +100.00 % on the trimmed set, and the d=0 bridge reproduced PR-07's -359.41 to -359.4078 (drift +0.002 pp) with smoothness_ratio 8.5175 and horizon_ratio 0.004413 against PR-07's 8.52 / 0.0044 -- the same measurement through a different driver. NO delay in the -4..+4 window clears L1 on half A, so the commanded and executed spaces are not a shifted copy of one another and the anchor is not the defect. THE INTERESTING PART IS THE SUB-FINDING: a real timing offset does exist, d* = -2 on BOTH halves independently, worth +28.81 pp (A) / +30.35 pp (B) -- material by the borrowed 10 pp floor and replicated out-of-sample -- but it closes only ~11 % of a ~254 pp gap and leaves the arm 3.2x worse than repeat-last-action. So the constant-lag reading PR-07-RESULT declined to establish is partially confirmed and decisively insufficient. smoothness_ratio moves 6.21 -> 5.67 only, i.e. re-anchoring removes ~9 % of the excess jerk; a shift re-indexes a signal and cannot smooth one, which is the substance of J. Curve is smooth, unimodal and interior (E did not apply), and both bench specs agree to nine decimals. Licenses nothing about GR00T or any policy, relabels nothing, retro-validates none of the fourteen negatives, and does not unblock training after T-39's VOID. Result: docs/preregistration/PR-10-RESULT-T-44.md, artifact runs/t44-anchoring-sweep/sweep.json."
 ---
 
 # Is the label/command mismatch a timing convention, or is it the space?
@@ -75,4 +75,18 @@ or unblocking training after a `VOID` gate, which stays the project owner's call
 
 ## Notes / Report
 
-_Empty until the task runs._
+**Verdict `J`** — see `docs/preregistration/PR-10-RESULT-T-44.md` for the full curve, both halves, both
+bench specs and the diagnostics.
+
+The one line worth carrying forward: **the anchor is real and it is not the problem.** `d* = -2`
+replicated on a held-out half and cleared the material floor, which is exactly what a genuine
+timing offset looks like — and it bought 29 pp against a 254 pp deficit. What survives every
+anchoring in the window is that the command carries high-frequency content the executed trajectory
+does not (`smoothness_ratio` 6.21 -> 5.67 against an L4 gate of 2.0), and a shift cannot smooth a
+signal. **`smoothness_ratio` is the object of study, and PR-04's collection spec — what *kind* of
+data — is the live question**, not another anchoring fix and not another model.
+
+Named as follow-up rather than answered: a per-joint or velocity-dependent lag is not ruled out.
+PR-10 §9 predicted it would show as "a partial, unsatisfying improvement", and that is what
+appeared — with L1 and L2 disagreeing about where the optimum sits (-2 vs -1). Designing that
+experiment after seeing this curve is what the next pre-registration is for.

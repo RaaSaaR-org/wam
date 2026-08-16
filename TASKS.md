@@ -109,19 +109,26 @@ mc show T-16     # the whole T-16 record
 
 - [x] **[T-39](.mc/tasks/done/T-39-the-positive-control-this-project-has-never-had.md)** The positive control this project has never had — **reported 2026-08-16: VOID (labels).** `oracle_state` +100.00 % (bit-exact), `oracle_action` **−359.41 %** on L1, so no policy trained on this corpus's action column can clear our bar. [`PR-07-RESULT.md`](docs/preregistration/PR-07-RESULT.md)
 
-- [ ] **[T-044](.mc/tasks/todo/T-044-is-the-label-command-mismatch-a-timing-convention.md)**
-  Is the label/command mismatch a timing convention, or is it the space? — **the one follow-up
-  PR-07-RESULT names**, and the successor to T-39 rather than a new direction. Sweeps the commanded
-  chunk's source index over `d ∈ {−4 … +4}` with the chaining, chunk length and anchor untouched,
-  to separate "the command leads the executed state by a constant lag" from "the two spaces differ
-  in a way no shift fixes". Pre-registered **before any sweep runs** as
-  [`PR-10`](docs/preregistration/PR-10-label-anchoring-delay-sweep.md), rule `T44_RULE_V1`; `d*`
-  fitted on holdout half A and read on half B so that nine-values-take-the-best cannot be the
-  finding. **Here the POSITIVE is the expensive verdict** — T licenses re-labelling the corpus and
-  re-reading `docs/benchmark.md` end to end — so T carries the `MATERIAL_FLOOR_PP = 10.0` margin
-  and J is the cheap default. **Zero GPU-hours, no cluster, no download**, which is most of why it
-  is the right next experiment rather than another model. Not yet implemented — PR-10 §8 lists the
-  three things that must exist first.
+- [x] **[T-044](.mc/tasks/done/T-044-is-the-label-command-mismatch-a-timing-convention.md)**
+  Is the label/command mismatch a timing convention, or is it the space? — **reported 2026-08-16:
+  `J`.** Pre-registered as
+  [`PR-10-label-anchoring-delay-sweep`](docs/preregistration/PR-10-label-anchoring-delay-sweep.md),
+  rule `T44_RULE_V1`, before the driver existed; result in
+  [`PR-10-RESULT-T-44.md`](docs/preregistration/PR-10-RESULT-T-44.md). Zero GPU-hours. Both G0 gates
+  passed — `oracle_state` +100.00 %, and the `d=0` bridge reproduced PR-07's −359.41 to −359.4078
+  (drift +0.002 pp). **No delay in `d ∈ {−4 … +4}` clears L1**, so the anchor is not the defect.
+  **But a real offset is there:** `d* = −2` on *both* holdout halves independently, worth **+28.81 /
+  +30.35 pp** — material by the borrowed 10 pp floor and replicated out-of-sample — and it closes
+  only ~11 % of a ~254 pp gap. `smoothness_ratio` moves 6.21 → 5.67 against a gate of 2.0: a shift
+  re-indexes a signal, it cannot smooth one. **The live question is now `smoothness_ratio` and
+  PR-04's collection spec — what *kind* of data — not another anchoring fix and not another model.**
+  ⚠️ **Duplicate PR number, needs a human decision:** a peer session independently pre-registered
+  and ran the same experiment the same afternoon as
+  [`PR-10-anchor-delay-sweep`](docs/preregistration/PR-10-anchor-delay-sweep.md) (rule
+  `PR10_RULE_V1`, verdict `P (partial)`, result in `PR-10-RESULT.md`). Wasteful, and also an
+  unplanned **independent replication that holds**: different drivers, different chunk sets,
+  different rules — same `d* = −2`, same ~29–30 pp gain, same `d = −1` optimum on L2, same failure
+  to clear L1. The cross-comparison is a table in `PR-10-RESULT-T-44.md`.
 
 **Exit:** ablation machinery ready; first real AC-07 verdict recorded — at tiny scale the video branch hurts, so "video helps" now rests on the pretrained prior (T-16 LoRA). T-26 tested the one confound that could have moved that premise and did not move it, so the burden on T-16 is confirmed rather than assumed. T-27 then re-scored both real runs against trivial baselines and raised the bar T-16 must clear: beating the action-only baseline is not enough, because that baseline itself loses to repeat-last-action. T-28 then closed the gap that would have made a finished T-16 unreadable: the trainer does no eval, so `eval_t16.py` is the step that turns a checkpoint into a scorable `predictions.jsonl` — and it refuses to score a holdout it cannot prove was excluded. Neither GPU nor code is the blocker any more — Discoverer+ is scripted (`cluster/discoverer/`) and T-16a is done.
 
