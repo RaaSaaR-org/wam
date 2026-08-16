@@ -5,7 +5,7 @@ aliases:
 - T-045
 title: "Is the residual the arm's low-pass filter, or is it content?"
 slug: is-the-residual-the-arm-s-low-pass-filter-or-is-it-content
-status: todo
+status: done
 priority: 1
 owner: ''
 projects: []
@@ -22,7 +22,7 @@ depends_on:
 due_date: ''
 created: 2026-08-16
 updated: 2026-08-16
-status_note: "Pre-registered 2026-08-16 as PR-11, rule T45_RULE_V1, BEFORE anything is filtered. Zero GPU-hours, CPU only, artifacts already on disk. The number PR-11 was CLAIMED ACROSS SESSIONS before the file was written and confirmed unclaimed by the author of PR-10-anchor-delay-sweep.md — that is the fix for the PR-10 duplication, which is still unresolved and is the user's to settle. Not yet implemented: PR-11 §8 lists four things that must exist first, three of them tests, including one that FAILS when the filter is removed."
+status_note: "RAN 2026-08-16, verdict R. Zero GPU-hours, 29 evaluations, ~2 min. All three G0 gates passed: the four no-op cells reproduced T-44 to <=0.003 pp drift, oracle_state +100.00 %, and the filter provably reached the array (RMS change 1.55e-03 at 12 Hz rising monotonically to 2.14e-02 at 1 Hz). NO cutoff clears L1 at either anchor. The best cell is 2 Hz at d=-2, worth +4.63 pp against a 224.89 pp deficit -- about 2 % of it, less than half the borrowed 10 pp floor, and PR-10's re-anchoring was already the small answer at ~11 %. THE NUMBER THAT REFRAMES THE PROBLEM: a 1 Hz cutoff on a 30 Hz signal moves smoothness_ratio only 5.675 -> 5.381, a 5.2 % change, which should be impossible if the excess jerk lived in high frequencies; horizon_ratio meanwhile sits at 0.006-0.008 at EVERY cutoff. Reading (marked as interpretation, not established here): the deficit is a level offset between command and state at the chunk's ANCHOR, so a filter reshapes steps 1..15 while the error sits in step 0 -- and smoothness_ratio may have been reporting that same first-step discontinuity all along rather than high-frequency content, which would bear on docs/benchmark.md's L4 gate. Between PR-10 and PR-11 both obvious cheap repairs to the label space are now measured and priced. Next is NOT another repair: PR-04's collection spec. Two follow-ups named and deliberately NOT run after seeing the verdict: the per-step error profile, and whether smoothness_ratio measures what its name claims. Result: docs/preregistration/PR-11-RESULT.md, artifact runs/t45-lowpass-sweep/sweep.json."
 ---
 
 # Is the residual the arm's low-pass filter, or is it content?
@@ -76,4 +76,18 @@ controller-side filter and the recording chain.
 
 ## Notes / Report
 
-_Empty until the task runs._
+**Verdict `R`** — `docs/preregistration/PR-11-RESULT.md` has the full grid at both anchors, both
+halves, both bench specs, and the three gate readings.
+
+The line worth carrying forward is not the verdict, it is the diagnostic underneath it: **a 1 Hz
+cutoff on a 30 Hz signal moves `smoothness_ratio` by 5.2 %.** That should be impossible for a signal
+whose excess jerk is high-frequency. Together with `horizon_ratio` sitting at 0.006-0.008 at every
+cutoff, it points at the error being a **level offset at the chunk's anchor** rather than a spectral
+property — and therefore at `smoothness_ratio` having been read wrongly in every document that has
+cited it, this project's L4 *moves-like-a-demo* gate included.
+
+Marked as interpretation, not measurement, and the experiment that would settle it (the per-step
+error profile) was deliberately not run after the verdict was known.
+
+**Both cheap repairs to the label space are now priced: anchor ~11 %, filter ~2 %.** The next thing
+is not a third repair.
