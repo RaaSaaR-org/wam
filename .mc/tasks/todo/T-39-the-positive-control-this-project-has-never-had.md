@@ -21,7 +21,7 @@ depends_on: []
 due_date: ''
 created: 2026-08-06
 updated: 2026-08-06
-status_note: "Pre-registered 2026-08-06 (PR-07), drivers + 31 tests shipped, and deliberately not submittable: PR-07 §8 items 4-6 remain (the $PROJ/virt_envs/t39 venv, a MODEL_ID verified from a primary source, and TRAINER_ENTRYPOINT / POLICY_ENTRYPOINT plus the vendored third_party/isaac-gr00t). Those need SSH or a source document — no local work is left. Submission is the user's call."
+status_note: "Pre-registered 2026-08-06 (PR-07), drivers + 31 tests shipped, and still not submittable: PR-07 §8 items 4-6 remain. CORRECTED 2026-08-16 — the claim that those items 'need SSH or a source document, no local work is left' was wrong. The source document is on this workstation and was before the gate was written: two Isaac-GR00T checkouts, a gr00t 0.1.0 venv that sees the 5090, the 402-episode corpus, and TRAINER_ENTRYPOINT = gr00t/experiment/launch_finetune.py read off the pinned commit. Inventory: docs/local_gr00t_assets.md. Item 4 substantially met, item 6 half met; item 5 genuinely open because the nvidia/GR00T-N1.7-3B BASE checkpoint is absent from this disk and a default in our own sbatch is not a primary source. Neither checkout is at the pinned 1a1837f. Submission, and any weight download, is the user's call."
 ---
 
 # The positive control this project has never had

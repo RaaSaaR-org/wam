@@ -887,6 +887,10 @@ different episode sets. Re-run `eval_t16.py` for one of them against the other's
 ## See also
 
 - `scripts/preflight_gpu.py` — the gate in §0; `--json` for the machine-readable version
+- `docs/local_gr00t_assets.md` — what GR00T is **already on this box** (two Isaac-GR00T checkouts, the
+  `venvs/arena` gr00t env that sees the 5090, three post-trained checkpoints, the 402-episode corpus)
+  and the one thing that is not: the `nvidia/GR00T-N1.7-3B` base. Also records that **`MUJOCO_GL=egl`
+  is required here** — without it MuJoCo picks GLFW, which wants an X display these shells lack.
 - `configs/training/joint_wan_gr00t_5090.yaml` — the §5 memory arithmetic, in full, with provenance
 - `docs/benchmark.md` — the ladder, its KPIs and the external benchmark landscape
 - `cluster/discoverer/README.md` — where the T-16 fine-tune of record ran
