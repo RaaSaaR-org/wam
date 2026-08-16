@@ -100,7 +100,22 @@ any amount that matters.** `horizon_ratio` moves from 0.00453 at `k = 0` to 0.00
 orders of magnitude below its own gate of 4 at every delay in the window. The first-step
 concentration T-39 measured survives every anchoring this grid admits. And `smoothness_ratio` at the
 optimum is **7.70**, down from 8.28 and still **3.9× its gate of 2** — a shift re-indexes a signal,
-it does not smooth one. Optimal alignment leaves the command nearly as jerky as it was.
+it does not smooth one.
+
+> **Correction, 2026-08-16, and this one is a change of direction.** This paragraph originally
+> closed *"optimal alignment leaves the command nearly as jerky as it was"*, and §"What it does
+> establish" read the same way. **That reading of `smoothness_ratio` is wrong.**
+> `docs/smoothness-ratio-audit.md` decomposes the statistic on these very chunks: **96.8 % of the
+> predicted jerk sum sits in a single term**, `d2[0]`, the only one containing `targets[0]` — and
+> `targets[0]` is the standing tracking error (`command − state`) while every other element is a
+> command increment (`command − command`). The target's sum is flat at 6.6 % ≈ 1/14 per index, as a
+> homogeneous first difference must be. With index 0 dropped from **both** arms the ratio falls
+> from 8.28 to **0.28**: over steps 1–15 the commanded stream is about **3.6× smoother** than the
+> executed trajectory, not 8× jerkier. So `smoothness_ratio ≈ 8` is very nearly a restatement of the
+> first-step discontinuity `horizon_ratio` already reports, which is why re-anchoring barely moves
+> it and why PR-11's 1 Hz low-pass moved it 5 %. The numbers in the table are correct and unchanged;
+> the sentence drawing "high-frequency content" from them was not. Found because the peer session
+> reported PR-11's 1 Hz cell as a contradiction instead of explaining it away.
 
 > **Correction, 2026-08-16.** This paragraph first read that `horizon_ratio` is "further from 1.0 at
 > `k = −2` (0.00551) than at `k = 0` (0.00453)" and that the registered prediction therefore failed
@@ -165,3 +180,10 @@ available account of the fourteen recorded negatives, and it would have been re-
 indefinitely. It is now measured: worth 8.7 % of one arm's deficit, and the residual is not a
 shift. The live question for this project is what the commanded stream contains that the executed
 trajectory does not — not which backbone to try next, and not more data.
+
+**Amended 2026-08-16.** That last sentence originally continued into a claim about *jerk*, and the
+audit above removed its basis. What survives is narrower and, if anything, more useful: the residual
+is **not a whole-window time shift** (this grid), **not a bandwidth mismatch** (PR-11), and it is
+**concentrated in the chunk's first step** — where a command is differenced against a state instead
+of against another command. Whether making that step homogeneous clears L1 is unmeasured here and is
+the peer session's **PR-12**.

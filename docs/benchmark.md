@@ -258,8 +258,9 @@ trained to predict them can clear L1 as scored here. T-39 is **VOID (labels)** �
 §4 pre-registered as a first-class finding rather than a setback.
 
 Two rungs locate the disagreement: `horizon_ratio 0.0044` puts essentially all of it in the
-chunk's **first step**, and `smoothness_ratio 8.52` makes the command 8.5× jerkier than the
-executed trajectory. The gripper section above records the same split from the other side — our
+chunk's **first step**, and `smoothness_ratio 8.52` was read as making the command 8.5× jerkier
+than the executed trajectory — **but see the audit note below; that second reading does not
+survive.** The gripper section above records the same split from the other side — our
 relabeled gripper channel is degenerate (0.00 debounced transitions/episode) while the raw
 commanded `action.left_hand.max_joint[0]` carries 2.04 per episode and a complete cycle in 99.8 %
 of them.
@@ -289,6 +290,19 @@ holdout; this run additionally shows a co-shifted control is flat, so the offset
 not our conversion's. Its headline reads 11 % rather than 8.7 % **only because it scores against a
 smaller chunk set's own baseline** — same numerator, different denominator.
 [`preregistration/PR-10-RESULT-T-44.md`](preregistration/PR-10-RESULT-T-44.md).
+
+**`smoothness_ratio` on an anchored chunk does not mean what the three documents above took it to
+mean (audited 2026-08-16).** On the PR-10 chunks, **96.8 % of the predicted jerk sum sits in one
+term** — `d2[0]`, the only one containing `targets[0]` — because a chunk anchored on an observed
+state makes `targets[0]` a *command minus state* (the standing tracking error) while every other
+element is *command minus command*. The target's sum is flat at 6.6 % ≈ 1/14 per index. Drop index 0
+from both arms and the ratio falls from 8.28 to **0.28**: over steps 1–15 the command is ~3.6×
+*smoother* than the executed trajectory, not 8× jerkier. That is why re-anchoring barely moves it
+and why PR-11's 1 Hz low-pass moved it 5 %. **No archived number changes and no gate moved** — every
+`smoothness_ratio` in the tables below was computed correctly under the shipped metric; what changes
+is the sentence read off it. What L4 *should* do about an anchored chunk reaches every run in this
+file and is an open decision, deliberately not taken by the session that found it:
+[`smoothness-ratio-audit.md`](smoothness-ratio-audit.md).
 
 ---
 

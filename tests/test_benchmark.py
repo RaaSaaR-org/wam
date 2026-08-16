@@ -571,3 +571,115 @@ def test_script_refuses_to_compare_different_holdouts(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "holdout mismatch" in result.stderr
+
+
+# ---------------------------------------------------------------------------------------
+# WHAT smoothness_ratio ACTUALLY REPORTS ON AN ANCHORED CHUNK (2026-08-16).
+#
+# `jerk` is `sum(d2**2)` over the second differences WITHIN one chunk, and `d2[0]` is the only
+# term containing `targets[0]`. When the chunk is built by anchoring on an observed state —
+# eval_t39_baseline.commanded_to_chunk, and every policy arm that reuses it — `targets[0]` is the
+# standing TRACKING ERROR (command minus current state) while `targets[t>0]` are per-step command
+# increments. Two different physical quantities in one array, and the sum is over squares, so the
+# larger one takes the statistic.
+#
+# Measured on the real PR-10 chunks by scripts/audit_smoothness_ratio.py: index 0 carries 96.8 %
+# of the predicted jerk sum and 6.6 % of the target's (which is 1/14, i.e. flat, as a uniform first
+# difference should be). These two tests pin the MECHANISM on synthetic data, where the command's
+# high-frequency content can be held exactly fixed while the anchor moves.
+#
+# This is not a defect in commanded_to_chunk — `action[t] - q[t]` is the correct commanded
+# displacement over step t, and under perfect tracking there is no discontinuity at all. It is a
+# statement about what the METRIC reports on such a chunk, and it is why PR-10 and PR-10-RESULT-T-44
+# both read "8x jerkier" as high-frequency content when PR-11's 1 Hz low-pass then moved it 5 %.
+# ---------------------------------------------------------------------------------------
+
+_ANCHORED_STEPS = 16
+_INCREMENT = 0.002        # a per-step command increment, rad — the corpus's order of magnitude
+_TRACKING_ERROR = 0.03    # a standing command-minus-state offset, rad — likewise
+
+
+def _anchored(anchor_error: float, *, increments: np.ndarray | None = None) -> np.ndarray:
+    """A JOINT_DELTA chunk whose element 0 is a tracking error and the rest command increments."""
+    if increments is None:
+        t = np.arange(_ANCHORED_STEPS, dtype=np.float64)
+        increments = _INCREMENT * (1.0 + 0.3 * np.sin(t))
+    out = np.repeat(np.asarray(increments, dtype=np.float64)[:, None], DIM, axis=1)
+    out[0] += anchor_error
+    return out.astype(np.float32)
+
+
+def _smoothness(predicted: np.ndarray, target: np.ndarray) -> float:
+    preds = episode([predicted], [target], stride=_ANCHORED_STEPS)
+    return bench_metrics(preds).smoothness_ratio
+
+
+def test_a_tracking_offset_alone_inflates_smoothness_ratio() -> None:
+    """The command is byte-identical in both arms; only the anchor moved."""
+    target = _anchored(0.0)
+    perfect = _anchored(0.0)
+    offset = _anchored(_TRACKING_ERROR)
+
+    # Everything the word "jerk" could mean is unchanged between `perfect` and `offset`: they
+    # differ in exactly one element, and it is the one the anchor sets.
+    assert np.array_equal(perfect[1:], offset[1:])
+
+    assert _smoothness(perfect, target) == pytest.approx(1.0)
+    inflated = _smoothness(offset, target)
+    assert inflated > 4 * MAX_SMOOTHNESS_RATIO, inflated
+
+
+def test_low_passing_the_command_barely_moves_an_offset_dominated_ratio() -> None:
+    """PR-11's result, as a controlled fact: filtering cannot fix what filtering does not touch."""
+    target = _anchored(0.0)
+    offset = _anchored(_TRACKING_ERROR)
+    # The most violent low-pass available: every increment replaced by their mean, so steps 1..15
+    # carry NO high-frequency content whatsoever. The anchor term is untouched, as a filter over
+    # the commanded column leaves it.
+    flat = np.full(_ANCHORED_STEPS, _INCREMENT, dtype=np.float64)
+    filtered = _anchored(_TRACKING_ERROR, increments=flat)
+
+    before = _smoothness(offset, target)
+    after = _smoothness(filtered, target)
+    # A metric reporting high-frequency content would collapse here. This one moves single digits.
+    assert abs(after - before) / before < 0.05, (before, after)
+    assert after > 4 * MAX_SMOOTHNESS_RATIO, after
+
+
+_AUDIT = Path(__file__).resolve().parent.parent / "scripts" / "audit_smoothness_ratio.py"
+
+
+def test_the_smoothness_audit_reproduces_the_metric_it_audits(tmp_path: Path) -> None:
+    """An audit that computes its own slightly-different number audits nothing.
+
+    The script's job is to split `bench_metrics`' jerk sum by within-chunk index. It earns the
+    right to say where the sum comes from only by first reproducing the sum, so that is asserted
+    here against a `bench.json` this test wrote — the same check the script prints as `drift`.
+    """
+    target = _anchored(0.0)
+    offset = _anchored(_TRACKING_ERROR)
+    preds = episode([offset], [target], stride=_ANCHORED_STEPS)
+
+    run = tmp_path / "cell"
+    run.mkdir()
+    save_predictions_jsonl(preds, run / "predictions.jsonl")
+    report = bench_metrics(preds)
+    (run / "bench.json").write_text(report.to_json() + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(_AUDIT), str(run), "--json-out", str(tmp_path / "audit.json")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "MISMATCH" not in result.stdout
+
+    audited = json.loads((tmp_path / "audit.json").read_text())[0]
+    assert audited["smoothness_ratio_recomputed"] == pytest.approx(
+        report.smoothness_ratio, rel=1e-12
+    )
+    # And the decomposition has to be load-bearing: on a chunk whose only anomaly is the anchor,
+    # index 0 carries essentially the whole predicted sum and none of the target's.
+    assert audited["index0_share_pred"] > 0.9
+    assert audited["index0_share_target"] < 0.2
