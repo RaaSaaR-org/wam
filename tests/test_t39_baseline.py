@@ -1213,3 +1213,158 @@ def test_commanded_policy_refuses_command_anchoring_without_the_command_column(m
             episode_id=EPISODE_ID,
             anchor_kind="command",
         )
+
+
+# -- the driver's anchoring flag, and the set it changes ----------------------------------------
+#
+# PR-12 measured the step-0 defect and PR-13 re-derived G0 on the repair, but both did it in
+# probe scripts that construct the adapter themselves. The shipping driver had no command line
+# that reached the repaired path at all, so a T-39 rerun would have scored the policy through the
+# same subtraction bug and re-printed the withdrawn VOID. These cover the wiring.
+
+#: The six required flags, so a parser test is about the flag under test and nothing else.
+_MINIMAL_ARGV = [
+    "--run-dir", "r",
+    "--arm", "oracle_action",
+    "--out", "o",
+    "--dataset", "d",
+    "--holdout", "h",
+    "--train-episodes", "t",
+]
+
+
+def test_the_anchor_flag_defaults_to_the_archived_convention():
+    """The default must stay 'state' or every archived command line silently changes meaning."""
+    args = ev._parse_args(_MINIMAL_ARGV)
+    assert args.anchor_kind == "state"
+
+
+def test_the_anchor_flag_accepts_command_and_refuses_anything_else():
+    assert ev._parse_args([*_MINIMAL_ARGV, "--anchor-kind", "command"]).anchor_kind == "command"
+    with pytest.raises(SystemExit):
+        ev._parse_args([*_MINIMAL_ARGV, "--anchor-kind", "commanded"])
+
+
+def test_command_anchoring_drops_exactly_the_chunks_with_no_preceding_command(
+    converted, recording, mapping
+):
+    """1040 -> 1000 on the real holdout is 40 episodes x 1. Here it is one episode x 1."""
+    reader = _reader(converted)
+    state_set = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="state"
+    )
+    command_set = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="command"
+    )
+    assert set(command_set) < set(state_set)
+    assert len(state_set) - len(command_set) == 1
+
+    anchors = ev.raw_anchor_indices(reader, recording)
+    dropped = set(state_set) - set(command_set)
+    # The dropped one is precisely the chunk anchored at raw index 0, which has no command before
+    # it. Anything else being dropped would mean the repair moved a chunk it had no business
+    # touching.
+    assert {anchors[t] for t in dropped} == {0}
+
+
+def test_the_oracle_stays_a_ceiling_under_command_anchoring(converted, recording, mapping):
+    """The same claim test_a_policy_returning_the_ground_truth... makes, re-made on the repair.
+
+    PR-07 §4 calls oracle_action "the ceiling for any policy trained on that column", and that
+    holds only while both arms cross into canonical units through one adapter. The repair changes
+    step 0 for BOTH arms, so if it were applied to one and not the other the ceiling would stop
+    bounding anything -- and CommandedPolicy's own docstring says the two anchor_kinds MUST match.
+    """
+    reader = _reader(converted)
+    anchors = ev.raw_anchor_indices(reader, recording)
+    oracle = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="command"
+    )
+
+    def infer(request):
+        index = int(np.argmin(np.abs(recording["state"] - request["state"]).sum(axis=1)))
+        return recording["action"][index : index + CHUNK_STEPS]
+
+    policy = ev.CommandedPolicy(
+        infer,
+        camera="ego",
+        chunk_steps=CHUNK_STEPS,
+        dt_s=DT,
+        mapping=mapping,
+        convert=convert,
+        raw_states={EPISODE_ID: recording["state"]},
+        raw_commands={EPISODE_ID: recording["action"]},
+        anchors={(EPISODE_ID, t): i for t, i in anchors.items()},
+        episode_id=EPISODE_ID,
+        anchor_kind="command",
+    )
+    from wam.evaluation import build_eval_pairs
+
+    pairs = build_eval_pairs(converted, "ego", CHUNK_STEPS)
+    compared = 0
+    for obs, _target, _ep in pairs:
+        t_ns = int(obs.state.timestamp_ns)
+        if t_ns not in oracle:
+            continue
+        predicted = policy.predict(obs)
+        np.testing.assert_array_equal(predicted.targets, oracle[t_ns].targets)
+        np.testing.assert_array_equal(predicted.gripper_target, oracle[t_ns].gripper_target)
+        compared += 1
+    assert compared, "the two arms shared no chunk, so the ceiling was never actually compared"
+
+
+def test_under_perfect_tracking_the_two_anchorings_agree_exactly(
+    converted, recording, mapping
+):
+    """Where the defect is INERT, and why -359.41 was never visible in a unit test.
+
+    This module's fixture has ``action[i] == state[i + 1]`` exactly, so the previous command and
+    the anchor state are literally the same row and ``command - STATE`` is a homogeneous first
+    difference by accident. The defect needs the command and the state to DISAGREE, which is what
+    a real controller with tracking lag does and what PR-10 measured as a 67 ms lead. Asserting
+    the no-op here is what stops someone reading the next test's difference as noise.
+    """
+    reader = _reader(converted)
+    state_set = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="state"
+    )
+    command_set = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, anchor_kind="command"
+    )
+    for t in sorted(set(state_set) & set(command_set)):
+        np.testing.assert_array_equal(state_set[t].targets, command_set[t].targets)
+
+
+def test_with_tracking_lag_the_repair_moves_step_zero_and_nothing_else(
+    converted, recording, mapping
+):
+    """The guard against this whole change being a no-op that quietly reintroduces the default.
+
+    A controller that does not perfectly reach its target is the ordinary case. Only step 0 may
+    move: every other step is a command-to-command difference in both modes, so a change there
+    would mean the anchor leaked into steps it does not index.
+    """
+    lagged = dict(recording)
+    rng = np.random.default_rng(7)
+    lagged["action"] = (
+        recording["action"] + rng.normal(0.0, 0.02, recording["action"].shape)
+    ).astype(np.float32)
+
+    reader = _reader(converted)
+    state_set = ev.oracle_action_chunks(
+        reader, lagged, CHUNK_STEPS, mapping, convert, anchor_kind="state"
+    )
+    command_set = ev.oracle_action_chunks(
+        reader, lagged, CHUNK_STEPS, mapping, convert, anchor_kind="command"
+    )
+    shared = sorted(set(state_set) & set(command_set))
+    assert shared
+    differing = [
+        t for t in shared
+        if not np.array_equal(state_set[t].targets[0], command_set[t].targets[0])
+    ]
+    assert differing, "step 0 was identical under both anchorings — the repair did nothing"
+    for t in shared:
+        np.testing.assert_array_equal(
+            state_set[t].targets[1:], command_set[t].targets[1:]
+        )

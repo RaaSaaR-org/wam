@@ -756,6 +756,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="PR-10 variant B (control): move the anchor state to i+k as well. Tests OUR time "
         "base rather than the robot's, and is expected to say nothing.",
     )
+    parser.add_argument(
+        "--anchor-kind",
+        choices=ANCHOR_KINDS,
+        default="state",
+        help="which quantity chunk step 0 is differenced against. 'state' is the ARCHIVED T-39 "
+        "convention and reproduces every historical number, including oracle_action's -359.41. "
+        "'command' is the repair PR-12 measured and PR-13 re-derived: step 0 becomes a "
+        "homogeneous first difference like every other step, and the same column scores +68.10. "
+        "IT CHANGES THE SCORED SET — each episode's first chunk has no preceding command and is "
+        "dropped (1040 -> 1000 on the T-39 holdout), so a run under 'command' is comparable only "
+        "against other 'command' runs, never against the archived cell.",
+    )
     parser.add_argument("--camera", default="ego")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--chunk-steps", type=int, help="override the dataset's chunk length")
@@ -892,18 +904,35 @@ def main(argv: list[str] | None = None) -> int:
                 offset=args.action_offset,
                 margin=args.chunk_margin,
                 co_shift=args.co_shift_anchor,
+                anchor_kind=args.anchor_kind,
             )
-            if swept:
-                # ONLY under a sweep. ChunkLookupPolicy's refusal to answer an unanchored t_ns is
-                # the guard that catches states and actions on different clocks, and it stays
-                # armed on the default path. A margin drops chunks ON PURPOSE, so under a sweep
-                # the pairs are narrowed to match rather than the guard being disarmed.
+            if swept or args.anchor_kind == "command":
+                # ONLY where chunks are dropped ON PURPOSE. ChunkLookupPolicy's refusal to answer
+                # an unanchored t_ns is the guard that catches states and actions on different
+                # clocks, and it stays armed on the default path. A margin drops chunks (sweep),
+                # and so does anchor_kind='command' — the episode's first chunk has no preceding
+                # command. In both cases the pairs are narrowed to match rather than the guard
+                # being disarmed, so a genuine clock mismatch still raises.
                 pairs = [p for p in pairs if int(p[0].state.timestamp_ns) in chunks]
                 if not pairs:
                     continue
             policy = ChunkLookupPolicy(chunks, episode_id=episode_id)
         else:
             raw = read_raw_episode(args.raw_dataset, episode_id)
+            anchor_index = raw_anchor_indices(reader, raw)
+            if args.anchor_kind == "command":
+                # Match oracle_action_chunks, which skips these rather than falling back to the
+                # state row. CommandedPolicy raises on index < 1 by design; narrowing here is what
+                # makes the two arms score the SAME set, which is the only way the oracle stays a
+                # ceiling over the policy. Default 1 = keep, so a t_ns with no anchor at all still
+                # reaches the loud guard instead of being silently dropped as a first chunk.
+                pairs = [
+                    p
+                    for p in pairs
+                    if anchor_index.get(int(p[0].state.timestamp_ns), 1) >= 1
+                ]
+                if not pairs:
+                    continue
             policy = CommandedPolicy(
                 infer,
                 camera=args.camera,
@@ -912,11 +941,12 @@ def main(argv: list[str] | None = None) -> int:
                 mapping=mapping,
                 convert=convert,
                 raw_states={episode_id: raw["state"]},
+                raw_commands={episode_id: raw["action"]},
                 anchors={
-                    (episode_id, t_ns): index
-                    for t_ns, index in raw_anchor_indices(reader, raw).items()
+                    (episode_id, t_ns): index for t_ns, index in anchor_index.items()
                 },
                 episode_id=episode_id,
+                anchor_kind=args.anchor_kind,
             )
         predictions.extend(evaluate_policy(policy, pairs))
     elapsed_s = time.perf_counter() - started
@@ -957,6 +987,10 @@ def main(argv: list[str] | None = None) -> int:
                 "action_offset": int(args.action_offset),
                 "chunk_margin": int(args.chunk_margin),
                 "co_shift_anchor": bool(args.co_shift_anchor),
+                # AC-04: the scored SET differs between the two anchorings, so a number is not
+                # interpretable without this field. An archived record written before the flag
+                # existed has no key here, which reads correctly as the "state" default.
+                "anchor_kind": str(args.anchor_kind),
                 "policy_entrypoint": args.policy_entrypoint,
                 "model_dir": str(args.model_dir) if args.model_dir else None,
             },
