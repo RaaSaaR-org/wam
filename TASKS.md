@@ -46,6 +46,35 @@ mc show T-16     # the whole T-16 record
 > Everything marked *hw* still needs real hardware, real teleop data (D1/D2), or an open decision.
 > Ordered path to real usage: `docs/ROADMAP.md`.
 
+> **Correction, 2026-08-16 (T-48).** The line above says **every** one of the 16 non-passes is a
+> missing gitignored artifact. For 14 of them that holds. For the four `tests/test_runtime.py`
+> rollout-CLI tests it is **half right, and the half it gets wrong is the interesting half.**
+> `scripts/overfit_d1.py --dataset datasets/mock-d1 --run-id d1-overfit-seed0 --seed 0 --steps 400`
+> regenerates the artifact in ~8 min on CPU and reproduces T-13's recorded result
+> (`.mc/tasks/done/T-13-*.md:29`, "loss → 0.09 % of initial"; measured again at **0.10 %**). That
+> takes the four failures to **two**. The remaining two do not want a file — they assert `rc == 0`
+> from `scripts/rollout.py`, i.e. they require the checkpoint to **clear the E2 release gate**, and
+> it does not: `safety_intervention_rate 1.000 > 0.1`, `intervention_kinds {'accel_limit': 60}`.
+>
+> That is a real, pre-existing gap between the D1 recipe and the E2 gate, not something the absent
+> file was hiding. The data is clean — recorded ground-truth chunks peak at **1.47 rad/s²** against
+> `ddq_max: 4.0` (`configs/safety/default.yaml`) and 0/25 trip the filter — while the model emits
+> max |accel| **9.85** on its own training episodes and **18.1** on E2's static-frame probe
+> (`src/wam/evaluation/e2_checks.py:166-172`). `overfit_d1.py`'s `build_training_config` sets
+> `ActionLossWeights(action=1.0, gripper=0.5, smoothness=0.0, limit=0.0)` — smoothness is logged and
+> weighted **zero** — and the action MSE plateau of ~1e-4 is an RMSE of 0.01/element, which at
+> `dt = 0.05` is exactly 4.0 rad/s² of accel noise. **Training harder does not fix it:** a 2×
+> better-converged model (`--lr 5e-4 --steps 4000`, train loss 4.8e-5) still fails with E1 holdout
+> unchanged, so the residual is generalization, not optimization; 4000 steps at the recipe's own
+> `lr 3e-3` diverges at step 1848. `docs/sim.md:73`'s "E2 static checks PASS on 16 probes" does not
+> contradict this — that is `--policy dummy` on `mujoco_g1`, not this checkpoint.
+>
+> **The closed loop itself does work.** With the gate waived, `scripts/rollout.py --task sim:reach
+> --contract-from-dataset datasets/mock-d1 --skip-e2 --rollouts 10` is **10/10, 0 estops, 0 watchdog
+> timeouts, 0 deadline misses**, hitting a `REACH_TARGET_RAD` that was frozen from the *original*
+> checkpoint's measured behaviour (`scripts/rollout.py:169`) — which is also what proves the
+> regenerated artifact is the genuine one and not a file-existence stub.
+
 ## M0 · Architecture & Safety Baseline (2–4 weeks)
 
 - [x] **[T-01](.mc/tasks/done/T-01-canonical-robot-state-action-schema-as-versioned-code.md)** Canonical robot state/action schema as versioned code
