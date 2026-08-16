@@ -1,5 +1,32 @@
 # PR-10 result — **P (partial)**: the delay is real, and it is 8.7 % of the problem
 
+> # ⚠ SUPERSEDED IN ITS INTERPRETATION BY PR-12 (verdict **C**), 2026-08-16
+>
+> **The verdict letter stands and the grid below is correct. The physical story told about it does
+> not.** PR-12 made the chunk's step 0 homogeneous — `targets[0] = q_cmd[0] − q_cmd[−1]`, a command
+> differenced against a command rather than against a state — and the arm went from **−379.68 to
+> +69.15 on a held-out half**, a gain of **448.82 pp**, clearing L1 for the first time in this
+> project. Step 0 alone carried **~90 % of the summed per-step MSE** and **143× the error of its
+> neighbours**.
+>
+> Three things below are therefore wrong or badly bounded, and each is corrected in place:
+>
+> 1. **The 67 ms lead was the grid fitting that discontinuity.** Under a homogeneous step 0 the
+>    preference flips and `k = 0` is at least as good on both halves. There is no lead left to find.
+>    "The command leads the executed state by about two control steps, an ordinary transport lag"
+>    was a physical story told about an arithmetic artefact.
+> 2. **The 8.7 % headline is a fraction of a deficit that was ~90 % one subtraction.** It is not
+>    wrong as arithmetic; it is close to meaningless as a proportion.
+> 3. **§5's registered prediction did not fail.** Both this document and T-44 recorded that it did,
+>    and a correction block below argues about the *direction* of that failure. All of it is
+>    superseded: under V-chain at `k = 0`, `horizon_ratio` is **1.0021**. The prediction was right,
+>    and the mechanism it was pointing at was somewhere neither run looked.
+>
+> What survives, and it is the part that mattered: the co-shifted control was flat, so the
+> discontinuity is not in our clock; **the residual is not a whole-window time shift**; and PR-11
+> then showed it is not a bandwidth mismatch either. Both of those remain true and both helped
+> corner it. Full record: [`PR-12-RESULT.md`](PR-12-RESULT.md).
+
 Ran 2026-08-16 on this workstation, CPU only. Pre-registration:
 `PR-10-anchor-delay-sweep.md`, rule `PR10_RULE_V1` in `scripts/sweep_t39_anchor.py`.
 Follows T-39 / PR-07, which reported `VOID (labels)`. Artifacts:
@@ -68,6 +95,13 @@ Follows T-39 / PR-07, which reported `VOID (labels)`. Artifacts:
 | +4 | +133 | −659.03 | −429.51 | 7.246e-05 | 0.00389 | 14.16 |
 
 992 chunks per cell, 40 holdout episodes, identical chunk set throughout (PR-10 §2's margin).
+
+> **Superseded, 2026-08-16.** The paragraph below says the interior optimum "could not have been an
+> artifact". **It was one.** PR-12 made step 0 homogeneous and the preference flipped to `k = 0` on
+> both halves — the grid was fitting a discontinuity that lives at one element of the chunk, not a
+> transport lag. Every number in the table is correct; the reading of them in this section is not.
+> Left standing rather than rewritten, because a result document that quietly acquires the right
+> answer is worth less than one that shows what it got wrong.
 
 **This is a real, single-peaked, interior optimum**, and that is worth saying plainly because it is
 the one thing in this grid that could not have been an artifact. The curve falls monotonically from

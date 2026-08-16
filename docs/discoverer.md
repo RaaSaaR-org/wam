@@ -15,15 +15,22 @@ quotas, billing, gotchas; that directory is the *how*. Its README opens with the
 **never-do** rules and carries the full link table to the provider's documentation (24 pages,
 all checked reachable 2026-07-28). The environment build, the weight staging, the smoke job, the
 readout probe, T-16 itself, the T-29 frame-mode A/B (job 184648, 2026-08-01) and T-30 (the
-flow-head eval, job 184670, 2026-08-01 — negative) have run; the T-39 positive control and the I-8
-rung remain staged and unrun, in that order.
+flow-head eval, job 184670, 2026-08-01 — negative) have run. **T-041** (the Cosmos Super
+fine-tune, 2026-08-15) has run and returned `VOID` on G0b, ~59 of its 122 GPU-h ceiling spent.
+**T-39** (the positive control, 2026-08-16) has run and returned `VOID (labels)`, 1.37 of its
+12 GPU-h ceiling spent; its policy arm never ran because G0b vetoed the experiment first. The
+**I-8 rung** remains staged and unrun, and T-32 stays blocked behind T-39 by pre-registration.
+
+> Corrected 2026-08-16: this paragraph said "the T-39 positive control and the I-8 rung remain
+> staged and unrun". Commit `70443bd` swept five documents carrying that stale claim and missed
+> this one, which is the file an operator reads *first* to find out what has run.
 
 | | |
 |---|---|
 | Login node | `login-plus.discoverer.bg` (port 22, public Internet, no VPN) |
 | Username | `ffromm` · key `~/.ssh/id_ed25519_eu_ai_hub` (passphrase-protected) |
 | Slurm account / QoS | `ehpc-aif-2026pg01-905` · partition `common` |
-| **Budget** | **5 000 GPU-hours + 330 900 billing-hours** — in use since 2026-07-28 (T-16, T-29, T-30); consumed figure not tracked here, read it off `sacct` |
+| **Budget** | **5 000 GPU-hours + 330 900 billing-hours** — in use since 2026-07-28 (T-16, T-29, T-30, T-041, T-39); ~4 879 h remained after T-041. Consumed figure not tracked here — read it off `sacct` |
 | **Max walltime** | **4 h per job**, max 4 running / 8 submitted jobs, ≤16 GPU + 416 CPU at once |
 | Project storage | `/valhalla/projects/ehpc-aif-2026pg01-905` — 5 TiB, setgid |
 | Home | `/home/ffromm` — 2 GB quota, 100 k inodes |

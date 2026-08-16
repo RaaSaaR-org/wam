@@ -271,6 +271,14 @@ as evidence about command-space policies without the label-space question being 
 Full record, receipts and the three defects found by running it:
 [`preregistration/PR-07-RESULT.md`](preregistration/PR-07-RESULT.md).
 
+> **Read PR-12 before you read the next three paragraphs.** They price two repairs to the label
+> space at ~9 % and ~2 %, and a third — making the chunk's step 0 homogeneous — then moved the arm
+> from **−379.68 to +69.15 on a held-out half**, clearing L1. Step 0 carried **~90 % of the summed
+> per-step MSE**. The two fractions below are fractions of a deficit that was almost entirely one
+> subtraction, and PR-10's "67 ms transport lag" was the grid fitting that discontinuity — under a
+> homogeneous step 0 the preference flips to `k = 0` and no lead remains.
+> [`preregistration/PR-12-RESULT.md`](preregistration/PR-12-RESULT.md).
+
 **And how much of it is a fixable offset (PR-10, measured 2026-08-16): 8.7 %.** Sweeping the
 anchoring convention across ±4 control steps finds a real, single-peaked, interior optimum at
 `k = −2` — the command leads the executed state by about **67 ms**, an ordinary transport lag —
