@@ -38,7 +38,24 @@ and a `## Notes / Report` section that carries the result once the task runs.
 
 ## The gate that binds both
 
-**T-39, the positive control, has still never run.** Its `oracle_action` arm asks whether this
-corpus's own action column can clear L1 under our scorer. If it cannot, no policy trained on this
-data can — and both sub-projects are built on the same corpus. **Neither sub-project may start a
-training run before T-39 reports.** Probes, staging, reading and pre-registration are all fine.
+**T-39 HAS REPORTED, 2026-08-16, and the verdict is `VOID (labels)`** —
+`docs/preregistration/PR-07-RESULT.md`, commit `8a4728c`, 1.37 of the 12 GPU-h ceiling.
+
+Its `oracle_action` arm asked whether this corpus's own action column can clear L1 under our scorer.
+**It cannot: −359.41 pp on L1, 4.59× worse than repeating the last action.** The companion arm
+`oracle_state` scored a bit-exact `mse 0.0` and +100 % on every rung, which is what makes the first
+number a measurement rather than broken plumbing. The premise the gate was built on came back
+**negative**, and by `T39_RULE_V1`'s own ordering — `not L1_action` is checked before any policy
+branch — no policy number can move it.
+
+**Read what that does and does not license, because it is easy to get backwards.** It licenses a
+defect report against our label pipeline and **forbids any statement about GR00T**: the policy arm
+never ran. It does not license swapping in another model — PR-07 §7's second candidate is
+pre-registered only on outcome **N**, so running it now would test a second policy against the same
+broken ruler.
+
+> **The standing rule was "neither sub-project starts a training run before T-39 reports". T-39 has
+> reported, with its own premise failing.** That is not the same as being unblocked, and it must not
+> be read as a green light. Whether training may now start, and against which label space, is the
+> project owner's decision rather than a formality that has been discharged. Probes, staging,
+> reading and pre-registration remain fine, as they always were.

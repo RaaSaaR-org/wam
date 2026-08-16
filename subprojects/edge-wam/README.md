@@ -45,14 +45,21 @@ Full primary-source pass, with what is verified and what is not:
 **E-01 and E-02 have reported; E-03 is answered except for the one part only a human can answer.**
 The code path exists: `wam.backbones.cosmos3_edge` (registry-constructible, no weights, no torch at
 module scope) and `wam.robot.g1_dex3_28` (the 28-dim ↔ canonical mapping) are in the shared tree
-with tests. No training has run and none may — T-39 still gates that.
+with tests. No training has run.
+
+**T-39 reported on 2026-08-16: `VOID (labels)`.** The corpus's own commanded action column fails L1
+by **−359.41 pp** under our scorer while `oracle_state` scores a bit-exact `mse 0.0` — so the label
+space, not the plumbing, is what disagrees with the corpus. Any policy post-trained on these labels
+is bounded by that, E-06 included. `docs/preregistration/PR-07-RESULT.md`. **This is not a green
+light:** the gate reported with its premise failing, which is the project owner's decision to read,
+and it forbids any statement about GR00T because the policy arm never ran.
 
 | | |
 |---|---|
 | model chosen | `Cosmos3-Edge` 4B — **not yet staged, not yet downloaded**; 9.14 GB resident, measured from the safetensors headers |
 | target hardware | **[?] still open, and it is a purchasing question, not a research one.** `Jetson AGX Orin` is *absent* from the policy variant's tested-hardware list; the local RTX 5090 fits inference **and** LoRA |
 | training hardware | Discoverer+ (`ehpc-aif-2026pg01-905`), 4 875 of 5 000 GPU-h left |
-| blocked by | **T-39** for any training run |
+| blocked by | **T-39 reported `VOID (labels)`** — the label space is the live defect, not the backbone |
 | corpus for a G1 embodiment | **3 152 episodes at `action float32[28]`** exist and are reachable (see below) |
 
 **Changed 2026-08-15, and it matters more than anything else here:** T-042's count found **3 152

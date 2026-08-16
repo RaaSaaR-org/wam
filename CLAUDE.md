@@ -47,8 +47,15 @@ and the robot HAL are contracts, and two drifting copies is the expensive failur
   own hand-maintained index, which is the accepted cost of the split. Existing `T-040`/`T-041`/
   `T-042` were deliberately **not** migrated: their pre-registrations, sbatch files and commit
   subjects all cite them where they are.
-- **No sub-project starts a training run before T-39 reports.** The positive control asks whether
-  this corpus's own action column clears L1 under our scorer; if it does not, no policy trained on
-  it can, and both sub-projects share that corpus.
+- **T-39 has reported, and the answer was `VOID (labels)`** (2026-08-16,
+  `docs/preregistration/PR-07-RESULT.md`). The positive control asked whether this corpus's own
+  action column clears L1 under our scorer. **It does not — −359.41 pp, while `oracle_state` scored
+  a bit-exact `mse 0.0`**, so the failure is our label space, not our plumbing. Therefore no policy
+  trained on these labels can clear the bar either, and both sub-projects share that corpus.
+  **This is not a discharged gate. Do not read VOID as permission to train** — the rule it replaces
+  said "no training run before T-39 reports", and what T-39 reported was that its own premise fails.
+  Whether training may start, and against which label space, is the project owner's call. It
+  licenses a defect report against the label pipeline and **forbids any statement about GR00T**
+  (the policy arm never ran); PR-07 §7's second model is licensed only on outcome N, not on VOID.
 - Every rollout must be traceable to checkpoint + dataset snapshot + config hash (AC-04).
 - Milestone order is strict: overfit a small task first (D1), only then scale (P6).

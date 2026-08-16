@@ -78,10 +78,17 @@ not only in prose.
 
 ## Gates, in the order they bind
 
-1. **T-39, the positive control, has never run, and no training run in this sub-project starts
-   before it reports.** It asks whether this corpus's own action column clears L1 under our scorer;
-   if it does not, no policy trained on it can. Probes, staging, reading and pre-registration are
-   all fine meanwhile.
+1. **T-39 reported `VOID (labels)` on 2026-08-16** (`docs/preregistration/PR-07-RESULT.md`,
+   commit `8a4728c`). It asked whether this corpus's own action column clears L1 under our scorer.
+   **It does not — `oracle_action` came in at −359.41 pp, 4.59× worse than repeat-last-action,
+   while `oracle_state` scored a bit-exact `mse 0.0` and +100 % on every rung.** The adapter, joint
+   order, delta anchoring and gripper synergy are provably correct; the label *space* is what
+   disagrees with the corpus. So no policy post-trained on these labels can clear the bar — this one
+   included — and the correct response is to fix the label space, not to buy a better backbone.
+   **Do not read VOID as this sub-project being unblocked.** The gate reported with its own premise
+   failing, which is a decision point for the project owner, not a formality that has been
+   discharged. It forbids any statement about GR00T (the policy arm never ran). Probes, staging,
+   reading and pre-registration are fine, as they always were.
 2. **E-01 and E-02 gate E-05 and E-06.** E-01 asks whether the Edge policy path can run with no
    text (the released `Cosmos3-Edge-Policy-DROID` is language-conditioned); E-02 asks what a 28-dim
    G1/Dex3 embodiment actually costs. Both are cheap and need no GPU, and between them decide
