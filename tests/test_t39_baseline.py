@@ -967,3 +967,82 @@ def test_training_refuses_a_split_file_that_names_a_holdout_episode(tmp_path):
 def test_load_witness_refuses_a_run_without_one(tmp_path):
     with pytest.raises(SystemExit, match="cannot be PROVEN unseen"):
         ev.load_witness(tmp_path)
+
+
+# ---------------------------------------------------------------------------------------
+# The policy arm's MODEL_DIR — the base checkpoint is one keystroke away and scores silently.
+#
+# 71_eval_t39_control.sbatch used to prompt for "the staged weights used by
+# 70_train_t39_baseline.sbatch". Those are the weights 70 trained FROM, not the ones it wrote, and
+# handing them to the policy arm scores an untrained `new_embodiment` action head — which loads
+# without complaint and returns a plausible number. This is the same class of failure as the
+# mis-anchoring above: no assertion anywhere downstream can tell the result apart from a headline.
+# ---------------------------------------------------------------------------------------
+
+_SBATCH_71 = _REPO_ROOT / "cluster" / "discoverer" / "71_eval_t39_control.sbatch"
+_GUARD_OPENS = 'if [[ ! -f "${MODEL_DIR}/trainer_state.json" ]]; then'
+
+
+def _model_dir_guard() -> str:
+    """The refusal block lifted VERBATIM from the sbatch, so the test runs the shipped code.
+
+    Deleting or rewording the guard makes the extraction fail, which fails the test — the point
+    of lifting it rather than restating it here.
+    """
+    text = _SBATCH_71.read_text(encoding="utf-8")
+    assert _GUARD_OPENS in text, "71_eval_t39_control.sbatch no longer guards MODEL_DIR"
+    start = text.index(_GUARD_OPENS)
+    end = text.index("\nfi\n", start) + len("\nfi\n")
+    return text[start:end]
+
+
+def _run_guard(model_dir: Path, out: Path):
+    import subprocess
+
+    script = f'set -uo pipefail\nOUT={out}\nMODEL_DIR={model_dir}\n' + _model_dir_guard()
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+
+
+def test_the_policy_arm_refuses_weights_the_trainer_did_not_write(tmp_path):
+    """The base checkpoint has no trainer_state.json, and that is what gets it turned away."""
+    out = tmp_path / "run"
+    (out / "checkpoints" / "checkpoint-10000").mkdir(parents=True)
+    base = tmp_path / "staged" / "GR00T-N1.7-3B"
+    base.mkdir(parents=True)
+    (base / "config.json").write_text("{}")          # looks exactly like a loadable model
+
+    result = _run_guard(base, out)
+    assert result.returncode == 1, result.stdout
+    assert "trainer_state.json" in result.stdout
+    assert "untrained new_embodiment" in result.stdout
+    # And it must say where the right one is, or the operator's next guess is another wrong path.
+    assert "checkpoint-10000" in result.stdout
+
+
+def test_the_policy_arm_accepts_the_checkpoint_that_run_actually_wrote(tmp_path):
+    """Same guard, same run, the directory 70 produced — it has to pass, or nothing can score."""
+    out = tmp_path / "run"
+    trained = out / "checkpoints" / "checkpoint-10000"
+    trained.mkdir(parents=True)
+    (trained / "trainer_state.json").write_text('{"global_step": 10000}')
+
+    result = _run_guard(trained, out)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_prompt_no_longer_sends_the_operator_to_the_base_weights():
+    """The wording is half the fix: the guard catches the mistake, the prompt prevents it."""
+    text = _SBATCH_71.read_text(encoding="utf-8")
+    prompt = next(
+        line for line in text.splitlines() if line.startswith("MODEL_DIR=${MODEL_DIR:?")
+    )
+    assert "POST-TRAINED" in prompt
+    assert "checkpoints/checkpoint-" in prompt
+    # "staged weights" is the phrase that named the wrong directory. It may survive in the comment
+    # block that explains what was wrong — it may not survive anywhere the shell reads.
+    executable = [
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert not [line for line in executable if "staged weights" in line]

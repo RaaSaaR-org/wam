@@ -138,8 +138,35 @@ fi
 # No defaults, the same rule as MODEL_ID (PR-07 §8) — the vendored inference API was never
 # verified from a primary source, so the operator states it and it is recorded in every arm's
 # timing.json.
+#
+# MODEL_DIR IS WHAT 70 PRODUCED, NOT WHAT IT CONSUMED. This prompt used to read "the staged weights
+# used by 70_train_t39_baseline.sbatch", which names the wrong directory: 70's own MODEL_DIR is the
+# BASE checkpoint it fine-tunes FROM (nvidia/GR00T-N1.7-3B), and 70 writes what it PRODUCES to
+# ${OUT}/checkpoints/checkpoint-<step>. An operator following the old wording would have scored the
+# base model as if it were the headline — and because the embodiment tag is `new_embodiment`, the
+# base carries an UNTRAINED action head for that slot, so it loads without complaint and returns
+# numbers rather than an error. A plausible wrong number is the single failure this whole file
+# exists to prevent, and the old wording asked for one by name.
+#
+# NO THRESHOLD MOVED. This is an operator-facing path, not a constant of T39_RULE_V1; the rule block
+# below is byte-identical and no arm has been re-scored. Recorded here rather than quietly patched,
+# per this file's own header and the GROOT_PATCH_MISTRAL note above.
 POLICY_ENTRYPOINT=${POLICY_ENTRYPOINT:?set POLICY_ENTRYPOINT to 'module.path:factory' — see scripts/eval_t39_baseline.py}
-MODEL_DIR=${MODEL_DIR:?set MODEL_DIR to the staged weights used by 70_train_t39_baseline.sbatch}
+MODEL_DIR=${MODEL_DIR:?set MODEL_DIR to the POST-TRAINED checkpoint 70 wrote, e.g. ${OUT}/checkpoints/checkpoint-<step> — NOT the base weights 70 trained from}
+
+# The wording alone is not the fix. A path is a path, and the base checkpoint remains one keystroke
+# away, so the refusal is mechanical: every checkpoint HF Trainer writes carries trainer_state.json
+# (it is what --resume_from_checkpoint reads), and no released base repo does. This distinguishes
+# "trained here" from "downloaded here" without trusting the operator to have read the paragraph.
+if [[ ! -f "${MODEL_DIR}/trainer_state.json" ]]; then
+  echo "FATAL: ${MODEL_DIR} has no trainer_state.json, so it is not a checkpoint this run wrote."
+  echo "       If that is the BASE checkpoint, it will load here WITHOUT ERROR and score an"
+  echo "       untrained new_embodiment action head — a number, not a failure, and nothing"
+  echo "       downstream could tell it apart from the headline."
+  echo "       Expected one of:"
+  ls -d "${OUT}"/checkpoints/checkpoint-* 2>/dev/null | sed 's/^/         /' || echo "         (none — did 70 finish?)"
+  exit 1
+fi
 policy=(
   --policy-entrypoint "${POLICY_ENTRYPOINT}"
   --model-dir "${MODEL_DIR}"
