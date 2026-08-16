@@ -313,6 +313,94 @@ def test_chunk_deltas_sum_to_the_total_commanded_displacement(recording, mapping
     np.testing.assert_allclose(targets.sum(axis=0), total, rtol=0, atol=1e-5)
 
 
+# ------------------------------------------------------------- PR-10, the anchor-delay sweep
+
+
+def test_the_sweep_defaults_are_the_t39_convention_exactly(converted, recording, mapping):
+    """Every default is T-39's, so the archived command line produces the archived numbers.
+
+    Pinned bit-for-bit rather than argued: the sweep was added to a scorer whose output is already
+    published, and a knob that shifts the default by a float would rewrite PR-07-RESULT silently.
+    """
+    reader = _reader(converted)
+    base = ev.oracle_action_chunks(reader, recording, CHUNK_STEPS, mapping, convert)
+    explicit = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, offset=0, margin=0, co_shift=False
+    )
+    assert set(base) == set(explicit)
+    for t_ns, chunk in base.items():
+        np.testing.assert_array_equal(chunk.targets, explicit[t_ns].targets)
+        np.testing.assert_array_equal(chunk.gripper_target, explicit[t_ns].gripper_target)
+
+
+@pytest.mark.parametrize("offset", [-2, -1, 1, 2])
+def test_a_nonzero_offset_actually_moves_the_command_window(
+    converted, recording, mapping, offset
+):
+    """THE MUTATION TEST PR-10 §8.3 REQUIRES, and the one failure this experiment would not notice.
+
+    An offset knob that is silently a no-op — threaded through the signature, never reaching the
+    slice — produces a perfectly flat grid, and a flat grid reads as a confident verdict **J**:
+    "no offset helps, therefore the mismatch is content, not shift". That is the wrong answer
+    arrived at without a single suspicious number, which is exactly the shape of T-37's transposed
+    ``xmat``. So the knob is required to CHANGE something, on both signs, before any grid is run.
+    """
+    reader = _reader(converted)
+    base = ev.oracle_action_chunks(reader, recording, CHUNK_STEPS, mapping, convert, margin=2)
+    moved = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, offset=offset, margin=2
+    )
+    assert set(base) == set(moved), "the margin did not hold the chunk set fixed across offsets"
+    assert base, "no chunks survived the margin — the test proves nothing"
+    differing = [
+        t_ns
+        for t_ns, chunk in base.items()
+        if not np.allclose(chunk.targets, moved[t_ns].targets, atol=1e-7)
+    ]
+    assert differing, (
+        f"offset {offset:+d} produced identical targets everywhere — the knob is a no-op and the "
+        "sweep would report a flat grid as evidence of content rather than shift"
+    )
+
+
+def test_the_margin_holds_one_chunk_set_across_the_whole_grid(converted, recording, mapping):
+    """PR-10 §2's common support: without it each cell scores a different sample set.
+
+    The margin has to be defined by the GRID's width, not by the cell's own offset — otherwise the
+    edge cells lose chunks the centre keeps and the sweep measures episode ends.
+    """
+    reader = _reader(converted)
+    grid = {
+        k: set(
+            ev.oracle_action_chunks(
+                reader, recording, CHUNK_STEPS, mapping, convert, offset=k, margin=4
+            )
+        )
+        for k in range(-4, 5)
+    }
+    sizes = {len(v) for v in grid.values()}
+    assert len(sizes) == 1, f"the grid's cells scored different numbers of chunks: {sizes}"
+    unmargined = set(ev.oracle_action_chunks(reader, recording, CHUNK_STEPS, mapping, convert))
+    assert grid[0] < unmargined, "margin=4 dropped nothing, so it is not restricting anything"
+
+
+def test_co_shifting_the_anchor_is_a_different_experiment_from_shifting_the_command(
+    converted, recording, mapping
+):
+    """Variants A and B must not collapse into each other, or the control is not a control."""
+    reader = _reader(converted)
+    a = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, offset=2, margin=2
+    )
+    b = ev.oracle_action_chunks(
+        reader, recording, CHUNK_STEPS, mapping, convert, offset=2, margin=2, co_shift=True
+    )
+    assert set(a) == set(b)
+    assert any(
+        not np.allclose(chunk.targets, b[t_ns].targets, atol=1e-7) for t_ns, chunk in a.items()
+    ), "variant B produced variant A's chunks — co_shift never reached the anchor"
+
+
 def test_commanded_to_chunk_refuses_a_wrong_width(recording, mapping):
     with pytest.raises(SystemExit, match="commanded actions must be"):
         ev.commanded_to_chunk(

@@ -546,19 +546,50 @@ def oracle_action_chunks(
     chunk_steps: int,
     mapping: GripperMapping,
     convert: Any,
+    *,
+    offset: int = 0,
+    margin: int = 0,
+    co_shift: bool = False,
 ) -> dict:
-    """``{t_ns: chunk}`` built from the source ``action`` column via :func:`commanded_to_chunk`."""
+    """``{t_ns: chunk}`` built from the source ``action`` column via :func:`commanded_to_chunk`.
+
+    ``offset``/``margin``/``co_shift`` are PR-10's anchor-delay sweep and all three default to the
+    T-39 convention, so the archived command line produces the archived numbers unchanged.
+
+    ``offset = k`` reads the command window from ``action[i+k]`` instead of ``action[i]``, which
+    asks: *is the command that produced executed step ``i`` actually ``action[i+k]``?* The anchor
+    state stays at ``i`` — the label being predicted is the displacement out of the state the robot
+    was in at ``t_ns``, and moving the anchor too would score a different chunk of the episode
+    against our chunk. ``co_shift`` moves it anyway, deliberately: that is PR-10's variant B, the
+    control that asks whether our own conversion's time base is offset rather than the robot's.
+
+    ``margin`` is the common-support restriction, and it is the part that is easy to leave out and
+    fatal to leave out. A shifted window falls off the end of an episode at a different chunk, so a
+    sweep without it compares each offset against a different sample set and reports the difference
+    as a delay. With ``margin = max|k|`` every cell of the grid is scored on one identical chunk
+    set. It costs ``2*margin`` chunks per episode and it is why the sweep's own ``k = 0`` cell does
+    not equal the archived −359.41 pp (PR-10 §2, written down before the grid was run).
+    """
     anchors = raw_anchor_indices(reader, raw)
     action = np.asarray(raw["action"], dtype=np.float32)
     state = np.asarray(raw["state"], dtype=np.float32)
+    n = action.shape[0]
     chunks: dict[int, ActionChunk] = {}
     for chunk, _prefix, t_ns in reader.read_actions():
         index = anchors[int(t_ns)]
-        if index + chunk_steps > action.shape[0]:
+        if index + chunk_steps > n:
+            continue
+        # Common support across the WHOLE grid, not just this offset: the bound is written in
+        # terms of `margin` alone so that every k in [-margin, +margin] keeps the same chunks.
+        if margin and (index - margin < 0 or index + margin + chunk_steps > n):
+            continue
+        start = index + offset
+        anchor_index = start if co_shift else index
+        if start < 0 or start + chunk_steps > n or not 0 <= anchor_index < n:
             continue
         chunks[int(t_ns)] = commanded_to_chunk(
-            action[index : index + chunk_steps],
-            state[index],
+            action[start : start + chunk_steps],
+            state[anchor_index],
             dt_s=float(chunk.dt_s),
             mapping=mapping,
             convert=convert,
@@ -608,6 +639,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "the recorded training set: an in-distribution arm that is not in distribution is just "
         "a second holdout wearing the wrong label.",
     )
+    parser.add_argument(
+        "--action-offset",
+        type=int,
+        default=0,
+        help="PR-10 variant A: read the command window from action[i+k] (oracle_action only). "
+        "0 is the T-39 convention and reproduces the archived numbers.",
+    )
+    parser.add_argument(
+        "--chunk-margin",
+        type=int,
+        default=0,
+        help="PR-10 common support: drop this many chunks at each end of every episode so that "
+        "every offset in [-margin, +margin] is scored on one identical chunk set.",
+    )
+    parser.add_argument(
+        "--co-shift-anchor",
+        action="store_true",
+        help="PR-10 variant B (control): move the anchor state to i+k as well. Tests OUR time "
+        "base rather than the robot's, and is expected to say nothing.",
+    )
     parser.add_argument("--camera", default="ego")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--chunk-steps", type=int, help="override the dataset's chunk length")
@@ -631,6 +682,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.arm == "oracle_action" and args.raw_dataset is None:
         raise SystemExit("--arm oracle_action needs --raw-dataset: the action column lives there")
+    swept = bool(args.action_offset or args.chunk_margin or args.co_shift_anchor)
+    if swept and args.arm != "oracle_action":
+        raise SystemExit(
+            "--action-offset / --chunk-margin / --co-shift-anchor are PR-10's sweep over the "
+            f"oracle_action anchoring and mean nothing for --arm {args.arm}. Silently ignoring "
+            "them would produce a grid of identical numbers and a confident wrong verdict."
+        )
+    if args.chunk_margin < 0:
+        raise SystemExit(f"--chunk-margin must be >= 0, got {args.chunk_margin}")
+    if abs(args.action_offset) > args.chunk_margin > 0:
+        raise SystemExit(
+            f"--action-offset {args.action_offset:+d} exceeds --chunk-margin {args.chunk_margin}: "
+            "the offset would fall outside the common support the margin reserves, so this cell "
+            "would be scored on fewer chunks than the rest of the grid and the comparison would "
+            "be between sample sets rather than between offsets."
+        )
     if args.arm == "policy":
         if args.policy_entrypoint is None or args.model_dir is None:
             raise SystemExit("--arm policy needs --policy-entrypoint and --model-dir")
@@ -692,6 +759,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if in_distribution:
         print("=== IN-DISTRIBUTION DIAGNOSTIC — these episodes were TRAINED ON, never a headline")
+    if swept:
+        print(
+            f"=== PR-10 SWEEP CELL — variant {'B (co-shifted anchor)' if args.co_shift_anchor else 'A'}"
+            f" | offset {args.action_offset:+d} | margin {args.chunk_margin}. Comparable only "
+            "against cells of the same margin, never against the archived T-39 number."
+        )
 
     infer = None
     if args.arm == "policy":
@@ -713,10 +786,25 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.arm == "oracle_action":
             raw = read_raw_episode(args.raw_dataset, episode_id)
-            policy = ChunkLookupPolicy(
-                oracle_action_chunks(reader, raw, chunk_steps, mapping, convert),
-                episode_id=episode_id,
+            chunks = oracle_action_chunks(
+                reader,
+                raw,
+                chunk_steps,
+                mapping,
+                convert,
+                offset=args.action_offset,
+                margin=args.chunk_margin,
+                co_shift=args.co_shift_anchor,
             )
+            if swept:
+                # ONLY under a sweep. ChunkLookupPolicy's refusal to answer an unanchored t_ns is
+                # the guard that catches states and actions on different clocks, and it stays
+                # armed on the default path. A margin drops chunks ON PURPOSE, so under a sweep
+                # the pairs are narrowed to match rather than the guard being disarmed.
+                pairs = [p for p in pairs if int(p[0].state.timestamp_ns) in chunks]
+                if not pairs:
+                    continue
+            policy = ChunkLookupPolicy(chunks, episode_id=episode_id)
         else:
             raw = read_raw_episode(args.raw_dataset, episode_id)
             policy = CommandedPolicy(
@@ -769,6 +857,9 @@ def main(argv: list[str] | None = None) -> int:
                 "num_frames": num_frames,
                 "chunk_steps": chunk_steps,
                 "gripper_mapping": mapping.kind,
+                "action_offset": int(args.action_offset),
+                "chunk_margin": int(args.chunk_margin),
+                "co_shift_anchor": bool(args.co_shift_anchor),
                 "policy_entrypoint": args.policy_entrypoint,
                 "model_dir": str(args.model_dir) if args.model_dir else None,
             },
