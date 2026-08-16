@@ -150,6 +150,34 @@ mc show T-16     # the whole T-16 record
   error profile, and an audit of what `smoothness_ratio` actually measures.
   ✅ PR-11 was **claimed across live sessions before it was written** — the fix for the PR-10
   duplication above, which remains the user's to resolve.
+  **Both follow-ups have since been answered, and the interpretation above is now measurement with
+  its direction inverted — see T-046.**
+
+- [ ] **[T-046](.mc/tasks/todo/T-046-step-0-is-the-whole-defect-does-homogenising-it-repair-the-.md)**
+  Step 0 is the whole defect. Does making it homogeneous repair the labels? — pre-registered as
+  [`PR-12`](docs/preregistration/PR-12-step-zero-anchor-heterogeneity.md), rule `T46_RULE_V1`,
+  **claimed across live sessions before it was written**.
+  **Read off the code, not hypothesised about the data**, which is what separates it from PR-10 and
+  PR-11: `convert_lerobot_g1.py:365` builds all sixteen target steps as `q[s+t+1] − q[s+t]`, while
+  `eval_t39_baseline.py:254-255` builds **step 0 alone** as `q_cmd[0] − q_state[s]` — the only
+  element in either chunk that subtracts a quantity of one kind from a quantity of another. A
+  steady-state tracking offset cancels in every other difference and survives at full magnitude
+  there.
+  **The diagnosis is measured, and it is a peer session's prior work** (`docs/smoothness-ratio-audit.md`,
+  `scripts/audit_smoothness_ratio.py`): index 0 carries **96.7 % of the predicted jerk sum** against
+  the target's flat **6.6 % (= 1/14)**, and `smoothness_ratio` with index 0 dropped from **both**
+  arms is **0.2747**, against a published 7.7011. So `benchmark.py:538` is arithmetically **right**
+  — the metric is correct and the vector it is fed has one corrupted element, which is a worse
+  failure mode than a wrong formula because it survives every unit test the metric has — and **the
+  published direction is inverted**: over steps 1–15 the command is ~3.6× *smoother* than the
+  executed trajectory, not 8× jerkier, which crosses spec 0.2.0's two-sided L4 band and fails on the
+  **bland** side.
+  **PR-12 therefore registers exactly one prediction**, because a prediction whose answer already
+  exists is not a pre-registration: **P2 — `targets[0] = q_cmd[0] − q_cmd[−1]` clears L1.** That
+  anchoring is *identical* to the current one under perfect tracking, so it is not a change of
+  premise but the same premise made robust to the premise failing; it is available at inference,
+  since a policy knows its own last command; and its cost is that the chunk loses its only tie to
+  the measured state.
 
 **Exit:** ablation machinery ready; first real AC-07 verdict recorded — at tiny scale the video branch hurts, so "video helps" now rests on the pretrained prior (T-16 LoRA). T-26 tested the one confound that could have moved that premise and did not move it, so the burden on T-16 is confirmed rather than assumed. T-27 then re-scored both real runs against trivial baselines and raised the bar T-16 must clear: beating the action-only baseline is not enough, because that baseline itself loses to repeat-last-action. T-28 then closed the gap that would have made a finished T-16 unreadable: the trainer does no eval, so `eval_t16.py` is the step that turns a checkpoint into a scorable `predictions.jsonl` — and it refuses to score a holdout it cannot prove was excluded. Neither GPU nor code is the blocker any more — Discoverer+ is scripted (`cluster/discoverer/`) and T-16a is done.
 
