@@ -1,0 +1,104 @@
+# WAM training config — joint_wan_gr00t_5090.yaml with the JERK REGULARISER OFF (PR-14 / T-48).
+#
+# ONE field differs from configs/training/joint_wan_gr00t_5090.yaml: weights.smoothness
+# 0.01 -> 0.0. Nothing else. Not the geometry, not feature_blocks, not lora_rank, not the
+# learning rates, not batch_size, not the step budget, not the other seven loss weights.
+#
+# WHY THIS FILE EXISTS. runs/t16-lora-seed0 (20 000 steps, Wan2.2-TI2V-5B LoRA, 362 episodes)
+# fails WAM-Bench L1 by 21.8 pp in the frame mode it was trained in, and the diagnosis on
+# record is a shape, not a score: the regression head's chunks have RMS 0.00226 against the
+# demonstrations' 0.00404 — a 44 % magnitude shortfall — with smoothness_ratio 0.29, i.e. the
+# prediction is 3.4x SMOOTHER than a real demonstration (src/wam/training/joint.py:405-411,
+# docs/benchmark.md "The T-16 result").
+#
+# Two explanations survive that, and BOTH produce small smooth chunks on their own:
+#   * the one-sided jerk regulariser — weights.smoothness = 0.01 is applied by
+#     JointTrainer.compute_losses to out["decoded_targets"] and to NOTHING ELSE
+#     (src/wam/training/joint.py:766, :777). The flow branch is never charged for jerk.
+#   * plain L2 shrinkage — action_reg is an MSE against targets whose own RMS is 0.004, under
+#     AdamW weight_decay. A head that under-shoots magnitude uniformly is indistinguishable,
+#     on RMS and jerk alone, from one that averages modes.
+#
+# Both the docstring and docs/benchmark.md name the same way to separate them, and it is not a
+# re-read of the table: "drop weights.smoothness to 0 and retrain" (joint.py:428).
+# This file is that retrain. It is registered by docs/preregistration/PR-14-smoothness-ablation.md
+# BEFORE it produced a single step.
+#
+# NOT A FIX, A DIAGNOSTIC. If the regulariser is the cause, this arm should be materially
+# jerkier and materially closer to the demonstrations' RMS. It may still fail L1 — nothing here
+# predicts otherwise, and PR-14 registers that outcome as informative rather than as a failure.
+#
+# The memory arithmetic of joint_wan_gr00t_5090.yaml applies unchanged; a loss weight costs no
+# VRAM. config_hash necessarily differs (weights are part of JointTrainingConfig), which is the
+# point: AC-04 must be able to tell the two arms apart.
+
+wam_config_version: "0.1.0"
+
+training:
+  seed: 0
+  device: cuda
+  # Unchanged from joint_wan_gr00t.yaml: the freshly initialized action branch (head,
+  # encoders, velocity head) learns at 1e-3, the LoRA adapters on a pretrained DiT at 1e-4.
+  lr: 0.001
+  backbone_lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  # THE ONLY LINE THAT DIFFERS FROM joint_wan_gr00t.yaml (which has 8).
+  # 8 was chosen for an H200's 141 GB. On 32 GiB the resident floor is 25.50 GB before a
+  # single activation, so the per-sample 0.209 GB is what has to shrink. --grad-accum 4
+  # restores the effective batch to 8; see the banner at the top of this file.
+  batch_size: 2
+  steps: 20000 # unchanged: rung 362 trained 20 000 steps and the rungs must share a budget
+  camera: ego
+  limit_margin: 0.95
+
+  weights: # PRD §10.4 loss inventory — byte-identical to joint_wan_gr00t.yaml
+    video: 0.5
+    action_flow: 1.0
+    action_recon: 1.0
+    action_reg: 1.0
+    gripper: 0.5
+    alignment: 0.1
+    smoothness: 0.0 # <-- THE ONLY LINE THAT DIFFERS FROM joint_wan_gr00t_5090.yaml (PR-14)
+    limit: 0.001
+
+  state: # StateMLPConfig (FR-02) — 15 q + 15 dq + 10 imu + 2 gripper = 42
+    embedding_dim: 32
+    hidden_dims: [64, 64]
+    num_joints: 15
+    gripper_dims: 2
+    use_layernorm: true
+    activation: gelu
+
+  # WanBackboneConfig (FR-09). Weight location and the LoRA surface still come from
+  # configs/model/wan22_ti2v_5b.yaml via --backbone-config; unchanged, including lora_rank 32
+  # and gradient_checkpointing: true. Dropping the rank to 16 would save 0.66 GB of the
+  # 1.32 GB training state — and would make the run a different experiment for 2.6 % of VRAM.
+  backbone:
+    kind: wan_i2v
+    dtype: bfloat16
+    device: cuda
+    feature_dim: 3072
+    num_frames: 9 # unchanged: 9 frames -> F' = 3 -> 60 video tokens. See the arithmetic above.
+    image_hw: [128, 160] # unchanged: 60 tokens is already tiny; activations are not the problem
+    state_embedding_dim: 32
+    max_text_tokens: 512
+    feature_blocks: [2, 10] # unchanged; keep in sync with the model config
+
+  action_encoder: # ActionChunkEncoderConfig (training only, PRD 9.5)
+    latent_dim: 32
+    hidden_dims: [64]
+    target_dim: 15
+    gripper_dims: 1
+    max_steps: 32
+
+  head: # ActionHeadConfig decoder on shared features (FR-04)
+    feature_dim: 3072
+    num_steps: 16
+    target_dim: 15
+    gripper_dims: 1
+    mode: joint_delta
+    dt_s: 0.0333333
+    hidden_dims: [256]
+
+  velocity_hidden_dims: [256]
