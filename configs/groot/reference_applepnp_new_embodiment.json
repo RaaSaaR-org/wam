@@ -1,0 +1,165 @@
+{
+  "_provenance": {
+    "source": "models/finetunes/groot_recipeA_ckpt5000/experiment_cfg/conf.yaml",
+    "source_sha256": "d5d9907472f6558134a410ff9f45e2b772884e7a9d703b64a66e7ddeaf3b8464",
+    "extracted_key": "data.modality_configs.new_embodiment",
+    "dataset_paths": [
+      "/valhalla/projects/ehpc-aif-2026pg01-905/apple_pnp_h200/dataset"
+    ],
+    "embodiment_tag": "new_embodiment",
+    "action_horizon": 40,
+    "max_action_dim": 132,
+    "use_relative_action": true
+  },
+  "modality_configs": {
+    "video": {
+      "delta_indices": [
+        0
+      ],
+      "modality_keys": [
+        "ego_view"
+      ],
+      "sin_cos_embedding_keys": null,
+      "mean_std_embedding_keys": null,
+      "action_configs": null
+    },
+    "state": {
+      "delta_indices": [
+        0
+      ],
+      "modality_keys": [
+        "left_leg",
+        "right_leg",
+        "waist",
+        "left_arm",
+        "right_arm",
+        "left_hand",
+        "right_hand"
+      ],
+      "sin_cos_embedding_keys": null,
+      "mean_std_embedding_keys": null,
+      "action_configs": null
+    },
+    "action": {
+      "delta_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "modality_keys": [
+        "left_arm",
+        "right_arm",
+        "left_hand",
+        "right_hand",
+        "waist",
+        "navigate_command",
+        "base_height_command",
+        "effort_left_arm",
+        "effort_right_arm",
+        "effort_left_hand",
+        "effort_right_hand",
+        "effort_waist"
+      ],
+      "sin_cos_embedding_keys": null,
+      "mean_std_embedding_keys": null,
+      "action_configs": [
+        {
+          "rep": "RELATIVE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "RELATIVE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        },
+        {
+          "rep": "ABSOLUTE",
+          "type": "NON_EEF",
+          "format": "DEFAULT",
+          "state_key": null
+        }
+      ]
+    },
+    "language": {
+      "delta_indices": [
+        0
+      ],
+      "modality_keys": [
+        "annotation.human.task_description"
+      ],
+      "sin_cos_embedding_keys": null,
+      "mean_std_embedding_keys": null,
+      "action_configs": null
+    }
+  }
+}

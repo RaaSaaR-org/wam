@@ -7,7 +7,10 @@
         --dataset data/raw/gr00t_apple --wam-dataset datasets/gr00t-apple-full \
         --train-episodes configs/splits/i8_train_362.txt \
         --exclude-episodes configs/splits/t18_holdout_episodes.txt \
-        --out-dir runs/t39-baseline-seed0
+        --embodiment-tag new_embodiment \
+        --modality-config configs/groot/new_embodiment_config_defaults.py \
+        --out-dir runs/t39-baseline-seed0 \
+        -- --base_model_path <staged weights> --embodiment_tag new_embodiment ...
 
 T-39 / PR-07. This driver does exactly two things of its own, both of them things the vendored
 trainer cannot do for us, and nothing else:
@@ -224,6 +227,128 @@ def build_lerobot_subset(source: Path, out: Path, indices: list[int]) -> dict[st
     }
 
 
+def resolve_embodiment_tag(vendor_root: Path, tag: str) -> str:
+    """``tag`` -> the ``EmbodimentTag`` NAME upstream's ``stats.py`` will accept.
+
+    THE TWO ENTRYPOINTS DISAGREE ABOUT SPELLING, and neither is wrong. ``launch_finetune.py``
+    declares ``embodiment_tag: str`` and hands it to ``EmbodimentTag.resolve()``, which matches a
+    name OR a value, case-insensitively — so ``new_embodiment`` works there. ``gr00t/data/stats.py``
+    declares ``embodiment_tag: EmbodimentTag``, so tyro builds a choice list of enum NAMES and
+    rejects ``new_embodiment`` outright in favour of ``NEW_EMBODIMENT``.
+
+    Uppercasing the string is NOT the fix, and looks like one: most tags have a name that is not
+    the shout-case of their value (``XDOF`` is ``xdof_relative_eef_relative_joint``), so
+    ``.upper()`` would invent ``XDOF_RELATIVE_EEF_RELATIVE_JOINT`` and fail on everything except
+    the one tag we happen to use. Ask the vendored enum instead, in the tree that will actually
+    run, so the answer is that tree's rather than this file's idea of it.
+    """
+    probe = (
+        "import sys;"
+        "from gr00t.data.embodiment_tags import EmbodimentTag;"
+        "print(EmbodimentTag.resolve(sys.argv[1]).name)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe, tag],
+        cwd=vendor_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"{tag!r} is not an embodiment tag the vendored tree knows.\n"
+            f"{completed.stderr.strip()}"
+        )
+    return completed.stdout.strip()
+
+
+def generate_subset_stats(
+    subset: Path,
+    *,
+    vendor_root: Path,
+    embodiment_tag: str,
+    modality_config: Path,
+) -> dict[str, Any]:
+    """Write ``meta/stats.json`` and ``meta/relative_stats.json`` INTO the subset.
+
+    ``LeRobotEpisodeLoader.__init__`` hard-asserts ``meta/stats.json`` (upstream
+    ``lerobot_episode_loader.py:180``), and ``relative_stats.json`` is not optional in practice
+    either: ``left_arm``/``right_arm`` are ``RELATIVE`` in this embodiment's action config, so
+    without it the relative branch normalises against nothing. Neither file ships with
+    ``nvidia/GR00T-N1.7-AppleToPlate`` — upstream expects you to run ``gr00t/data/stats.py``.
+
+    OVER THE SUBSET, AND DELIBERATELY NOT OVER THE SOURCE. These statistics are min/max, mean/std
+    and q01/q99 percentiles, and ``launch_finetune.py`` normalises every input with them. Computed
+    over all 402 episodes they would carry the 40 holdout episodes' extremes into the training
+    signal — a quiet leak that the witness cannot catch, because the witness proves which episodes
+    were *trained on*, not which ones a percentile saw. Computed over the 362 that survived
+    :func:`build_lerobot_subset`, they describe exactly the data the trainer is allowed to see.
+    Cost: a few CPU-minutes on 71 MB of parquet, inside a job that is otherwise GPU-bound.
+
+    Run as a SUBPROCESS in the vendored tree, for the same reason the trainer is (PR-07 §3): these
+    numbers are upstream's, produced by upstream's code, and importing ``gr00t`` into this process
+    would put its torch pin in the same interpreter as ``wam.*``.
+    """
+    # EVERY PATH IS RESOLVED BEFORE THE COMMAND IS BUILT, because the subprocess runs with
+    # cwd=vendor_root and a relative path means something different there. A relative
+    # --vendor-root doubles into vendor/vendor/gr00t/data/stats.py and the run dies with a bare
+    # "exited 2"; a relative --dataset-path or --modality-config silently resolves against the
+    # vendored tree instead of the caller's directory, which is worse — stats.py would refuse a
+    # missing file, but a same-named file inside the vendor tree would be read without complaint.
+    # Found by running the dry run from a relative path on the workstation, 2026-08-16. It never
+    # surfaced on the cluster because the sbatch builds ${PROJ}-rooted absolute paths throughout.
+    vendor_root = vendor_root.resolve()
+    subset = subset.resolve()
+    modality_config = modality_config.resolve()
+
+    stats_script = vendor_root / "gr00t" / "data" / "stats.py"
+    if not stats_script.is_file():
+        raise SystemExit(
+            f"{stats_script} missing — the vendored tree does not carry upstream's statistics "
+            "generator, so the trainer would assert on a dataset with no meta/stats.json."
+        )
+    if not modality_config.is_file():
+        raise SystemExit(
+            f"{modality_config} missing. A custom embodiment tag is absent from upstream's "
+            "MODALITY_CONFIGS registry until a --modality-config-path registers it, and "
+            "gr00t/data/stats.py refuses rather than writing a partial set."
+        )
+    tag_name = resolve_embodiment_tag(vendor_root, embodiment_tag)
+    command = [
+        sys.executable,
+        str(stats_script),
+        "--dataset-path",
+        str(subset),
+        "--embodiment-tag",
+        tag_name,
+        "--modality-config-path",
+        str(modality_config),
+    ]
+    print(f"\n=== normalization stats over the subset:\n    {' '.join(command)}\n")
+    completed = subprocess.run(command, cwd=vendor_root, check=False)
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"gr00t/data/stats.py exited {completed.returncode} — refusing to train against a "
+            "dataset whose normalization statistics were not written."
+        )
+    written = {}
+    for name in ("stats.json", "relative_stats.json"):
+        path = subset / "meta" / name
+        if not path.is_file():
+            raise SystemExit(
+                f"stats.py exited 0 but {path} is absent. Upstream's generate_rel_stats returns "
+                "early when the registered modality config carries no action_configs; check "
+                f"{modality_config}."
+            )
+        written[name] = path.stat().st_size
+    return {
+        "embodiment_tag": embodiment_tag,
+        "embodiment_tag_name": tag_name,
+        "modality_config": str(modality_config),
+        **written,
+    }
+
+
 def write_witness(
     out_dir: Path,
     *,
@@ -278,6 +403,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", default="latest")
     parser.add_argument(
+        "--embodiment-tag",
+        required=True,
+        help="the tag the SUBSET's statistics are generated under. Must be the same tag passed "
+        "to the trainer after --, or the trainer normalises with statistics computed for a "
+        "different modality layout. No default: PR-07 §8.",
+    )
+    parser.add_argument(
+        "--modality-config",
+        type=Path,
+        required=True,
+        help="the .py that registers --embodiment-tag in upstream's MODALITY_CONFIGS. Same file "
+        "the trainer is given as --modality_config_path.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="build the subset and the witness, then stop before the trainer. Everything this "
@@ -310,6 +449,14 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     subset = args.out_dir / SUBSET_DIRNAME
     stats = build_lerobot_subset(args.dataset, subset, indices)
+    # Immediately after the subset exists and before anything reads it. build_lerobot_subset
+    # rmtree's its output, so these files cannot be produced by an earlier pass and survive.
+    stats["normalization"] = generate_subset_stats(
+        subset,
+        vendor_root=args.vendor_root,
+        embodiment_tag=args.embodiment_tag,
+        modality_config=args.modality_config,
+    )
 
     run_id = args.out_dir.name
     config = {
@@ -327,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
         "num_holdout_episodes": len(holdout_ids),
         "seed": args.seed,
         "source_state_dim": convert.SOURCE_STATE_DIM,
+        "embodiment_tag": args.embodiment_tag,
+        "modality_config": str(args.modality_config),
         "subset": stats,
     }
     metadata = write_witness(
@@ -343,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    train      {len(trained_ids)} episodes from {args.train_episodes.name}")
     print(f"    holdout    {len(holdout_ids)} episodes, excluded and NOT in the subset")
     print(f"    subset     {subset} ({stats['parquet_links']} parquet, {stats['video_links']} mp4)")
+    print(f"    stats      {args.embodiment_tag} over the subset, not the source")
     print(f"    snapshot   {snapshot_ref}")
     print(f"    witness    {args.out_dir / WITNESS_FILENAME} (config {metadata.config_hash[:12]})")
 

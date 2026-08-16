@@ -594,6 +594,180 @@ def test_subset_rebuild_is_idempotent(tmp_path, recording):
     assert len(linked) == 1, "a rebuild left the previous selection behind"
 
 
+# --------------------------------------------------- the subset's normalization statistics
+#
+# generate_subset_stats shells out to upstream's gr00t/data/stats.py, which needs the vendored
+# tree and a working gr00t install. What is OURS to get right is the refusal set, and every one of
+# these failures is otherwise discovered after a GPU has been allocated. The fake vendor tree is a
+# real directory with a real script in it, so the tests exercise the actual subprocess path rather
+# than a mock of it.
+
+
+def _fake_vendor(root: Path, body: str) -> Path:
+    """A vendor tree whose gr00t/data/stats.py is ``body``, plus an importable embodiment enum.
+
+    The enum is real rather than stubbed away because ``generate_subset_stats`` asks the vendored
+    tree to resolve the tag before it shells out, and the whole point of that step is that name
+    and value differ. ``XDOF`` is included precisely because ``"xdof_relative_eef_relative_joint"
+    .upper()`` is not its name — the shortcut this indirection exists to rule out.
+    """
+    data = root / "gr00t" / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "stats.py").write_text(body)
+    (root / "gr00t" / "__init__.py").write_text("")
+    (data / "__init__.py").write_text("")
+    (data / "embodiment_tags.py").write_text(
+        "from enum import Enum\n"
+        "class EmbodimentTag(Enum):\n"
+        "    NEW_EMBODIMENT = 'new_embodiment'\n"
+        "    XDOF = 'xdof_relative_eef_relative_joint'\n"
+        "    @classmethod\n"
+        "    def resolve(cls, s):\n"
+        "        for m in cls:\n"
+        "            if s.lower() in (m.name.lower(), m.value.lower()):\n"
+        "                return m\n"
+        "        raise ValueError(s)\n"
+    )
+    return root
+
+
+def test_the_tag_is_resolved_to_the_enum_name_upstream_stats_demands(tmp_path):
+    """gr00t/data/stats.py types embodiment_tag as the ENUM, so tyro offers enum NAMES and rejects
+    'new_embodiment' outright. launch_finetune.py types it as str and resolves either spelling.
+    One concept, two accepted spellings — the driver absorbs that so the operator never has to."""
+    vendor = _fake_vendor(tmp_path / "vendor", "pass\n")
+    assert tr.resolve_embodiment_tag(vendor, "new_embodiment") == "NEW_EMBODIMENT"
+    assert tr.resolve_embodiment_tag(vendor, "NEW_EMBODIMENT") == "NEW_EMBODIMENT"
+
+
+def test_the_tag_is_resolved_by_the_enum_and_not_by_uppercasing(tmp_path):
+    """The shortcut that looks correct and is not: XDOF's value is not the shout-case of its name,
+    so `.upper()` would invent XDOF_RELATIVE_EEF_RELATIVE_JOINT and be rejected."""
+    vendor = _fake_vendor(tmp_path / "vendor", "pass\n")
+    assert tr.resolve_embodiment_tag(vendor, "xdof_relative_eef_relative_joint") == "XDOF"
+
+
+def test_an_unknown_tag_is_refused_by_the_vendored_enum(tmp_path):
+    vendor = _fake_vendor(tmp_path / "vendor", "pass\n")
+    with pytest.raises(SystemExit, match="not an embodiment tag"):
+        tr.resolve_embodiment_tag(vendor, "definitely_not_a_robot")
+
+
+def test_stats_refuse_a_vendor_tree_without_the_generator(tmp_path):
+    (tmp_path / "subset").mkdir()
+    (tmp_path / "config.py").write_text("")
+    with pytest.raises(SystemExit, match="does not carry upstream"):
+        tr.generate_subset_stats(
+            tmp_path / "subset",
+            vendor_root=tmp_path / "vendor",
+            embodiment_tag="new_embodiment",
+            modality_config=tmp_path / "config.py",
+        )
+
+
+def test_stats_refuse_a_missing_modality_config(tmp_path):
+    """A custom tag is absent from MODALITY_CONFIGS until a config registers it, and upstream's
+    generator raises rather than writing a partial set. Catching it here names the actual file."""
+    vendor = _fake_vendor(tmp_path / "vendor", "raise SystemExit(0)\n")
+    (tmp_path / "subset").mkdir()
+    with pytest.raises(SystemExit, match="MODALITY_CONFIGS registry"):
+        tr.generate_subset_stats(
+            tmp_path / "subset",
+            vendor_root=vendor,
+            embodiment_tag="new_embodiment",
+            modality_config=tmp_path / "absent.py",
+        )
+
+
+def test_stats_refuse_a_generator_that_fails(tmp_path):
+    vendor = _fake_vendor(tmp_path / "vendor", "import sys; sys.exit(3)\n")
+    (tmp_path / "subset").mkdir()
+    (tmp_path / "config.py").write_text("")
+    with pytest.raises(SystemExit, match="exited 3"):
+        tr.generate_subset_stats(
+            tmp_path / "subset",
+            vendor_root=vendor,
+            embodiment_tag="new_embodiment",
+            modality_config=tmp_path / "config.py",
+        )
+
+
+def test_stats_refuse_a_generator_that_exits_zero_writing_nothing(tmp_path):
+    """The one that would otherwise get through. generate_rel_stats returns EARLY and writes no
+    relative_stats.json when the registered config carries no action_configs — exit code 0, no
+    file, and the failure surfaces as a normalization error thousands of GPU-seconds later."""
+    vendor = _fake_vendor(tmp_path / "vendor", "pass\n")
+    subset = tmp_path / "subset"
+    (subset / "meta").mkdir(parents=True)
+    (subset / "meta" / "stats.json").write_text("{}")  # only the first of the two
+    (tmp_path / "config.py").write_text("")
+    with pytest.raises(SystemExit, match="returns early"):
+        tr.generate_subset_stats(
+            subset,
+            vendor_root=vendor,
+            embodiment_tag="new_embodiment",
+            modality_config=tmp_path / "config.py",
+        )
+
+
+def test_stats_report_both_files_when_the_generator_writes_them(tmp_path):
+    vendor = _fake_vendor(
+        tmp_path / "vendor",
+        "import pathlib, sys\n"
+        "meta = pathlib.Path(sys.argv[sys.argv.index('--dataset-path') + 1]) / 'meta'\n"
+        "meta.mkdir(parents=True, exist_ok=True)\n"
+        "(meta / 'stats.json').write_text('{\"a\": 1}')\n"
+        "(meta / 'relative_stats.json').write_text('{\"b\": 2}')\n",
+    )
+    subset = tmp_path / "subset"
+    subset.mkdir()
+    (tmp_path / "config.py").write_text("")
+    written = tr.generate_subset_stats(
+        subset,
+        vendor_root=vendor,
+        embodiment_tag="new_embodiment",
+        modality_config=tmp_path / "config.py",
+    )
+    assert written["embodiment_tag"] == "new_embodiment"
+    assert written["stats.json"] > 0 and written["relative_stats.json"] > 0
+
+
+def test_relative_paths_survive_the_cwd_change_into_the_vendored_tree(tmp_path, monkeypatch):
+    """The subprocess runs with ``cwd=vendor_root``, so every relative path means something else
+    inside it. A relative ``--vendor-root`` doubles into ``vendor/vendor/gr00t/data/stats.py``
+    and the run dies with a bare 'exited 2'; a relative ``--dataset-path`` is worse, because it
+    would resolve against the vendored tree without complaint if a same-named directory existed
+    there. Found on the workstation 2026-08-16 and invisible on the cluster, where the sbatch
+    builds ${PROJ}-rooted absolute paths throughout — which is exactly why it needs a test."""
+    _fake_vendor(
+        tmp_path / "vendor",
+        "import pathlib, sys\n"
+        "meta = pathlib.Path(sys.argv[sys.argv.index('--dataset-path') + 1]) / 'meta'\n"
+        "meta.mkdir(parents=True, exist_ok=True)\n"
+        "(meta / 'stats.json').write_text('{\"a\": 1}')\n"
+        "(meta / 'relative_stats.json').write_text('{\"b\": 2}')\n",
+    )
+    (tmp_path / "subset").mkdir()
+    (tmp_path / "config.py").write_text("")
+
+    # A decoy at the path the doubled/mis-resolved lookup would land on, so the test fails on a
+    # WRONG answer rather than only on a missing-file refusal.
+    (tmp_path / "vendor" / "subset").mkdir()
+
+    monkeypatch.chdir(tmp_path)
+    written = tr.generate_subset_stats(
+        Path("subset"),
+        vendor_root=Path("vendor"),
+        embodiment_tag="new_embodiment",
+        modality_config=Path("config.py"),
+    )
+    assert written["stats.json"] > 0 and written["relative_stats.json"] > 0
+    assert (tmp_path / "subset" / "meta" / "stats.json").is_file()
+    assert not (tmp_path / "vendor" / "subset" / "meta").exists(), (
+        "the stats landed inside the vendored tree — the path resolved against cwd=vendor_root"
+    )
+
+
 # ------------------------------------------------------------- the witness, end to end
 
 
