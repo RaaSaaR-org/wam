@@ -204,10 +204,36 @@ blur, `:104-108` seg):
 repository = "nvidia/Cosmos-Transfer2.5-2B"
 revision   = "b67b64abda3801a9aceddbff2bdb86126c06db74"   # edge; the others differ
 filename   = "general/edge/61f5694b-..._ema_bf16.pt"
+uuid       = "61f5694b-0ad5-4ecd-8ad7-c8545627d125"
 ```
 
-PR-08 §6 requires the generator checkpoint id **and a pinned revision** in the record; these are
-they. `TRANSFER_MODEL_REVISION` must be **the control's own revision**, not a single repo-wide one.
+### `name` is not unique, and one of the collisions is trained on mock data
+
+**This is the sharpest trap in the file and it is easy to walk into.** `checkpoints_transfer2.py`
+registers the name `nvidia/Cosmos-Transfer2.5-2B/general/edge` **twice** — at `:35` and again at
+`:115` — with different uuids, different revisions, different filenames and different experiments.
+The same double registration exists for `general/depth`, `general/blur` and `general/seg`
+(`:55`/`:175`, `:75`/`:155`, `:95`/`:135`).
+
+It does not raise, because **`name` is not a key.** `_CHECKPOINTS` is
+`dict[str, CheckpointConfig]` keyed by **`uuid` and `s3.uri`** (`_src/imaginaire/utils/checkpoint_db.py:321`,
+registration loop `:336-339`); `name` is used only by `full_name` for log lines (`:287-290`).
+
+And the two are not interchangeable. The `experiment` strings differ, and the second `general/edge`
+entry's ends **`..._rectified_flow_mock_data`** (`:117`) against the first's
+`..._rectified_flow_refimdrop0pt5` (`:36`).
+
+**So a checkpoint cannot be identified by name, and `TRANSFER_MODEL_ID` as an HF repo id identifies
+nothing** — the repo id is the same string for every one of them. PR-08 §6 requires the generator
+checkpoint id and a pinned revision in the record; satisfying that honestly means recording **the
+`uuid`**, and the revision must be **that uuid's own**, not a repo-wide one. `97`'s
+`TRANSFER_MODEL_ID` / `TRANSFER_MODEL_REVISION` pair is necessary and **not sufficient**; a
+`TRANSFER_CHECKPOINT_UUID` belongs beside them, and the staging job should assert that the file it
+staged is that uuid's `filename`.
+
+*Corrected 2026-08-16, hours after this document was first written:* the original §9 said only that
+`TRANSFER_MODEL_REVISION` must be the control's own revision. True, and it left the impression that
+naming the control picks the weights. It does not.
 
 ### The cluster problem this creates
 
