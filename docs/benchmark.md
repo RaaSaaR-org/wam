@@ -270,6 +270,17 @@ as evidence about command-space policies without the label-space question being 
 Full record, receipts and the three defects found by running it:
 [`preregistration/PR-07-RESULT.md`](preregistration/PR-07-RESULT.md).
 
+**And how much of it is a fixable offset (PR-10, measured 2026-08-16): 8.7 %.** Sweeping the
+anchoring convention across ±4 control steps finds a real, single-peaked, interior optimum at
+`k = −2` — the command leads the executed state by about **67 ms**, an ordinary transport lag —
+worth **+29.75 pp** of the 342 pp deficit. **All nine offsets remain below L0**, the best-aligned
+command is still 4.1× worse than repeat-last, and `smoothness_ratio` at the optimum is 7.70 against
+a gate of 2. The co-shifted control is flat (17 pp of span against 346 pp), so the offset is the
+robot's and not our conversion's. Verdict **P (partial)**: re-anchoring is a genuine fix that does
+not come close to clearing the bar, and "the adapter is mis-anchored" is retired as a sufficient
+explanation for the negatives below.
+[`preregistration/PR-10-RESULT.md`](preregistration/PR-10-RESULT.md).
+
 ---
 
 ## First results (2026-07-29)
