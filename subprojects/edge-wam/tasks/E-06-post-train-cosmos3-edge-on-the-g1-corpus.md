@@ -49,6 +49,18 @@ relabeled from executed state over `t → t+1` while the corpus's target is the 
 `smoothness_ratio 8.52` making the command 8.5× jerkier than the demonstration. That is the
 experiment this task now waits behind, not another backbone.
 
+**Superseded 2026-08-16 — that sweep ran, and the anchoring convention turned out to be a defect
+rather than a convention.** `commanded_to_chunk` built the chunk's step 0 as `command − STATE`
+while every other step is `command − command`; a standing tracking error cancels in every
+homogeneous difference and survived at full magnitude in that one term. **`smoothness_ratio 8.52`
+never meant "the command is 8.5× jerkier"** — 96.8 % of the predicted-jerk sum sat in the index-0
+term alone, and dropping index 0 from *both* arms gives **0.28**, i.e. over steps 1–15 the command
+is ~3.6× *smoother* than the demonstration (`docs/smoothness-ratio-audit.md`). Repaired, the
+corpus's own action column scores **+68.10 L1 / +75.40 L2, level L4** on T-39's own holdout with
+`horizon_ratio` ~0.97 (`docs/preregistration/PR-12-RESULT.md`, `PR-13-RESULT.md`). **So this task no
+longer waits behind the anchoring question** — it is answered — but behind the training decision
+that follows from it, which is the project owner's call.
+
 ## Acceptance
 
 1. All of E-01, E-02, E-04, E-05 closed, and **T-39 reported** — it has, `VOID (labels)`, so this

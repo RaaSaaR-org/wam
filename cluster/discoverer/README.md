@@ -9,8 +9,12 @@ readout probe, T-16 itself (20 000 LoRA steps, `runs/t16-lora-seed0`, negative: 
 `skill_vs_repeat_pct` −32.4 %, a *tiled* number), and T-29, which re-measured that same
 checkpoint through the real frame window: −21.80 % (+10.65 pp). L1 is still failed by 21.80 pp,
 so the verdict survives and the published figure does not. Step 9 (T-30) **ran 2026-08-01 as job
-184670 and is negative** — every flow arm below L0. Steps 10–13 are staged and unrun, and 12–13
-are blocked behind 11.
+184670 and is negative** — every flow arm below L0. **Steps 10 and 11 ran 2026-08-16** (jobs 187804
+and 187813): the verdict is `VOID (labels)`, and PR-12 (`C`) then PR-13 (`W`) traced that VOID to
+our own evaluation adapter rather than the corpus — repaired, the corpus's own action column scores
+**+68.10 L1, level L4** on T-39's own holdout. **Step 11's POLICY arm still has not run** (G0 fires
+before the policy branch), so steps 12–13 remain blocked behind 11 and the training decision that
+would unblock them is the project owner's.
 
 **No document here asserts how much of the allocation is left** — that number moves every job and a
 stale copy of it is worse than none. Read it live with `accountcheck` (`docs/discoverer.md` §9).
@@ -72,8 +76,8 @@ Checkpoints belong in `${PROJ}/runs` ([scratch](https://docs.discoverer.bg/scrat
 | 7 | `60_eval_t16.sbatch` | project | ~0.2 GPU-h | score the checkpoint on the proven holdout |
 | 8 | `61_eval_t29_frame_history.sbatch` | project | ~0.4 GPU-h | T-29 / I-7: tiled frame vs. the real window — **ran** 2026-08-01 (job 184648): −32.45 % → −21.80 %, L1 still failed |
 | 9 | `63_eval_t30_flow_head.sbatch` | project | ~4 GPU-h ×1–2 | T-30 / I-3: regression head vs. the flow sampler — **ran** 2026-08-01 (job 184670): all 10 arms below L0, mean-of-8 arm 11.1× worse than the regression readout |
-| 10 | `70_train_t39_baseline.sbatch` | project | ≤8 GPU-h | **T-39 / PR-07, the positive control** — NVIDIA's own recipe on our committed split |
-| 11 | `71_eval_t39_control.sbatch` | project | ~0.5 GPU-h | four arms + the pre-registered `T39_RULE_V1` verdict |
+| 10 | `70_train_t39_baseline.sbatch` | project | ≤8 GPU-h | **T-39 / PR-07, the positive control** — NVIDIA's own recipe on our committed split — **ran** 2026-08-16 (job 187804, 1:22:14, 1.37 of the 12 GPU-h ceiling) |
+| 11 | `71_eval_t39_control.sbatch` | project | ~0.5 GPU-h | four arms + the pre-registered `T39_RULE_V1` verdict — **verdict `VOID (labels)`**, decided by G0 on the oracle arms. **Its POLICY arm has never run**: job 187813 died at 108 s on a missing `GROOT_PATCH_MISTRAL` export (since fixed), and G0 fires before the policy branch, so the checkpoint step 10 wrote has never been scored. Read `MODEL_DIR`'s guard in the file before resubmitting |
 | 12 | `55_train_i8_rung.sbatch` | project | ~36 GPU-h ×3 | I-8 / T-32 rungs 040 / 120 (+ a seed-1 replicate) — **blocked on step 11** |
 | 13 | `62_eval_i8_curve.sbatch` | project | ~1 GPU-h | both frame modes × 3 rungs, then the pre-registered verdict |
 

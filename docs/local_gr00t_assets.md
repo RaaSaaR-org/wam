@@ -15,8 +15,10 @@ walking the filesystem. Every path, size and commit below was read off this disk
 > the recipe** — see §6 question 3, and note the probe that would answer it was blocked for
 > permission, not skipped.
 
-**Why this page exists.** `PR-07 §8` items 4–6 have blocked T-39 since 2026-08-06, and all three
-were written as *"needs SSH or a source document"*:
+**Why this page exists.** `PR-07 §8` items 4–6 blocked T-39 from 2026-08-06 until they were closed,
+and all three were written as *"needs SSH or a source document"*. **T-39 has since run on the
+cluster (2026-08-16, jobs 187804/187813) and reported `VOID (labels)`** — so this page is now
+provenance for a run that happened, not a plan for one that has not:
 
 > 4. A separate cluster venv for the vendored trainer.
 > 5. `MODEL_ID` — the exact checkpoint id, **not verified from a primary source**.

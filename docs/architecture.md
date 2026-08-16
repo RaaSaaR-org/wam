@@ -228,7 +228,11 @@ come close to closing it: the verdict survives, the published figure does not. ~
 open — T-30 (flow readout) is running now, T-32 (data scaling) is unrun.~~ **T-30 reported
 2026-08-01 (job 184670) and is negative too** — all nine flow arms below L0, the mean-of-8
 measurement arm 11.1× worse than the regression readout — so the readout axis is closed and only
-T-32 is left, itself now blocked behind T-39 (the positive control, `PR-07`). ~~Only `t16-lora-seed0`
+T-32 is left, itself blocked behind T-39 (the positive control, `PR-07`). **T-39 reported
+2026-08-16: `VOID (labels)`, whose cause PR-12 (`C`) and PR-13 (`W`) traced to our evaluation
+adapter rather than the corpus — repaired, the corpus's own action column scores +68.10 L1 and
+level L4. The premise behind the block is withdrawn by measurement; lifting the block itself is
+the project owner's call and is not done here.** ~~Only `t16-lora-seed0`
 has been re-scored, so the baselines it is held against are still tiled-only numbers and AC-07 is
 back to *undetermined* rather than answered.~~ **Both baselines were re-scored on 2026-08-01 (CPU,
 zero allocation) and neither moved**, so the ladder is single-mode: adding the world branch to the

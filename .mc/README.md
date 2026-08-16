@@ -40,9 +40,11 @@ mc validate                  # see the caveat below
   `task-filename` block is noise.
 - **`tags:` carry the milestone** (`m0`…`m4`) plus topical tags, so `mc list tasks --tag m3`
   reproduces a milestone view. mc has no milestone concept of its own.
-- **`depends_on:` is load-bearing.** T-32 depends on T-39, which is why `mc task next` returns
+- **`depends_on:` is load-bearing.** T-32 depends on T-39, which is why `mc task next` returned
   T-39 and not the bigger job behind it. That ordering is pre-registered (PR-07), not a
-  preference — keep it in the frontmatter, not only in prose.
+  preference — keep it in the frontmatter, not only in prose. **T-39 reported 2026-08-16
+  (`VOID (labels)`); its dependents do not auto-unblock, because the verdict's own premise was
+  withdrawn by PR-12/PR-13 and what follows is the project owner's call, not a state transition.**
 - **`TASKS.md` stays** as the milestone index with the M0–M4 exit criteria, the M3 narrative and
   the OD table. It links here; it no longer holds task detail.
 

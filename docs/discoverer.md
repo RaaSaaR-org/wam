@@ -19,7 +19,10 @@ flow-head eval, job 184670, 2026-08-01 — negative) have run. **T-041** (the Co
 fine-tune, 2026-08-15) has run and returned `VOID` on G0b, ~59 of its 122 GPU-h ceiling spent.
 **T-39** (the positive control, 2026-08-16) has run and returned `VOID (labels)`, 1.37 of its
 12 GPU-h ceiling spent; its policy arm never ran because G0b vetoed the experiment first. The
-**I-8 rung** remains staged and unrun, and T-32 stays blocked behind T-39 by pre-registration.
+**I-8 rung** remains staged and unrun, and T-32 stays blocked behind T-39 by pre-registration —
+still blocked after the report, because PR-12 (`C`) and PR-13 (`W`) traced that `VOID` to our own
+evaluation adapter rather than the corpus, and the policy arm T-32 actually depends on has still
+never been scored.
 
 > Corrected 2026-08-16: this paragraph said "the T-39 positive control and the I-8 rung remain
 > staged and unrun". Commit `70443bd` swept five documents carrying that stale claim and missed

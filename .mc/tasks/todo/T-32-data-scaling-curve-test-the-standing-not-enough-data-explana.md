@@ -21,7 +21,7 @@ depends_on:
 due_date: ''
 created: 2026-08-01
 updated: 2026-08-01
-status_note: "Staged on Discoverer+ (~109 GPU-h) and deliberately BLOCKED behind T-39. Fitting a data-scaling curve on a method no positive control has validated measures the scaling of brokenness if the method is broken; that ordering is pre-registered, not a preference."
+status_note: "Staged on Discoverer+ (~109 GPU-h) and deliberately BLOCKED behind T-39. Fitting a data-scaling curve on a method no positive control has validated measures the scaling of brokenness if the method is broken; that ordering is pre-registered, not a preference. UPDATE 2026-08-16: T-39 reported VOID (labels), and PR-12 (C) / PR-13 (W) traced that VOID to our own evaluation adapter rather than the corpus — repaired, the corpus's own action column scores +68.10 L1, level L4. But T-39's POLICY arm never ran (G0 fires before it), so the thing this task is blocked on — a positive control that validates the METHOD — still does not exist. The block stands on its original reason."
 ---
 
 # Data-scaling curve — test the standing "not enough data" explanation

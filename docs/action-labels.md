@@ -49,8 +49,11 @@ per-step object-centroid displacement in the source) rather than coined, and G0c
 real robot back over the generated frame **unconditionally**, so the generic-manipulator defect
 cannot enter and no IoU threshold has to be invented.
 
-Status: pre-registration written 2026-08-06, generation blocked on T-39, and one acceptance
-criterion still open (the `emai/vla-training` consumer contract).
+Status: pre-registration written 2026-08-06, generation blocked on T-39 by `PR-08` §1, and one
+acceptance criterion still open (the `emai/vla-training` consumer contract). **T-39 reported
+2026-08-16 — `VOID (labels)`, whose cause PR-12 (`C`) and PR-13 (`W`) traced to our evaluation
+adapter rather than the corpus, so §1's stated reason is withdrawn by measurement. §1 is not
+lifted here; that is the project owner's call.**
 
 ## 3a. Inferred from pixels, by *us* — closed, and priced twice
 

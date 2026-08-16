@@ -21,7 +21,7 @@ are. Referenced by ID:
 
 | id | state | why it matters here |
 |---|---|---|
-| **T-040** | **`PR-08` + `T40_RULE_V1` in git, 9/13 acceptance closed** | **the main use case** — restyle real episodes, recorded actions carried over unchanged. Four items open, none a decision: the missing depth/segmentation conditioning, `GEOM_TOL`/`EST_DRIFT_P95`, H200 throughput + chunked sbatch, the `vla-training` consumer contract. Gated on T-39 by `PR-08` §1 |
+| **T-040** | **`PR-08` + `T40_RULE_V1` in git, 9/13 acceptance closed** | **the main use case** — restyle real episodes, recorded actions carried over unchanged. Four items open, none a decision: the missing depth/segmentation conditioning, `GEOM_TOL`/`EST_DRIFT_P95`, H200 throughput + chunked sbatch, the `vla-training` consumer contract. Gated on T-39 by `PR-08` §1 — **and T-39 has now reported (2026-08-16): `VOID (labels)`, whose cause PR-12 (`C`) and PR-13 (`W`) traced to our evaluation adapter, not the corpus. §1's stated reason is therefore withdrawn by measurement, but §1 is not lifted here — that is the project owner's call.** |
 | **T-041** | ran, **verdict VOID** on G0b | the Super fine-tune; its VOID needs a decision, not a rescue |
 | **T-042** | **closed 2026-08-15** | step 0 counted zero unlabelled footage — and found 3 152 already-labelled 28-dim G1 episodes instead |
 | **T-043** | **file written 2026-08-15**, blocked on a 647 MB fetch | convert those 3 152 `action float32[28]` episodes — recorded labels, route 1. 23.96 h, `cam_left_high` natively 640×480. **Block order measured arm-first (`[0:14]` arm, `[14:28]` hand)** — the opposite of what these docs said this morning; left/right and intra-hand order still unverified |

@@ -94,6 +94,15 @@ resolution claim without a named artifact has an expiry date.
 **And it is gated on T-39 by its own pre-registration** — `PR-08` §1 binds itself to that reason
 rather than leaving it to a later judgement call.
 
+**T-39 has since reported (2026-08-16), and §1's reason no longer holds.** §1 gates generation on
+"until T-39 reports whether **any** method clears the bar on this corpus". T-39 returned
+`VOID (labels)`; PR-12 (`C`) and PR-13 (`W`) then showed the VOID was **our evaluation adapter** —
+the chunk's step 0 subtracted a command from a *state* while every other step is
+command-minus-command, carrying ~90 % of the error — and that repaired, the corpus's own action
+column scores **+68.10 L1 / +75.40 L2, level L4** on T-39's own holdout. So a method does clear the
+bar on this corpus. **This paragraph records that; it does not lift §1.** Whether generation starts
+is the project owner's call, and no session may edit this file to make it look otherwise.
+
 ## State — 2026-08-15
 
 | | |

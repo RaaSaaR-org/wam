@@ -240,7 +240,9 @@ already priced generated video as supervision and the answer was worse than a fr
 Overturning that needs its own pre-registration with `screen_corpus.py` (T-34) run on the
 generated corpus, not a paragraph in a backbone doc. **That is now T-040**
 (`.mc/tasks/todo/T-040-cosmos-transfer-photoreal-augmentation.md`) — backlog, blocked on T-39,
-and its deliverable is the pre-registration, not the corpus.
+and its deliverable is the pre-registration, not the corpus. **T-39 reported 2026-08-16
+(`VOID (labels)`, cause traced to our evaluation adapter by PR-12/PR-13); the block's reason is
+withdrawn by measurement but the block is not lifted here.**
 
 ## 6. Adding a backbone, mechanically
 

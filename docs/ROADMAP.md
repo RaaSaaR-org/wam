@@ -134,11 +134,16 @@ Ordered bring-up checklist: `docker/dds/README.md` § "Remaining steps for real-
   world branch costs 108 pp on `tiny`; the pretrained prior recovers essentially all of it and buys
   no advantage over the action-only baseline. **No measurable world-action advantage**, in
   distribution. `docs/improvements.md` I-7, `docs/benchmark.md`.
-- **What is genuinely open is one step further back (T-39, `PR-07`).** Every verdict above compares
-  a WAM variant against a trivial baseline; none compares anything against a method known to work,
-  and this corpus is NVIDIA's own tutorial dataset for a recipe this repo has never run. Until that
-  positive control reports, no negative here separates "the approach is wrong" from "nothing clears
-  this bar on this corpus".
+- **What was genuinely open is one step further back (T-39, `PR-07`) — and it has now reported.**
+  Every verdict above compares a WAM variant against a trivial baseline; none compares anything
+  against a method known to work, and this corpus is NVIDIA's own tutorial dataset for a recipe this
+  repo has never run. **T-39 ran 2026-08-16 and returned `VOID (labels)`; PR-12 (`C`) and PR-13
+  (`W`) then showed the VOID was our evaluation adapter rather than the corpus** — the chunk's step
+  0 subtracted a command from a *state*, carrying ~90 % of the error, and repairing it puts the
+  corpus's own action column at **+68.10 L1, level L4** on T-39's own holdout. So the corpus is not
+  the explanation for the negatives above, and those negatives stand. **What is still open is the
+  question T-39 was built to answer and never reached: whether a trained policy can learn these
+  labels.** Its policy arm never ran, and running it is a training run — the project owner's call.
 
 ## 6. Real rollouts (M4 / E3)
 
