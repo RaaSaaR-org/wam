@@ -77,6 +77,36 @@ unmodified as G0's other clause.
   materially smaller there, the correct reading is that the trimmed set was unrepresentative — and
   that would bear on all four documents, not just this one.
 
+## 4a. Addendum — the size of the set change, predicted before it is measured
+
+**Added 2026-08-16 after the peer session reviewed §4 and before `scripts/rederive_t39_g0.py` had
+produced a single cell.** It only ever *narrows* what counts as confirmation, and §5's rule is
+untouched. The objection it answers is exact: **"confirmatory" without a predicted magnitude quietly
+licenses reading any positive number as the expected one.**
+
+PR-12's +69.15 was a held-out half of the **trimmed** set — first and last chunk of every episode
+dropped. PR-13's anchorable set drops only the **first**, so it adds back **each episode's last
+chunk** (one per episode) relative to what PR-12 ever scored. Those chunks have never been scored by
+any cell in PR-10, PR-11 or PR-12.
+
+**Registered prediction:** the repaired cell lands **between +55 and +75** on the anchorable set,
+and specifically **slightly below** PR-12's half-A values (+67.30 / +68.57). Direction and reason:
+an episode's last chunk is end-of-task and low-motion, which is exactly where repeat-last-action is
+strongest, so re-adding forty of them should pull the skill percentage down rather than up.
+
+**A number outside that band does not change the verdict** — `T47_RULE_V1` is fixed in §5 and is not
+touched by this addendum — **but it must be read as a signal that the set change matters more than
+expected, and reported as such rather than banked as confirmation.** Above +75 in particular would
+mean the trimmed set was *harder* than the full one, which would invert the reasoning above and
+would bear on every number PR-10, PR-11 and PR-12 produced.
+
+**On the bridge, for the record:** it was already registered as a falsifiable check rather than as
+context — §5's G0.2 is a hard gate at ±0.5 pp that returns `INVALID` and stops the run. If the
+unmodified full-set cell does not reproduce `−359.41`, something other than the anchoring differs
+between this driver and the archived one, and the other two cells are not comparable to the archive
+either — which is most of PR-13's value. Restated here because the point is worth being explicit
+about, not because the gate changed.
+
 ## 5. Gates — `T47_RULE_V1`
 
 Ladder unchanged. `MATERIAL_FLOOR_PP = 10.0`, borrowed from `I8_RULE_V3` for the fifth time rather
