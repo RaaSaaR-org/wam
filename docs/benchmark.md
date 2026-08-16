@@ -281,6 +281,15 @@ not come close to clearing the bar, and "the adapter is mis-anchored" is retired
 explanation for the negatives below.
 [`preregistration/PR-10-RESULT.md`](preregistration/PR-10-RESULT.md).
 
+**Independently replicated the same day.** Two sessions ran this sweep without knowing of each
+other, with different drivers, rules and chunk sets. Both found the L1 optimum at `k = −2` and the
+L2 optimum at `k = −1`, both measured the gain at ~29 pp, both found no cell clearing L1, and both
+bridge to PR-07's −359.41. T-44 additionally replicates the optimum on a held-out half of the
+holdout; this run additionally shows a co-shifted control is flat, so the offset is the robot's and
+not our conversion's. Its headline reads 11 % rather than 8.7 % **only because it scores against a
+smaller chunk set's own baseline** — same numerator, different denominator.
+[`preregistration/PR-10-RESULT-T-44.md`](preregistration/PR-10-RESULT-T-44.md).
+
 ---
 
 ## First results (2026-07-29)

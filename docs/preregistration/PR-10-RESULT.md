@@ -9,6 +9,50 @@ Follows T-39 / PR-07, which reported `VOID (labels)`. Artifacts:
 **Verdict: P — partial**, on branch 4 of `PR10_RULE_V1` §3: `k_best = −2` gains **+29.75 pp**
 (≥ `MATERIAL_FLOOR_PP = 10.0`) without clearing L1.
 
+> ## This experiment was run twice, independently, on the same afternoon
+>
+> A peer session pre-registered and ran the same sweep as **T-44** — different driver
+> (`scripts/sweep_label_anchoring.py`), different rule (`T44_RULE_V1`), different chunk set,
+> different verdict vocabulary — and **neither session knew about the other** until both had
+> pushed. Their result is `PR-10-RESULT-T-44.md`. **Both claimed the pre-registration number
+> PR-10, and that collision needs a human decision**: rules here are versioned and never edited in
+> place, so neither document can be renumbered by whoever notices second.
+>
+> **The duplicated effort bought an unplanned independent replication, and it holds on every
+> comparable quantity:**
+>
+> | | this run | T-44 | agree? |
+> |---|---|---|---|
+> | best `k` on **L1** | **−2** | **−2**, on both held-out halves | **yes** |
+> | best `k` on **L2** | **−1** | **−1**, on both halves | **yes** |
+> | gain at best `k` | **+29.75 pp** | **+28.81 / +30.35 pp** | **yes**, within 1.5 pp |
+> | any cell clears L1 | no | no | **yes** |
+> | `smoothness_ratio`, `k = 0` → best | 8.28 → 7.70 | 6.21 → 5.67 | **yes**, ~7–9 % of the excess |
+> | `horizon_ratio` under the shift | rises | rises | **yes** |
+> | bridge to PR-07's −359.41 | bit-identical | −359.4078, drift +0.002 pp | **yes** |
+> | verdict | **P (partial)** | **J** | same finding, two vocabularies |
+>
+> **The verdict letters differ only in the rules' wording, not in the finding.** T-44's own result
+> document says so directly: its J branch fired on the correct condition but was worded as "the
+> commanded and executed spaces are not a shifted copy of one another", which the data contradicts —
+> and it records that "the accurate statement is the peer's P branch". Both documents conclude: a
+> real, material, replicated shift of about two control steps, worth roughly 29 pp, that does not
+> come close to clearing the bar.
+>
+> **Why the headline percentages differ (8.7 % here, 11 % there) — it is the denominator, not the
+> measurement.** The absolute gain replicates to within 1.5 pp. T-44 splits the holdout into two
+> disjoint halves and scores 474/486 chunks against each half's own `d = 0` (L1 −253.70 on half A);
+> this run pools all 40 episodes into 992 chunks with common support across the grid (L1 −342.24).
+> Same numerator, different baseline deficit. Neither fraction is wrong and neither should be quoted
+> without its chunk set.
+>
+> **Each design caught something the other could not.** T-44's held-out half turns `k = −2` from a
+> grid maximum into a *replicated* one, and it scores both bench specs. This run's co-shifted
+> control (variant B, flat at 17 pp against 346) is what rules out the peak being a property of our
+> own conversion's time base rather than the robot's — T-44 records that it has no such control and
+> does not claim it. **Read together they are stronger than either alone**, which is the only good
+> thing to say about having spent two sessions on one experiment.
+
 ## Variant A — the command does lead the state, by about two control steps
 
 | `k` | ms | `skill_vs_repeat_pct` (**L1**) | `ci_…` (**L2**) | `mse` | `horizon_ratio` | `smoothness_ratio` |
@@ -49,13 +93,22 @@ command is still **4.1× worse than repeating the last action** (and 2.3× worse
 `skill_vs_zero_pct −132.26` at `k = −2`). Re-anchoring is a genuine fix for a genuine defect and it
 does not come close to producing a label space that clears our bar.
 
-**The two secondary readings say the same thing, and one of them says it against the delay
-hypothesis.** PR-10 §5 registered in advance that a shift should flatten `horizon_ratio` toward 1.0
-by moving error out of the chunk's first step. **It does not.** `horizon_ratio` is *further* from 1.0
-at `k = −2` (0.00551) than at `k = 0` (0.00453), and across variant A it moves monotonically with `k`
-rather than peaking where L1 does — so the first-step concentration T-39 measured is not what the
-offset is fixing. And `smoothness_ratio` at the optimum is **7.70**, down from 8.28 and still **3.9×
-its gate of 2**. Optimal alignment leaves the command nearly as jerky as it was.
+**Both secondary readings say the same thing.** PR-10 §5 registered in advance that a shift should
+flatten `horizon_ratio` toward 1.0 by moving error out of the chunk's first step. **It does not, in
+any amount that matters.** `horizon_ratio` moves from 0.00453 at `k = 0` to 0.00551 at `k = −2` —
+*toward* 1.0, by one part in a thousand of the distance it would have to travel, and it stays two
+orders of magnitude below its own gate of 4 at every delay in the window. The first-step
+concentration T-39 measured survives every anchoring this grid admits. And `smoothness_ratio` at the
+optimum is **7.70**, down from 8.28 and still **3.9× its gate of 2** — a shift re-indexes a signal,
+it does not smooth one. Optimal alignment leaves the command nearly as jerky as it was.
+
+> **Correction, 2026-08-16.** This paragraph first read that `horizon_ratio` is "further from 1.0 at
+> `k = −2` (0.00551) than at `k = 0` (0.00453)" and that the registered prediction therefore failed
+> by moving the wrong way. That inverts its own numbers — 0.00551 is nearer 1.0, not further — and
+> the error is repeated in commit `bacf513`'s message, which cannot be amended after pushing. Caught
+> by the peer session's independent replication (see below), not by me. The direction was wrong; the
+> conclusion the paragraph draws is not, and is restated above in terms of magnitude, which is what
+> should have carried it in the first place.
 
 So: a shift exists, it is measurable, it is worth fixing — and underneath it the commanded stream
 still carries content the executed trajectory does not. That is branch 4, and PR-10 §4 wrote down
