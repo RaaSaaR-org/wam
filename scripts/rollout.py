@@ -366,7 +366,9 @@ def resolve_policy_contract(
         # 'ego', and docs/sim.md tells you to override it deliberately. Said out loud anyway,
         # because the camera is the original member of this family of invisible-when-wrong
         # inputs and it has never had anything but a config_hash entry nobody reads.
-        notes.append(f"[contract] NOTE camera trained={contract.camera} deployed={deployed_camera}")
+        notes.append(
+            f"[contract] NOTE camera trained={contract.camera} deployed={deployed_camera}"
+        )
     return contract, notes
 
 
@@ -413,7 +415,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--robot", choices=("mock", "g1", "mujoco_g1", "isaac_g1"), default="mock")
+    parser.add_argument(
+        "--robot", choices=("mock", "g1", "mujoco_g1", "isaac_g1"), default="mock"
+    )
     parser.add_argument(
         "--policy", choices=("checkpoint", "joint", "dummy", "remote"), default="checkpoint"
     )
@@ -601,7 +605,8 @@ def _build_g1(args: argparse.Namespace):
         "q_max": config.q_max,
         "dq_max": config.dq_max,
         "ddq_max": tuple(
-            float(x) for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
+            float(x)
+            for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
         ),
     }
 
@@ -660,7 +665,8 @@ def _build_mujoco_g1(args: argparse.Namespace):
         "q_max": config.q_max,
         "dq_max": config.dq_max,
         "ddq_max": tuple(
-            float(x) for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
+            float(x)
+            for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
         ),
     }
 
@@ -740,7 +746,8 @@ def _build_isaac_g1(args: argparse.Namespace):
         "q_max": config.q_max,
         "dq_max": config.dq_max,
         "ddq_max": tuple(
-            float(x) for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
+            float(x)
+            for x in limits_cfg.get("ddq_max", (FALLBACK_DDQ_MAX,) * G1_SPEC.num_joints)
         ),
     }
 
@@ -875,7 +882,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         spec, dt_s, robot_limits, robot_factory = _build_mock(args)
 
-    safety_cfg = build_safety_config(SafetyConfig.from_yaml(args.safety_config), spec, robot_limits)
+    safety_cfg = build_safety_config(
+        SafetyConfig.from_yaml(args.safety_config), spec, robot_limits
+    )
     base_policy = _build_policy(args, spec, dt_s)
 
     exec_cfg = ExecutorConfig(
