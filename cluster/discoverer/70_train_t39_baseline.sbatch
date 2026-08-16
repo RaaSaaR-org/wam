@@ -62,6 +62,27 @@ export PATH=${VIRTUAL_ENV}/bin:${PATH}
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+
+# GROOT_PATCH_MISTRAL=1 — upstream's own escape hatch, and it is NOT one of the two forbidden ones.
+# transformers' PreTrainedTokenizerBase._patch_mistral_regex calls is_base_mistral(), which calls
+# huggingface_hub.model_info() on the model NAME while loading the tokenizer. Offline that raises
+# OfflineModeIsEnabled and the run dies ~150 s in, after the weights have already been read (job
+# 187802, 2026-08-15); upstream hit the same call as a 600 s HANG in their own CI.
+#
+# gr00t/__init__.py:_patch_mistral installs a wrapper that returns the tokenizer untouched when the
+# name is a directory or does not contain "mistral" — which is every path we take — so no hub call
+# happens and no weight-loading behaviour changes. It is gated on its own env var and is a separate
+# function from _patch_hf_local_first.
+#
+# DO NOT reach for GROOT_HF_LOCAL_FIRST or GROOT_SKIP_HF_MODEL_WEIGHTS instead. Those wrap
+# PreTrainedModel.from_pretrained generically, so they would also skip the start_from_checkpoint
+# load, zero the parameters, and fake the loading-info that setup.py's strict missing-key guard
+# reads — training from zeros with no error anywhere.
+export GROOT_PATCH_MISTRAL=1
+# albumentations phones home for a version check on import (check_for_updates()). It is only a
+# warning when it fails, but it is a network round trip inside a GPU job on a node that is not
+# supposed to need one, and its timeout is not ours to rely on.
+export NO_ALBUMENTATIONS_UPDATE=1
 export WAM_GIT_COMMIT=$(cat "${PROJ}/wam/GIT_COMMIT" 2>/dev/null || true)
 
 nvidia-smi -L
@@ -89,13 +110,53 @@ VENDOR=${PROJ}/wam/third_party/isaac-gr00t
 DRIVER=${PROJ}/wam/scripts/train_t39_baseline.py
 PREREG=${PROJ}/wam/docs/preregistration/PR-07-positive-control.md
 
+# THE EMBODIMENT TAG, and why it is not the one the corpus is named after. Upstream's own enum
+# (gr00t/data/embodiment_tags.py) files UNITREE_G1 -> "unitree_g1_full_body_with_waist_height_nav_cmd"
+# under "pre-registered POSTTRAIN tags (require finetuned checkpoint)", and NEW_EMBODIMENT under
+# "finetuning tag (for custom robots)". nvidia/GR00T-N1.7-3B is the BASE checkpoint, so the unitree
+# tag names an embodiment head this checkpoint does not carry trained weights for. new_embodiment is
+# the tag upstream's finetuning path is written around, and it is what the modality config below
+# registers. Overridable, but changing it changes what is being measured.
+EMBODIMENT_TAG=${EMBODIMENT_TAG:-new_embodiment}
+# The .py that registers ${EMBODIMENT_TAG} in upstream's MODALITY_CONFIGS. Named ONCE and used
+# TWICE below — once for the statistics and once for the trainer. They must be the same file: the
+# statistics are computed per modality key, and normalising a 43-dim vector sliced one way with
+# statistics computed over it sliced another way does not raise, it just trains against the wrong
+# target (configs/groot/new_embodiment_config_defaults.py header).
+MODALITY_CONFIG=${MODALITY_CONFIG:-${PROJ}/wam/configs/groot/new_embodiment_config_defaults.py}
+
+# HYPERPARAMETERS ARE UPSTREAM'S, from examples/finetune.sh at the vendored commit, so that a
+# failure is attributable to NVIDIA's recipe rather than to our tuning of it (PR-07 §3). PR-07
+# fixes a budget, not a learning rate, and deliberately names no hyperparameter — so the defensible
+# default is the one the recipe ships with. Every value is echoed into the log below.
+#
+# Two deviations, both throughput/durability rather than science, and both stated rather than
+# buried:
+#   SAVE_STEPS      500 not 1000 — --requeue can lose up to one save interval, and this job has a
+#                   4 h walltime against a 12 GPU-h ceiling. Halving the interval halves the worst
+#                   case of a preemption; it changes no gradient.
+#   NUM_WORKERS     8 not 4 — this cluster has no FFmpeg, so video decoding runs through the PyAV
+#                   fallback patch, which is slower than torchcodec. 8 <= the 26 threads/GPU
+#                   billing cap. It changes no gradient either.
+MAX_STEPS=${MAX_STEPS:-10000}
+SAVE_STEPS=${SAVE_STEPS:-500}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-5}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-32}
+NUM_WORKERS=${NUM_WORKERS:-8}
+LEARNING_RATE=${LEARNING_RATE:-1e-4}
+WARMUP_RATIO=${WARMUP_RATIO:-0.05}
+WEIGHT_DECAY=${WEIGHT_DECAY:-1e-5}
+SHARD_SIZE=${SHARD_SIZE:-1024}
+NUM_SHARDS_PER_EPOCH=${NUM_SHARDS_PER_EPOCH:-100000}
+EPISODE_SAMPLING_RATE=${EPISODE_SAMPLING_RATE:-0.1}
+
 if [[ ! -d "${VIRTUAL_ENV}" ]]; then
   echo "FATAL: ${VIRTUAL_ENV} missing. The vendored trainer needs its OWN venv —"
   echo "       building it into virt_envs/wam changes the dependency set every WAM number"
   echo "       was produced under. See PR-07 §8 item 4."
   exit 1
 fi
-for f in "${DRIVER}" "${PREREG}" "${SPLIT}" "${HOLDOUT}" "${WAM_DATASET}"; do
+for f in "${DRIVER}" "${PREREG}" "${SPLIT}" "${HOLDOUT}" "${WAM_DATASET}" "${MODALITY_CONFIG}"; do
   if [[ ! -e "${f}" ]]; then
     echo "FATAL: ${f} missing — run cluster/discoverer/sync.sh from the Mac first."
     exit 1
@@ -108,6 +169,25 @@ if [[ ! -d "${VENDOR}" ]]; then
 fi
 if [[ ! -d "${MODEL_DIR}" ]]; then
   echo "FATAL: ${MODEL_DIR} missing — stage the weights first (HF_HUB_OFFLINE=1 here)."
+  exit 1
+fi
+
+# THE SECOND SET OF WEIGHTS, which is easy to forget because nothing on the command line names it.
+# launch_finetune.py hardcodes config.model.model_name = "nvidia/Cosmos-Reason2-2B" and the backbone
+# is constructed by Qwen3VLForConditionalGeneration.from_pretrained(model_name) — a real 4.5 GB
+# read from the HF cache, not a config-only build. The no-weight fast paths in gr00t/__init__.py
+# are pytest-only (they need PYTEST_CURRENT_TEST or GROOT_HF_LOCAL_FIRST *and*
+# GROOT_SKIP_HF_MODEL_WEIGHTS) and must NOT be used to work around a missing cache: that patch
+# wraps PreTrainedModel.from_pretrained generically, so it would skip the start_from_checkpoint
+# load too and zero the model while faking the loading-info that the strict key check reads. The
+# result trains silently from zeros. Fail here instead.
+COSMOS_BACKBONE=${HF_HUB_CACHE}/models--nvidia--Cosmos-Reason2-2B
+if [[ ! -d "${COSMOS_BACKBONE}" ]]; then
+  echo "FATAL: ${COSMOS_BACKBONE} missing. HF_HUB_OFFLINE=1 is set here, so the Cosmos-Reason2-2B"
+  echo "       backbone cannot be fetched at run time and the trainer dies after the GPU is"
+  echo "       allocated. Ship it from the workstation cache:"
+  echo "         ./cluster/discoverer/sync.sh --backbone"
+  echo "       Do NOT set GROOT_HF_LOCAL_FIRST or GROOT_SKIP_HF_MODEL_WEIGHTS to get past this."
   exit 1
 fi
 
@@ -134,7 +214,31 @@ if (( RESTARTS >= MAX_RESTARTS )); then
 fi
 echo "=== pass $((RESTARTS + 1)) of $((MAX_RESTARTS + 1)) on $(hostname) at $(date -Is)"
 
+# RESUME IS CONDITIONAL, not a constant. HF Trainer raises when resume_from_checkpoint=True and
+# output_dir holds no checkpoint-*, so passing it unconditionally would make the FIRST pass fail and
+# every requeue after it fail identically. Passing it never would make a requeue silently restart
+# from step 0 and burn the 12 GPU-h ceiling three times over the same first 4 h of training.
+RESUME_FLAG=()
+if compgen -G "${OUT}/checkpoints/checkpoint-*" >/dev/null; then
+  echo "=== resuming: $(ls -d "${OUT}"/checkpoints/checkpoint-* | tail -1)"
+  RESUME_FLAG=(--resume_from_checkpoint)
+fi
+
+echo "=== embodiment ${EMBODIMENT_TAG} via ${MODALITY_CONFIG}"
+echo "=== recipe     max_steps=${MAX_STEPS} save_steps=${SAVE_STEPS} batch=${GLOBAL_BATCH_SIZE}"
+echo "===            lr=${LEARNING_RATE} warmup=${WARMUP_RATIO} wd=${WEIGHT_DECAY}"
+echo "===            shard=${SHARD_SIZE} shards/epoch=${NUM_SHARDS_PER_EPOCH} sampling=${EPISODE_SAMPLING_RATE}"
+echo "=== backbone   ${COSMOS_BACKBONE} (offline)"
+
 START=${SECONDS}
+# RC is captured with `|| RC=$?`, not with a bare call followed by `RC=$?`. `set -e` is on at the
+# top of this file, so a bare failing call terminates the script immediately and every branch below
+# that inspects RC is unreachable — including the one that refuses to requeue a hard crash.
+RC=0
+# Everything after the bare -- is handed to the vendored trainer VERBATIM and appears in the log
+# exactly as invoked. --dataset-path and --output-dir are the driver's (it points them at the
+# 362-episode subset it just built); every flag here is upstream's own, spelled as
+# examples/finetune.sh spells it.
 python "${DRIVER}" \
     --vendor-root "${VENDOR}" \
     --trainer-entrypoint "${TRAINER_ENTRYPOINT}" \
@@ -144,11 +248,29 @@ python "${DRIVER}" \
     --wam-dataset "${WAM_DATASET}" \
     --train-episodes "${SPLIT}" \
     --exclude-episodes "${HOLDOUT}" \
+    --embodiment-tag "${EMBODIMENT_TAG}" \
+    --modality-config "${MODALITY_CONFIG}" \
     --seed "${SEED}" \
     --out-dir "${OUT}" \
     --resume latest \
-    --device cuda
-RC=$?
+    --device cuda \
+    -- \
+    --base_model_path "${MODEL_DIR}" \
+    --embodiment_tag "${EMBODIMENT_TAG}" \
+    --modality_config_path "${MODALITY_CONFIG}" \
+    --num_gpus 1 \
+    --max_steps "${MAX_STEPS}" \
+    --save_steps "${SAVE_STEPS}" \
+    --save_total_limit "${SAVE_TOTAL_LIMIT}" \
+    --global_batch_size "${GLOBAL_BATCH_SIZE}" \
+    --dataloader_num_workers "${NUM_WORKERS}" \
+    --learning_rate "${LEARNING_RATE}" \
+    --warmup_ratio "${WARMUP_RATIO}" \
+    --weight_decay "${WEIGHT_DECAY}" \
+    --shard_size "${SHARD_SIZE}" \
+    --num_shards_per_epoch "${NUM_SHARDS_PER_EPOCH}" \
+    --episode_sampling_rate "${EPISODE_SAMPLING_RATE}" \
+    ${RESUME_FLAG[@]+"${RESUME_FLAG[@]}"} || RC=$?
 ELAPSED=$((SECONDS - START))
 echo "trainer exited ${RC} after ${ELAPSED}s at $(date -Is)"
 

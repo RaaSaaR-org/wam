@@ -3,6 +3,7 @@
 #
 #   ./cluster/discoverer/sync.sh              # push repo + jobs + caches.sh
 #   ./cluster/discoverer/sync.sh --data       # also push the 81 MB converted dataset
+#   ./cluster/discoverer/sync.sh --backbone   # push the 4.6 GB Cosmos-Reason2-2B backbone (T-39)
 #   ./cluster/discoverer/sync.sh --corpus     # push the 14 GB captioned T-041 corpus (then 92b)
 #   ./cluster/discoverer/sync.sh --pull       # pull every run's artifacts back
 #   ./cluster/discoverer/sync.sh --pull t16-lora-seed0   # ...or just one run
@@ -87,6 +88,34 @@ if [[ "${1:-}" == "--data" ]]; then
   echo "==> dataset -> ${PROJ}/data/gr00t-apple-full"
   "${RSYNC[@]}" "${ROOT}/datasets/gr00t-apple-full/" \
     "${HOST}:${PROJ}/data/gr00t-apple-full/"
+fi
+
+if [[ "${1:-}" == "--backbone" ]]; then
+  # nvidia/Cosmos-Reason2-2B, ~4.6 GB. NOT optional and NOT obvious: nothing on 70_*'s command
+  # line names it. launch_finetune.py hardcodes config.model.model_name = "nvidia/Cosmos-Reason2-2B"
+  # and Qwen3Backbone calls Qwen3VLForConditionalGeneration.from_pretrained(model_name) — a real
+  # weight load. The staged GR00T-N1.7-3B checkpoint then overwrites those tensors, which is why it
+  # is easy to assume the download is skippable; it is not, the constructor runs first. 70_* exports
+  # HF_HUB_OFFLINE=1, so a compute node cannot fetch it either.
+  #
+  # Shipped from the workstation cache rather than downloaded on a compute node: the bytes already
+  # exist here, and this way the cluster copy is provably the same snapshot rather than whatever
+  # `main` points at on the day the job runs.
+  SRC=${COSMOS_REASON_SRC:-${HOME}/.cache/huggingface/hub/models--nvidia--Cosmos-Reason2-2B}
+  DEST=${PROJ}/hf_cache/hub/models--nvidia--Cosmos-Reason2-2B
+  [[ -d "${SRC}" ]] || {
+    echo "FATAL: ${SRC} missing. Fetch it here first, or set COSMOS_REASON_SRC:"
+    echo "         hf download nvidia/Cosmos-Reason2-2B"; exit 1; }
+  # A snapshot dir is a symlink farm pointing into blobs/; -l keeps the links AS links and the
+  # blobs travel separately, which is why RSYNC carries -l and the whole repo dir is shipped
+  # rather than just snapshots/. Copying the tree without blobs/ yields dangling links and an
+  # offline resolution failure that reads as "model not found".
+  echo "==> backbone -> ${DEST}  ($(du -sh "${SRC}" | cut -f1))"
+  ssh "${HOST}" "mkdir -p $(dirname "${DEST}")"
+  "${RSYNC[@]}" "${SRC}/" "${HOST}:${DEST}/"
+  echo
+  echo "shipped. 70_train_t39_baseline.sbatch checks for exactly this path before the GPU is used."
+  exit 0
 fi
 
 if [[ "${1:-}" == "--corpus" ]]; then
