@@ -1,0 +1,729 @@
+# T-040 / PR-08 §5 — the committed TRAIN_STYLES / EVAL_STYLES partition for the photoreal
+# augmentation of the real AppleToPlate corpus. Closes PR-08 §8 item 6.
+#
+# THIS FILE IS THE PRE-COMMITMENT. PR-08 §5: "The style pool is split into disjoint TRAIN_STYLES
+# and EVAL_STYLES — as a committed file, in git, before the first clip — so the evaluation domain
+# cannot be chosen after seeing which restyles came out well." The headline (§6) is arm B against
+# arm A on the EVAL_STYLES set; if the members of that set could be picked after looking at
+# generated clips, the headline measures the picking and not the augmentation.
+#
+# NOTHING HERE LICENSES GENERATION. PR-08 §1 forbids generating a corpus until every §8 item is
+# closed and T-39 has reported. Committing this file is explicitly one of the things §1 *does*
+# license, and it is all it does.
+#
+# WHY TOML AND NOT YAML. The repo has more .yaml configs, but they are runtime configs loaded by
+# `wam` (robot, model, training, safety). The nearest neighbour by *genre* is
+# configs/cosmos3/t041_eval_selection.toml — a pre-commitment for a Cosmos generation run under a
+# pre-registration, with the argument for every value kept next to the value. That is exactly what
+# this is, so it is written the same way. `tomllib` is stdlib on 3.11+; the verifier needs no
+# dependency to read it.
+#
+# VERIFIER: scripts/check_style_partition.py (tests/test_style_partition.py runs it in CI).
+# It checks disjointness, hash reproducibility, and that no style string contains a
+# geometry-moving term. Run it before quoting the hash anywhere.
+
+schema = "wam.style_partition/1"
+# Versioned like a registered rule, for the same reason (docs/handoff.md §3): if a style turns out
+# to be unusable, the fix is T40_STYLES_V2 committed alongside this, never an edit in place. An
+# edit would change the content hash PR-08 §6 records and there would be no way to tell which
+# partition a finished run actually used.
+#
+# AMENDED IN PLACE 2026-08-15, STILL V1, AND THE REASON MATTERS. The rule above protects a
+# *finished run's* recorded hash: once clips exist under a digest, that digest must keep meaning
+# the same partition. No clip exists. PR-08 §1 forbids generation until every §8 item is closed
+# and T-39 has reported; nothing has been submitted, and the pre-amendment digest
+# 4da3875d0c76e9b23821c1ca9fe20f965f9fc0867edcd085fb792b587a680da8 is recorded nowhere except in
+# this file's own sidecar and its rendering. So the amendment orphans no record, and a V2 would
+# have bought a second file to keep in sync in exchange for nothing.
+#
+# WHAT THE AMENDMENT CHANGED: arm C's sizing ([volume], [identity_style].repeats). The committed
+# V1 shipped ONE identity style against TEN train styles, so arm C was 402 clips against arm B's
+# 4020. PR-08 §5 requires arm C to be "same generator, same pipeline, SAME FRAME COUNT, no added
+# diversity" — a 10x volume gap confounds "diversity helped" with "more data helped", which is the
+# single confound arm C exists to remove, so V1 as committed could not have served its purpose.
+# The identity style is now generated 10 times per episode under 10 committed seeds. Arm B is NOT
+# subsampled: the fix raises C to B, it does not lower B to C. No style was added, dropped or
+# re-slugged, and no style moved between the sets — the appearance partition names exactly what it
+# named before, so nothing about which appearances are held out has changed.
+#
+# One prompt's WORDING did change in the same amendment, and it is recorded here so the digest
+# change is fully accounted for rather than attributed entirely to the sizing: eval-01's "from the
+# left" became "from one side" after the geometry lint grew a spatial-relation vocabulary. The
+# reason is at the style itself; the light it describes and the slug it carries are unchanged.
+#
+# So the digest moved for three reasons, all of them content: the repeats, the clip counts, and
+# that one rewording.
+#
+# SECOND AMENDMENT, SAME DAY, STILL V1, AND THIS ONE IS THE SEED SCHEDULE. The argument above
+# carries over unchanged — no clip exists, so no record is orphaned — and what it repairs is the
+# confound arm C exists to remove, re-entering through a field nobody was reading as part of the
+# design.
+#
+#   AS COMMITTED EARLIER TODAY every TRAIN style and every EVAL style carried repeats = 1, and the
+#   committed rule was "repeat r uses repeat_seeds[r]; a style with repeats = 1 uses
+#   repeat_seeds[0]". Read literally — and the sbatch does read it literally — that means:
+#     - arm B's 4 020 clips were ALL generated at seed 7001,
+#     - the EVAL set's 2 010 clips were ALSO all at seed 7001,
+#     - and arm C's 4 020 clips were the only ones spanning 7001-7010.
+#   Two consequences, the second of which breaks the experiment:
+#     1. arm B varied its PROMPT at a fixed seed while arm C varied its SEED at a fixed prompt, so
+#        B − C was a difference between two effects rather than the isolation of one.
+#     2. arm B's TRAINING clips shared their initial-noise seed with the EVAL clips the headline is
+#        scored on, and arm C's mostly did not. Any transferable seed-specific generator
+#        fingerprint therefore matches B's training distribution to the eval distribution more
+#        closely than C's, and inflates B − C on the headline for a reason that has nothing to do
+#        with diversity. That CAN MANUFACTURE A P, and it is exactly the confound arm C was added
+#        to remove — re-entering through the seed schedule instead of through the clip counts.
+#
+#   THE REPAIR COSTS ZERO EXTRA CLIPS, and it is only available before the first clip exists. The
+#   seed schedule is now a committed block of its own ([seed_schedule]), one seed per
+#   style-instance, one block per set:
+#     - TRAIN gets ten seeds, style i under blocks.train[i]. Arms B and C then span the IDENTICAL
+#       ten seeds, and prompt diversity becomes the only difference between them.
+#     - IDENTITY keeps 7001-7010: repeat r under blocks.identity[r].
+#     - EVAL gets a DISJOINT block, 7011-7015, so no eval clip shares an initial latent with any
+#       training clip in EITHER arm.
+#   Nothing else moved IN THIS AMENDMENT: no style was added, dropped, re-slugged or moved between
+#   the sets, no prompt was reworded, and every clip total is what it was — 4 020 / 4 020 / 2 010.
+#   The seed schedule is the whole of it.
+#
+#   BUT THE DIGEST DID NOT MOVE FOR THE SCHEDULE ALONE, because a third amendment landed the same
+#   day and the V3 author needs both accounted for: train-04's lighting slug and prompt were
+#   reworded ("low-key-desk-lamp" -> "moody-dim-desk-lamp") when the geometry lint took the stem
+#   "low", which is recorded at the style itself. Two independent content changes, one digest. Read
+#   the sidecar, never a value quoted in prose.
+#
+# The next amendment, if there is one, is very likely a V2: the moment a clip exists this comment
+# stops applying.
+rule = "T40_STYLES_V1"
+committed = "2026-08-15"
+pre_registration = "docs/preregistration/PR-08-photoreal-augmentation.md"
+# The V2 clarification this file's [volume] block implements: arm C frame-matched to arm B at
+# 10 x 402, and the GPU-h ceiling derived over the whole 10 050-clip partition.
+#
+# ONE DISAGREEMENT WITH IT, RECORDED RATHER THAN PAPERED OVER, AND IT IS ABOUT THIS FILE'S HASH.
+# PR-08-V2 §0 and §5 both state that the committed partition is "unchanged" and that its
+# source_content_sha256 is still 4da3875d0c76e9b23821c1ca9fe20f965f9fc0867edcd085fb792b587a680da8,
+# reasoning that the ten seeds are "a generation parameter, not a new style". That reasoning is
+# sound about STYLES and wrong about this FILE, for two reasons that both post-date it:
+#   1. the seeds and the repeat counts were put HERE, in the committed partition and its rendering,
+#      rather than left as a submit-time parameter — precisely so the sbatch's work-list expansion
+#      reads them instead of inferring them, and so a run cannot be generated under seeds nobody
+#      wrote down. V2 §2 itself requires the ten seed values to be recorded; this is where.
+#   2. eval-01's prompt was reworded (see the style) after the geometry lint grew a
+#      spatial-relation vocabulary — a prompt string change, which V2 §0 says V2 does not make,
+#      and it did not: the lint did.
+#   3. and now the seed SCHEDULE as well as the seed values (see the second amendment above and
+#      [seed_schedule]). V2 §2 requires the ten seed values to be recorded and this is where they
+#      are, but it says nothing about which style-instance draws which one — and the answer that
+#      fell out of the V1 rule put every arm-B training clip and every eval clip on one shared
+#      seed. The assignment is therefore committed here too, and it is part of the hash.
+# So the recorded digest MOVED, and V2's two citations of 4da3875d... are stale. That is a defect
+# in a registered document and it is not repairable from here: rules are versioned, never edited in
+# place (docs/handoff.md §3). It needs a V3 recording the new value — and the V3 that records it
+# should also register the seed-schedule rule in §2, because "ten committed seeds" is satisfied by
+# a schedule that hands arm B one of them and hands the eval set the same one. Until then, the
+# authority for the partition hash is this file's sidecar, which check_style_partition.py
+# recomputes on every run — not V2's §0 table.
+pre_registration_v2 = "docs/preregistration/PR-08-V2-arm-c-frame-matching.md"
+rule_v2 = "T40_RULE_V2"
+task = "T-040"
+generator = "Cosmos-Transfer2.5, frozen"
+
+# The prompt is prose, and that is a decision rather than an observation. PR-08 §5 says arm C's
+# "style prompt *is* the source's own appearance", which is a prompt-shaped thing; but
+# Cosmos-Transfer2.5's prompt contract is not vendored in this repo (no cookbook, no config, no
+# script — docs/backbone-eval.md §5 describes it in prose only). The only prompt machinery here,
+# scripts/make_t041_eval_prompts.py and scripts/make_apple_variation_prompts.py, emits an 18-key
+# structured caption for Cosmos3-**Super** text2video, which is a different model and a different
+# API. So the partition is committed at the level that survives either answer: the *identity* of a
+# style (its id and its four axis slugs) and the appearance it names. If Transfer2.5 turns out to
+# consume a structured caption instead, the prompt strings below are what goes into the
+# appearance-bearing keys (`background_setting`, `lighting.*`, `aesthetics.color_scheme`, the
+# apple subject's `description`) via the apply_variation() override discipline that already
+# exists — and the partition is unchanged, because the partition is the ids and the slugs.
+# Whichever shape is used, record it in the verdict.
+prompt_form = "prose"
+
+# ---------------------------------------------------------------------------------------------
+# What may vary, and what may not. T-040: "Appearance may vary; geometry may not. The actions are
+# the recorded trajectory, so anything that moves an object desynchronizes pixels from labels and
+# the arm grasps empty air."
+#
+#   ALLOWED   apple texture / colour / variety, table (tablecloth) material, background / wall,
+#             lighting
+#   FORBIDDEN apple or plate *position*, table height, robot pose, object count
+#
+# Two consequences that are easy to miss and are therefore written into every prompt below:
+#
+#  1. THE PLATE IS NOT AN AXIS. It is not in T-040's allowed list, and the one existing script
+#     that varies it (make_apple_variation_prompts.py's `white-bowl`) changes receptacle geometry,
+#     which is the thing G0b exists to catch. Every prompt ends by holding the plate fixed.
+#  2. Every prompt ends with the invariance clause as well, so the constraint is in the text the
+#     generator actually reads and not only in this comment.
+# ---------------------------------------------------------------------------------------------
+allowed_axes = ["apple", "table", "background", "lighting"]
+invariance_clause = "The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[source]
+# The corpus being restyled (PR-08 §3: re-derived from the HF source at full resolution, NOT
+# datasets/gr00t-apple-full/, which is 120x160).
+corpus = "nvidia/GR00T-N1.7-AppleToPlate"
+episodes = 402
+# Where the identity style's text comes from, verbatim. This is a *caption of the same scene* from
+# the T-041 corpus — the only machine-written description of AppleToPlate's appearance we hold —
+# not a hand-written summary of it, for the same reason make_apple_variation_prompts.py edits a
+# real caption instead of authoring one: a hand-written description differs in style as well as in
+# content, and arm C's whole job is to differ in nothing.
+caption_provenance = "~/wam-t041/cosmos-g1-embodiment/val/captions/gr00t-n1-7-appletoplate_episode_000135_clip000/caption.json"
+
+# =============================================================================================
+# VOLUME — the clip arithmetic, machine-readable, so nobody recomputes 10 x 402 by hand and
+# nobody has to infer arm C's size from the fact that there is one identity style.
+#
+# THE THING THIS TABLE EXISTS TO PREVENT. PR-08 §5 gives arm C `real+identity` as the
+# generator-fingerprint control: "Same generator, same pipeline, SAME FRAME COUNT, no added
+# diversity." Frame count is not decoration in that sentence — it is the whole mechanism. Arm B
+# differs from arm A in two things at once, appearance diversity and generated volume, and arm C
+# is the arm that holds volume fixed while removing the diversity. An arm C at 402 clips against
+# an arm B at 4020 removes the diversity AND removes 90% of the volume, so B > C would be
+# consistent with "diversity helped" and equally consistent with "more data helped", and the
+# headline could not tell them apart. That is the control failing open.
+#
+# THE FIX, and the one that was rejected. Two ways to frame-match: subsample arm B to 402, or
+# repeat the identity style to 4020. Subsampling B was rejected — B is the arm the experiment is
+# about, PR-08 §9 prices it at ten restyles of 402 demos, and cutting it to a tenth to make a
+# control fit would answer a smaller question than the one registered. So the identity style is
+# generated TEN TIMES PER EPISODE, under ten distinct committed seeds, and arm C lands on the same
+# 4020 clips as arm B. Ten repeats of one appearance is exactly what a fingerprint control should
+# be: the generator's own variance under a fixed prompt, sampled as many times as arm B samples
+# its ten prompts.
+#
+# THE CONSEQUENCE, WHICH IS NOT FREE. Generated volume across the partition roughly doubles
+# (train 4020 + identity 4020, plus eval). The GPU-h ceiling of PR-08 §8 item 3 must therefore be
+# derived over the WHOLE partition and then split across the three STYLE_SET invocations — see
+# gpu_h_ceiling_scope below and the [consumer] note, because the sbatch's gate is per-invocation
+# and will happily approve the same ceiling three times.
+# =============================================================================================
+[volume]
+episodes = 402
+
+# Arm B / arm D. Ten styles, one clip each per episode.
+train_style_count = 10
+train_repeats = 1
+train_clips = 4020
+
+# Arm C. One style, ten clips each per episode. train_clips == identity_clips is the invariant
+# PR-08 §5 asks for, and scripts/check_style_partition.py fails if it stops holding.
+identity_style_count = 1
+identity_repeats = 10
+identity_clips = 4020
+
+# EVAL_STYLES, over all 402 episodes. This total is NOT this file's to choose — T40_RULE_V2 §3.1
+# fixes it at "5 x 402 = 2 010 clips (unchanged)" and derives the ceiling over a whole partition of
+# 10 050, and the sbatch's work-list expansion already strides over every episode in the manifest
+# rather than over an eval subset. An earlier draft of this table committed only the per-episode
+# rate on the argument that the held-out episode split belongs to the episode partition; that is a
+# defensible position and it is not the registered one, and a config that quietly disagrees with
+# the rule it implements is worse than one that is wrong out loud.
+eval_style_count = 5
+eval_repeats = 1
+eval_clips_per_episode = 5
+eval_clips = 2010
+
+# The two totals T40_RULE_V2 §3 names, kept apart because they answer different questions.
+#   training_clips        arm B + arm C, i.e. the generated frames that reach a training corpus.
+#                         "roughly doubles, to ~8 040 clips" (§3.1) — up from 4 422 under the
+#                         unmatched arm C.
+#   whole_partition_clips train + eval + identity. THIS is the ceiling basis: §3.2 requires the
+#                         GPU-h ceiling to be derived "over 10 050 clips, i.e. over all 25
+#                         style-instances", never per style-set invocation.
+training_clips = 8040
+whole_partition_clips = 10050
+# 10 train + 10 identity + 5 eval. The unit §3.1 prices at ~171 625 frames each (~4.29 M total).
+style_instances = 25
+
+# THE SEEDS MOVED OUT OF THIS BLOCK on 2026-08-15 (second amendment, see the header) and they are
+# now in [seed_schedule], with the ASSIGNMENT next to them. `repeat_seeds` used to live here as a
+# bare list of ten values under the rule "repeat r uses repeat_seeds[r]; repeats = 1 uses
+# repeat_seeds[0]", and since every TRAIN and every EVAL style has repeats = 1, that rule put all
+# 4 020 arm-B clips and all 2 010 eval clips on seed 7001 while arm C alone spanned all ten. The
+# values were never the load-bearing part; the schedule was, and a list of values does not carry a
+# schedule. [seed_schedule] carries both and is inside the partition hash.
+seed_schedule_ref = "seed_schedule"
+
+# Read by nothing; stated so a reviewer can check the claim above in one line.
+frame_matched_arms = ["train", "identity"]
+
+# T40_RULE_V2 §3.2: the ceiling is derived over the whole partition and then SPLIT across the
+# STYLE_SET invocations, because the sbatch enforces CEILING_GPU_H per invocation and would
+# otherwise authorise the same number three times. See [consumer] item 3.
+gpu_h_ceiling_scope = "whole-partition"
+gpu_h_ceiling_basis_clips = 10050
+
+# =============================================================================================
+# SEED SCHEDULE — which style-instance is generated under which initial-noise seed.
+#
+# THE SCHEDULE IS THE COMMITMENT, NOT THE SEED VALUES. The values are arbitrary; the assignment is
+# not, and the previous version of this file committed only the values. Under its rule ("repeat r
+# uses repeat_seeds[r]; repeats = 1 uses repeat_seeds[0]") every TRAIN style and every EVAL style —
+# all of which have repeats = 1 — resolved to repeat_seeds[0] = 7001. Arm B was 4 020 clips at one
+# seed, the eval set was 2 010 clips at THE SAME seed, and arm C was the only arm that saw ten.
+#
+# WHY THAT IS FATAL RATHER THAN UNTIDY. Two separate defects:
+#
+#  1. B AND C DIFFERED IN TWO THINGS. Arm B varied the prompt at a fixed seed; arm C varied the
+#     seed at a fixed prompt. B − C was then "ten prompts at one seed" minus "one prompt at ten
+#     seeds", i.e. a difference between two effects, not the isolation of one. PR-08 §5 asks arm C
+#     to differ from arm B in diversity and in nothing else.
+#
+#  2. THE TRAINING SET SHARED A SEED WITH THE EVAL SET, IN ONE ARM ONLY. The headline is scored on
+#     EVAL_STYLES clips, which were also all at 7001. So every one of arm B's training clips shared
+#     its initial latent with every eval clip, while nine tenths of arm C's did not. If the
+#     generator leaves any transferable seed-specific fingerprint at all — and arm C exists
+#     precisely because we do not assume it does not — then B's training distribution is matched to
+#     the scoring distribution more closely than C's for a reason unrelated to appearance
+#     diversity, and B − C is inflated on the headline. A confound that can manufacture a p, in the
+#     control that was added to remove exactly this class of confound.
+#
+# THE FIX, AT ZERO EXTRA CLIPS, AND ONLY AVAILABLE BEFORE THE FIRST CLIP EXISTS. One seed per
+# style-instance, one block per set: TRAIN and IDENTITY share an identical block (so the two arms
+# span the same seeds and diversity is all that is left between them), and EVAL gets a block
+# disjoint from both (so no eval clip shares an initial latent with any training clip in EITHER
+# arm). No style, prompt, slug or clip count changes.
+#
+# THE ARITHMETIC, WORKED THROUGH RATHER THAN ASSERTED — the "style i uses blocks.train[i]" rule
+# only spans ten seeds for arm B because arm B has ten styles, so it is written out:
+#
+#   set        styles x repeats = instances/episode   seed_index = style_index*repeats + repeat
+#   ---------  --------------------------------------  ----------------------------------------
+#   train      10 x  1 = 10                            i*1 + 0 = i        for i in 0..9  -> ten
+#   identity    1 x 10 = 10                            0*10 + r = r       for r in 0..9  -> ten
+#   eval        5 x  1 =  5                             j*1 + 0 = j       for j in 0..4  -> five
+#
+#   train    10 instances x 402 episodes = 4 020 clips over blocks.train    (7001-7010)
+#   identity 10 instances x 402 episodes = 4 020 clips over blocks.identity (7001-7010)
+#   eval      5 instances x 402 episodes = 2 010 clips over blocks.eval     (7011-7015)
+#
+# So arm B and arm C do not merely span the same SET of seeds — they use each of the ten the same
+# number of times, 4 020 / 10 = 402 clips per seed in both arms, one per episode. The match is
+# seed-by-seed, which is the strong form of the property and it falls straight out of
+# train_instances == identity_instances, i.e. out of the frame match [volume] already enforces.
+# The eval block is 402 clips per seed on five seeds none of which any training clip touches.
+#
+# The blocks are the same for every episode, deliberately: the seed is a property of the
+# style-instance, not of the episode, so "episode 000135 at 7003" identifies a clip and a resume
+# under a different schedule is detectable (the sbatch hashes the seed into WORK_SHA).
+# =============================================================================================
+[seed_schedule]
+# NORMATIVE AND MACHINE-READABLE. `assignment` is the name the checker and the sbatch dispatch on;
+# `rule` is the same statement in one line for a human recomputing a seed by hand. They are
+# checked against the code (scripts/check_style_partition.py), because the last seed rule was a
+# sentence in a comment and a sentence in a comment is what produced the defect above.
+assignment = "style-instance-index"
+rule = "seed = blocks[<set>][style_index * repeats + repeat_index]; style_index and repeat_index are 0-based, styles in committed order"
+# Every style-instance in a set gets its own seed and no seed is committed that no instance uses:
+# len(blocks[set]) == style_count[set] * repeats[set], enforced. A block longer than the set is a
+# seed nobody generates under, which is how a schedule quietly stops being the one that ran.
+one_seed_per_style_instance = true
+
+[seed_schedule.blocks]
+# Arm B. Ten styles x one repeat, so style i is generated under train[i] and the arm spans all ten.
+train = [7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008, 7009, 7010]
+# Arm C. One style x ten repeats, so repeat r is generated under identity[r] and the arm spans the
+# same ten. IDENTICAL TO `train` BY RULE, not by coincidence: check_style_partition.py fails if the
+# two blocks stop being the same set, because the moment they differ, part of B − C is the seeds.
+identity = [7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008, 7009, 7010]
+# The headline's scoring set. DISJOINT FROM BOTH TRAINING BLOCKS, and the checker fails on any
+# intersection. An eval clip that shares its initial latent with a training clip hands whichever
+# arm generated that training clip a match to the scoring distribution that is not diversity.
+eval = [7011, 7012, 7013, 7014, 7015]
+
+# =============================================================================================
+# BLOCKING TODOs — open items that must close BEFORE generation, as records rather than as prose.
+#
+# Each is a thing that would make a finished run uninterpretable rather than merely imperfect, so
+# it blocks the submission and not the review. scripts/check_style_partition.py prints every OPEN
+# item on every run; it does not fail on them, because committing this file is explicitly allowed
+# (PR-08 §1) while generating from it is not, and a checker that refused to pass would only teach
+# people to skip the checker.
+# =============================================================================================
+[[blocking_todos]]
+id = "T40-TODO-01-identity-prompt-provenance"
+status = "OPEN"
+blocks = "STYLE_SET=identity  (arm C, the generator-fingerprint control)"
+rule_ref = "PR-08 §5 — arm C's style prompt *is* the source's own appearance"
+claim = """[identity_style].prompt is assembled from a T-041 machine caption of ONE clip,
+episode_000135_clip000 (see [source].caption_provenance), and is applied unchanged to all 402
+episodes. Nobody has checked that it describes the other 401, and it was written against T-041's
+corpus rather than against the 640x480 re-derivation PR-08 §3 restyles."""
+why_blocking = """Arm C is a control, and a control is only a control if its prompt is the
+source's own appearance. If the caption is wrong for most episodes — a different cloth, a
+different apple, different lighting — then arm C is a weak RESTYLE, not an identity pass. It would
+then carry some of arm B's diversity, B - C would understate the diversity effect, and the
+headline's attribution between 'diversity helped' and 'generator fingerprint' silently breaks. The
+frame-match fixed by [volume] does not help here: a frame-matched control with the wrong prompt is
+still the wrong control."""
+action = """Re-derive the identity prompt from the 640x480 corpus, or sample-check the committed
+one against a random sample of episodes spanning the corpus and record the sample, the sample size
+and the disagreements. If the appearance is not constant across the 402, that is the finding and
+arm C needs a per-episode identity prompt rather than one shared string."""
+evidence_required = "the sampled episode ids, the sample size, and the per-episode verdicts"
+closes_by = "editing this file (status = CLOSED, plus the evidence) before the first identity clip"
+
+[hash]
+# THE STYLE PARTITION HASH — the value PR-08 §6 lists under "Recorded regardless of verdict".
+#
+# It is a hash of the *content*, not of the file's bytes: sha256 over the canonical JSON of this
+# document with the [hash] and [consumer] tables removed, `json.dumps(..., ensure_ascii=True,
+# sort_keys=True, separators=(",", ":"))` — the same serialisation make_t041_eval_prompts.py uses,
+# for the same reason (whitespace is not the object). So rewording a comment does not invalidate a
+# finished run's recorded hash, while changing any style, any slug, any id, or the rule name does.
+#
+# [consumer] is outside the hash too, and that exclusion is argued rather than convenient: it holds
+# a path and two key names, the question the recorded hash has to answer is "which styles was this
+# generated under", and repointing the generator at a different copy of the same rendering must not
+# make a finished run's recorded value unmatchable. It cannot hide a style change either — the
+# rendering is checked against this document on every run of the verifier.
+#
+# The value lives in the sidecar styles.toml.sha256 rather than in this file, because a file
+# cannot contain its own hash. scripts/check_style_partition.py recomputes it and FAILS if the
+# sidecar disagrees; `--write-hash` is the only thing that writes the sidecar.
+#
+# THE RULE STRING BELOW IS NORMATIVE AND WAS WRONG UNTIL 2026-08-15. It read
+# "sha256(canonical_json(document minus [hash]))" and omitted [consumer], while the code's
+# HASH_EXCLUDES has always been ("hash", "consumer"). Anyone recomputing the PR-08 §6 partition
+# hash from the rule string as written got a digest that could never match the committed one, and
+# the natural reading of that mismatch — "the partition changed" — is the exact alarm this value
+# exists to raise. A rule string that cannot reproduce its own digest is worse than no rule
+# string. It now names both exclusions, and the prose two paragraphs up already argued [consumer].
+rule = "sha256(canonical_json(document minus [hash] and [consumer]))"
+excludes = ["hash", "consumer"]
+sidecar = "configs/transfer25/styles.toml.sha256"
+
+[consumer]
+# cluster/discoverer/97_transfer25_restyle.sbatch reads the partition with json.loads and indexes
+# styles["train"] / styles["eval"], and it byte-hashes the file it is given with sha256sum. So the
+# generator does not read this file; it reads a *rendering* of it, generated by
+# `scripts/check_style_partition.py --emit-json` and committed alongside. THIS FILE REMAINS THE
+# SOURCE OF TRUTH — the rendering carries no argument for any value and must never be hand-edited.
+# The verifier refuses to pass when the two disagree, which is the only reason committing both is
+# safe.
+#
+# RECONCILIATION, re-checked against the sbatch on 2026-08-15. The two items that used to stand
+# here were STALE IN BOTH DIRECTIONS and would have sent a reader to "fix" a correct script:
+#   - it said STYLE_PARTITION defaults to configs/cosmos3/pr08_style_partition.json. It does not,
+#     and may never have: line 221 is
+#       STYLE_PARTITION=${STYLE_PARTITION:-${WAM}/configs/transfer25/pr08_style_partition.json}
+#     which is this rendering, at this path. Nothing to point anywhere. RESOLVED, no action.
+#   - it said that for STYLE_SET=identity the sbatch substitutes {"id": "identity", "prompt":
+#     None}. It explicitly REFUSES to: the work-list block reads the committed 'identity' set like
+#     any other and exits FATAL if the rendering has no such set, with a comment recording that an
+#     earlier draft did synthesise one and that doing so "would make the control unattributable".
+#     Arm C is prompted from [identity_style].prompt below. RESOLVED, no action.
+# Following that note as written would have meant editing a correct default to a wrong path and
+# re-introducing a synthesised identity prompt into the one arm whose prompt must not be invented.
+#
+# WHAT IS ACTUALLY OPEN, verified against the script rather than remembered (re-checked
+# 2026-08-15, after the seed-schedule amendment):
+#   1. REPEATS ARE EXPANDED. RESOLVED, no action. The work-list block loops
+#      `for r in range(repeats_of(s))`, emits unit ids `<episode>__<style>__r<NN>`, exits FATAL on
+#      a style with no positive integer `repeats` (no default of 1), and re-proves arm C's frame
+#      match against the expansion itself. The note that used to stand here described a script
+#      that no longer exists.
+#   2. THE FRAME COUNT FEEDING THE CEILING GATE INHERITED (1), so it is resolved with it: the
+#      expansion prices the WHOLE partition (every set, times its repeats, times every episode)
+#      and hands that to the gate alongside this chunk's frames.
+#   2b. SEEDS ARE READ PER STYLE-INSTANCE, not per repeat index. RESOLVED in the same amendment
+#      that added [seed_schedule]: the rendering carries a resolved `seeds` list on every style
+#      (one entry per repeat, in repeat order) and the expansion uses `seeds_of(s)[r]`. It must
+#      NOT go back to indexing one shared list by r — that rule is what put all of arm B and all
+#      of the eval set on seed 7001. The sbatch re-checks the two schedule invariants (train and
+#      identity span the same seed set; eval is disjoint from both) before it writes a work list,
+#      because it is the last gate before a clip exists.
+#   3. THE CEILING IS PER-INVOCATION AND THE BUDGET IS NOT. The gate compares CEILING_GPU_H
+#      against THIS invocation's projection, so passing one whole-partition ceiling to each of
+#      STYLE_SET=train, eval and identity authorises it three times over. PR-08 §8 item 3's
+#      ceiling is derived over the whole partition (volume.gpu_h_ceiling_scope): derive it once
+#      over train + eval + identity, split it across the three submissions in proportion to their
+#      clip counts, and pass each submission only its share. Record the split with the derivation.
+rendering = "configs/transfer25/pr08_style_partition.json"
+rendering_keys = ["train", "eval", "identity"]
+# Also emitted into the rendering, for the expansion described in items 1 and 2b above. `seeds` is
+# the schedule already RESOLVED per style — seeds[r] is the seed for repeat r of that style — so
+# the consumer never re-derives an index rule and cannot re-derive a different one.
+rendering_style_keys = ["id", "prompt", "apple", "table", "background", "lighting", "repeats",
+                        "seeds"]
+rendering_volume_key = "volume"
+rendering_seed_schedule_key = "seed_schedule"
+
+# =============================================================================================
+# IDENTITY — arm C's control. IN NEITHER SET, BY CONSTRUCTION.
+#
+# PR-08 §5 arm C `real+identity`: "restyles whose style prompt *is* the source's own appearance …
+# generator-fingerprint control. Same generator, same pipeline, same frame count, no added
+# diversity." It is not a style: it adds no appearance the corpus does not already have. Putting
+# it in TRAIN_STYLES would smuggle arm C's frames into arm B; putting it in EVAL_STYLES would make
+# the headline's "visually shifted" eval set unshifted, and §6's B−A could then be read off a
+# domain that never moved. The verifier asserts it is in neither, on id and on all four slugs.
+# =============================================================================================
+[identity_style]
+id = "identity-source"
+role = "control"
+arm = "C"
+# TEN clips per episode, not one — see [volume]. This is the field the sbatch's work-list
+# expansion must read (its item 1 in [consumer]); it is not a hint and it is not derivable from
+# anything else in the file. 10 x 402 = 4020 = train_clips, which is PR-08 §5's "same frame
+# count". If this ever stops equalling the number of TRAIN_STYLES, arm C stops being frame-matched
+# to arm B and check_style_partition.py fails rather than letting the run be submitted.
+repeats = 10
+# Repeat r is generated under [seed_schedule.blocks].identity[r], so arm C spans 7001-7010 — the
+# same ten seeds arm B spans across its ten styles, 402 clips per seed in each arm. That equality
+# is the point: with the seeds held identical, the ONLY thing left differing between arm B and arm
+# C is prompt diversity, which is what B − C is supposed to measure.
+apple = "source-red-yellow-glossy"
+table = "source-black-cloth"
+background = "source-black-flat"
+lighting = "source-even-bright-top-down"
+prompt = "A red and yellow apple with a glossy surface and a visible stem, on a black cloth covering a flat surface. A white, round plate. Even, bright, top-down lighting with minimal shadows; the lighting highlights the objects without creating harsh contrasts. Contrast between the black background and the white plate and red/yellow apple. Live-action video, realistic. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+# The caption fields the prompt above is assembled from, quoted so the assembly is checkable and
+# so the structured-caption path (see `prompt_form`) has the override set already written out.
+[identity_style.source_caption]
+"subjects[0].description" = "A red and yellow apple with a glossy surface and a visible stem."
+"subjects[2].description" = "A white, round plate."
+background_setting = "A black cloth covering a flat surface."
+"lighting.conditions" = "Even, bright lighting."
+"lighting.direction" = "Top-down lighting."
+"lighting.shadows" = "Minimal shadows."
+"lighting.illumination_effect" = "The lighting highlights the objects without creating harsh contrasts."
+"aesthetics.color_scheme" = "Contrast between the black background and the white plate and red/yellow apple."
+style_medium = "Live-action video."
+artistic_style = "Realistic."
+
+# =============================================================================================
+# TRAIN_STYLES — 10. Arms B and D train on restyles drawn from here.
+#
+# Ten because PR-08 §9 prices the experiment as "ten restyles of 402 demos", and §8 item 3 makes
+# the GPU-h ceiling a multiple of the variant count (~172 000 frames per variant). A count chosen
+# after the throughput measurement would be a budget decision dressed as a design decision.
+#
+# Each style names all four allowed axes and nothing else. The axis values are *slugs*, and the
+# slugs are what disjointness is checked on — see EVAL_STYLES below for why the check is not on
+# the ids.
+#
+# `repeats = 1` on every one of them, stated rather than defaulted. Arm B's diversity comes from
+# having ten appearances, not from sampling one of them ten times, so a repeat here would add
+# generator variance to the arm that is supposed to isolate diversity — the mirror image of arm
+# C's job. It is written out on each style because the sbatch's expansion reads the field and an
+# absent field is a thing to infer; ten explicit ones cost a line each and infer nothing. This is
+# also the half of the frame-match that must NOT move: PR-08 §9 prices arm B at ten restyles of
+# 402 demos, and matching arm C by cutting B to 402 would answer a smaller question than the one
+# registered. C was raised to B, never the reverse.
+#
+# ONE SEED PER STYLE, AND THE ORDER BELOW IS THE SCHEDULE. Style i is generated under
+# [seed_schedule.blocks].train[i], so the ten styles listed here span 7001-7010 — the same ten arm
+# C spans over its ten repeats, 402 clips per seed in both arms. `repeats = 1` is why the seed has
+# to come from the STYLE index and not from the repeat index: under the old rule (repeats = 1 uses
+# seed[0]) all ten of these, and therefore all 4 020 arm-B clips, were one seed. Reordering the
+# styles below re-assigns the seeds, which is a content change and moves the partition hash — that
+# is intended, and it is why the rule says "styles in committed order".
+# =============================================================================================
+[[train_styles]]
+id = "train-01-oak-tungsten"
+repeats = 1
+apple = "green-granny"
+table = "oak-wood"
+background = "white-plaster-wall"
+lighting = "warm-tungsten-side"
+prompt = "A bright green Granny Smith apple on a pale oak wooden table top, against a plain white plaster wall, lit by warm tungsten light from one side with soft shadows. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-02-linen-overcast"
+repeats = 1
+apple = "yellow-golden"
+table = "blue-linen"
+background = "grey-concrete-wall"
+lighting = "cool-overcast-diffuse"
+prompt = "A pale yellow Golden Delicious apple on a blue linen tablecloth, against a grey concrete wall, lit by cool overcast daylight that is evenly diffused. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-03-melamine-fluorescent"
+repeats = 1
+apple = "deep-red-matte"
+table = "white-melamine"
+background = "beige-curtain"
+lighting = "bright-fluorescent-overhead"
+prompt = "A deep red apple with a dull matte skin on a white melamine table top, against a beige fabric curtain, lit by bright fluorescent tubes overhead, crisp and cold. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-04-slate-lowkey"
+repeats = 1
+apple = "russet-brown"
+table = "grey-slate"
+background = "dark-green-wall"
+# REWORDED 2026-08-15 (second geometry-lint extension), and the light is unchanged.
+# WAS: lighting = "low-key-desk-lamp"
+#      prompt "… lit by a single dim desk lamp, low key with deep shadows. …"
+# The lint forbade "lower" while allowing "low" — the comparative listed, the plain stem missing,
+# which is the defect that let "A low table, waist-high." through. Fixing it properly means
+# FORBIDDEN_TERMS holds the stem "low" and derives "lower"/"lowest" from it, and this is the one
+# committed string "low" collides with. "low key" is a lighting term of art, on T-040's ALLOWED
+# side, so the choice was: keep a comparative-only entry (the defect), add an exemption (the shape
+# a real violation takes), or say the same thing in a word that is not a height. "moody" is the
+# same light: one dim desk lamp, deep shadows, most of the frame dark. The id keeps "lowkey"
+# because ids name work units and "lowkey" is one token the lint cannot read as "low"; only the
+# generator-visible text and the axis slug changed.
+lighting = "moody-dim-desk-lamp"
+prompt = "A brown russet apple with rough dry skin on a grey slate slab, against a dark green painted wall, lit by a single dim desk lamp, moody with deep shadows. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-05-checked-window"
+repeats = 1
+apple = "pink-lady-mottled"
+table = "red-check-tablecloth"
+background = "varnished-wood-panelling"
+lighting = "window-daylight"
+prompt = "A mottled pink and green Pink Lady apple on a red and white checked tablecloth, against varnished wood panelling, lit by warm directional daylight through a window. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-06-steel-clinical"
+repeats = 1
+apple = "pale-green-waxy"
+table = "stainless-steel"
+background = "tiled-white-splashback"
+lighting = "clinical-cool-white"
+prompt = "A pale green apple with a waxy sheen on a brushed stainless steel worktop, against a white tiled splashback, lit by clinical cool white light, flat and almost shadowless. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-07-walnut-amber"
+repeats = 1
+apple = "striped-gala"
+table = "walnut-veneer"
+background = "exposed-brick-wall"
+lighting = "amber-evening"
+prompt = "A red and orange striped Gala apple on a dark walnut veneer table, against an exposed red brick wall, lit by amber evening light casting long soft shadows. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-08-cork-softbox"
+repeats = 1
+apple = "dark-crimson-glossy"
+table = "cork"
+background = "pale-blue-wall"
+lighting = "softbox-neutral"
+# REWORDED 2026-08-15 (second geometry-lint extension), and the apple's finish is unchanged.
+# WAS: prompt "A dark crimson apple with a mirror gloss on a cork covered table top, …"
+# "The scene is mirrored horizontally." was one of the probes that got through the lint: it names
+# no object, so no position word fires, and it swaps left for right in the pixels while the
+# carried-over trajectory still reaches right — T-040's failure with none of T-040's vocabulary.
+# The stem that catches it is "mirror", and "a mirror gloss" was the one committed string it
+# collided with. A mirror gloss is a surface finish, on T-040's ALLOWED side, and "polished" is
+# the same finish; the apple slug "dark-crimson-glossy" is unchanged because it never said mirror.
+prompt = "A dark crimson apple with a polished gloss on a cork covered table top, against a pale blue wall, lit by neutral softbox lighting, gentle and even. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-09-marble-spot"
+repeats = 1
+apple = "speckled-yellow-green"
+table = "marble"
+background = "black-velvet-curtain"
+lighting = "hard-spot"
+prompt = "A speckled yellow-green apple on a white marble slab with grey veining, against a black velvet curtain, lit by one hard spot light with strong specular highlights. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[train_styles]]
+id = "train-10-denim-hazy"
+repeats = 1
+apple = "bronze-red-dull"
+table = "denim-cloth"
+background = "olive-painted-wall"
+lighting = "hazy-sunlight"
+prompt = "A dull bronze-red apple with a scuffed skin on a denim cloth cover, against an olive painted wall, lit by hazy sunlight, slightly washed out. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+# =============================================================================================
+# EVAL_STYLES — 5. The headline's visually shifted eval set (PR-08 §6). No arm trains on these.
+#
+# DISJOINTNESS IS CHECKED ON THE AXIS SLUGS, NOT ON THE IDS, and that is the point of having
+# slugs at all. Two styles with different ids can still be the same appearance — "walnut-veneer"
+# in TRAIN and "oak-veneer" in EVAL would pass any id-level check while making the eval set a
+# near-copy of the training domain, and the headline would then report generalisation to a shift
+# that did not happen. So: for each of the four axes, the set of slugs used in TRAIN, the set used
+# in EVAL, and the identity style's slug are pairwise disjoint, and the verifier enforces it.
+#
+# Five and not ten: EVAL_STYLES are only generated for the eval episodes, and PR-08 §7 already
+# records that a P here is a claim about held-out *generated* appearance rather than real
+# appearance — so buying breadth on the eval side buys less than it looks like it does. The number
+# is fixed here, before any clip, which is the property that matters.
+#
+# `repeats = 1` here too, and for a different reason than TRAIN_STYLES': the eval set is what arms
+# A and B are SCORED on, not trained on. Repeating an eval style would weight one appearance five
+# times over in the headline mean without adding a held-out appearance, which changes what the
+# number means for no gain. Arm C's frame match is a property of the training corpora and does not
+# reach this set. [volume] commits the total as 5 x 402 = 2 010, which is T40_RULE_V2 §3.1's
+# figure and matches what the sbatch's expansion actually does (it strides over every episode in
+# the manifest, not over an eval subset).
+#
+# THE EVAL SEEDS ARE A DISJOINT BLOCK, 7011-7015, and that is a property of the HEADLINE rather
+# than of these styles. The eval set is what B − A and B − C are read off. If an eval clip is
+# generated from the same initial latent as a training clip, then whichever arm owns that training
+# clip is matched to the scoring distribution by the generator's own seed-specific behaviour and
+# not by anything the experiment is about. Under the previous schedule that is exactly what
+# happened, and it happened to ONE arm: every eval clip and every arm-B training clip sat on 7001
+# while nine tenths of arm C's did not, which biases the B − C the control exists to produce.
+# Style j here is generated under [seed_schedule.blocks].eval[j]; check_style_partition.py fails
+# if that block ever intersects either training block.
+# =============================================================================================
+[[eval_styles]]
+id = "eval-01-terracotta-rim"
+repeats = 1
+apple = "lime-green-smooth"
+table = "terracotta-tile"
+background = "lavender-wall"
+lighting = "strong-side-rim"
+# REWORDED 2026-08-15, "from the left" -> "from one side", and the reword is the point rather than
+# a tidy-up. The geometry lint gained a spatial-relation vocabulary after a reviewer showed that
+# "The apple sits to the left of the plate." passed it clean, and "left" then matched here. The
+# word was innocent in this sentence — it described the LIGHTING direction, which is on T-040's
+# allowed side — but the lint cannot tell a lit-from-the-left wall from a moved-to-the-left apple,
+# and it is not supposed to try: scripts/check_style_partition.py's own rule is that a false
+# positive costs one edit to a file nobody has generated from yet, while a false negative costs a
+# corpus. So the STYLE was fixed and the TERM was kept. The appearance is unchanged — the slug is
+# still `strong-side-rim`, the light is still a hard side rim with dark falloff, and only the
+# compass word is gone. The alternative, exempting "left" when it follows "light from the", is
+# exactly the shape a real violation would take.
+prompt = "A smooth lime green apple on a terracotta tiled surface, against a lavender painted wall, lit by a strong rim light from one side with dark falloff. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[eval_styles]]
+id = "eval-02-baize-dusk"
+repeats = 1
+apple = "purple-black-arkansas"
+table = "green-baize"
+background = "rusted-metal-wall"
+lighting = "cold-blue-dusk"
+prompt = "A very dark purple-black Arkansas Black apple on a green baize cloth, against a rusted corrugated metal wall, lit by cold blue dusk light, dim and bluish. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[eval_styles]]
+id = "eval-03-bamboo-dappled"
+repeats = 1
+apple = "orange-blush"
+table = "bamboo-mat"
+background = "yellow-wallpaper"
+lighting = "dappled-shade"
+prompt = "An orange apple with a red blush on a woven bamboo mat, against patterned yellow wallpaper, lit by dappled shade falling through leaves. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[eval_styles]]
+id = "eval-04-glass-overexposed"
+repeats = 1
+apple = "pale-ivory-white"
+table = "black-glass"
+background = "mint-tiled-wall"
+lighting = "overexposed-flat-white"
+prompt = "A pale ivory white apple on a black glass table top, against a mint green tiled wall, lit by overexposed flat white light with washed out highlights. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+
+[[eval_styles]]
+id = "eval-05-hessian-lantern"
+repeats = 1
+apple = "freckled-crimson"
+table = "hessian-burlap"
+background = "deep-teal-wall"
+lighting = "diffuse-lantern-glow"
+prompt = "A freckled crimson apple with pale flecks on a coarse hessian burlap cloth, against a deep teal wall, lit by a diffuse warm lantern glow. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."

@@ -1,0 +1,289 @@
+{
+ "blocking_todos": [
+  {
+   "action": "Re-derive the identity prompt from the 640x480 corpus, or sample-check the committed\none against a random sample of episodes spanning the corpus and record the sample, the sample size\nand the disagreements. If the appearance is not constant across the 402, that is the finding and\narm C needs a per-episode identity prompt rather than one shared string.",
+   "blocks": "STYLE_SET=identity  (arm C, the generator-fingerprint control)",
+   "claim": "[identity_style].prompt is assembled from a T-041 machine caption of ONE clip,\nepisode_000135_clip000 (see [source].caption_provenance), and is applied unchanged to all 402\nepisodes. Nobody has checked that it describes the other 401, and it was written against T-041's\ncorpus rather than against the 640x480 re-derivation PR-08 \u00a73 restyles.",
+   "closes_by": "editing this file (status = CLOSED, plus the evidence) before the first identity clip",
+   "evidence_required": "the sampled episode ids, the sample size, and the per-episode verdicts",
+   "id": "T40-TODO-01-identity-prompt-provenance",
+   "rule_ref": "PR-08 \u00a75 \u2014 arm C's style prompt *is* the source's own appearance",
+   "status": "OPEN",
+   "why_blocking": "Arm C is a control, and a control is only a control if its prompt is the\nsource's own appearance. If the caption is wrong for most episodes \u2014 a different cloth, a\ndifferent apple, different lighting \u2014 then arm C is a weak RESTYLE, not an identity pass. It would\nthen carry some of arm B's diversity, B - C would understate the diversity effect, and the\nheadline's attribution between 'diversity helped' and 'generator fingerprint' silently breaks. The\nframe-match fixed by [volume] does not help here: a frame-matched control with the wrong prompt is\nstill the wrong control."
+  }
+ ],
+ "committed": "2026-08-15",
+ "eval": [
+  {
+   "apple": "lime-green-smooth",
+   "background": "lavender-wall",
+   "id": "eval-01-terracotta-rim",
+   "lighting": "strong-side-rim",
+   "prompt": "A smooth lime green apple on a terracotta tiled surface, against a lavender painted wall, lit by a strong rim light from one side with dark falloff. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7011
+   ],
+   "table": "terracotta-tile"
+  },
+  {
+   "apple": "purple-black-arkansas",
+   "background": "rusted-metal-wall",
+   "id": "eval-02-baize-dusk",
+   "lighting": "cold-blue-dusk",
+   "prompt": "A very dark purple-black Arkansas Black apple on a green baize cloth, against a rusted corrugated metal wall, lit by cold blue dusk light, dim and bluish. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7012
+   ],
+   "table": "green-baize"
+  },
+  {
+   "apple": "orange-blush",
+   "background": "yellow-wallpaper",
+   "id": "eval-03-bamboo-dappled",
+   "lighting": "dappled-shade",
+   "prompt": "An orange apple with a red blush on a woven bamboo mat, against patterned yellow wallpaper, lit by dappled shade falling through leaves. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7013
+   ],
+   "table": "bamboo-mat"
+  },
+  {
+   "apple": "pale-ivory-white",
+   "background": "mint-tiled-wall",
+   "id": "eval-04-glass-overexposed",
+   "lighting": "overexposed-flat-white",
+   "prompt": "A pale ivory white apple on a black glass table top, against a mint green tiled wall, lit by overexposed flat white light with washed out highlights. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7014
+   ],
+   "table": "black-glass"
+  },
+  {
+   "apple": "freckled-crimson",
+   "background": "deep-teal-wall",
+   "id": "eval-05-hessian-lantern",
+   "lighting": "diffuse-lantern-glow",
+   "prompt": "A freckled crimson apple with pale flecks on a coarse hessian burlap cloth, against a deep teal wall, lit by a diffuse warm lantern glow. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7015
+   ],
+   "table": "hessian-burlap"
+  }
+ ],
+ "identity": [
+  {
+   "apple": "source-red-yellow-glossy",
+   "background": "source-black-flat",
+   "id": "identity-source",
+   "lighting": "source-even-bright-top-down",
+   "prompt": "A red and yellow apple with a glossy surface and a visible stem, on a black cloth covering a flat surface. A white, round plate. Even, bright, top-down lighting with minimal shadows; the lighting highlights the objects without creating harsh contrasts. Contrast between the black background and the white plate and red/yellow apple. Live-action video, realistic. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 10,
+   "seeds": [
+    7001,
+    7002,
+    7003,
+    7004,
+    7005,
+    7006,
+    7007,
+    7008,
+    7009,
+    7010
+   ],
+   "table": "source-black-cloth"
+  }
+ ],
+ "pre_registration": "docs/preregistration/PR-08-photoreal-augmentation.md",
+ "rule": "T40_STYLES_V1",
+ "schema": "wam.style_partition/1",
+ "seed_schedule": {
+  "assignment": "style-instance-index",
+  "blocks": {
+   "eval": [
+    7011,
+    7012,
+    7013,
+    7014,
+    7015
+   ],
+   "identity": [
+    7001,
+    7002,
+    7003,
+    7004,
+    7005,
+    7006,
+    7007,
+    7008,
+    7009,
+    7010
+   ],
+   "train": [
+    7001,
+    7002,
+    7003,
+    7004,
+    7005,
+    7006,
+    7007,
+    7008,
+    7009,
+    7010
+   ]
+  },
+  "one_seed_per_style_instance": true,
+  "rule": "seed = blocks[<set>][style_index * repeats + repeat_index]; style_index and repeat_index are 0-based, styles in committed order"
+ },
+ "source": "configs/transfer25/styles.toml",
+ "source_content_sha256": "8d8565ffcd12ad17318f10979abb44f639084e21857866cbc3b2f32f1332628b",
+ "train": [
+  {
+   "apple": "green-granny",
+   "background": "white-plaster-wall",
+   "id": "train-01-oak-tungsten",
+   "lighting": "warm-tungsten-side",
+   "prompt": "A bright green Granny Smith apple on a pale oak wooden table top, against a plain white plaster wall, lit by warm tungsten light from one side with soft shadows. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7001
+   ],
+   "table": "oak-wood"
+  },
+  {
+   "apple": "yellow-golden",
+   "background": "grey-concrete-wall",
+   "id": "train-02-linen-overcast",
+   "lighting": "cool-overcast-diffuse",
+   "prompt": "A pale yellow Golden Delicious apple on a blue linen tablecloth, against a grey concrete wall, lit by cool overcast daylight that is evenly diffused. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7002
+   ],
+   "table": "blue-linen"
+  },
+  {
+   "apple": "deep-red-matte",
+   "background": "beige-curtain",
+   "id": "train-03-melamine-fluorescent",
+   "lighting": "bright-fluorescent-overhead",
+   "prompt": "A deep red apple with a dull matte skin on a white melamine table top, against a beige fabric curtain, lit by bright fluorescent tubes overhead, crisp and cold. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7003
+   ],
+   "table": "white-melamine"
+  },
+  {
+   "apple": "russet-brown",
+   "background": "dark-green-wall",
+   "id": "train-04-slate-lowkey",
+   "lighting": "moody-dim-desk-lamp",
+   "prompt": "A brown russet apple with rough dry skin on a grey slate slab, against a dark green painted wall, lit by a single dim desk lamp, moody with deep shadows. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7004
+   ],
+   "table": "grey-slate"
+  },
+  {
+   "apple": "pink-lady-mottled",
+   "background": "varnished-wood-panelling",
+   "id": "train-05-checked-window",
+   "lighting": "window-daylight",
+   "prompt": "A mottled pink and green Pink Lady apple on a red and white checked tablecloth, against varnished wood panelling, lit by warm directional daylight through a window. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7005
+   ],
+   "table": "red-check-tablecloth"
+  },
+  {
+   "apple": "pale-green-waxy",
+   "background": "tiled-white-splashback",
+   "id": "train-06-steel-clinical",
+   "lighting": "clinical-cool-white",
+   "prompt": "A pale green apple with a waxy sheen on a brushed stainless steel worktop, against a white tiled splashback, lit by clinical cool white light, flat and almost shadowless. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7006
+   ],
+   "table": "stainless-steel"
+  },
+  {
+   "apple": "striped-gala",
+   "background": "exposed-brick-wall",
+   "id": "train-07-walnut-amber",
+   "lighting": "amber-evening",
+   "prompt": "A red and orange striped Gala apple on a dark walnut veneer table, against an exposed red brick wall, lit by amber evening light casting long soft shadows. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7007
+   ],
+   "table": "walnut-veneer"
+  },
+  {
+   "apple": "dark-crimson-glossy",
+   "background": "pale-blue-wall",
+   "id": "train-08-cork-softbox",
+   "lighting": "softbox-neutral",
+   "prompt": "A dark crimson apple with a polished gloss on a cork covered table top, against a pale blue wall, lit by neutral softbox lighting, gentle and even. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7008
+   ],
+   "table": "cork"
+  },
+  {
+   "apple": "speckled-yellow-green",
+   "background": "black-velvet-curtain",
+   "id": "train-09-marble-spot",
+   "lighting": "hard-spot",
+   "prompt": "A speckled yellow-green apple on a white marble slab with grey veining, against a black velvet curtain, lit by one hard spot light with strong specular highlights. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7009
+   ],
+   "table": "marble"
+  },
+  {
+   "apple": "bronze-red-dull",
+   "background": "olive-painted-wall",
+   "id": "train-10-denim-hazy",
+   "lighting": "hazy-sunlight",
+   "prompt": "A dull bronze-red apple with a scuffed skin on a denim cloth cover, against an olive painted wall, lit by hazy sunlight, slightly washed out. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+   "repeats": 1,
+   "seeds": [
+    7010
+   ],
+   "table": "denim-cloth"
+  }
+ ],
+ "volume": {
+  "episodes": 402,
+  "eval_clips": 2010,
+  "eval_clips_per_episode": 5,
+  "eval_repeats": 1,
+  "eval_style_count": 5,
+  "frame_matched_arms": [
+   "train",
+   "identity"
+  ],
+  "gpu_h_ceiling_basis_clips": 10050,
+  "gpu_h_ceiling_scope": "whole-partition",
+  "identity_clips": 4020,
+  "identity_repeats": 10,
+  "identity_style_count": 1,
+  "seed_schedule_ref": "seed_schedule",
+  "style_instances": 25,
+  "train_clips": 4020,
+  "train_repeats": 1,
+  "train_style_count": 10,
+  "training_clips": 8040,
+  "whole_partition_clips": 10050
+ }
+}
