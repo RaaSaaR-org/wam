@@ -8,9 +8,15 @@
 # rather than trimming the dependency set — and record that you did, because it bills.
 #
 # WHY A SEPARATE VENV. 70_train_t39_baseline.sbatch exits FATAL if ${PROJ}/virt_envs/t39 is
-# absent, on purpose: the vendored trainer pins torch 2.7.1 / flash-attn 2.7.4 / deepspeed
-# 0.17.6, and resolving those into virt_envs/wam would quietly change the dependency set every
-# WAM number in docs/benchmark.md was produced under. Same rule, same reason, as the cosmos env.
+# absent, on purpose: the vendored trainer pins its own interpreter and its own torch, and
+# resolving those into virt_envs/wam would quietly change the dependency set every WAM number in
+# docs/benchmark.md was produced under. Same rule, same reason, as the cosmos env.
+#
+# The pins are the COMMIT's, not a constant — they moved between the two registered commits and
+# will move again. e5749287 wanted python 3.10 / torch 2.7.1; 1a1837f wants python 3.12
+# (requires-python = ">=3.12,<3.13") / torch 2.9.0+cu128 / torchcodec 0.8.0. Read them off
+# pyproject.toml at ${GR00T_COMMIT} rather than from this comment, and note that the smoke test
+# below prints what was actually built.
 #
 # WHY A PINNED SHA WITH NO DEFAULT. PR-07 §8 items 5 and 6 exist because "the recipe" is not a
 # thing you can cite — a branch name moves. The same argument applies to the trainer tree itself,
@@ -56,8 +62,36 @@ module load anaconda3/python3.12
 
 VENDOR=${PROJ}/wam/third_party/isaac-gr00t
 VENV=${PROJ}/virt_envs/t39
-PATCH=${PROJ}/wam/third_party/patches/isaac-gr00t-pyav-fallback.patch
 PROV=${VENDOR}/PROVENANCE.json
+
+# THE PATCH IS SELECTED BY COMMIT, AND AN UNREGISTERED COMMIT IS FATAL. The PyAV fallback is a
+# context diff against ONE base and does not travel: the e5749287 patch is REJECTED at 1a1837f
+# (hunk #2), because upstream inserted a `_decoder_import_error()` helper into the exact function
+# the patch hooks. Hardcoding one path meant that changing GR00T_COMMIT produced a rejected patch
+# — survivable here only because `set -e` is on and the smoke test interrogates the decoder — and
+# the operator would have read a build failure rather than "the patch is for a different commit".
+# Refusing an unknown commit outright is cheaper than either.
+PATCHES=${PROJ}/wam/third_party/patches
+PATCH=""
+case "${GR00T_COMMIT}" in
+  e5749287*) PATCH=${PATCHES}/isaac-gr00t-pyav-fallback.patch ;;
+  1a1837f*)  PATCH=${PATCHES}/isaac-gr00t-pyav-fallback-1a1837f.patch ;;
+  *)
+    # T39_SKIP_PATCH is honoured HERE and not only further down: rejecting the commit before the
+    # switch is consulted would make the advice in this very message unusable.
+    if [[ "${T39_SKIP_PATCH:-0}" == "1" ]]; then
+      echo "=== no patch registered for ${GR00T_COMMIT}, and T39_SKIP_PATCH=1 — continuing unpatched"
+    else
+      echo "FATAL: no PyAV fallback patch is registered for GR00T_COMMIT=${GR00T_COMMIT}."
+      echo "       Discoverer+ ships no FFmpeg, so upstream's torchcodec-only decoder cannot load"
+      echo "       and every dataloader worker dies. Re-derive the fallback against this commit and"
+      echo "       add it to ${PATCHES} plus the case above — do NOT edit an existing patch file,"
+      echo "       they are the provenance record for the runs built on them (docs/handoff.md §3)."
+      echo "       To vendor upstream unpatched on purpose, set T39_SKIP_PATCH=1 instead."
+      exit 1
+    fi
+    ;;
+esac
 UPSTREAM=https://github.com/NVIDIA/Isaac-GR00T.git
 
 # Compute nodes have outbound network; the login node does not. If this is running anywhere
@@ -101,17 +135,19 @@ echo "=== vendored at ${CLONED_SHA}"
 # nothing else — no model, no trainer, no loss, no hyperparameter. It is a recorded exception to
 # §3, not a loophole, and the patch file carries the full argument. It is applied here so the
 # vendored tree is provably "upstream@sha + this exact patch" rather than "a fork someone packed".
-if [[ ! -f "${PATCH}" ]]; then
-  echo "FATAL: ${PATCH} missing — run cluster/discoverer/sync.sh first."
-  exit 1
-fi
-PATCH_SHA=$(sha256sum "${PATCH}" | cut -d' ' -f1)
 if [[ "${T39_SKIP_PATCH:-0}" == "1" ]]; then
   # The cleaner answer to the FFmpeg problem, if it ever works: leave upstream untouched and make
   # torchcodec load. Kept as a switch so that experiment is one variable, not a re-edit.
+  # Checked BEFORE the existence test: the commit switch above leaves PATCH empty when skipping,
+  # and `! -f ""` would otherwise report a missing file that was never meant to be read.
   echo "=== T39_SKIP_PATCH=1 — vendoring upstream UNPATCHED; torchcodec must load on its own"
   PATCH_SHA="skipped"
 else
+  if [[ ! -f "${PATCH}" ]]; then
+    echo "FATAL: ${PATCH} missing — run cluster/discoverer/sync.sh first."
+    exit 1
+  fi
+  PATCH_SHA=$(sha256sum "${PATCH}" | cut -d' ' -f1)
   echo "=== applying ${PATCH} (sha256 ${PATCH_SHA})"
   ( cd "${VENDOR}" && patch -p1 --forward < "${PATCH}" )
 fi
@@ -139,8 +175,15 @@ echo "=== uv $(uv --version)"
 # torchcodec-only, so the patch's fallback has no package to import unless we add it back. It is
 # installed separately, and named in the provenance, so it is visible as OUR addition rather than
 # hiding inside the lock.
+#
+# --python IS NOT OPTIONAL. UV_PROJECT_ENVIRONMENT is honoured by `uv sync` and `uv run` and NOT by
+# `uv pip`, which resolves a target the old way: $VIRTUAL_ENV, else a .venv in the working
+# directory. The vendored tree has neither, so the first attempt at this build (job 187712,
+# 2026-08-15) installed all 90-odd locked packages successfully and then died on the last line with
+# "No virtual environment found; run `uv venv`" — four minutes of work discarded at the finish.
+# Naming the interpreter explicitly is what makes this install land in the env `uv sync` just built.
 if [[ "${T39_SKIP_PATCH:-0}" != "1" ]]; then
-  ( cd "${VENDOR}" && uv pip install av )
+  ( cd "${VENDOR}" && uv pip install --python "${VENV}/bin/python" av )
 fi
 
 # -- prove it, before anything downstream trusts it ----------------------------------------------
@@ -184,9 +227,14 @@ echo "=== NOTE: cuda_available=false is expected here; this is a CPU-only job."
 # -- provenance ----------------------------------------------------------------------------------
 # AC-04: every rollout traceable to checkpoint + dataset snapshot + config hash. The trainer tree
 # is part of that config, and until now it was a tarball nobody could name.
-"${VENV}/bin/python" - "$PROV" "$CLONED_SHA" "$PATCH_SHA" "$VENDOR" "$VENV" <<'EOF'
-import hashlib, json, subprocess, sys
-prov_path, sha, patch_sha, vendor, venv = sys.argv[1:6]
+# PATCH is passed in rather than spelled again: it used to be the literal string
+# "third_party/patches/isaac-gr00t-pyav-fallback.patch" here, which stopped being true the moment
+# the commit switch above gained a second patch. Build 187797 recorded the e5749287 FILENAME beside
+# the 1a1837f HASH — the hash was right, so the record was merely self-contradictory rather than
+# wrong, and a later reader reconciling the two would have had to guess which half to believe.
+"${VENV}/bin/python" - "$PROV" "$CLONED_SHA" "$PATCH_SHA" "$VENDOR" "$VENV" "${PATCH:-skipped}" <<'EOF'
+import hashlib, json, os, subprocess, sys
+prov_path, sha, patch_sha, vendor, venv, patch_path = sys.argv[1:7]
 
 def digest(p):
     h = hashlib.sha256()
@@ -195,12 +243,21 @@ def digest(p):
             h.update(chunk)
     return h.hexdigest()
 
-freeze = subprocess.run([f"{venv}/bin/python", "-m", "pip", "freeze"],
+# `uv pip freeze --python`, NOT `python -m pip freeze`. A uv-created venv ships no pip at all, so
+# the old call wrote nothing to stdout, capture_output swallowed the ModuleNotFoundError, and the
+# recorded pip_freeze_sha256 was e3b0c442… — the SHA-256 of the empty string. That is worse than
+# omitting the field: it reads as a dependency record and is the same constant for every build.
+freeze = subprocess.run(["uv", "pip", "freeze", "--python", f"{venv}/bin/python"],
                         capture_output=True, text=True).stdout
+if not freeze.strip():
+    raise SystemExit(
+        "FATAL: `uv pip freeze` produced nothing for {}. AC-04 asks every run to be traceable to "
+        "its config, and an empty freeze hashed anyway is a record of nothing.".format(venv)
+    )
 json.dump({
     "upstream": "https://github.com/NVIDIA/Isaac-GR00T.git",
     "commit": sha,
-    "patch": "third_party/patches/isaac-gr00t-pyav-fallback.patch",
+    "patch": os.path.basename(patch_path),
     "patch_sha256": patch_sha,
     "uv_lock_sha256": digest(f"{vendor}/uv.lock"),
     "pyproject_sha256": digest(f"{vendor}/pyproject.toml"),

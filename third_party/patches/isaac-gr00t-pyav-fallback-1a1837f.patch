@@ -1,0 +1,160 @@
+From: WAM / T-39 (PR-07 §8 item 4)
+Subject: [PATCH] video_utils: fall back to PyAV when torchcodec cannot load (1a1837f base)
+
+WHAT THIS IS. The 1a1837f re-derivation of isaac-gr00t-pyav-fallback.patch. That
+patch was derived against e5749287 (2026-06-18) and DOES NOT APPLY to
+1a1837f20538b7d7e21f977a11a5aee14f99803c ("GR00T N1.7 General Release",
+2026-07-06): hunk #2 is rejected, because upstream inserted a
+`_decoder_import_error()` helper between `_DEFAULT_DECODER_KWARGS` and
+`_get_video_decoder_cls()` and changed the raise it hooks.
+
+Both patch files are kept. Rules are versioned, never edited in place
+(docs/handoff.md §3), and the e5749287 patch is the provenance record for the
+already-trained runs/apple_pnp_h200_frozen tree. This one is not a correction of
+it; it is the same exception re-derived onto a different base.
+
+WHY IT IS STILL NEEDED AT 1a1837f. Upstream's 22 new lines in this file are a
+better DIAGNOSTIC, not a fallback -- `_get_video_decoder_cls` still raises. The
+FFmpeg-mismatch hint it adds names exactly our situation and offers no remedy
+that exists on Discoverer+ (no module, no system libavutil, no conda). So the
+decoder still cannot load and every dataloader worker still dies.
+
+WHAT CHANGED FROM THE e5749287 PATCH. The shim class is carried over verbatim.
+Only the hook differs: upstream's improved `_decoder_import_error(exc)` is
+PRESERVED and re-raised when PyAV is also missing, rather than being reverted to
+the older `ImportError(_TORCHCODEC_INSTALL_HINT)`. We add a fallback; we do not
+take upstream's better error message away.
+
+SCOPE. One file. No model, no trainer, no loss, no hyperparameter. Still a
+recorded exception to PR-07 §3, on the same argument as its predecessor.
+
+NOT YET VERIFIED ON THE CLUSTER. Applies cleanly and compiles locally; the venv
+build and smoke test in 72_build_t39_env.sbatch have not been run against it.
+--- a/gr00t/utils/video_utils.py
++++ b/gr00t/utils/video_utils.py
+@@ -17,6 +17,7 @@
+ from typing import List, Optional, Tuple
+ 
+ import numpy as np
++import torch
+ 
+ 
+ _TORCHCODEC_INSTALL_HINT = (
+@@ -53,11 +54,116 @@
+     return ImportError(_TORCHCODEC_FFMPEG_HINT.format(error=exc))
+ 
+ 
++# ---------------------------------------------------------------------------
++# dz-226 (native Windows) fallback decoder.
++# torchcodec has no Windows wheel that matches the torch 2.7.1 build this env is
++# pinned to (its win_amd64 wheels start at 0.7.0, which require torch >= 2.8).
++# Upgrading torch under the whole GR00T stack just for a video decoder is the
++# wrong trade, so we fall back to a self-contained PyAV decoder that mimics the
++# exact slice of the torchcodec VideoDecoder API that this module uses:
++#   len(decoder), decoder.metadata.average_fps,
++#   decoder.get_frames_at(indices=...)  -> .data (NHWC/NCHW uint8), .pts_seconds
++#   decoder.get_frames_played_at(seconds=...) -> .data
++# On Linux the torchcodec import above succeeds and this shim is never used.
++# ---------------------------------------------------------------------------
++class _FrameBatch:
++    def __init__(self, data: "torch.Tensor", pts_seconds: "torch.Tensor"):
++        self.data = data  # torch.Tensor, NHWC (or NCHW) uint8
++        self.pts_seconds = pts_seconds  # torch.Tensor, float64
++
++
++class _PyAVVideoDecoder:
++    """Minimal torchcodec-VideoDecoder-compatible shim backed by PyAV."""
++
++    class _Meta:
++        def __init__(self, average_fps: float):
++            self.average_fps = average_fps
++
++    def __init__(
++        self,
++        video_path: str,
++        device: str = "cpu",
++        dimension_order: str = "NHWC",
++        num_ffmpeg_threads: int = 0,
++        **_ignored,
++    ):
++        import av
++
++        self._path = str(video_path)
++        self._dimension_order = dimension_order
++        with av.open(self._path) as container:
++            stream = container.streams.video[0]
++            avg = stream.average_rate or stream.guessed_rate
++            self._fps = float(avg) if avg else 30.0
++            n = stream.frames
++            if not n:  # some containers do not store an exact frame count
++                if stream.duration and stream.time_base:
++                    n = int(round(float(stream.duration * stream.time_base) * self._fps))
++                else:
++                    n = 0
++            self._num_frames = int(n)
++        self.metadata = self._Meta(self._fps)
++
++    def __len__(self) -> int:
++        return self._num_frames
++
++    def _collect(self, wanted) -> "_FrameBatch":
++        import av
++
++        wanted_list = [int(i) for i in wanted]
++        wanted_set = set(wanted_list)
++        max_i = max(wanted_set) if wanted_set else -1
++        frames: dict = {}
++        pts: dict = {}
++        # Single forward decode pass up to the highest requested index; the callers
++        # request either a contiguous window or the full episode, so this is O(max_i).
++        with av.open(self._path) as container:
++            stream = container.streams.video[0]
++            stream.thread_type = "AUTO"
++            for i, frame in enumerate(container.decode(stream)):
++                if i in wanted_set:
++                    frames[i] = frame.to_ndarray(format="rgb24")  # HWC uint8, RGB
++                    if frame.pts is not None and stream.time_base is not None:
++                        pts[i] = float(frame.pts * stream.time_base)
++                    else:
++                        pts[i] = i / self._fps
++                if i >= max_i:
++                    break
++        if not frames:
++            raise RuntimeError(f"PyAV decoded no frames from {self._path}")
++        # Clamp any index past the end to the last decoded frame (torchcodec clamps too).
++        last = max(frames)
++        for i in wanted_list:
++            if i not in frames:
++                frames[i] = frames[last]
++                pts[i] = pts[last]
++        arr = np.stack([frames[i] for i in wanted_list], axis=0)  # NHWC uint8
++        data = torch.from_numpy(np.ascontiguousarray(arr))
++        if self._dimension_order == "NCHW":
++            data = data.permute(0, 3, 1, 2).contiguous()
++        pts_arr = np.array([pts[i] for i in wanted_list], dtype=np.float64)
++        return _FrameBatch(data, torch.from_numpy(pts_arr))
++
++    def get_frames_at(self, indices) -> "_FrameBatch":
++        return self._collect(indices)
++
++    def get_frames_played_at(self, seconds) -> "_FrameBatch":
++        idxs = [int(round(float(s) * self._fps)) for s in np.asarray(seconds).tolist()]
++        last = max(self._num_frames - 1, 0)
++        idxs = [min(max(i, 0), last) for i in idxs]
++        return self._collect(idxs)
+ def _get_video_decoder_cls():
+     try:
+         from torchcodec.decoders import VideoDecoder
+     except (ImportError, OSError, RuntimeError) as exc:
+-        raise _decoder_import_error(exc) from exc
++        # Discoverer+ ships no FFmpeg, so torchcodec cannot load and every
++        # dataloader worker dies. Fall back to PyAV; upstream's improved
++        # diagnostic is preserved for the case where PyAV is missing too.
++        try:
++            import av  # noqa: F401
++        except ImportError:
++            raise _decoder_import_error(exc) from exc
++        return _PyAVVideoDecoder
+     return VideoDecoder
+ 
+ 
