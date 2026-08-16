@@ -238,6 +238,40 @@ a pinned `--gripper-affine` that clips a single sample.
 
 ---
 
+## What every number below is bounded by (T-39 / PR-07, measured 2026-08-16)
+
+**These numbers are statements about predicting what the robot *did*. They are not statements
+about predicting what it was *told to do*, and until 2026-08-16 nobody had measured the
+difference.** Every label in this document comes from `convert_lerobot_g1.py`'s relabeling of
+**executed state** into bounded joint deltas. T-39 pushed the same corpus's native **commanded
+`action` column** through that same adapter and scored it here, as a ceiling:
+
+| arm | `skill_vs_repeat_pct` (**L1**) | level |
+|---|---|---|
+| `oracle_state` — future executed states | **+100.00** (`mse` exactly `0.0`) | L4, 100/100 |
+| `oracle_action` — the corpus's own `action` column | **−359.41** | none — below L0 |
+
+`oracle_state` passing bit-exactly is what makes the second row a measurement rather than a
+suspected bug: the adapter, joint ordering, delta anchoring and gripper synergy are provably
+correct. So **the corpus's own ground-truth commands score below L0 on this ladder**, and no policy
+trained to predict them can clear L1 as scored here. T-39 is **VOID (labels)** — the outcome PR-07
+§4 pre-registered as a first-class finding rather than a setback.
+
+Two rungs locate the disagreement: `horizon_ratio 0.0044` puts essentially all of it in the
+chunk's **first step**, and `smoothness_ratio 8.52` makes the command 8.5× jerkier than the
+executed trajectory. The gripper section above records the same split from the other side — our
+relabeled gripper channel is degenerate (0.00 debounced transitions/episode) while the raw
+commanded `action.left_hand.max_joint[0]` carries 2.04 per episode and a complete cycle in 99.8 %
+of them.
+
+**What this does and does not do.** It does not withdraw or exonerate any number below; the ladder
+is internally consistent and every re-score reproduces. It does mean a result here cannot be read
+as evidence about command-space policies without the label-space question being reopened first.
+Full record, receipts and the three defects found by running it:
+[`preregistration/PR-07-RESULT.md`](preregistration/PR-07-RESULT.md).
+
+---
+
 ## First results (2026-07-29)
 
 Both existing real-data runs, identical 40-episode holdout:

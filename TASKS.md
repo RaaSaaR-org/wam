@@ -9,7 +9,7 @@ that used to live here moved into those files unchanged. Conventions and the `mc
 knowing: `.mc/README.md`.
 
 ```bash
-mc task next     # -> T-39, the one actionable critical task
+mc task next     # -> the next actionable critical task (T-39 reported VOID 2026-08-16)
 mc task board    # backlog / todo / done
 mc show T-16     # the whole T-16 record
 ```
@@ -20,7 +20,10 @@ mc show T-16     # the whole T-16 record
 > robot) and **[`subprojects/data-factory/`](subprojects/data-factory/TASKS.md)** (`D-NN` — more and
 > better training data from real episodes). Overview:
 > [`subprojects/README.md`](subprojects/README.md). `T-040`/`T-041`/`T-042` stay here and are cited
-> from there by ID. **No sub-project starts a training run before T-39 reports.**
+> from there by ID. **No sub-project starts a training run before T-39 reports.** It reported **VOID (labels)** on
+> 2026-08-16 — the corpus's own action column scores below L0 under our scorer
+> ([`PR-07-RESULT.md`](docs/preregistration/PR-07-RESULT.md)) — so the gate's own premise came back
+> negative rather than clear. Releasing it is a decision, not a formality.
 
 > **Build status (2026-08-15):** M0–M4 code-complete and tested — **1 638 passed, 32 skipped,
 > 6 failed, 10 errors, 19 min 49 s** (`.venv/bin/python -m pytest -q`). **Every one of the 16
@@ -104,7 +107,7 @@ mc show T-16     # the whole T-16 record
 
 - [x] **[T-38](.mc/tasks/done/T-38-wan-vs-cosmos-as-one-experiment-at-three-corpus-sizes.md)** Wan vs. Cosmos as one experiment, at three corpus sizes
 
-- [ ] **[T-39](.mc/tasks/todo/T-39-the-positive-control-this-project-has-never-had.md)** The positive control this project has never had — ***next.*** *Not submittable yet: PR-07 §8 items 4–6*
+- [x] **[T-39](.mc/tasks/done/T-39-the-positive-control-this-project-has-never-had.md)** The positive control this project has never had — **reported 2026-08-16: VOID (labels).** `oracle_state` +100.00 % (bit-exact), `oracle_action` **−359.41 %** on L1, so no policy trained on this corpus's action column can clear our bar. [`PR-07-RESULT.md`](docs/preregistration/PR-07-RESULT.md)
 
 **Exit:** ablation machinery ready; first real AC-07 verdict recorded — at tiny scale the video branch hurts, so "video helps" now rests on the pretrained prior (T-16 LoRA). T-26 tested the one confound that could have moved that premise and did not move it, so the burden on T-16 is confirmed rather than assumed. T-27 then re-scored both real runs against trivial baselines and raised the bar T-16 must clear: beating the action-only baseline is not enough, because that baseline itself loses to repeat-last-action. T-28 then closed the gap that would have made a finished T-16 unreadable: the trainer does no eval, so `eval_t16.py` is the step that turns a checkpoint into a scorable `predictions.jsonl` — and it refuses to score a holdout it cannot prove was excluded. Neither GPU nor code is the blocker any more — Discoverer+ is scripted (`cluster/discoverer/`) and T-16a is done.
 
