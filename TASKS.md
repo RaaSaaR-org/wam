@@ -130,6 +130,23 @@ mc show T-16     # the whole T-16 record
   different rules — same `d* = −2`, same ~29–30 pp gain, same `d = −1` optimum on L2, same failure
   to clear L1. The cross-comparison is a table in `PR-10-RESULT-T-44.md`.
 
+- [ ] **[T-045](.mc/tasks/todo/T-045-is-the-residual-the-arm-s-low-pass-filter-or-is-it-content.md)**
+  Is the residual the arm's low-pass filter, or is it content? — **the sentence both PR-10 runs end
+  on.** A position-controlled arm *is* a low-pass filter, so if the surviving 3–5× jerk is content
+  the joint simply cannot follow, filtering the commanded column before it becomes a chunk should
+  recover most of what the anchor left. If it does not, no post-processing of these labels reaches
+  it and **PR-04's collection spec is ahead of processing this data better.** Pre-registered
+  **before anything is filtered** as
+  [`PR-11`](docs/preregistration/PR-11-command-lowpass-sweep.md), rule `T45_RULE_V1`; zero-phase
+  Hann-windowed sinc, numpy only (adding `scipy` to the WAM venv would move the dependency set every
+  benchmark number was produced under), `d = −2` taken from T-44 and held fixed so cutoff and anchor
+  are not searched together. **The trap it is built around:** a low-pass filter shrinks magnitude,
+  and shrinkage improves an MSE ratio whether or not the removed part was noise — so `F` also
+  requires `skill_vs_zero_pct` to improve, and a cell that clears L1 without it is verdict `S`.
+  **Zero GPU-hours.** ✅ **PR-11 was claimed across live sessions before it was written** and
+  confirmed unclaimed by the author of `PR-10-anchor-delay-sweep.md` — the fix for the PR-10
+  duplication above, which remains the user's to resolve.
+
 **Exit:** ablation machinery ready; first real AC-07 verdict recorded — at tiny scale the video branch hurts, so "video helps" now rests on the pretrained prior (T-16 LoRA). T-26 tested the one confound that could have moved that premise and did not move it, so the burden on T-16 is confirmed rather than assumed. T-27 then re-scored both real runs against trivial baselines and raised the bar T-16 must clear: beating the action-only baseline is not enough, because that baseline itself loses to repeat-last-action. T-28 then closed the gap that would have made a finished T-16 unreadable: the trainer does no eval, so `eval_t16.py` is the step that turns a checkpoint into a scorable `predictions.jsonl` — and it refuses to score a holdout it cannot prove was excluded. Neither GPU nor code is the blocker any more — Discoverer+ is scripted (`cluster/discoverer/`) and T-16a is done.
 
 **T-16 has now run (2026-07-30), the confound found afterwards has been cleared and priced
