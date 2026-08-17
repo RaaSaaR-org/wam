@@ -9,7 +9,7 @@ that used to live here moved into those files unchanged. Conventions and the `mc
 knowing: `.mc/README.md`.
 
 ```bash
-mc task next     # -> the next actionable critical task (T-39 reported VOID 2026-08-16)
+mc task next     # -> the next actionable critical task (T-39 re-reported N 2026-08-17)
 mc task board    # backlog / todo / done
 mc show T-16     # the whole T-16 record
 ```
@@ -24,6 +24,15 @@ mc show T-16     # the whole T-16 record
 > 2026-08-16 — the corpus's own action column scores below L0 under our scorer
 > ([`PR-07-RESULT.md`](docs/preregistration/PR-07-RESULT.md)) — so the gate's own premise came back
 > negative rather than clear. Releasing it is a decision, not a formality.
+> **RE-REPORTED 2026-08-17 under `T39_RULE_V2`: `VERDICT N`**
+> ([`PR-07-V2-RESULT.md`](docs/preregistration/PR-07-V2-RESULT.md), job 188408). With step 0 anchored
+> on the previous command, G0 **passes** — `oracle_action` **+68.10 %** L1 / **+75.40 %** L2, L4 — so
+> the VOID premise above is superseded by measurement, not by argument. The policy arm then ran for
+> the first time and scored **−239.69 %** on the holdout and **−186.73 %** on episodes it *trained
+> on*: it never fit. **N is a verdict, so `T40_RULE_V3` §5.3's "T-39 has reported" is satisfied and
+> PR-08 §8 item 7 is closed — items 2, 3 and 4 are still open, so T-040 is not open.** N licenses
+> "the corpus is the finding, the next move is the *kind* of data", and forbids reading it as
+> refuting any WAM design. **It still does not license training: that remains the owner's call.**
 
 > **Build status (2026-08-15):** M0–M4 code-complete and tested — **1 638 passed, 32 skipped,
 > 6 failed, 10 errors, 19 min 49 s** (`.venv/bin/python -m pytest -q`). **Every one of the 16
@@ -136,7 +145,7 @@ mc show T-16     # the whole T-16 record
 
 - [x] **[T-38](.mc/tasks/done/T-38-wan-vs-cosmos-as-one-experiment-at-three-corpus-sizes.md)** Wan vs. Cosmos as one experiment, at three corpus sizes
 
-- [x] **[T-39](.mc/tasks/done/T-39-the-positive-control-this-project-has-never-had.md)** The positive control this project has never had — **reported 2026-08-16: VOID (labels).** `oracle_state` +100.00 % (bit-exact), `oracle_action` **−359.41 %** on L1, so no policy trained on this corpus's action column can clear our bar. [`PR-07-RESULT.md`](docs/preregistration/PR-07-RESULT.md)
+- [x] **[T-39](.mc/tasks/done/T-39-the-positive-control-this-project-has-never-had.md)** The positive control this project has never had — **re-reported 2026-08-17 under `T39_RULE_V2`: `VERDICT N`.** G0 passes on the repaired anchoring — `oracle_state` +100.00 %, `oracle_action` **+68.10 %** L1 / +75.40 % L2 (L4) — and the policy scores **−239.69 %** on the holdout and **−186.73 %** on episodes it trained on. The corpus/bar is the finding; more of *this* data is not the story. [`PR-07-V2-RESULT.md`](docs/preregistration/PR-07-V2-RESULT.md) · superseded: [`PR-07-RESULT.md`](docs/preregistration/PR-07-RESULT.md) (VOID, 2026-08-16, `−359.41 %` — the defective instrument)
 
 - [x] **[T-044](.mc/tasks/done/T-044-is-the-label-command-mismatch-a-timing-convention.md)**
   Is the label/command mismatch a timing convention, or is it the space? — **reported 2026-08-16:
