@@ -311,3 +311,61 @@ def test_98_warns_that_the_two_env_files_collide_on_framework() -> None:
     assert "DO NOT source this together with cosmos_env.sh" in build, (
         "the written env file must carry the collision warning, not only 98's header"
     )
+
+
+def test_98_pins_the_interpreter_rather_than_obeying_dot_python_version() -> None:
+    """The checkout's own ``.python-version`` cannot install the checkout's own cu128 extra.
+
+    Measured, job 189024, which failed in 12 s: upstream commit ce13887 ("Add Python 3.13 support
+    (cu130+torch29 via v1.5.0 index)") set ``.python-version`` to 3.13, but the pinned sha still
+    resolves cu128 from the **v1.2.0** index, and that index publishes flash-attn wheels for cp310
+    and cp312 only. uv obeys ``.python-version`` unless told otherwise, so the default path is the
+    broken one and the failure is a wheel-resolution error with no mention of Python at all.
+    """
+    build = _text(_BUILD)
+    match = re.search(r"TRANSFER_PYTHON=\$\{TRANSFER_PYTHON:-([^}]*)\}", build)
+    assert match, (
+        "98 no longer pins TRANSFER_PYTHON. Without it uv takes the checkout's .python-version "
+        "(3.13 at the pinned sha), for which the cu128 extra has no wheels."
+    )
+    pinned = match.group(1).strip()
+    assert pinned in {"3.10", "3.12"}, (
+        f"TRANSFER_PYTHON={pinned!r} is not an ABI tag the cu128 v1.2.0 index carries "
+        "(it publishes cp310 and cp312 only)"
+    )
+    assert re.search(r"uv sync --python \"\$\{TRANSFER_PYTHON\}\"", build), (
+        "TRANSFER_PYTHON is set but never reaches `uv sync`, so .python-version still wins"
+    )
+
+
+def test_98_does_not_need_tomllib_to_print_its_own_diagnostic() -> None:
+    """The compute nodes run python3 3.9; tomllib arrived in 3.11.
+
+    This block exists to tell the operator which extras are legal when TRANSFER_UV_ARGS has to be
+    set by hand. On the one run where that mattered it raised ModuleNotFoundError and printed
+    nothing, so the job that needed the hint is exactly the job that did not get it.
+    """
+    build = _text(_BUILD)
+    # Scope this to the heredoc body rather than the whole file. The word survives in the comment
+    # that explains the absence -- that comment is the point -- so a file-wide search would either
+    # fail on the explanation or, if written as a line pattern, miss `import sys, tomllib`. The
+    # body is what actually runs on a 3.9 interpreter, so the body is what gets asserted about.
+    lines = build.splitlines()
+    starts = [i for i, line in enumerate(lines) if "<<'EOFDIAG'" in line]
+    assert len(starts) == 1, "98's pyproject diagnostic heredoc is no longer named EOFDIAG"
+    ends = [i for i, line in enumerate(lines) if line.strip() == "EOFDIAG" and i > starts[0]]
+    assert ends, "98's EOFDIAG heredoc is never terminated"
+    body = "\n".join(lines[starts[0] + 1 : ends[0]])
+    assert "tomllib" not in body, (
+        "98's diagnostic uses tomllib, which does not exist on the 3.9 python3 these nodes ship"
+    )
+    assert "tomli" not in body, "98 depends on a third-party toml parser for a diagnostic"
+
+
+def test_98_explains_an_abi_failure_instead_of_inviting_the_wrong_fix() -> None:
+    """The obvious 'fix' for a --python failure is to drop --python, which restores the bug."""
+    build = _text(_BUILD)
+    assert "ABI tag" in build, "98's sync failure path never mentions the ABI mismatch"
+    assert "Do NOT 'fix' this by dropping --python" in build, (
+        "98 does not warn against the fix that reinstates .python-version=3.13"
+    )

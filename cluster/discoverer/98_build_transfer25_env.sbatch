@@ -74,6 +74,28 @@ TRANSFER_FRAMEWORK_SHA=${TRANSFER_FRAMEWORK_SHA:-2ff49d0717af02057ae79bc75c00fbf
 TRANSFER_ROOT=${TRANSFER_ROOT:-${PROJ}/third_party/cosmos-transfer2.5}
 # --extra cu128, not empty: see the header. A plain sync installs no torch on this project.
 TRANSFER_UV_ARGS=${TRANSFER_UV_ARGS:---extra cu128}
+# 3.10, NOT the checkout's own .python-version. THE TWO DISAGREE AT THIS SHA, and uv obeys the file.
+#
+# Upstream ships `.python-version` = 3.13, set by ce13887 (2026-05-01) whose subject says exactly
+# what it was for: "Add Python 3.13 support (cu130+torch29 via **v1.5.0** index)". Our pinned sha
+# 2ff49d0 is downstream of that bump, but its cu128 extra still resolves from the **v1.2.0** index,
+# and v1.2.0 publishes flash-attn wheels for cp310 and cp312 ONLY. So on this sha the declared
+# interpreter cannot install the CUDA-12.8 dependency set at all:
+#
+#     error: Distribution `flash-attn==2.7.3+cu128.torch27` can't be installed because it doesn't
+#     have a source distribution or wheel for the current platform
+#     hint: You're using CPython 3.13 (`cp313`), but `flash-attn` only has wheels with the
+#     following Python ABI tag: `cp310`
+#
+# (Observed, job 189024, failed in 12 s.) 3.10 is what upstream itself carried from its initial
+# commit until that bump, i.e. the interpreter the torch27 set was actually tested on, and it is the
+# one ABI tag present on BOTH the cu128 and cu130 v1.2.0 indexes. 3.12 would also resolve; 3.10 is
+# the conservative half of that pair rather than the newer one.
+#
+# THIS IS COUPLED TO TRANSFER_UV_ARGS. If the extra ever moves to a v1.5.0 index, 3.13 becomes the
+# right answer and this becomes the wrong one -- which is why it is a named variable with the
+# reasoning attached, and not a bare flag buried in the sync line.
+TRANSFER_PYTHON=${TRANSFER_PYTHON:-3.10}
 
 echo "=== repo      ${TRANSFER_REPO_URL}"
 echo "=== pinned at ${TRANSFER_FRAMEWORK_SHA}"
@@ -125,26 +147,48 @@ echo "=== checkout is at ${GOT_SHA}"
 # What groups/extras this project actually offers, printed rather than guessed. If TRANSFER_UV_ARGS
 # has to be set on a later run, this output is where the legal values come from.
 echo "=== dependency groups/extras declared by the checkout:"
-python3 - "${TRANSFER_ROOT}/pyproject.toml" <<'PY' || echo "    (could not parse pyproject.toml — read it by hand before setting TRANSFER_UV_ARGS)"
-import sys, tomllib
+# No tomllib: the compute nodes run python3 3.9 (measured, job 189024), and tomllib arrived in
+# 3.11 -- so the parse this diagnostic used to do raised ModuleNotFoundError and printed nothing
+# on the one run where it was needed. It is a table-header scan now: dependency-free, correct for
+# the two flat tables it reads, and it cannot become the reason a job dies.
+python3 - "${TRANSFER_ROOT}/pyproject.toml" <<'EOFDIAG' || echo "    (could not read pyproject.toml — read it by hand before setting TRANSFER_UV_ARGS)"
+import sys
 from pathlib import Path
 p = Path(sys.argv[1])
 if not p.is_file():
     print("    (no pyproject.toml at the checkout root)")
     raise SystemExit(0)
-d = tomllib.loads(p.read_text())
-groups = list((d.get("dependency-groups") or {}).keys())
-extras = list(((d.get("project") or {}).get("optional-dependencies") or {}).keys())
-print("    groups:", ", ".join(groups) if groups else "(none)")
-print("    extras:", ", ".join(extras) if extras else "(none)")
-PY
+want = {"project.optional-dependencies": [], "dependency-groups": []}
+section = None
+for raw in p.read_text().splitlines():
+    line = raw.strip()
+    if line.startswith("[") and line.endswith("]"):
+        section = line[1:-1].strip()
+        continue
+    if section in want and "=" in line and not line.startswith("#"):
+        want[section].append(line.split("=", 1)[0].strip().strip('"'))
+print("    extras:", ", ".join(want["project.optional-dependencies"]) or "(none)")
+print("    groups:", ", ".join(want["dependency-groups"]) or "(none)")
+EOFDIAG
 
 # -- the install ----------------------------------------------------------------------------------
 cd "${TRANSFER_ROOT}"
-echo "=== uv sync ${TRANSFER_UV_ARGS}"
+echo "=== uv sync --python ${TRANSFER_PYTHON} ${TRANSFER_UV_ARGS}"
 # Unquoted on purpose: TRANSFER_UV_ARGS is a word list (e.g. "--extra cu128"), not one word.
 # shellcheck disable=SC2086
-uv sync ${TRANSFER_UV_ARGS}
+if ! uv sync --python "${TRANSFER_PYTHON}" ${TRANSFER_UV_ARGS}; then
+  echo
+  echo "FATAL: uv sync failed."
+  echo "  If the error names an ABI tag ('only has wheels with the following Python ABI tag'),"
+  echo "  the interpreter and the extra disagree: TRANSFER_PYTHON=${TRANSFER_PYTHON} against"
+  echo "  ${TRANSFER_UV_ARGS}. That pairing is not free -- each cuNNN extra resolves from a pinned"
+  echo "  cosmos-dependencies index, and each index publishes wheels for a fixed set of ABI tags."
+  echo "  The extras this checkout declares were printed above; the tags an index actually carries"
+  echo "  are listed at the index URL the failure names. Do NOT 'fix' this by dropping --python and"
+  echo "  letting the checkout's .python-version win: at this sha that file says 3.13 and the"
+  echo "  cu128 extra cannot be installed on 3.13 at all. See the TRANSFER_PYTHON comment above."
+  exit 1
+fi
 
 if [[ ! -x "${TRANSFER_ROOT}/.venv/bin/python" ]]; then
   echo "FATAL: uv sync finished but ${TRANSFER_ROOT}/.venv/bin/python does not exist."
