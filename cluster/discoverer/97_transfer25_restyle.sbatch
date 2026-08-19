@@ -5,11 +5,12 @@
 #   measure first, it is a GATE and not a warm-up (PR-08 §8 item 3). PR-08 §1 licenses "timing one
 #   episode on an H200" WITHOUT waiting for T-39, so the timing path asks for neither a T-39
 #   attestation nor a budget — the budget is what it MEASURES. See (a) and (c) below:
-#       TIMING=1 STYLE_SET=train CHUNK_INDEX=1 CHUNK_TOTAL=1 sbatch 97_transfer25_restyle.sbatch
+#       TIMING=1 STYLE_SET=train CHUNK_INDEX=1 CHUNK_TOTAL=1 CONTROL=depth:0.5,seg:0.5 \
+#         sbatch 97_transfer25_restyle.sbatch
 #   then one submission per chunk, at most 4 in flight (MaxJobsPU=4):
 #       PR08_T39_REPORTED="<verdict letter> ... <YYYY-MM-DD>" PR08_T39_ARTIFACT=<path> \
 #         PARTITION_CEILING_GPU_H=<whole partition> CEILING_GPU_H=<this style set's share> \
-#         GEOM_STEP_FRAMES=<registered step> STYLE_SET=train \
+#         GEOM_STEP_FRAMES=<registered step> STYLE_SET=train CONTROL=<key:weight,...> \
 #         CHUNK_INDEX=1 CHUNK_TOTAL=4 sbatch 97_transfer25_restyle.sbatch
 #
 #   THE TWO GPU-h NUMBERS, AND WHY THERE ARE TWO (changed 2026-08-15 — see (e) below).
@@ -288,6 +289,7 @@ if [[ "${TIMING:-0}" != "0" ]]; then TIMING_MODE=1; fi
 : "${STYLE_SET:?which half of the committed partition to generate: train | eval | identity. PR-08 §5 splits TRAIN_STYLES from EVAL_STYLES before the first clip so the eval domain cannot be chosen after seeing which restyles came out well; identity is arm C, the generator-fingerprint control.}"
 : "${CHUNK_INDEX:?1-based chunk number. Chunking is not optional under 4 h MaxWall (PR-08 §8 item 3).}"
 : "${CHUNK_TOTAL:?how many chunks this run is split into. At most 4 may be in flight (MaxJobsPU=4).}"
+: "${CONTROL:?which Transfer2.5 control blocks condition the restyle and at what weight, e.g. depth:0.5,seg:0.5. Required on BOTH paths and never defaulted, for the reason restyle_transfer25.py refuses to default it: the choice decides how much geometry survives, which is exactly what PR-08 §6 G0b measures, so picking it after looking at clips is the failure the committed style partition exists to prevent. It also decides the TIMING number — our manifest carries no depth or segmentation maps, so each control block Transfer2.5 has to ESTIMATE is GPU time the measurement must include.}"
 
 case "${STYLE_SET}" in
   train|eval|identity) ;;
@@ -296,6 +298,14 @@ esac
 [[ "${CHUNK_TOTAL}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: CHUNK_TOTAL=${CHUNK_TOTAL} is not a positive integer."; exit 1; }
 [[ "${CHUNK_INDEX}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: CHUNK_INDEX=${CHUNK_INDEX} is not a positive integer."; exit 1; }
 (( CHUNK_INDEX <= CHUNK_TOTAL )) || { echo "FATAL: CHUNK_INDEX=${CHUNK_INDEX} > CHUNK_TOTAL=${CHUNK_TOTAL}."; exit 1; }
+# Shape only. The KEYS are validated against upstream-s set by parse_controls() in the driver,
+# which is where that knowledge lives; this catches an empty or malformed spec here rather than
+# after Slurm has handed the job a GPU.
+[[ "${CONTROL}" =~ ^[a-z]+:[0-9]*[.]?[0-9]+(,[a-z]+:[0-9]*[.]?[0-9]+)*$ ]] || {
+  echo "FATAL: CONTROL=${CONTROL} is not a comma-separated list of key:weight pairs,"
+  echo "       e.g. depth:0.5,seg:0.5. The keys are checked by the driver against the"
+  echo "       upstream control set; this only checks the shape."
+  exit 1; }
 
 # -- the two GPU-h ceilings: required on GENERATION, EXEMPT on TIMING -----------------------------
 # See (c) and (e) in the header. TIMING=1 is the measurement the ceilings are DERIVED FROM, so
@@ -1056,14 +1066,15 @@ if (( TIMING_MODE )); then
       --work-list "${TIMING_LIST}" \
       --out "${TROOT}" \
       --resolution 640x480 \
+      --control "${CONTROL}" \
       --nproc 1
   TIMING_WALL=$((SECONDS - S))
   echo "=== timed episode: ${TIMING_WALL}s"
 
   python - "${TIMING_UNIT}" "${TIMING_WALL}" "${THROUGHPUT}" "${TRANSFER_MODEL_ID}" \
-           "${TRANSFER_MODEL_REVISION}" "${CEILING_GPU_H}" <<'PY'
+           "${TRANSFER_MODEL_REVISION}" "${CEILING_GPU_H}" "${CONTROL}" <<'PY'
 import json, sys
-unit, wall, out, model, rev, ceiling = sys.argv[1:7]
+unit, wall, out, model, rev, ceiling, control = sys.argv[1:8]
 u = json.loads(unit)
 wall = float(wall)
 # The ceiling is EXEMPT on this path (header (c)): PR-08 §8 item 3 says no budget line exists
@@ -1092,6 +1103,11 @@ report = {
     "gpu_hours_per_variant": round(gpu_h_per_variant, 2),
     "gpu_hours_per_variant_is_lower_bound_above_1_gpu": True,
     "generator": f"{model}@{rev}",
+    # The controls are part of the measurement, not context for it. The source manifest carries no
+    # depth or segmentation maps, so every control block named here is one Transfer2.5 ESTIMATED
+    # with its own model on this GPU -- real seconds, in this number. A projection built from a
+    # timing under one control spec and spent under another is not a projection of that run.
+    "control": control,
     "ceiling_gpu_hours_supplied_at_measurement_time": ceiling,
     "ceiling_gpu_hours_supplied_at_measurement_time_note": (
         "null is the expected value. PR-08 §8 item 3: no budget line exists until this "
@@ -1680,6 +1696,7 @@ PY
         --work-list "${MISSING}" \
         --out "${RAW}" \
         --resolution 640x480 \
+        --control "${CONTROL}" \
         --nproc "${NPROC}" &
     # The trap at the top of the file reads this. It was assigned "" there, so the handler knows
     # there is no driver to terminate before this line and knows there is one after it; there is no

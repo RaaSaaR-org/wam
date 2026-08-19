@@ -186,9 +186,16 @@ Three standing results, none of which this task may quietly step over:
       changes no action, so M1/M2/M3 are identical to the source by construction and the gate as
       written would pass vacuously. Restated as an *identity* check — it must reproduce the source
       within the script's `EXPECT_TOL`, and a deviation means the pipeline corrupted the labels.
-- [ ] The consumer contract with `emai/vla-training` is written down: LeRobot v3.0, 28-dim
+- [x] The consumer contract with `emai/vla-training` is written down: LeRobot v3.0, 28-dim
       arms+hands, right hand index-before-middle, and where the action labels come from.
-      → **open.** PR-08 §8 item 2 names the fields; the contract document itself is not written.
+      → `docs/contracts/vla-training-consumer.md`, written 2026-08-15. **This AC and PR-08 §8
+      item 2 both name the wrong corpus**, and the contract's §0 says so rather than quietly
+      complying: those three fields describe `unitreerobotics/G1_Dex3_*` (v3.0, 28-dim), while
+      PR-08 §3 restyles `nvidia/GR00T-N1.7-AppleToPlate`, which is **v2.1 and 43-dim in seven
+      groups** — measured from its own `meta/info.json`. The contract covers both corpora and §7
+      states what a superseding `T40_RULE_V2` would have to say; `T40_RULE_V1` is registered and
+      is not edited (`docs/handoff.md` §3). Its one open item, §3.2, is corpus B's intra-hand
+      order, which does not block PR-08.
 - [x] **One path chosen and justified** — Isaac (exact conditioning, sim frames) or real teleop
       (real frames, estimated conditioning). Under the real path, the depth/segmentation
       estimator's error is measured *before* generation, against Humanoid Everyday's ground-truth
@@ -207,6 +214,15 @@ Three standing results, none of which this task may quietly step over:
       commit and `99_stage_transfer25_weights.sbatch` stages the weights at a pinned revision.
       **The licence gate that blocked 99 was accepted by the account holder on 2026-08-19** — the
       probe against the pinned revision returns 200 where it returned 403 the day before.
+      A third input was missing and nothing had noticed: 97 reads `${SOURCE}/manifest.json` and its
+      own header said *"Nothing writes it today"*, so the timing run had no corpus to time.
+      `100_fetch_pr08_source.sbatch` + `scripts/build_pr08_source.py` write it, and the build was
+      exercised end to end on the workstation copy 2026-08-19 — **402 episodes, 171 625 frames,
+      640×480 av1, every episode's video length equal to its declared label length**, and the
+      resulting manifest drives `restyle_transfer25.py` to a clean run under `--backend null`.
+      A fourth blocker was found the same way and fixed: 97 passed the driver no `--control`, which
+      the driver requires with no default, so **both** the timing and generation invocations would
+      have died at argparse with an H200 already allocated.
 - [x] Generation is **chunked and resumable** under 4 h `MaxWall` / `MaxJobsPU=4`.
       → `cluster/discoverer/97_transfer25_restyle.sbatch` (2026-08-16). `CHUNK_INDEX`/`CHUNK_TOTAL`
       are required with no default, `--requeue` plus `--signal=B:USR1@300` hands the run five

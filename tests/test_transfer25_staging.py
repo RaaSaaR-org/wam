@@ -33,6 +33,7 @@ _JOBS = _REPO_ROOT / "cluster" / "discoverer"
 _BUILD = _JOBS / "98_build_transfer25_env.sbatch"
 _STAGE = _JOBS / "99_stage_transfer25_weights.sbatch"
 _RESTYLE = _JOBS / "97_transfer25_restyle.sbatch"
+_SOURCE = _JOBS / "100_fetch_pr08_source.sbatch"
 
 
 def _text(path: Path) -> str:
@@ -158,16 +159,20 @@ def test_a_403_names_the_human_action_and_offers_no_workaround() -> None:
 
 
 def test_staging_and_building_bill_no_gpu_hours() -> None:
-    """PR-08 §8 item 3: no budget line exists yet, so neither job may spend from it."""
-    for path in (_BUILD, _STAGE):
+    """PR-08 §8 item 3: no budget line exists yet, so none of these jobs may spend from it.
+
+    100 is in this list for the same reason as 98 and 99 and one more: it PRECEDES the throughput
+    measurement, so there is not even a number it could be checked against.
+    """
+    for path in (_BUILD, _STAGE, _SOURCE):
         text = _text(path)
         assert "--qos=2cpu-single-host" in text, f"{path.name} is not on the free QoS"
         assert "--gres=gpu" not in text, f"{path.name} requests a GPU"
 
 
 def test_neither_job_generates_anything() -> None:
-    """PR-08 §1 licenses building and timing, never generating. These two must stay on that side."""
-    for path in (_BUILD, _STAGE):
+    """PR-08 §1 licenses building and timing, never generating. These must stay on that side."""
+    for path in (_BUILD, _STAGE, _SOURCE):
         text = _text(path)
         assert "restyle_transfer25.py" not in text, f"{path.name} invokes the generation driver"
         assert "STYLE_SET" not in text, f"{path.name} reaches into the generation partition"
@@ -223,6 +228,80 @@ def test_98_reports_a_missing_torch_as_a_missing_extra_not_a_traceback() -> None
         "the missing-torch guard must come before torch.version.cuda is read, or the import "
         "error surfaces as a traceback instead of the message"
     )
+
+
+def test_100_pins_the_source_corpus_revision() -> None:
+    """The corpus 97 restyles has to be able to name the snapshot it came from.
+
+    Same rule as 91 and 99 state for weights, and it bites harder here: a result cites the corpus
+    it was measured on, and ``main`` is not a corpus.
+    """
+    source = _text(_SOURCE)
+    match = re.search(r"SOURCE_REVISION=\$\{SOURCE_REVISION:-([^}]*)\}", source)
+    assert match, "100 no longer sets a default SOURCE_REVISION"
+    assert re.fullmatch(r"[0-9a-f]{40}", match.group(1)), (
+        f"default revision {match.group(1)!r} is not a 40-hex commit sha"
+    )
+    case_block = source[source.index('case "${SOURCE_REVISION}"') :]
+    case_block = case_block[: case_block.index("esac")]
+    for pointer in ("main", "master", "HEAD", "latest"):
+        assert pointer in case_block, f"{pointer!r} is not refused as a source revision"
+
+
+def test_100_writes_the_path_97_reads_by_default() -> None:
+    """Two files naming the same tree by two different literals is a bug waiting for a rename."""
+    source = _text(_SOURCE)
+    restyle = _text(_RESTYLE)
+    match = re.search(r"SOURCE=\$\{SOURCE:-\$\{PROJ\}/([^}]*)\}", restyle)
+    assert match, "97 no longer defaults SOURCE under ${PROJ}"
+    assert match.group(1) in source, (
+        f"97 reads ${{PROJ}}/{match.group(1)} and 100 does not write it"
+    )
+
+
+def test_97_passes_control_to_every_driver_invocation() -> None:
+    """restyle_transfer25.py declares --control required with no default; 97 has to supply it.
+
+    The driver was written after 97 (14bf784 after 50ab5a4) and made the control spec mandatory, on
+    the grounds that the choice decides how much geometry survives and so cannot be picked after
+    looking at clips. 97 was not updated to match, so BOTH of its invocations -- the timing run and
+    the generation run -- ended at argparse, after Slurm had already handed out an H200. That is
+    the exact shape of failure 97's own header exists to prevent, which is why the guard belongs in
+    a test rather than in a comment.
+    """
+    restyle = _text(_RESTYLE)
+    driver = (_REPO_ROOT / "scripts" / "restyle_transfer25.py").read_text()
+
+    # Read the requirement off the driver rather than restating it: if --control ever gains a
+    # default, this test should stop demanding one instead of failing for the wrong reason.
+    idx = driver.index('"--control"')
+    assert "required=True" in driver[idx : idx + 200], (
+        "restyle_transfer25.py no longer requires --control; this test is now over-strict"
+    )
+
+    invocations = restyle.count('python "${RESTYLE_DRIVER}"')
+    assert invocations >= 2, f"expected the timing and generation invocations, found {invocations}"
+    passes = restyle.count('--control "${CONTROL}"')
+    assert passes == invocations, (
+        f"{invocations} driver invocations in 97 but only {passes} pass --control. The one that "
+        f"does not dies at argparse with a GPU already allocated."
+    )
+    assert ': "${CONTROL:?' in restyle, (
+        "CONTROL must be required with no default, like the driver's own flag -- a default here "
+        "would reintroduce exactly the silent choice the driver refuses to make"
+    )
+
+
+def test_the_timing_number_records_which_controls_it_measured() -> None:
+    """A throughput figure is only comparable to a run under the same conditioning.
+
+    The source manifest carries no depth or segmentation maps, so each control block is one map
+    Transfer2.5 estimates with its own model on the same GPU. Those are real seconds inside the
+    measurement, and a ceiling derived under one spec and spent under another is not a ceiling for
+    that run.
+    """
+    restyle = _text(_RESTYLE)
+    assert '"control": control' in restyle, "THROUGHPUT.json does not record the control spec"
 
 
 def test_98_warns_that_the_two_env_files_collide_on_framework() -> None:
