@@ -17,6 +17,11 @@
 # job's. So this file CHECKS the gate and refuses with instructions; it never tries to work around
 # one. If the check fails, the fix is a browser, not a flag:
 #
+# THE ACCOUNT HOLDER ACCEPTED IT ON 2026-08-19, and the same probe against the PINNED revision now
+# returns 200. The check below stays exactly as it was: gate state is a property of an account at a
+# moment, not of this file, and a token rotation or a licence revision puts the 403 back. A guard
+# deleted because it passed once is a guard that reports nothing the day it matters.
+#
 #     https://huggingface.co/nvidia/Cosmos-Transfer2.5-2B     <- accept, then re-run this job
 #
 # ================================================================================================
