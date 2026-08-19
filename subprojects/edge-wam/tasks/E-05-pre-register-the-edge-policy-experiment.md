@@ -29,8 +29,17 @@ seeing its output is not a gate.** PR-05's G2 is recorded VOID rather than patch
 returned VOID and the 60 clips stay unread. This sub-project gets the same treatment from the start,
 before it has any results to be tempted by.
 
-The pre-registration — `docs/preregistration/PR-10-edge-policy.md`, following PR-07's nine-section
+The pre-registration — `docs/preregistration/PR-15-edge-policy.md`, following PR-07's nine-section
 shape — must fix, in git, before any weights move:
+
+> **Renumbered 2026-08-19: this file reserved `PR-10`, and `PR-10` was already taken twice.**
+> `PR-10-anchor-delay-sweep.md` (`PR10_RULE_V1`) and `PR-10-label-anchoring-delay-sweep.md`
+> (`T44_RULE_V1`) were both registered on 2026-08-16 under that number, and that collision is
+> unresolved and the project owner's to settle — 163 references across 34 files, so neither can be
+> renamed by whoever notices second. This reservation is the **third** claimant and the only one
+> that costs nothing to move: the file was never written, so no citation breaks. `PR-15` was
+> confirmed unused repo-wide and announced to both live peer sessions before being claimed, which is
+> the practice `PR-11` §1 records.
 
 - **The claim.** Something falsifiable, e.g. *a post-trained Cosmos3-Edge policy clears WAM-Bench L1
   (`skill_vs_repeat_pct > 0`) on the G1 apple-to-plate corpus at a control rate that fits FR-05's
@@ -47,7 +56,7 @@ shape — must fix, in git, before any weights move:
 
 ## Acceptance
 
-1. `docs/preregistration/PR-10-edge-policy.md` written and **committed before** E-06 starts.
+1. `docs/preregistration/PR-15-edge-policy.md` written and **committed before** E-06 starts.
 2. `E05_RULE_V1` in git as executable code, with tests, before any run.
 3. Every number in it traceable to a source: the corpus, the bench ladder, the borrowed floor.
 4. Reviewed against PR-07 §8's list of what a pre-registration must not leave open (no undefined

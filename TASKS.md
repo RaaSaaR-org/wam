@@ -266,6 +266,35 @@ mc show T-16     # the whole T-16 record
   decision remains the project owner's. **Still unanswered:** whether a policy can *learn* these
   labels — this scores oracles, and testing it is a training run.
 
+- [x] **[T-048](.mc/tasks/done/T-048-is-the-jerk-regulariser-the-cause-of-the-bland-chunk.md)**
+  Is the jerk regulariser the cause of the bland chunk? — **reported 2026-08-19: `S` (shrinkage).**
+  Pre-registered as
+  [`PR-14`](docs/preregistration/PR-14-smoothness-ablation.md), rule `T48_RULE_V1`, registered
+  2026-08-16 before the run produced a single step; result in
+  [`PR-14-RESULT.md`](docs/preregistration/PR-14-RESULT.md), commit `19f4eee`. **Zero Discoverer+
+  GPU-hours** — local RTX 5090, ~6 h.
+  `shape_moved` is a **conjunction, and it split**: `chunk_rms` **0.00226 → 0.00293** cleared its
+  1.25× threshold while `smoothness_ratio` **0.3198 → 0.3548** fell far short of its 2× one
+  (0.6396). **The chunks got bigger without getting jerkier**, so **the jerk regulariser is not a
+  material cause of the bland output** and L2 shrinkage / mean-seeking survives as the explanation.
+  Had the rule been written on `chunk_rms` alone it would have returned a positive for a model whose
+  smoothness is still **0.71 of spec 0.2.0's floor** — the conjunction is what earned the verdict.
+  **`S` licenses dropping the regulariser hypothesis, not adopting the mean-seeking one.**
+  `l1_cleared` **FALSE** at **−3.4288**, so no `L` verdict fires; `l1_material` is TRUE at
+  **+18.371 pp** against A's archived −21.80 — the closest any run has come to repeat-last-action
+  and still on the wrong side of it — but PR-14 §3 registers the 5090-vs-H200 confound as live in
+  exactly that positive direction, so it is a number and not an effect.
+  **The run survived its own §6 validity clause**: an external `SIGTERM` at step 7385 was **resumed,
+  not restarted**, and the log proves one continuous chain — the resume re-entered at step 7385
+  *and* sampler position epoch 6 batch 1112 — so 20 000/20 000 is scoreable rather than `I`.
+  Re-scored from stored predictions under both bench specs 2026-08-19: **56.0 / 36.0**, level **L0**
+  under both, now the fifth row in [`docs/benchmark.md`](docs/benchmark.md).
+  **The task ID is contested and the file records it rather than hiding it:** `T-48` was claimed on
+  2026-08-16 both by `PR-14` and by the runtime-failures correction at line 58 of this file (commit
+  `b8da4e3`), and neither minted a task. `T-048` is minted here for the pre-registration on the
+  ground that a versioned rule cannot be amended to point elsewhere. **That is a tie-break, not a
+  ruling** — the second such collision after PR-10, which remains the owner's to settle.
+
 **Exit:** ablation machinery ready; first real AC-07 verdict recorded — at tiny scale the video branch hurts, so "video helps" now rests on the pretrained prior (T-16 LoRA). T-26 tested the one confound that could have moved that premise and did not move it, so the burden on T-16 is confirmed rather than assumed. T-27 then re-scored both real runs against trivial baselines and raised the bar T-16 must clear: beating the action-only baseline is not enough, because that baseline itself loses to repeat-last-action. T-28 then closed the gap that would have made a finished T-16 unreadable: the trainer does no eval, so `eval_t16.py` is the step that turns a checkpoint into a scorable `predictions.jsonl` — and it refuses to score a holdout it cannot prove was excluded. Neither GPU nor code is the blocker any more — Discoverer+ is scripted (`cluster/discoverer/`) and T-16a is done.
 
 **T-16 has now run (2026-07-30), the confound found afterwards has been cleared and priced

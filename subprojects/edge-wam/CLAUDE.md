@@ -101,8 +101,14 @@ not only in prose.
    **THE GATE IS UNCHANGED. Correcting a claim is not lifting one, and `C`/`W` are not permission.**
    Do not read either as this sub-project being unblocked: the gate reported with its own premise
    failing, that premise has now been withdrawn rather than satisfied, and **which label space
-   training may start against is the project owner's decision**, not a session's. PR-07 §6 still
-   forbids any statement about GR00T (the policy arm never ran). Probes, staging, reading and
+   training may start against is the project owner's decision**, not a session's. **PR-07 §6's ban
+   on statements about GR00T attached to verdict `VOID`, and that condition is no longer met** — the
+   policy arm ran on 2026-08-17 (job `188408`) and T-39 re-reported **`VERDICT N`**: GR00T N1.7
+   scored **−239.69 %** on the holdout and **−186.73 %** on the forty episodes it *trained on*
+   (`docs/preregistration/PR-07-V2-RESULT.md`). Read §6's **N** row before citing any of it: N
+   **forbids** reading the result as refuting any WAM design, and it points the next move at the
+   *kind* of data rather than at another method — which is the one sentence **E-06 has to be read
+   against**, since E-06 is another method on the same corpus. Probes, staging, reading and
    pre-registration are fine, as they always were.
 2. **E-01 and E-02 gate E-05 and E-06.** E-01 asks whether the Edge policy path can run with no
    text (the released `Cosmos3-Edge-Policy-DROID` is language-conditioned); E-02 asks what a 28-dim

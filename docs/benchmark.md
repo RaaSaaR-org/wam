@@ -164,11 +164,26 @@ test it passed:
 | `t18-real-ablation-seed0` | tiled | 5.0980 | 19.9 | 19.9 | below L0 | below L0 | fails (−129.0%) |
 | `t16-lora-seed0` | tiled | 0.2932 | **48.4** | **28.4** | L0 | L0 | fails (−32.4%) |
 | `t16-lora-seed0` | `--frame-history` | 0.3198 | **50.6** | **30.6** | L0 | L0 | fails (−21.8%) |
+| `pr14-nosmooth-seed0` | `--frame-history` | 0.3548 | **56.0** | **36.0** | L0 | L0 | fails (−3.4%) |
 
 Only T-16's score changes under the spec change, by exactly the 20 points L4 should never have
 awarded it. The level column is constant for the reason given above and carries no information
 about the change. The fourth row is a **different measurement**, not a different spec — added
 2026-08-01 by T-29; the +2.2 it carries under both specs is the frame mode, not the rule.
+
+The fifth row is a **different model**, added 2026-08-19 by PR-14 — the smoothness-regulariser
+ablation, verdict `S` ([`PR-14-RESULT.md`](preregistration/PR-14-RESULT.md)). It belongs beside row
+four rather than in a table of its own because it is the same `scripts/eval_t16.py` path, the same
+`--frame-history` mode and the same 40-episode `t18` holdout, re-scored here from its stored
+`predictions.jsonl` under both specs (`runs/pr14-nosmooth-seed0/eval-t29-history/bench.json` and
+`bench-0.2.0.json`). It drops the same 20 points to L4 for the same reason as row four, which is the
+point of listing it: **removing the jerk regulariser moved `smoothness_ratio` only 0.3198 → 0.3548,
+still below 0.2.0's derived floor**, so the disagreement at `:311` now has a second cell caught in
+it rather than one. Two cautions, both from PR-14: the run trained on a local RTX 5090 at
+`batch 2 × accum 4` where row four trained on an H200 at `batch 8 × accum 1`, a confound PR-14 §3
+registers as live for a positive and inert for a null; and the L1 column's **−3.4%** is the closest
+any run in this file has come to repeat-last-action **without clearing it** — it is a number here,
+not a claim, because that is the direction the confound bites.
 
 ---
 
