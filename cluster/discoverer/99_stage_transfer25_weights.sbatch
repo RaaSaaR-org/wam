@@ -137,6 +137,18 @@ case "${CODE}" in
     echo
     echo "  Accepting a model licence is the account holder's act. This job will not attempt to"
     echo "  work around the gate, and no flag here can. Accept it, then resubmit this job."
+    echo
+    echo "  IF IT WAS ALREADY ACCEPTED, THE LIKELY CAUSE IS THAT THIS IS A DIFFERENT ACCOUNT."
+    echo "  The gate is granted to a USER, not to a repository: acceptance in a browser on one"
+    echo "  machine does nothing for a token minted by another account. The token this job just"
+    echo "  used belongs to:"
+    WHO=$(curl -s -H "Authorization: Bearer ${HF_TOKEN}" \
+            https://huggingface.co/api/whoami-v2 \
+          | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("name","<unknown>"))' \
+          2>/dev/null || echo "<could not resolve>")
+    echo "      ${WHO}"
+    echo "  Compare that against the account that accepted the licence. If they differ, copy that"
+    echo "  account's read token to \${HF_HOME}/token, or export HF_TOKEN for this submission."
     exit 1 ;;
   *)
     echo "FATAL: unexpected HTTP ${CODE} probing the repo. Not treating this as a gate failure —"

@@ -201,9 +201,19 @@ Three standing results, none of which this task may quietly step over:
       not a pass. HE becomes the confirmatory measurement if the licence resolves.
 - [ ] **A measured throughput number** from one timed episode on an H200 at target resolution,
       and a GPU-h ceiling derived from it — enforced in the sbatch, as `MAX_RESTARTS` enforces
-      T-39's. ~172 k frames per variant is the multiplier. → **open, needs the cluster.**
-- [ ] Generation is **chunked and resumable** under 4 h `MaxWall` / `MaxJobsPU=4`. → **open**, the
-      sbatch is not written.
+      T-39's. ~172 k frames per variant is the multiplier. → **open, needs the cluster.** The
+      enforcement half exists (97, above); the measurement half is `TIMING=1`, and its two inputs
+      landed 2026-08-18/19: `98_build_transfer25_env.sbatch` builds the framework at a pinned
+      commit and `99_stage_transfer25_weights.sbatch` stages the weights at a pinned revision.
+      **The licence gate that blocked 99 was accepted by the account holder on 2026-08-19** — the
+      probe against the pinned revision returns 200 where it returned 403 the day before.
+- [x] Generation is **chunked and resumable** under 4 h `MaxWall` / `MaxJobsPU=4`.
+      → `cluster/discoverer/97_transfer25_restyle.sbatch` (2026-08-16). `CHUNK_INDEX`/`CHUNK_TOTAL`
+      are required with no default, `--requeue` plus `--signal=B:USR1@300` hands the run five
+      minutes to file what is finished before the wall, and a per-chunk stamp refuses to resume
+      into a directory another invocation owns. `PARTITION_CEILING_GPU_H` / `CEILING_GPU_H` are
+      likewise required with no default, so the ceiling cannot be a number nobody measured — which
+      is why this AC is closed while the one below it is not.
 - [ ] Nothing is generated, trained or submitted under this task until the above is reviewed.
       → **standing.** Also gated on T-39 reporting, per PR-08 §1.
 
