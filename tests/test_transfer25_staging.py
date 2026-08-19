@@ -184,6 +184,47 @@ def test_98_refuses_a_cuda_major_that_does_not_match_the_cluster() -> None:
     assert "major != 12" in build, "98 does not check the CUDA major against this cluster's 12.8"
 
 
+def test_98_syncs_a_cuda_12_extra_because_torch_is_in_no_default() -> None:
+    """A plain ``uv sync`` on this project installs no torch at all.
+
+    Read off the pinned checkout's own pyproject.toml: torch reaches the venv only through the
+    ``cu128`` / ``cu130`` extras, and the base dependencies name none of them. So an empty default
+    is not the conservative choice it looks like -- it is the one that produces a venv the CUDA
+    check below can only report as broken, four hours after the job started.
+    """
+    build = _text(_BUILD)
+    match = re.search(r"TRANSFER_UV_ARGS=\$\{TRANSFER_UV_ARGS:-([^}]*)\}", build)
+    assert match, "98 no longer sets a default TRANSFER_UV_ARGS"
+    default = match.group(1).strip()
+    assert default, (
+        "TRANSFER_UV_ARGS defaults to empty, i.e. a plain `uv sync`. On this project that "
+        "installs no torch -- torch is only in the cu128/cu130 extras."
+    )
+    assert "cu128" in default, (
+        f"default {default!r} does not name the CUDA 12 extra. This cluster's newest CUDA module "
+        f"is 12.8; a cu130 build imports cleanly and dies on the first kernel launch."
+    )
+    assert "cu130" not in default, f"default {default!r} names cu130 on a 12.8 cluster"
+
+
+def test_98_reports_a_missing_torch_as_a_missing_extra_not_a_traceback() -> None:
+    """The failure mode the default above prevents still has to be legible when it happens.
+
+    Someone overriding TRANSFER_UV_ARGS gets the empty-sync venv back. A bare ImportError
+    traceback sends them looking for a broken install; the real answer is one flag.
+    """
+    build = _text(_BUILD)
+    assert "ModuleNotFoundError" in build, (
+        "98 does not distinguish 'no torch installed' from 'torch built against the wrong CUDA'"
+    )
+    guard = build.index("ModuleNotFoundError")
+    version_check = build.index("torch.version.cuda")
+    assert guard < version_check, (
+        "the missing-torch guard must come before torch.version.cuda is read, or the import "
+        "error surfaces as a traceback instead of the message"
+    )
+
+
 def test_98_warns_that_the_two_env_files_collide_on_framework() -> None:
     """Both cosmos_env.sh and cosmos_transfer_env.sh export FRAMEWORK, at different checkouts."""
     build = _text(_BUILD)

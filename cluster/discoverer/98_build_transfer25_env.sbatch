@@ -26,12 +26,28 @@
 # revision. A run that cannot name the code it ran is not reproducible, and PR-08 §6 requires the
 # generator recorded regardless of verdict.
 #
-# THE CUDA BUILD IS VERIFIED, NOT ASSUMED. 90 hardcodes `--group=cu128-train` because the Cosmos3
-# setup guide names that group on a CUDA 12.x driver. This repository is a different project and
-# its group names are not ours to guess, so this job runs whatever TRANSFER_UV_ARGS says (default:
-# a plain `uv sync`, which is what the upstream installation guide documents) and then CHECKS the
-# result against the driver, failing loudly on a mismatch. Verifying the outcome catches the
-# CUDA-13-against-a-12.8-driver mistake that guessing the flag only sometimes avoids.
+# THE CUDA BUILD IS VERIFIED, NOT ASSUMED, AND THE EXTRA IS NOT OPTIONAL.
+# 90 hardcodes `--group=cu128-train` because the Cosmos3 setup guide names that group. This is a
+# different repository, so the value here was read off ITS pyproject.toml at the pinned sha rather
+# than guessed:
+#
+#     [project.optional-dependencies]
+#     cu128 = ["cosmos-oss[cu128_torch27]"]
+#     cu130 = ["cosmos-oss[cu130_torch29]"]
+#     [tool.uv] conflicts = [[{extra = "cu128"}, {extra = "cu129"}, {extra = "cu130"}]]
+#
+# **torch appears in NEITHER the base dependencies NOR a default extra.** A plain `uv sync` on this
+# project therefore succeeds and produces a venv with no torch in it at all -- not a CPU build, not
+# a mismatched build, none. The default below is consequently `--extra cu128`, because this
+# cluster's newest CUDA module is 12.8 (docs/discoverer.md §3) and cu130 would import cleanly and
+# die on the first kernel launch. The check after the install still verifies the OUTCOME: the
+# default is a claim about what upstream declared today, and the check is what notices when the
+# pin moves or the extra is overridden.
+#
+# TWO THINGS §4 NEEDS SHIP IN THIS ENV'S BASE DEPENDENCIES, which is worth knowing before anyone
+# prices them as separate work: `sam2>=1.1.0` (the segmenter measure_geom_tol.py refuses to
+# substitute a red-pixel heuristic for) and `video-depth-anything` (a monocular depth estimator,
+# i.e. the thing whose error EST_DRIFT_P95 is). Neither is installed on this workstation.
 #
 #SBATCH --job-name=wam-transfer25-env
 #SBATCH --partition=common
@@ -56,7 +72,8 @@ WORK=${PROJ}/scratch/${USER}
 TRANSFER_REPO_URL=${TRANSFER_REPO_URL:-https://github.com/nvidia-cosmos/cosmos-transfer2.5}
 TRANSFER_FRAMEWORK_SHA=${TRANSFER_FRAMEWORK_SHA:-2ff49d0717af02057ae79bc75c00fbff9da1b4e7}
 TRANSFER_ROOT=${TRANSFER_ROOT:-${PROJ}/third_party/cosmos-transfer2.5}
-TRANSFER_UV_ARGS=${TRANSFER_UV_ARGS:-}
+# --extra cu128, not empty: see the header. A plain sync installs no torch on this project.
+TRANSFER_UV_ARGS=${TRANSFER_UV_ARGS:---extra cu128}
 
 echo "=== repo      ${TRANSFER_REPO_URL}"
 echo "=== pinned at ${TRANSFER_FRAMEWORK_SHA}"
@@ -125,7 +142,7 @@ PY
 # -- the install ----------------------------------------------------------------------------------
 cd "${TRANSFER_ROOT}"
 echo "=== uv sync ${TRANSFER_UV_ARGS}"
-# Unquoted on purpose: TRANSFER_UV_ARGS is a word list (e.g. "--group cu128-train"), not one word.
+# Unquoted on purpose: TRANSFER_UV_ARGS is a word list (e.g. "--extra cu128"), not one word.
 # shellcheck disable=SC2086
 uv sync ${TRANSFER_UV_ARGS}
 
@@ -141,7 +158,15 @@ fi
 # into a generation job. nvidia-smi is absent on a CPU node, so the driver figure comes from the
 # module tree, and if neither can be read the job says so rather than quietly passing.
 "${TRANSFER_ROOT}/.venv/bin/python" - <<'PY'
-import torch
+try:
+    import torch
+except ModuleNotFoundError:
+    raise SystemExit(
+        "FATAL: the venv has no torch. On this project torch arrives ONLY through an extra "
+        "(cu128 / cu130) -- it is in neither the base dependencies nor a default -- so a sync "
+        "with no --extra succeeds and installs none. Re-run with TRANSFER_UV_ARGS='--extra cu128' "
+        "(this cluster is CUDA 12.8); the extras the checkout declares were printed above."
+    )
 built = torch.version.cuda
 print(f"    torch {torch.__version__}, built against CUDA {built}")
 if built is None:
