@@ -369,3 +369,39 @@ def test_98_explains_an_abi_failure_instead_of_inviting_the_wrong_fix() -> None:
     assert "Do NOT 'fix' this by dropping --python" in build, (
         "98 does not warn against the fix that reinstates .python-version=3.13"
     )
+
+
+def test_100_authenticates_because_anonymous_hits_the_rate_limit() -> None:
+    """Not gated is not the same as not rate-limited.
+
+    Job 189023 fetched 80% of 813 files anonymously and then died on 429 Too Many Requests, six
+    minutes in and after a much longer queue wait. hf warns on its first line and proceeds anyway,
+    so the run looks healthy right up until it isn't. Refusing up front costs a second.
+    """
+    source = _text(_SOURCE)
+    assert "HF_TOKEN" in source, "100 never looks for a token; an anonymous 813-file fetch 429s"
+    assert "429" in source, (
+        "100's token requirement no longer records WHY it exists, so the next reader will "
+        "reasonably delete it on the grounds that the dataset is public"
+    )
+    # Line-anchored: a commented-out `# export HF_TOKEN` still contains the substring, and that
+    # is exactly the shape a disabling edit takes.
+    assert re.search(r"^export HF_TOKEN$", source, re.MULTILINE), (
+        "100 resolves a token but never exports it, so the hf CLI still runs anonymous"
+    )
+    for path in (_SOURCE, _STAGE):
+        assert '"${HOME}/.huggingface/token"' in _text(path), (
+            f"{path.name} does not search ~/.huggingface/token; the two jobs must agree on where "
+            "a token lives or one of them silently runs anonymous"
+        )
+
+
+def test_no_job_ever_echoes_a_token() -> None:
+    """A Slurm log is a plain file that outlives the job and gets copied around by sync.sh."""
+    for path in (_SOURCE, _STAGE):
+        text = _text(path)
+        assert not re.search(r"echo[^\n|]*\$\{?HF_TOKEN\}?(?![A-Za-z_])", text), (
+            f"{path.name} echoes HF_TOKEN into the job log"
+        )
+        if "HF_TOKEN" in text:
+            assert "not echoed" in text, f"{path.name} handles a token without saying it is hidden"

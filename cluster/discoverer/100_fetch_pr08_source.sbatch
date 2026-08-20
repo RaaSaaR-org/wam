@@ -100,6 +100,36 @@ BUILDER=${BUILDER:-${WAM}/scripts/build_pr08_source.py}
 # in both jobs. It writes progress to stderr and the SNAPSHOT PATH to stdout, which is why the path
 # is captured rather than reconstructed from ${HF_HOME} and a naming convention that is upstream's
 # to change.
+# -- the token ------------------------------------------------------------------------------------
+# REQUIRED, EVEN THOUGH THIS DATASET IS NOT GATED. Anonymity is not the same as access: an
+# unauthenticated client gets the anonymous rate limit, and this is an 813-file fetch. Measured,
+# job 189023: the download ran happily to 80% and then died on
+#
+#     ConnectionError: Network error: Request error: HTTP status client error
+#     (429 Too Many Requests), domain: .../xet-read-token/d89c126a...
+#
+# six minutes in, after a queue wait far longer than that. hf itself warns about this on the first
+# line it prints ("You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to
+# enable higher rate limits") and then proceeds anyway, which is the worst of both: the run looks
+# fine until it is not. So this refuses up front instead. A READ token is enough; nothing here
+# writes to the Hub.
+#
+# Search order is 99's, unchanged, so the two jobs cannot disagree about where a token lives.
+if [[ -z "${HF_TOKEN:-}" ]]; then
+  for f in "${HF_HOME:-${HOME}/.cache/huggingface}/token" "${HOME}/.huggingface/token"; do
+    [[ -f "${f}" ]] && { HF_TOKEN=$(<"${f}"); break; }
+  done
+fi
+if [[ -z "${HF_TOKEN:-}" ]]; then
+  echo "FATAL: no Hugging Face token, and an anonymous fetch of 813 files hits the rate limit"
+  echo "       long before it finishes (measured: 429 at 80%, job 189023). Export HF_TOKEN, or"
+  echo "       put a READ token at \${HF_HOME}/token or ~/.huggingface/token. This dataset is"
+  echo "       NOT gated -- the token buys throughput, not permission."
+  exit 1
+fi
+export HF_TOKEN
+echo "=== HF token present (${#HF_TOKEN} chars, not echoed)"
+
 echo "=== downloading into ${HF_HOME}"
 SNAPSHOT=$(uvx hf@latest download "${SOURCE_REPO_ID}" \
     --repo-type dataset --revision "${SOURCE_REVISION}" | tail -1)
