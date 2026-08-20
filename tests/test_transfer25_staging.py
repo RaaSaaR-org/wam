@@ -405,3 +405,31 @@ def test_no_job_ever_echoes_a_token() -> None:
         )
         if "HF_TOKEN" in text:
             assert "not echoed" in text, f"{path.name} handles a token without saying it is hidden"
+
+
+def test_100_asks_hf_for_a_bare_path_rather_than_parsing_its_banner() -> None:
+    """hf 1.28 decorates its output; `tail -1` then captures the label, not the path.
+
+    Measured, job 189134: the download SUCCEEDED and the job failed anyway, because stdout ended
+    "  path: /valhalla/..." and the directory guard rejected it. --quiet is documented as "one ID
+    per line", which is a contract; the banner is not.
+    """
+    source = _text(_SOURCE)
+    capture = re.search(r"SNAPSHOT=\$\((.*?)\)\n", source, re.DOTALL)
+    assert capture, "100 no longer captures a snapshot path from hf"
+    assert "--quiet" in capture.group(1), (
+        "100 captures hf's stdout without --quiet, so it parses the decorated banner"
+    )
+
+
+def test_99_does_not_capture_stdout_so_it_needs_no_quiet_flag() -> None:
+    """Guards the asymmetry, so nobody 'fixes' 99 by symmetry or breaks it by tidying.
+
+    99 passes --local-dir and reads the directory afterwards. That is why the banner change that
+    broke 100 left 99 untouched, and why the two jobs legitimately differ here.
+    """
+    stage = _text(_STAGE)
+    assert "--local-dir" in stage, "99 no longer stages via --local-dir"
+    assert not re.search(r"\$\(uvx hf@latest download", stage), (
+        "99 now captures hf's stdout; if so it needs --quiet for the reason 100 does"
+    )

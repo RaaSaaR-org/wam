@@ -96,10 +96,19 @@ BUILDER=${BUILDER:-${WAM}/scripts/build_pr08_source.py}
 # Whole repo: 0.94 GB, of which 0.87 GB is the 402 mp4s. There is no useful --include here because
 # the builder needs meta/ AND videos/, and data/ (the action parquets) is what the ASSEMBLER carries
 # through byte-identically later. Taking the lot once is simpler than discovering the gap in 97.
-# `uvx hf@latest download` is 99's idiom, unchanged: one tool, pinned by uv, resolved the same way
-# in both jobs. It writes progress to stderr and the SNAPSHOT PATH to stdout, which is why the path
-# is captured rather than reconstructed from ${HF_HOME} and a naming convention that is upstream's
-# to change.
+# `uvx hf@latest download` is 99's idiom: one tool, pinned by uv, resolved the same way in both
+# jobs. The path is captured rather than reconstructed from ${HF_HOME} and a naming convention
+# that is upstream's to change.
+#
+# --quiet IS LOAD-BEARING, not noise control. hf 1.28's default output is decorated:
+#
+#     ✓ Downloaded
+#       path: /valhalla/.../snapshots/d89c126a...
+#
+# so `tail -1` yields "  path: /valhalla/..." — label, leading spaces and all — and the directory
+# check below then rejects a download that in fact succeeded (measured, job 189134). `--quiet` is
+# documented as "one ID per line" and emits the bare path, which is a contract to depend on rather
+# than a banner to parse. Note 99 does NOT need this: it passes --local-dir and never reads stdout.
 # -- the token ------------------------------------------------------------------------------------
 # REQUIRED, EVEN THOUGH THIS DATASET IS NOT GATED. Anonymity is not the same as access: an
 # unauthenticated client gets the anonymous rate limit, and this is an 813-file fetch. Measured,
@@ -132,7 +141,7 @@ echo "=== HF token present (${#HF_TOKEN} chars, not echoed)"
 
 echo "=== downloading into ${HF_HOME}"
 SNAPSHOT=$(uvx hf@latest download "${SOURCE_REPO_ID}" \
-    --repo-type dataset --revision "${SOURCE_REVISION}" | tail -1)
+    --repo-type dataset --revision "${SOURCE_REVISION}" --quiet | tail -1)
 [[ -d "${SNAPSHOT}" ]] || {
   echo "FATAL: hf download did not print a directory (got: ${SNAPSHOT:-<empty>})."
   echo "       Not guessing the cache layout -- that is upstream's to change."
