@@ -253,15 +253,27 @@ trap usr1_handler USR1
 source /valhalla/projects/ehpc-aif-2026pg01-905/caches.sh
 
 # ------------------------------------------------------------------------------------------------
-# TODO(human) — cosmos_transfer_env.sh DOES NOT EXIST YET.
+# cosmos_transfer_env.sh — written by 98, appended to by 99. (Was a TODO(human) until 2026-08-20:
+# when this file was written nothing in the repo built or staged Transfer2.5, and `grep -ril
+# transfer2` over the tree returned only prose.)
+#
 # 90_build_cosmos_env.sbatch writes ${PROJ}/cosmos_env.sh for the Cosmos3 GENERATOR family
 # (FRAMEWORK, FFMPEG_PREFIX, MODEL_ID, BASE_CHECKPOINT_PATH, ...). Transfer2.5 is a different
-# checkout with a different entrypoint, and nothing in this repo builds or stages it: `grep -ril
-# transfer2` over the tree returns only prose. So a sibling build/stage job has to exist before
-# this file can run, and it must export at least the four names asserted immediately below. The
-# file is sourced if present so this script stays honest either way: if it is absent, the `: ${..:?}`
-# guards fire with a message that names the missing job rather than dying on `set -u` 200 lines
-# down, after Slurm has already handed the job a GPU.
+# checkout with a different entrypoint, so it gets its own file and its own two jobs:
+#
+#     98_build_transfer25_env.sbatch   writes it: TRANSFER_FRAMEWORK, FRAMEWORK, FFMPEG_PREFIX,
+#                                      the UV_* triple, and the pinned framework sha
+#     99_stage_transfer25_weights.sbatch  appends TRANSFER_MODEL_ID, TRANSFER_MODEL_REVISION
+#                                      and TRANSFER_CHECKPOINT_PATH
+#
+# DO NOT source this together with cosmos_env.sh — both export FRAMEWORK, pointing at different
+# checkouts, and the second one sourced silently wins. 98's own header says the same thing.
+#
+# It is still sourced only `if present`, and the `: ${..:?}` guards below still fire by name. That
+# is not vestigial now that the producers exist: 99 can succeed at staging weights and still leave
+# the file half-written if it is killed between the two appends, and the guards are what turn that
+# into a message naming the missing job rather than a `set -u` death 200 lines down, after Slurm
+# has already handed the job a GPU.
 # ------------------------------------------------------------------------------------------------
 TRANSFER_ENV=${TRANSFER_ENV:-${PROJ}/cosmos_transfer_env.sh}
 if [[ -f "${TRANSFER_ENV}" ]]; then
