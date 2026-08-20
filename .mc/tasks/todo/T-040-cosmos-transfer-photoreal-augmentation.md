@@ -223,6 +223,28 @@ Three standing results, none of which this task may quietly step over:
       A fourth blocker was found the same way and fixed: 97 passed the driver no `--control`, which
       the driver requires with no default, so **both** the timing and generation invocations would
       have died at argparse with an H200 already allocated.
+
+      **2026-08-20 — the chain ran on the cluster, and three more defects surfaced by running it.**
+      `100` and `98` are **done**; `99` is queued (est. 02:08) with the timing run held behind it on
+      `--dependency=afterok`. Each defect below cost a queue cycle and would have cost a GPU:
+      - **`98` could not build at all.** The checkout ships `.python-version` = 3.13, set by upstream
+        ce13887 *"Add Python 3.13 support (cu130+torch29 via **v1.5.0** index)"*, but the pinned sha
+        still resolves `cu128` from the **v1.2.0** index, whose flash-attn is cp310/cp312 only. uv
+        obeys the file, so the default path was the broken one and the error named a wheel, not a
+        Python. Pinned `TRANSFER_PYTHON=3.10`. `98` then completed in 2:46 — torch 2.7.0+cu128,
+        CUDA major matched, `cosmos_transfer_env.sh` written.
+      - **`100` ran anonymous and was rate-limited**, dying on `429 Too Many Requests` at 80 % of
+        813 files, six minutes in. The corpus is public, so no token was thought to be needed; the
+        token was never about permission, only about the anonymous rate limit. Now required up front.
+      - **`100` then failed with the download SUCCEEDED.** hf 1.28 decorates stdout (`✓ Downloaded`,
+        then `  path: …`), so `tail -1` captured the label and the directory guard correctly
+        rejected it. `--quiet` is documented as "one ID per line". 99 is unaffected — it passes
+        `--local-dir` and never reads stdout.
+      **The corpus now exists on the cluster and was verified against the snapshot's own metadata:**
+      `${PROJ}/data/pr08-apple-640x480`, 888 MB, **402 episodes / 171 625 frames** matching
+      `info.json` exactly, 640×480 av1, 402 materialised files (no symlinks), **0 conditioning maps
+      claimed** — the honest state until items 4/5 land, and the manifest Transfer2.5 will estimate
+      depth/seg from.
 - [x] Generation is **chunked and resumable** under 4 h `MaxWall` / `MaxJobsPU=4`.
       → `cluster/discoverer/97_transfer25_restyle.sbatch` (2026-08-16). `CHUNK_INDEX`/`CHUNK_TOTAL`
       are required with no default, `--requeue` plus `--signal=B:USR1@300` hands the run five
