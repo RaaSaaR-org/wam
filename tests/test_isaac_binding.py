@@ -40,9 +40,11 @@ from wam.robot.isaac_binding import (
     EFFORT_GETTER_CANDIDATES,
     EXPECTED_NUM_DOFS,
     FINGER_NAME_CANDIDATES,
+    GROUND_TRUTH_ANNOTATORS,
     FakeIsaacBinding,
     IsaacBinding,
     IsaacSimBinding,
+    SegmentationFrame,
     _batch,
     _row,
     _to_numpy,
@@ -169,6 +171,158 @@ def test_the_warmup_returns_none_before_it_returns_a_frame() -> None:
 def test_an_unknown_camera_is_refused(fake: FakeIsaacBinding) -> None:
     with pytest.raises(ValueError, match="unknown camera"):
         fake.render_frame("wrist_left")
+
+
+# -- ground truth (PR-08 §4: the estimator error budget) ------------------------------------
+
+
+def test_ground_truth_is_off_by_default_and_asking_anyway_raises(fake: FakeIsaacBinding) -> None:
+    """The default binding is exactly the binding that existed before: rgb and nothing else.
+
+    Refusing is the whole design. A binding with no depth annotator has no depth, and the
+    tempting alternative — hand back zeros, or a plausible constant — puts a fabricated
+    distance into ``EST_DRIFT_P95``, which is a number a gate is computed from. Nothing
+    downstream could tell it from a measurement.
+    """
+    assert fake.ground_truth_channels == ()
+    assert fake.render_frame("persp") is not None
+    for call in (fake.render_depth, fake.render_segmentation):
+        with pytest.raises(RuntimeError, match="not attached"):
+            call("persp")
+
+
+def test_the_refusal_names_the_knob_that_fixes_it(fake: FakeIsaacBinding) -> None:
+    with pytest.raises(RuntimeError) as excinfo:
+        fake.render_depth("persp")
+    message = str(excinfo.value)
+    assert "ground_truth=('depth',)" in message
+    assert "distance_to_camera" in message  # the vendor name, so a preflight report is greppable
+
+
+def test_only_the_requested_channels_are_attached() -> None:
+    """Asking for depth must not quietly enable segmentation: the rig pays per AOV per frame,
+    and a channel nobody asked for is a cost nobody budgeted."""
+    binding = FakeIsaacBinding(ground_truth=("depth",))
+    assert binding.ground_truth_channels == ("depth",)
+    assert binding.render_depth("persp") is not None
+    with pytest.raises(RuntimeError, match="not attached"):
+        binding.render_segmentation("persp")
+
+
+def test_an_unknown_ground_truth_channel_is_refused_at_construction() -> None:
+    """At construction, not at the first render: the rig boots a GPU before it renders."""
+    with pytest.raises(ValueError, match="unknown ground-truth channel 'normals'"):
+        FakeIsaacBinding(ground_truth=("depth", "normals"))
+    with pytest.raises(ValueError, match="unknown ground-truth channel 'normals'"):
+        IsaacSimBinding(ground_truth=("normals",))
+
+
+def test_a_bare_string_is_refused_instead_of_iterated_into_letters() -> None:
+    """``ground_truth="depth"`` is the obvious typo and Python would iterate it into five
+    single-character channels; the error has to name the mistake, not the letter ``d``."""
+    with pytest.raises(ValueError, match=r"got the string 'depth'"):
+        FakeIsaacBinding(ground_truth="depth")
+
+
+def test_channels_are_deduplicated_in_the_order_given() -> None:
+    binding = FakeIsaacBinding(ground_truth=("segmentation", "depth", "segmentation"))
+    assert binding.ground_truth_channels == ("segmentation", "depth")
+
+
+def test_depth_is_float32_hw_in_metres() -> None:
+    binding = FakeIsaacBinding(render_hw=(32, 48), ground_truth=("depth",))
+    depth = binding.render_depth("persp")
+    assert depth is not None
+    assert depth.dtype == np.float32
+    assert depth.shape == (32, 48)
+    finite = depth[np.isfinite(depth)]
+    assert finite.size and float(finite.min()) > 0.0
+
+
+def test_depth_reports_the_background_as_inf_rather_than_a_finite_sentinel() -> None:
+    """``distance_to_camera`` gives ``inf`` where a ray hit nothing, and the binding passes it
+    through untouched. A rig that forgets to mask has to blow up here, on a laptop, rather
+    than report a p95 depth error of ``inf`` after a GPU-hour of rendering — or, worse, a
+    finite sentinel that reads like a real distance."""
+    depth = FakeIsaacBinding(ground_truth=("depth",)).render_depth("persp")
+    assert depth is not None
+    assert np.isinf(depth).any()
+    assert np.isfinite(depth).any()
+
+
+def test_segmentation_gives_integer_ids_and_the_labels_that_explain_them() -> None:
+    """Ids without the map are unusable: Replicator numbers them per annotator, so "which id
+    is the apple" is answerable only through ``id_to_labels``. Keys are ``int`` — the vendor
+    hands them back as strings, and a string-keyed lookup finds nothing and says nothing."""
+    binding = FakeIsaacBinding(render_hw=(32, 48), ground_truth=("segmentation",))
+    seg = binding.render_segmentation("persp")
+    assert seg is not None
+    assert seg.ids.dtype == np.uint32
+    assert seg.ids.shape == (32, 48)
+    assert all(isinstance(key, int) for key in seg.id_to_labels)
+    labelled = {value["class"] for value in seg.id_to_labels.values()}
+    assert "apple" in labelled
+    assert set(np.unique(seg.ids)) <= set(seg.id_to_labels)
+
+
+def test_the_object_centroid_moves_with_the_pose() -> None:
+    """PR-08 §4 measures the displacement between the true and the estimated object centroid.
+    A fake whose mask never moved would make every assertion about that displacement — and
+    every rig bug that freezes it — invisible."""
+    binding = FakeIsaacBinding(ground_truth=("segmentation",))
+    apple = next(
+        i
+        for i, v in binding.render_segmentation("persp").id_to_labels.items()
+        if v["class"] == "apple"
+    )
+
+    def centroid(seg: Any) -> float:
+        columns = np.nonzero(seg.ids == apple)[1]
+        assert columns.size, "the object left the frame; the fake must always paint it"
+        return float(columns.mean())
+
+    before = centroid(binding.render_segmentation("persp"))
+    binding.set_dof_gains(_flat(binding, 400.0), _flat(binding, 20.0))
+    binding.set_dof_position_targets(_flat(binding, 0.5))
+    binding.step(20)
+    assert centroid(binding.render_segmentation("persp")) != before
+
+
+def test_ground_truth_renders_never_advance_the_tick() -> None:
+    """Same guarantee as rgb, and it has to hold per channel: the adapter owns the clock."""
+    binding = FakeIsaacBinding(ground_truth=("depth", "segmentation"))
+    binding.step(5)
+    before = binding.get_physics_step_count()
+    binding.render_frame("persp")
+    binding.render_depth("persp")
+    binding.render_segmentation("persp")
+    assert binding.get_physics_step_count() == before
+
+
+def test_each_channel_warms_up_on_its_own_schedule() -> None:
+    """The three annotators are independent objects on the box. A rig that asked for rgb
+    first must not be handed an unwarmed depth frame because someone shared a counter."""
+    binding = FakeIsaacBinding(ground_truth=("depth",), warmup_frames=2)
+    assert [binding.render_frame("persp") for _ in range(2)] == [None, None]
+    assert binding.render_frame("persp") is not None
+    assert binding.render_depth("persp") is None  # its own first call, still warming up
+    assert binding.render_depth("persp") is None
+    assert binding.render_depth("persp") is not None
+
+
+def test_an_unknown_camera_is_refused_for_every_channel() -> None:
+    binding = FakeIsaacBinding(ground_truth=("depth", "segmentation"))
+    for call in (binding.render_frame, binding.render_depth, binding.render_segmentation):
+        with pytest.raises(ValueError, match="unknown camera"):
+            call("wrist_left")
+
+
+def test_ground_truth_calls_raise_after_close() -> None:
+    binding = FakeIsaacBinding(ground_truth=("depth", "segmentation"))
+    binding.close()
+    for call in (binding.render_depth, binding.render_segmentation):
+        with pytest.raises(RuntimeError, match="closed"):
+            call("persp")
 
 
 # -- gains ---------------------------------------------------------------------------------
@@ -485,6 +639,26 @@ def test_the_preflight_probes_the_same_asset_and_effort_getters_this_module_uses
     assert preflight.EFFORT_GETTER_CANDIDATES == EFFORT_GETTER_CANDIDATES
 
 
+def test_the_preflight_probes_the_same_ground_truth_annotators_this_module_attaches() -> None:
+    """Third constant across that seam, pinned for the sharp version of the same reason: the
+    preflight is the ONLY thing that will ever execute ``distance_to_camera`` or
+    ``semantic_segmentation`` before the calibration rig does. Let the names drift and check N
+    goes green on an annotator the binding never asks for, while the binding asks for one
+    nobody proved exists — and the first symptom is a rig that renders nothing on the box."""
+    preflight = _load_preflight()
+    assert preflight.GROUND_TRUTH_ANNOTATORS == dict(GROUND_TRUTH_ANNOTATORS)
+    assert dict(GROUND_TRUTH_ANNOTATORS) == {
+        "depth": "distance_to_camera",
+        "segmentation": "semantic_segmentation",
+    }
+    # The init params too: a preflight that proved a COLORISED segmentation works would say
+    # nothing about the annotator the binding actually asks for.
+    assert preflight.ANNOTATOR_INIT_PARAMS == {
+        channel: dict(params) for channel, params in isaac_binding._ANNOTATOR_INIT_PARAMS.items()
+    }
+    assert isaac_binding._ANNOTATOR_INIT_PARAMS["segmentation"]["colorize"] is False
+
+
 # -- the boundary helpers ------------------------------------------------------------------
 
 
@@ -608,6 +782,118 @@ def test_the_real_bindings_tick_rule_is_the_one_the_preflight_and_the_transport_
             binding.get_physics_step_count()
 
 
+class _StubAnnotator:
+    """One Replicator annotator reduced to the one method the binding calls."""
+
+    def __init__(self, payload: Any) -> None:
+        self.payload = payload
+
+    def get_data(self) -> Any:
+        return self.payload
+
+
+class _StubRenderer:
+    """``RenderingManager`` reduced to ``render()``, counting the calls."""
+
+    def __init__(self) -> None:
+        self.renders = 0
+
+    def render(self) -> None:
+        self.renders += 1
+
+
+def _stubbed_real_binding(**payloads: Any) -> IsaacSimBinding:
+    """An :class:`IsaacSimBinding` with its two render dependencies replaced, and no Isaac.
+
+    Same bare-object trick as the tick test above: ``__init__`` never runs, so no vendor
+    import happens. It exists because the annotator-to-numpy path in ``IsaacSimBinding``
+    is otherwise UNEXECUTED CODE on every machine that is not the box — the payload shapes
+    are guesses, and a guess that is never even run against a stub is two guesses.
+    """
+    binding = object.__new__(IsaacSimBinding)
+    binding._closed = False
+    binding._rendering = _StubRenderer()
+    binding._annotators = {
+        "persp": {channel: _StubAnnotator(payload) for channel, payload in payloads.items()}
+    }
+    return binding
+
+
+def test_the_real_binding_parses_the_documented_segmentation_payload() -> None:
+    """``semantic_segmentation`` is the odd one out: it returns ``{"data": ..., "info": ...}``
+    rather than a bare array, and the string ids in ``idToLabels`` have to become ints or the
+    object can never be found in the mask."""
+    binding = _stubbed_real_binding(
+        segmentation={
+            "data": np.full((4, 5, 1), 2, dtype=np.uint32),
+            "info": {"idToLabels": {"0": {"class": "BACKGROUND"}, "2": {"class": "apple"}}},
+        }
+    )
+    seg = binding.render_segmentation("persp")
+    assert isinstance(seg, SegmentationFrame)
+    assert seg.ids.shape == (4, 5)
+    assert seg.ids.dtype == np.uint32
+    assert seg.id_to_labels == {0: {"class": "BACKGROUND"}, 2: {"class": "apple"}}
+
+
+def test_the_real_binding_also_accepts_a_bare_segmentation_array() -> None:
+    """Which of the two shapes a given Replicator build produces is UNVERIFIED (preflight
+    check N records it), so the parser must survive either — with an empty label map, which
+    is honest, rather than a fabricated one."""
+    binding = _stubbed_real_binding(segmentation=np.zeros((4, 5), dtype=np.uint32))
+    seg = binding.render_segmentation("persp")
+    assert seg is not None
+    assert seg.ids.shape == (4, 5)
+    assert seg.id_to_labels == {}
+
+
+def test_the_real_binding_refuses_a_colorized_segmentation() -> None:
+    """``colorize=False`` is requested at construction; an (H, W, 4) uint8 array means it did
+    not take effect, and a centroid measured off a palette is not a measurement of geometry."""
+    binding = _stubbed_real_binding(segmentation=np.zeros((4, 5, 4), dtype=np.uint8))
+    with pytest.raises(RuntimeError, match="colorize"):
+        binding.render_segmentation("persp")
+
+
+def test_the_real_bindings_depth_is_squeezed_to_hw_float32_and_keeps_inf() -> None:
+    payload = np.full((4, 5, 1), 2.5, dtype=np.float32)
+    payload[0, 0, 0] = np.inf
+    binding = _stubbed_real_binding(depth=payload)
+    depth = binding.render_depth("persp")
+    assert depth is not None
+    assert depth.shape == (4, 5)
+    assert depth.dtype == np.float32
+    assert np.isinf(depth[0, 0])
+    assert depth[1, 1] == np.float32(2.5)
+
+
+def test_the_real_binding_reports_a_depth_shape_it_does_not_understand() -> None:
+    binding = _stubbed_real_binding(depth=np.zeros((4, 5, 3), dtype=np.float32))
+    with pytest.raises(RuntimeError, match="distance_to_camera"):
+        binding.render_depth("persp")
+
+
+def test_the_real_bindings_ground_truth_warmup_returns_none_and_still_rendered() -> None:
+    """An empty annotator buffer is the warmup, on all three channels alike: return ``None``
+    and let the caller retry. Zeros would be a depth map of a plane 0 m from the lens."""
+    binding = _stubbed_real_binding(
+        depth=np.zeros((0,), dtype=np.float32), segmentation={"data": None, "info": {}}
+    )
+    assert binding.render_depth("persp") is None
+    assert binding.render_segmentation("persp") is None
+    assert binding._rendering.renders == 2
+
+
+def test_the_real_binding_refuses_a_channel_it_never_attached() -> None:
+    """The rgb-only binding is the default one, so this is the message an operator who forgot
+    ``ground_truth=`` will actually see."""
+    binding = _stubbed_real_binding(rgb=np.zeros((4, 5, 4), dtype=np.uint8))
+    with pytest.raises(RuntimeError, match="not attached"):
+        binding.render_depth("persp")
+    with pytest.raises(ValueError, match="unknown camera"):
+        binding.render_frame("wrist_left")
+
+
 def test_the_real_binding_without_isaac_names_the_two_venv_split_instead_of_raising_import() -> (
     None
 ):
@@ -642,6 +928,8 @@ def test_the_module_imports_and_runs_without_isaac_sim_and_without_torch() -> No
         "binding.set_dof_gains([1.0] * 43, [0.1] * 43)\n"
         "binding.step(3)\n"
         "binding.render_frame('persp')\n"
+        "gt = b.FakeIsaacBinding(ground_truth=('depth', 'segmentation'))\n"
+        "assert gt.render_depth('persp').shape == gt.render_segmentation('persp').ids.shape\n"
         "assert binding.dof_indices.body\n"
         "leaked = sorted(m for m in sys.modules if m == 'torch' or m.startswith('torch.'))\n"
         "assert not leaked, leaked\n"
