@@ -51,6 +51,13 @@ WHAT THE PROTOCOL PROMISES
   toggle ``/app/player/playSimulations`` off, update once and restore it. The adapter owns
   the clock; a render that stepped behind its back would corrupt staleness detection and
   silently widen the ``dq_max * dt`` velocity limit. Preflight check I is the proof.
+- **Ground truth is opt-in.** ``rgb`` is always attached; the ``distance_to_camera`` and
+  ``semantic_segmentation`` annotators (:data:`GROUND_TRUTH_ANNOTATORS`) only when the caller
+  passes ``ground_truth=``. They exist for PR-08 §4's calibration rig — the monocular
+  estimator's error budget, which is measured against exact geometry or not at all — and a
+  rollout wants neither, so the default keeps the render path byte-for-byte what it was.
+  ``render_depth``/``render_segmentation`` inherit ``render_frame``'s two rules exactly:
+  never step physics, and return ``None`` (never a fabricated frame) during warmup.
 - **The caller owns the gains.** :meth:`set_dof_gains` writes what it is given, including
   ``kp = 0`` (the e-stop damping mode). This is why the backend is raw Isaac Sim and NOT
   Isaac Lab: Isaac Lab's explicit actuator models (``DCMotorCfg``, used for the G1 legs in
@@ -110,11 +117,13 @@ __all__ = [
     "EFFORT_GETTER_CANDIDATES",
     "EXPECTED_NUM_DOFS",
     "FINGER_NAME_CANDIDATES",
+    "GROUND_TRUTH_ANNOTATORS",
     "ISAAC_MISSING_MSG",
     "FakeIsaacBinding",
     "G1DofIndices",
     "IsaacBinding",
     "IsaacSimBinding",
+    "SegmentationFrame",
     "fake_g1_dof_names",
     "resolve_g1_dof_indices",
 ]
@@ -156,6 +165,42 @@ EXPECTED_NUM_DOFS = len(G1_MOTOR_JOINT_NAMES) + 2 * len(DEX3_FINGER_JOINTS)
 #: exists on any stage, which is what ``scripts/preflight_isaac.py`` renders from. A G1
 #: scene with head/wrist cameras supplies its own mapping; the prims must exist on the stage.
 DEFAULT_CAMERA_PRIMS: Mapping[str, str] = {"persp": "/OmniverseKit_Persp"}
+
+#: Ground-truth render channel -> Replicator annotator name. ``rgb`` is deliberately NOT in
+#: here: it is always attached, these are OPT-IN (``ground_truth=`` on either binding's
+#: constructor) and OFF by default. PR-08 §4 needs them — the monocular estimator's error
+#: budget is measured against exact geometry, and ``EST_DRIFT_P95`` has no other source — but
+#: a rollout does not, and every attached annotator is another AOV the renderer has to produce
+#: on every ``RenderingManager.render()``.
+#:
+#: ``distance_to_camera`` is EUCLIDEAN ray length from the camera origin, NOT the z-depth a
+#: monocular estimator predicts (Replicator calls that one ``distance_to_image_plane``). PR-08
+#: §4 item 0 names ``distance_to_camera``, so it is what is wired here and the calibration rig
+#: owes the conversion: comparing the two directly inflates the error by 1/cos(angle off the
+#: optical axis), which is 1.41 at 45°, and an inflated budget is not a conservative one — it
+#: is a different number.
+#:
+#: UNVERIFIED, like every other vendor string in this file. ``scripts/preflight_isaac.py``
+#: check N is what turns these two names into a pass or a fail on the box.
+#:
+#: DUPLICATED, deliberately, in ``scripts/preflight_isaac.py`` — same reason as
+#: :data:`BODY_NAME_CANDIDATES`, and ``tests/test_isaac_binding.py`` asserts the copies match.
+GROUND_TRUTH_ANNOTATORS: Mapping[str, str] = {
+    "depth": "distance_to_camera",
+    "segmentation": "semantic_segmentation",
+}
+
+#: ``init_params`` for the annotators that need them, keyed by channel. A channel absent from
+#: here is constructed exactly the way ``rgb`` always was — ``get_annotator(name)``, no
+#: ``init_params`` argument at all — so the one call this file has ever made is unchanged.
+#:
+#: ``colorize=False`` is the load-bearing one: a colorised segmentation is an RGBA *picture*
+#: of the labels, and an object centroid measured off it is a measurement of the palette, not
+#: of the geometry. Passed explicitly rather than relying on the default, because which way
+#: the default falls is exactly the kind of thing that changes between Replicator versions.
+_ANNOTATOR_INIT_PARAMS: Mapping[str, Mapping[str, Any]] = {
+    "segmentation": {"colorize": False},
+}
 
 #: Candidate names for the Articulation's measured-effort getter, tried in order. UNVERIFIED
 #: — unlike positions/velocities/gains this one is NOT in the documentation excerpt the rest
@@ -320,14 +365,67 @@ def _resolution_error(
 # -- the seam ------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class SegmentationFrame:
+    """One ground-truth semantic segmentation: the label ids AND what they mean.
+
+    The ids alone are useless to the thing that asked for them. PR-08 §4 measures an
+    *object-centroid* displacement, which means knowing which id is the apple, and Replicator
+    assigns ids per annotator instance — they are not stable across runs, scenes or even
+    reattachments. So the mapping travels WITH the pixels instead of being fetched separately,
+    where the two could drift a frame apart and nothing would say so.
+
+    ``ids`` is ``uint32 (H, W)``; ``id_to_labels`` maps each id to whatever Replicator's
+    ``info["idToLabels"]`` carries for it (documented as ``{"class": "apple"}``-shaped, itself
+    UNVERIFIED — preflight check N records the real thing). It can be empty: an annotator that
+    hands back pixels and no info is a degraded but usable depth-free mask, and refusing it
+    here would turn a recoverable rig problem into a crash mid-render.
+    """
+
+    ids: np.ndarray
+    id_to_labels: dict[int, Any]
+
+
+def _id_to_labels(info: Any) -> dict[int, Any]:
+    """``{"idToLabels": {"1": {"class": "apple"}}}`` -> ``{1: {"class": "apple"}}``.
+
+    The keys are coerced to ``int`` because Replicator hands them back as STRINGS (they survive
+    a JSON round-trip) while the pixels are integers. Looking an integer id up in a
+    string-keyed dict finds nothing, raises nothing, and reports every object as unlabelled —
+    the failure mode that makes a whole error budget quietly empty.
+    """
+    raw = info.get("idToLabels") if isinstance(info, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return {}
+    labels: dict[int, Any] = {}
+    for key, value in raw.items():
+        try:
+            labels[int(key)] = value
+        except (TypeError, ValueError):
+            # A non-numeric id is Replicator telling us something this parser does not know
+            # about. Keep the ones that parsed rather than losing the whole map to it.
+            continue
+    return labels
+
+
 @runtime_checkable
 class IsaacBinding(Protocol):
-    """Everything the Isaac G1 transport needs from Isaac Sim, and nothing more.
+    """Everything the Isaac G1 transport needs from Isaac Sim, plus the two ground-truth
+    render channels PR-08 §4 calibrates against — and nothing more.
 
     Kept deliberately small: every member is a thing that can turn out to be wrong on the
     box, and the cost of being wrong is one preflight check each. Shapes are single-robot
     ``(D,)`` numpy — the ``(N, D)`` batch squeeze and the ``warp.array`` conversion both
     happen inside the implementation.
+
+    ``render_depth``/``render_segmentation`` are the one group that is not for the transport,
+    and they were added with that cost paid rather than waived: preflight check N is theirs.
+    They are members rather than an optional duck-typed extra because the alternative — a rig
+    that reaches past this seam into :class:`IsaacSimBinding` — is a rig that cannot be tested
+    against :class:`FakeIsaacBinding`, and everything in this file exists to avoid exactly
+    that. An implementation that attaches no ground-truth annotators still satisfies the
+    protocol: both methods RAISE (they never return a plausible-looking array), which is the
+    same "loud, never silently wrong" rule the rest of the seam follows.
     """
 
     @property
@@ -353,6 +451,11 @@ class IsaacBinding(Protocol):
     @property
     def camera_names(self) -> tuple[str, ...]:
         """Camera names accepted by :meth:`render_frame`."""
+        ...
+
+    @property
+    def ground_truth_channels(self) -> tuple[str, ...]:
+        """Which of :data:`GROUND_TRUTH_ANNOTATORS` are attached. Empty by default."""
         ...
 
     def get_physics_step_count(self) -> int:
@@ -411,6 +514,26 @@ class IsaacBinding(Protocol):
         """
         ...
 
+    def render_depth(self, camera: str) -> np.ndarray | None:
+        """Ground-truth depth from ``camera`` as ``float32 (H, W)`` in metres, no physics step.
+
+        Distance along the ray from the camera origin (``distance_to_camera``), NOT z-depth —
+        see :data:`GROUND_TRUTH_ANNOTATORS`. ``None`` during warmup, exactly like
+        :meth:`render_frame`. Raises ``RuntimeError`` when the channel was not requested at
+        construction: a binding without the annotator has no depth to give, and a zero array
+        would enter the error budget as a measurement.
+        """
+        ...
+
+    def render_segmentation(self, camera: str) -> SegmentationFrame | None:
+        """Ground-truth semantic segmentation from ``camera``, no physics step.
+
+        Ids plus their labels (:class:`SegmentationFrame`); ``None`` during warmup and
+        ``RuntimeError`` when the channel was not requested — same two rules as
+        :meth:`render_depth`.
+        """
+        ...
+
     def register_pre_physics_callback(self, callback: Callable[[], None]) -> None:
         """Call ``callback()`` on the main thread before each physics step.
 
@@ -442,6 +565,31 @@ def _to_numpy(value: Any) -> np.ndarray:
     if callable(to_numpy):
         return np.asarray(to_numpy())
     return np.asarray(value)
+
+
+def _validate_ground_truth(channels: Sequence[str]) -> tuple[str, ...]:
+    """Normalise a ``ground_truth=`` argument to a deduplicated tuple of known channel names.
+
+    A bare string is refused rather than iterated: ``ground_truth="depth"`` would otherwise
+    ask for the channels ``d``, ``e``, ``p``... and the resulting error would name a letter.
+    An unknown channel is refused at CONSTRUCTION — the alternative is discovering it from a
+    render call several minutes into a rig run that has already booted a GPU.
+    """
+    if isinstance(channels, str):
+        raise ValueError(
+            f"ground_truth must be a sequence of channel names, got the string "
+            f"{channels!r} — pass ({channels!r},)"
+        )
+    resolved: list[str] = []
+    for channel in channels:
+        name = str(channel)
+        if name not in GROUND_TRUTH_ANNOTATORS:
+            raise ValueError(
+                f"unknown ground-truth channel {name!r}; have {sorted(GROUND_TRUTH_ANNOTATORS)}"
+            )
+        if name not in resolved:
+            resolved.append(name)
+    return tuple(resolved)
 
 
 def _row(value: Any, num_dofs: int, what: str) -> np.ndarray:
@@ -526,6 +674,7 @@ class IsaacSimBinding:
         device: str = "cuda:0",
         cameras: Mapping[str, str] | None = None,
         render_hw: tuple[int, int] = (256, 256),
+        ground_truth: Sequence[str] = (),
         headless: bool = True,
         renderer: str = "RaytracedLighting",
         expected_num_dofs: int = EXPECTED_NUM_DOFS,
@@ -536,11 +685,15 @@ class IsaacSimBinding:
         :data:`DEFAULT_ASSET_SUBPATH`. ``physics_hz``: physics rate; ``int(1/dt)`` must be
         exact. ``cameras``: name -> prim path (default :data:`DEFAULT_CAMERA_PRIMS`); the
         prims must already exist on the stage. ``render_hw``: (H, W) of every render product.
-        ``expected_num_dofs``: asserted against the articulation, 43 for the G1 with hands.
+        ``ground_truth``: which of :data:`GROUND_TRUTH_ANNOTATORS` to attach ALONGSIDE ``rgb``
+        — empty by default, because only PR-08 §4's calibration rig wants them and a rollout
+        pays for every extra AOV on every frame. ``expected_num_dofs``: asserted against the
+        articulation, 43 for the G1 with hands.
 
         Raises ``RuntimeError`` when Isaac Sim is not importable (:data:`ISAAC_MISSING_MSG`),
         when called off the main thread, or when the DOF count disagrees; ``ValueError`` when
-        a joint name cannot be resolved (the message names it and dumps the actual names).
+        a joint name cannot be resolved (the message names it and dumps the actual names) or
+        when ``ground_truth`` names a channel this binding does not know.
         """
         _require_main_thread("IsaacSimBinding()")
         if physics_hz <= 0:
@@ -554,6 +707,9 @@ class IsaacSimBinding:
             )
         if len(render_hw) != 2 or any(int(v) < 1 for v in render_hw):
             raise ValueError(f"render_hw must be two positive ints, got {render_hw!r}")
+        # Before the vendor import, like the rate guards above: a typo in a channel name
+        # should not cost the operator a GPU boot to discover.
+        ground_truth_channels = _validate_ground_truth(ground_truth)
 
         try:
             # MUST come before every other omni/isaacsim import in this constructor: the
@@ -636,7 +792,11 @@ class IsaacSimBinding:
 
             self._cameras = dict(DEFAULT_CAMERA_PRIMS if cameras is None else cameras)
             self._render_hw = (int(render_hw[0]), int(render_hw[1]))
-            self._annotators: dict[str, Any] = {}
+            self._ground_truth = ground_truth_channels
+            # camera -> channel -> annotator. Nested rather than flat because the render
+            # product stays 1:1 with the camera and close() has to pair each annotator with
+            # the product it was attached to.
+            self._annotators: dict[str, dict[str, Any]] = {}
             self._render_products: dict[str, Any] = {}
             self._setup_cameras()
         except BaseException:
@@ -664,6 +824,10 @@ class IsaacSimBinding:
     @property
     def camera_names(self) -> tuple[str, ...]:
         return tuple(self._cameras)
+
+    @property
+    def ground_truth_channels(self) -> tuple[str, ...]:
+        return self._ground_truth
 
     @property
     def asset(self) -> str:
@@ -766,7 +930,12 @@ class IsaacSimBinding:
     # -- rendering -------------------------------------------------------------------------
 
     def _setup_cameras(self) -> None:
-        """One replicator render product + ``rgb`` annotator per camera.
+        """One replicator render product per camera, and one annotator per channel on it.
+
+        ``rgb`` always; each requested :data:`GROUND_TRUTH_ANNOTATORS` channel alongside it,
+        on the SAME render product — one product per camera is what keeps the three channels
+        describing the same pixels, and what keeps ``close()`` able to pair every annotator
+        with the product it was attached to.
 
         ``set_capture_on_play(False)`` is what keeps the renderer OUT of the physics loop:
         with capture-on-play the orchestrator drives its own frame cadence and the "render
@@ -778,25 +947,58 @@ class IsaacSimBinding:
         height, width = self._render_hw
         for name, prim in self._cameras.items():
             product = rep.create.render_product(str(prim), resolution=(width, height))
-            annotator = rep.AnnotatorRegistry.get_annotator("rgb")
-            annotator.attach(product)
             self._render_products[name] = product
-            self._annotators[name] = annotator
+            channels: dict[str, Any] = {}
+            for channel in ("rgb", *self._ground_truth):
+                vendor = GROUND_TRUTH_ANNOTATORS.get(channel, channel)
+                init_params = _ANNOTATOR_INIT_PARAMS.get(channel)
+                # Two call shapes on purpose: with no ground truth requested this file makes
+                # the single argument-free get_annotator("rgb") call it has always made.
+                annotator = (
+                    rep.AnnotatorRegistry.get_annotator(vendor)
+                    if init_params is None
+                    else rep.AnnotatorRegistry.get_annotator(vendor, init_params=dict(init_params))
+                )
+                annotator.attach(product)
+                channels[channel] = annotator
+            self._annotators[name] = channels
+
+    def _channel_data(self, camera: str, channel: str, op: str) -> Any:
+        """Render once and hand back one annotator's raw ``get_data()``.
+
+        The shared half of all three render methods: the open/main-thread guards, the camera
+        and channel lookups, and the ``RenderingManager.render()`` call — which is documented
+        to render WITHOUT advancing physics (it flips ``/app/player/playSimulations`` off,
+        updates once, restores it), preflight check I being the proof on this build.
+
+        Note that each render method renders: asking for rgb and then depth costs two
+        ``render()`` calls of the same unchanged scene. Correct but not free, and the reason
+        it is acceptable is that the only caller wanting both is the calibration rig, which is
+        not on the control loop.
+        """
+        self._require_open(op)
+        _require_main_thread(op)
+        channels = self._annotators.get(camera)
+        if channels is None:
+            raise ValueError(f"unknown camera {camera!r}; have {list(self._annotators)}")
+        annotator = channels.get(channel)
+        if annotator is None:
+            raise RuntimeError(
+                f"{op}: the {channel!r} channel "
+                f"({GROUND_TRUTH_ANNOTATORS.get(channel, channel)!r} annotator) is not "
+                f"attached — pass ground_truth={(channel,)!r} when constructing the binding. "
+                f"Attached here: {list(channels)}"
+            )
+        self._rendering.render()
+        return annotator.get_data()
 
     def render_frame(self, camera: str) -> np.ndarray | None:
         """One rendered frame, or ``None`` while the renderer warms up.
 
-        ``RenderingManager.render()`` is documented to render WITHOUT advancing physics (it
-        flips ``/app/player/playSimulations`` off, updates once, restores it) — preflight
-        check I is the proof on this build. The annotator hands back RGBA; the alpha channel
-        is dropped here so no caller has to know.
+        The annotator hands back RGBA; the alpha channel is dropped here so no caller has to
+        know. Never advances physics — see :meth:`_channel_data`.
         """
-        self._require_open("render_frame")
-        _require_main_thread("render_frame")
-        if camera not in self._annotators:
-            raise ValueError(f"unknown camera {camera!r}; have {list(self._annotators)}")
-        self._rendering.render()
-        data = self._annotators[camera].get_data()
+        data = self._channel_data(camera, "rgb", "render_frame")
         if data is None or getattr(data, "size", 0) == 0:
             return None  # warmup: the caller retries; recording a black frame is worse
         frame = np.asarray(_to_numpy(data))
@@ -806,6 +1008,66 @@ class IsaacSimBinding:
                 f"{frame.shape}"
             )
         return np.ascontiguousarray(frame[:, :, :3])
+
+    def render_depth(self, camera: str) -> np.ndarray | None:
+        """Ground-truth depth as ``float32 (H, W)`` in metres, or ``None`` during warmup.
+
+        Distance along the ray from the camera origin, not z-depth (see
+        :data:`GROUND_TRUTH_ANNOTATORS`). Non-finite background pixels are passed THROUGH
+        untouched: ``distance_to_camera`` is documented to report a ray that hit nothing as
+        ``inf``, and substituting a finite sentinel here would put a made-up distance into an
+        error budget with nothing left to mark it as made up. The rig masks; the binding does
+        not decide.
+        """
+        data = self._channel_data(camera, "depth", "render_depth")
+        if data is None or getattr(data, "size", 0) == 0:
+            return None
+        depth = np.asarray(_to_numpy(data), dtype=np.float32)
+        if depth.ndim == 3 and depth.shape[2] == 1:
+            depth = depth[:, :, 0]  # some builds carry a trailing channel axis
+        if depth.ndim != 2:
+            raise RuntimeError(
+                f"camera {camera!r}: expected (H, W) from the "
+                f"{GROUND_TRUTH_ANNOTATORS['depth']} annotator, got {depth.shape}"
+            )
+        return np.ascontiguousarray(depth)
+
+    def render_segmentation(self, camera: str) -> SegmentationFrame | None:
+        """Ground-truth semantic segmentation, or ``None`` during warmup.
+
+        This annotator does NOT return a bare array like the other two: it returns
+        ``{"data": ids, "info": {"idToLabels": ...}}``, and the ids are meaningless without
+        the mapping (:class:`SegmentationFrame`). The bare-array form is accepted too, because
+        which of the two a given Replicator build produces is UNVERIFIED — preflight check N
+        records what this one did.
+
+        ``colorize=False`` was requested at construction, so an ``(H, W, 4)`` uint8 array
+        arriving here is a *colorised* mask, and it raises rather than being reduced to
+        something id-shaped: measuring an object centroid off a palette is not a measurement
+        of the geometry.
+        """
+        raw = self._channel_data(camera, "segmentation", "render_segmentation")
+        info: Any = {}
+        data = raw
+        if isinstance(raw, Mapping):
+            info = raw.get("info") or {}
+            data = raw.get("data")
+        if data is None or getattr(data, "size", 0) == 0:
+            return None
+        ids = np.asarray(_to_numpy(data))
+        if ids.ndim == 3 and ids.shape[2] == 1:
+            ids = ids[:, :, 0]
+        if ids.ndim != 2:
+            raise RuntimeError(
+                f"camera {camera!r}: expected (H, W) label ids from the "
+                f"{GROUND_TRUTH_ANNOTATORS['segmentation']} annotator, got {ids.shape} — an "
+                f"(H, W, 4) array means colorize=False did not take effect, and a centroid "
+                f"measured off a colorised mask measures the palette"
+            )
+        return SegmentationFrame(
+            ids=np.ascontiguousarray(ids, dtype=np.uint32),
+            id_to_labels=_id_to_labels(info),
+        )
 
     # -- callbacks -------------------------------------------------------------------------
 
@@ -840,12 +1102,13 @@ class IsaacSimBinding:
         if getattr(self, "_closed", False):
             return
         self._closed = True
-        for name, annotator in getattr(self, "_annotators", {}).items():
+        for name, channels in getattr(self, "_annotators", {}).items():
             product = self._render_products.get(name)
-            try:
-                annotator.detach([product] if product is not None else None)
-            except Exception:  # noqa: BLE001, S110 - must not mask the original failure
-                pass
+            for annotator in channels.values():
+                try:
+                    annotator.detach([product] if product is not None else None)
+                except Exception:  # noqa: BLE001, S110 - must not mask the original failure
+                    pass
         handle = getattr(self, "_callback_handle", None)
         if handle is not None:
             try:
@@ -858,6 +1121,19 @@ class IsaacSimBinding:
 
 
 # -- the fake (pure python, fully executed) ------------------------------------------------
+
+#: The three semantic ids :meth:`FakeIsaacBinding._synthetic_segmentation` paints, and their
+#: labels in Replicator's own ``{"class": ...}`` shape. Small integers on purpose: real ids
+#: are arbitrary and per-annotator, so rig code must look the object up BY LABEL — hard-coding
+#: ``ids == 2`` is the mistake, and a fake that used the same id as the real scene would hide
+#: it. ``0`` is unlabelled background, which is Replicator's convention too.
+_FAKE_TABLE_ID = 1
+_FAKE_OBJECT_ID = 2
+_FAKE_ID_TO_LABELS: Mapping[int, Any] = {
+    0: {"class": "BACKGROUND"},
+    _FAKE_TABLE_ID: {"class": "table"},
+    _FAKE_OBJECT_ID: {"class": "apple"},
+}
 
 
 def fake_g1_dof_names(
@@ -906,6 +1182,11 @@ class FakeIsaacBinding:
       that deliberately drives the whole binding from a worker.
     - **Frames are deterministic and non-blank**, and depend on the tick and the joint state,
       so "the frame changed after execute()" is a real assertion.
+    - **Ground truth is opt-in and behaves like the real thing when it is off**: without
+      ``ground_truth=`` the depth and segmentation calls RAISE rather than returning zeros,
+      and with it they warm up per channel, carry ``inf`` background depth and move the
+      object's centroid with the pose (see :meth:`_synthetic_depth`,
+      :meth:`_synthetic_segmentation`).
 
     Failure modes it can simulate, because they are the ones that bite:
 
@@ -924,6 +1205,7 @@ class FakeIsaacBinding:
         physics_dt: float = 1.0 / 500.0,
         cameras: Sequence[str] = ("persp",),
         render_hw: tuple[int, int] = (64, 64),
+        ground_truth: Sequence[str] = (),
         warmup_frames: int = 0,
         enforce_main_thread: bool = True,
         initial_positions: np.ndarray | None = None,
@@ -939,6 +1221,7 @@ class FakeIsaacBinding:
         self._physics_dt = float(physics_dt)
         self._cameras = tuple(cameras)
         self._render_hw = (int(render_hw[0]), int(render_hw[1]))
+        self._ground_truth = _validate_ground_truth(ground_truth)
         self._warmup_frames = int(warmup_frames)
         self._enforce_main_thread = bool(enforce_main_thread)
         self._indices: G1DofIndices | None = None
@@ -961,7 +1244,13 @@ class FakeIsaacBinding:
         self._wedged = False
         self._pre_physics: list[Callable[[], None]] = []
 
-        #: Diagnostics, mirroring ``FakeG1Transport``'s recording style.
+        #: Per-channel render counts, so each channel warms up on its own schedule — the real
+        #: annotators are independent objects and a rig retrying depth must not be handed a
+        #: frame because rgb happened to be asked for first.
+        self._channel_calls: dict[str, int] = {}
+
+        #: Diagnostics, mirroring ``FakeG1Transport``'s recording style. ``render_calls``
+        #: counts EVERY channel, so it stays the "how much rendering happened" number.
         self.step_calls: int = 0
         self.render_calls: int = 0
         self.callback_invocations: int = 0
@@ -1017,6 +1306,10 @@ class FakeIsaacBinding:
     @property
     def camera_names(self) -> tuple[str, ...]:
         return self._cameras
+
+    @property
+    def ground_truth_channels(self) -> tuple[str, ...]:
+        return self._ground_truth
 
     def get_physics_step_count(self) -> int:
         self._require_open("get_physics_step_count")
@@ -1101,20 +1394,51 @@ class FakeIsaacBinding:
         self._require_main_thread("get_dof_gains")
         return self._kp.astype(np.float32), self._kd.astype(np.float32)
 
+    def _begin_render(self, camera: str, channel: str, op: str) -> bool:
+        """The guards every render method shares -> ``True`` when a frame should be produced.
+
+        ``False`` means this channel is still warming up. Refuses an unknown camera with the
+        same ``ValueError`` and an unattached channel with the same ``RuntimeError`` as
+        :class:`IsaacSimBinding`, because a rig that only ever meets the fake has to meet the
+        real errors. Never advances the tick.
+        """
+        self._require_open(op)
+        self._require_main_thread(op)
+        if camera not in self._cameras:
+            raise ValueError(f"unknown camera {camera!r}; have {list(self._cameras)}")
+        if channel != "rgb" and channel not in self._ground_truth:
+            raise RuntimeError(
+                f"{op}: the {channel!r} channel "
+                f"({GROUND_TRUTH_ANNOTATORS.get(channel, channel)!r} annotator) is not "
+                f"attached — pass ground_truth={(channel,)!r} when constructing the binding. "
+                f"Attached here: {['rgb', *self._ground_truth]}"
+            )
+        self.render_calls += 1
+        seen = self._channel_calls.get(channel, 0) + 1
+        self._channel_calls[channel] = seen
+        return seen > self._warmup_frames
+
     def render_frame(self, camera: str) -> np.ndarray | None:
         """A deterministic synthetic frame, or ``None`` for the first ``warmup_frames`` calls.
 
         Never advances the tick — same guarantee ``RenderingManager.render()`` is documented
         to give, which is the one the whole render path rests on.
         """
-        self._require_open("render_frame")
-        self._require_main_thread("render_frame")
-        if camera not in self._cameras:
-            raise ValueError(f"unknown camera {camera!r}; have {list(self._cameras)}")
-        self.render_calls += 1
-        if self.render_calls <= self._warmup_frames:
+        if not self._begin_render(camera, "rgb", "render_frame"):
             return None
         return self._synthetic_frame(self._cameras.index(camera))
+
+    def render_depth(self, camera: str) -> np.ndarray | None:
+        """Deterministic synthetic depth, or ``None`` for this channel's warmup calls."""
+        if not self._begin_render(camera, "depth", "render_depth"):
+            return None
+        return self._synthetic_depth(self._cameras.index(camera))
+
+    def render_segmentation(self, camera: str) -> SegmentationFrame | None:
+        """Deterministic synthetic ids + labels, or ``None`` for this channel's warmup."""
+        if not self._begin_render(camera, "segmentation", "render_segmentation"):
+            return None
+        return self._synthetic_segmentation(self._cameras.index(camera))
 
     def _synthetic_frame(self, camera_index: int) -> np.ndarray:
         """uint8 (H, W, 3) with real pixel variance, derived from the tick and the pose.
@@ -1134,6 +1458,50 @@ class FakeIsaacBinding:
         green = ((yy * 255) // max(height - 1, 1) + phase) % 256
         blue = red ^ green
         return np.stack([red, green, blue], axis=-1).astype(np.uint8)
+
+    def _synthetic_depth(self, camera_index: int) -> np.ndarray:
+        """float32 (H, W) metres, pose-dependent, with an INFINITE background band.
+
+        The ``inf`` band is the point, not decoration: ``distance_to_camera`` reports a ray
+        that hit no geometry as ``inf``, so a calibration rig that forgets to mask has to
+        produce a p95 depth error of ``inf`` HERE, on a laptop, rather than on the box after a
+        GPU-hour of rendering. No RNG, like every other number this fake produces.
+        """
+        height, width = self._render_hw
+        yy, xx = np.mgrid[0:height, 0:width]
+        total = float(np.sum(np.abs(self._q)))
+        pose = (total % 1.0) if np.isfinite(total) else 0.0
+        near = 0.5 + 0.25 * camera_index + pose
+        depth = (near + 1.5 * (yy / max(height - 1, 1)) + 0.5 * (xx / max(width - 1, 1))).astype(
+            np.float32
+        )
+        depth[:, -max(width // 8, 1) :] = np.inf
+        return np.ascontiguousarray(depth)
+
+    def _synthetic_segmentation(self, camera_index: int) -> SegmentationFrame:
+        """uint32 (H, W) ids + labels, with an object whose CENTROID MOVES with the pose.
+
+        PR-08 §4 measures an object-centroid displacement between the estimated and the true
+        mask, so a fake whose mask never moved would make "the centroid followed the robot" an
+        assertion that cannot fail. Ids are small integers with a label map shaped like
+        Replicator's (``{"class": ...}``) so rig code written against this fake indexes the
+        real thing the same way.
+        """
+        height, width = self._render_hw
+        yy, _ = np.mgrid[0:height, 0:width]
+        ids = np.zeros((height, width), dtype=np.uint32)
+        ids[yy > height // 2] = _FAKE_TABLE_ID
+        total = float(np.sum(np.abs(self._q)))
+        shift = int(total * 100.0) if np.isfinite(total) else 0
+        half = max(min(height, width) // 8, 1)
+        span = max(width - 2 * half, 1)
+        centre_x = half + (width // 4 + shift + camera_index) % span
+        centre_y = max(height // 3, half)
+        ids[
+            centre_y - half : centre_y + half,
+            centre_x - half : centre_x + half,
+        ] = _FAKE_OBJECT_ID
+        return SegmentationFrame(ids=ids, id_to_labels=dict(_FAKE_ID_TO_LABELS))
 
     def register_pre_physics_callback(self, callback: Callable[[], None]) -> None:
         self._require_open("register_pre_physics_callback")

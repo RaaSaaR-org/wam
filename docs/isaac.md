@@ -126,7 +126,7 @@ what we assumed it was*. It deliberately does **not** import `wam.robot.isaac_tr
 would conflate "is the vendor API what we think" with "is our code correct against it", and only
 the first question can be answered here. Flags: `--asset`, `--hz` (default 500), `--device`
 (default `cuda:0`), `--camera-hw H W` (default 256 256), `--warmup-frames` (default 20), `--out`,
-`--gui` (default is headless).
+`--gui` (default is headless), `--ground-truth-annotators` (default off — adds check N).
 
 Every result is printed as `[PASS]`/`[FAIL]` with `flush=True` as it happens, and the same list is
 written to `--out` as `{"checks": [{name, ok, detail}], "info": {...}}`. **The report is written
@@ -153,6 +153,7 @@ What it checks, in the order it runs them:
 | J | `gains_round_trip`, `zero_kp_accepted` | the caller owns the gains. `kp=0` is the e-stop damping mode and must not be clamped to a floor. This is the check that says the backend can stay raw Isaac Sim rather than Isaac Lab |
 | G′ | `same_process_determinism` | recorded as a measured max-abs delta in rad, not just a boolean. Same-process only — NVIDIA makes no cross-machine guarantee, and the rollout manifest should carry the weaker claim |
 | K | `camera_returns_a_frame`, `camera_dtype_uint8`, `camera_shape`, `camera_frame_is_not_blank` | the first frames come back as `None`, not black — up to 20 of them in NVIDIA's own test. Code that does not gate on `is not None` records **black frames into a dataset**, which is worse than a crash: they pass the T-11 data-quality gates and poison training silently |
+| N | `annotator_depth_attaches`, `annotator_segmentation_attaches`, `depth_is_hw_float`, `depth_has_finite_values`, `segmentation_ids_are_not_colorized`, `segmentation_carries_id_to_labels` (plus recorded `depth_finite_range`, `depth_background_is_inf`, `segmentation_id_to_labels`) | **only with `--ground-truth-annotators`.** The `distance_to_camera` + `semantic_segmentation` names, shapes and payload shape the binding's `ground_truth=` path assumes (PR-08 §4 / §8 item 5). Off by default deliberately: no rollout uses these annotators, and failing the gate that every rollout passes on one of them would block the box for nothing — but the calibration rig that computes `EST_DRIFT_P95` must see them pass first |
 
 ### The part that is discovery, not verification: `info.dof_names`
 
