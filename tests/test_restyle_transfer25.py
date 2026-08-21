@@ -65,7 +65,7 @@ def corpus(tmp_path: pathlib.Path):
     return {"manifest": manifest, "styles": styles, "work": work, "out": tmp_path / "raw", "rows": rows}
 
 
-def _argv(corpus, **over) -> list[str]:
+def _argv(corpus, over: dict | None = None) -> list[str]:
     args = {
         "--checkpoint-path": "/staged/ckpt",
         "--manifest": str(corpus["manifest"]),
@@ -76,8 +76,9 @@ def _argv(corpus, **over) -> list[str]:
         "--control": "depth:0.5",
         "--backend": "null",
     }
-    args.update(over)
-    flat = [x for kv in args.items() for x in kv]
+    args.update(over or {})
+    # A None value is a store_true flag, which takes no argument.
+    flat = [x for k, v in args.items() for x in ((k,) if v is None else (k, v))]
     return flat + ["--no-guardrails"]
 
 
@@ -292,3 +293,82 @@ def test_a_declared_but_missing_map_is_refused_rather_than_silently_re_estimated
             controls=[rt.Control("depth", 0.5)],
             bucket="480",
         )
+
+
+# -- what job 189142 cost us -------------------------------------------------------------------
+#
+# The restyle job on 2026-08-20 exited 0:0, wrote THROUGHPUT.json, and reported 9.56 GPU-h per
+# variant to the PR-08 §8 item 3 budget. It had generated nothing: every unit died inside
+# SetupArguments and the wall clock the sbatch measured was the time to reach the crash. The three
+# tests below are the three links in that chain, each one broken on its own.
+
+
+def test_a_dead_unit_cannot_become_a_measurement(corpus, monkeypatch):
+    """--require-success is what the TIMING path passes. Without it the driver returns 0 on a
+    chunk of corpses (deliberately — the chunked run resumes), and the sbatch above it times the
+    corpse and calls the number throughput."""
+
+    def dead(sample, out_dir):
+        raise RuntimeError("SetupArguments: model is required")
+
+    monkeypatch.setattr(rt, "_null_backend", dead)
+    assert rt.main(_argv(corpus)) == 0, "the resumable default must not change"
+    assert rt.main(_argv(corpus, {"--require-success": None})) == 1
+
+
+def test_require_success_is_silent_when_every_unit_lands(corpus):
+    """It must gate on the outcome, not merely on being passed."""
+    assert rt.main(_argv(corpus, {"--require-success": None})) == 0
+
+
+def test_the_setup_dict_names_a_model_because_upstream_validates_before_defaults(corpus, monkeypatch):
+    """SetupArguments declares `model` with a default, and that default is unreachable: its
+    validator is mode="before", so it sees the raw dict and raises "model is required" for a key
+    pydantic would have filled in a moment later. The stub reproduces that ordering exactly."""
+    seen = {}
+
+    class _SetupArguments:
+        def __init__(self, **kw):
+            if kw.get("model") is None:  # config.py:263-270, mode="before"
+                raise ValueError("model is required")
+            seen.update(kw)
+            self.model_key = type("K", (), {"distilled": False})()
+
+    class _InferenceArguments:
+        def __init__(self, **kw):
+            self.name = kw["name"]
+
+    class _Control2WorldInference:
+        def __init__(self, args, hint_keys):
+            seen["hint_keys"] = list(hint_keys)
+            self.checkpoint_list = [f"s3://stub/{k}" for k in hint_keys]
+
+        def generate(self, samples, out_dir):
+            path = out_dir / f"{samples[0].name}.mp4"
+            path.write_bytes(b"stub mp4")
+            return [path]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "cosmos_transfer2.config",
+        type(sys)("cosmos_transfer2.config"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "cosmos_transfer2.inference",
+        type(sys)("cosmos_transfer2.inference"),
+    )
+    sys.modules["cosmos_transfer2.config"].SetupArguments = _SetupArguments
+    sys.modules["cosmos_transfer2.config"].InferenceArguments = _InferenceArguments
+    sys.modules["cosmos_transfer2.inference"].Control2WorldInference = _Control2WorldInference
+
+    argv = _argv(corpus, {"--backend": "transfer25", "--control": "depth:0.5,seg:0.5"})
+    assert rt.main(argv) == 0
+    assert seen["model"] == "depth", "with several controls upstream ignores it, but it must be one of them"
+    assert seen["hint_keys"] == ["depth", "seg"]
+
+    record = json.loads((corpus["out"] / corpus["rows"][0]["unit"] / "sample_outputs.json").read_text())
+    # Two hint keys means upstream resolved its own checkpoints and never looked at
+    # --checkpoint-path. The record has to say so, because the sbatch's log line does not.
+    assert record["checkpoint_path_honoured"] is False
+    assert record["checkpoints_loaded"] == ["s3://stub/depth", "s3://stub/seg"]

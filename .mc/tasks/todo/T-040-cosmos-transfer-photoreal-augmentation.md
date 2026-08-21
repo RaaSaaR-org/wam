@@ -245,6 +245,41 @@ Three standing results, none of which this task may quietly step over:
       `info.json` exactly, 640×480 av1, 402 materialised files (no symlinks), **0 conditioning maps
       claimed** — the honest state until items 4/5 land, and the manifest Transfer2.5 will estimate
       depth/seg from.
+
+      **2026-08-22 — the timing run reported a number, and the number is not a measurement.**
+      `99` completed (job 189135) and the timing run went through as job **189142**: `COMPLETED`,
+      exit `0:0`, 2 min on one H200, and it wrote `THROUGHPUT.json` claiming **0.2 s/frame → 9.56
+      GPU-h per variant**. It generated **nothing**. Its own log says `[1/1] … error ValidationError`
+      and `=== done: 0 success, 1 error`; the 118 s it timed is the time to import torch, build the
+      checkpointer and die. **That figure is the input PR-08 §8 item 3 derives the whole-partition
+      ceiling from, so the ceiling would have been derived from a crash.** Three separate defects
+      had to line up, and all three are now closed:
+      - **`model` is required and looks optional.** `SetupArguments` declares it with a default
+        (`config.py:305`), but `validate_model` is a `mode="before"` validator (`:263-270`) — it
+        sees the raw dict and raises `"model is required"` for the key pydantic would have filled
+        in a moment later. The driver never passed it. It now does, derived from the hint keys.
+      - **The driver's resumability was load-bearing in the wrong place.** It returns 0 on a dead
+        unit *by design*, so a partial chunk can be re-driven — correct for generation, fatal for
+        timing, where the sbatch measures a wall clock around it and calls the result throughput.
+        `--require-success` now exists and the TIMING path alone passes it, so a dead unit exits 1
+        and `THROUGHPUT.json` is never written.
+      - **On the committed control set upstream ignores our checkpoint entirely.**
+        `CONTROL=depth:0.5,seg:0.5` gives `Control2WorldInference` two hint keys, which takes the
+        multi-branch branch (`inference.py:64-72`). That branch never reads `args.checkpoint_path`,
+        loads **all four** of `CONTROL_KEYS = ["edge","vis","depth","seg"]` ("even if some have
+        control weight = 0"), and resolves each through `download_checkpoint()` at a revision
+        **hardcoded per checkpoint** in `checkpoints_transfer2.py` — four *different* commits, none
+        of them `ce8440327…`. So `99`'s 29 GB staged tree is unused on this path, `general/blur`
+        (which `99` deliberately skipped, and which is what `ModelVariant.VIS` is backed by) is
+        required, and the hub cache holds none of it. A cold run downloads ~22 GB **inside the
+        measured window**. `99b_stage_transfer25_multibranch.sbatch` now warms exactly those four
+        through upstream's own resolver and records them in `MULTIBRANCH_STAGED.json`; the driver
+        additionally writes `checkpoints_loaded` and `checkpoint_path_honoured` into each unit's
+        record, because the sbatch's `generator … (FROZEN)` log line describes bytes that this path
+        does not load.
+      **The throughput AC stays OPEN and is now openly worse than it looked:** the one number we
+      had has been withdrawn. `99b` → `97 TIMING=1` is resubmitted; the AC closes on the number that
+      run produces, not on this one.
 - [x] Generation is **chunked and resumable** under 4 h `MaxWall` / `MaxJobsPU=4`.
       → `cluster/discoverer/97_transfer25_restyle.sbatch` (2026-08-16). `CHUNK_INDEX`/`CHUNK_TOTAL`
       are required with no default, `--requeue` plus `--signal=B:USR1@300` hands the run five

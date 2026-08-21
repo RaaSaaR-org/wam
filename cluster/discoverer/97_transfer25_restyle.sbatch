@@ -1069,9 +1069,16 @@ if (( TIMING_MODE )); then
   # --no-guardrails: see the note on the real invocation below. It is mandatory here too, and for
   # the timing number specifically it matters twice over — the guardrail pass is real GPU time
   # that the production run will not spend, so timing with it on measures a pipeline we do not run.
+  # --require-success: the chunked run below deliberately exits 0 on a dead unit so the chunk stays
+  # resumable, and until 2026-08-21 this path inherited that. It must not. Job 189142 crashed inside
+  # the driver on a SetupArguments validation error, produced 0 clips, exited 0 -- and the block
+  # below turned the 118 s it took to reach the crash into "9.56 GPU-h per variant" and wrote it to
+  # THROUGHPUT.json as the input to the PR-08 §8 item 3 budget. The clock measures the crash unless
+  # something asserts the clip exists, so the driver asserts it and this exits here if it does not.
   python "${RESTYLE_DRIVER}" \
       --checkpoint-path "${TRANSFER_CHECKPOINT_PATH}" \
       --no-guardrails \
+      --require-success \
       --manifest "${SOURCE}/manifest.json" \
       --styles "${STYLE_PARTITION}" \
       --style-set "${STYLE_SET}" \
@@ -1079,7 +1086,13 @@ if (( TIMING_MODE )); then
       --out "${TROOT}" \
       --resolution 640x480 \
       --control "${CONTROL}" \
-      --nproc 1
+      --nproc 1 || {
+    echo "FATAL: the timed episode did not produce a clip, so there is no measurement to record."
+    echo "       THROUGHPUT.json is deliberately NOT written -- a wall clock around a failed unit"
+    echo "       is not a throughput number, and PR-08 §8 item 3 derives the budget from this file."
+    echo "       Per-unit reason: ${TROOT}/*/sample_outputs.json"
+    exit 1
+  }
   TIMING_WALL=$((SECONDS - S))
   echo "=== timed episode: ${TIMING_WALL}s"
 

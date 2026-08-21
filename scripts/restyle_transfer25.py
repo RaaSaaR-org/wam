@@ -344,11 +344,24 @@ def _transfer25_backend(sample: dict, out_dir: pathlib.Path, setup: dict) -> dic
     from cosmos_transfer2.config import InferenceArguments, SetupArguments  # type: ignore
     from cosmos_transfer2.inference import Control2WorldInference  # type: ignore
 
-    args = SetupArguments(**setup)
-    parsed = InferenceArguments(**sample)
     # batch_hint_keys is normally computed by from_files(); with one sample per call it is just
     # this sample's control keys (api §9).
     hint_keys = sorted(k for k in _CONTROL_KEYS if k in sample)
+
+    # `model` LOOKS optional -- SetupArguments declares it with a default (config.py:305). It is
+    # not. validate_model is a mode="before" validator, so it runs on the raw dict before pydantic
+    # applies any default, and an absent key raises "model is required" (config.py:263-270). Job
+    # 189142 died on exactly this after loading the checkpointer, and because the driver reports a
+    # dead unit as an error rather than a non-zero exit, the sbatch above it timed the crash.
+    #
+    # WHICH name to pass depends on how many controls there are, and the two cases are not alike:
+    #   one  control key  -- upstream keeps our --checkpoint-path (inference.py:52-62) and `model`
+    #                        is what picks the variant, so it has to BE that key.
+    #   many control keys -- upstream takes the multi-branch branch (inference.py:64-72). `model`
+    #                        there only decides `.distilled`, which is False either way.
+    # hint_keys[0] is exact in the first case and inert in the second.
+    args = SetupArguments(**{**setup, "model": hint_keys[0]})
+    parsed = InferenceArguments(**sample)
     inference = Control2WorldInference(args, hint_keys)
     produced = inference.generate([parsed], out_dir)
 
@@ -363,7 +376,17 @@ def _transfer25_backend(sample: dict, out_dir: pathlib.Path, setup: dict) -> dic
     if not flat.is_file():
         raise DriverError(f"unit {sample['name']}: expected {flat}, which was not written.")
     flat.replace(out_dir / "vision.mp4")
-    return {"backend": "transfer25", "produced": [str(p) for p in produced]}
+    # The checkpoints upstream ACTUALLY loaded, read back off the object rather than restated from
+    # what we passed in. With more than one control key `--checkpoint-path` is not consulted at all
+    # (inference.py:64-72) and every entry here comes from upstream's own registry, at the revision
+    # pinned in checkpoints_transfer2.py -- which is NOT ${TRANSFER_MODEL_REVISION}. PR-08 §6 wants
+    # the generator recorded; this is the only place that can record the one that ran.
+    return {
+        "backend": "transfer25",
+        "produced": [str(p) for p in produced],
+        "checkpoints_loaded": [str(c) for c in inference.checkpoint_list],
+        "checkpoint_path_honoured": len(hint_keys) == 1,
+    }
 
 
 # --------------------------------------------------------------------------------------------
@@ -463,6 +486,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resolution", default="640x480")
     ap.add_argument("--nproc", type=int, default=1)
     ap.add_argument(
+        "--require-success",
+        action="store_true",
+        help=(
+            "Exit non-zero if any unit failed. OFF by default and it must stay off for the chunked "
+            "run, whose whole resume story is that a partial chunk exits 0 and is re-driven. It is "
+            "for the TIMING path, where the opposite is true: a unit that died is not a slow unit, "
+            "and a wall clock measured around it is not a measurement."
+        ),
+    )
+    ap.add_argument(
         "--control",
         required=True,
         help="e.g. 'depth:0.5,seg:0.5'. Required and never defaulted — see parse_controls().",
@@ -535,9 +568,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{i}/{len(units)}] {unit.unit} {outcome.status} {outcome.detail}", flush=True)
 
         print(f"=== done: {len(units) - failures} success, {failures} error", flush=True)
+        if failures and args.require_success:
+            print(
+                f"FATAL: --require-success and {failures} of {len(units)} units failed. "
+                "Read the per-unit sample_outputs.json for the reason.",
+                file=sys.stderr,
+            )
+            return 1
         # A non-zero exit on any failure would make 96's resume impossible — the whole point of the
         # per-unit status file is that a partial chunk is resumable. The count is reported and the
-        # harvest decides.
+        # harvest decides. --require-success is the one caller that needs the opposite.
         return 0
     except DriverError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
