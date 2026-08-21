@@ -6,7 +6,17 @@
 #   episode on an H200" WITHOUT waiting for T-39, so the timing path asks for neither a T-39
 #   attestation nor a budget — the budget is what it MEASURES. See (a) and (c) below:
 #       TIMING=1 STYLE_SET=train CHUNK_INDEX=1 CHUNK_TOTAL=1 CONTROL=depth:0.5,seg:0.5 \
-#         sbatch 97_transfer25_restyle.sbatch
+#         sbatch --time=01:30:00 97_transfer25_restyle.sbatch
+#
+#   THE --time OVERRIDE IS PART OF THE RECIPE, NOT A TWEAK. The #SBATCH --time=04:00:00 below is
+#   sized for a GENERATION chunk and is simply wrong for one episode: `common` churns on 1-2 hour
+#   jobs, so a 4 h request cannot fit the gaps the partition actually offers and sits PENDING
+#   (Priority) behind them. Measured 2026-08-20 on three jobs: 4 h requests estimated 13-17 hours
+#   out, and lowering them to honest values started two within seconds. 189402 was submitted at
+#   4 h on 2026-08-22, sat an hour with no start estimate, and moved only after
+#   `scontrol update JobId=189402 TimeLimit=01:30:00` — which is also the fix for a job already
+#   queued, since it keeps the job's age and can be raised again while it is still pending.
+#   Ask for what the run needs. That is the honest number and Slurm rewards it; it is not gaming.
 #   then one submission per chunk, at most 4 in flight (MaxJobsPU=4):
 #       PR08_T39_REPORTED="<verdict letter> ... <YYYY-MM-DD>" PR08_T39_ARTIFACT=<path> \
 #         PARTITION_CEILING_GPU_H=<whole partition> CEILING_GPU_H=<this style set's share> \
