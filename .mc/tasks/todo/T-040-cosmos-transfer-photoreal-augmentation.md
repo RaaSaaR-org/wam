@@ -277,6 +277,12 @@ Three standing results, none of which this task may quietly step over:
         additionally writes `checkpoints_loaded` and `checkpoint_path_honoured` into each unit's
         record, because the sbatch's `generator … (FROZEN)` log line describes bytes that this path
         does not load.
+      **Measured the same day (job 189401, 2:31, 22.11 GB, free CPU QoS).** Diffing the four
+      against `99`'s `STAGED.json` by sha256: `edge`, `depth` and `seg` are **byte-identical** to
+      what `99` staged at `ce8440327…`; only `vis`/`general/blur` (`82ede02539a4b141`) is new. The
+      four revisions are therefore commit labels over unchanged content, and the `FROZEN` claim
+      holds as a statement about bytes — the only checkable form of it, per api §9. It also settles
+      `99`'s `"variant_selected": null`: upstream selects the 5.53 GB member of each pair.
       **The throughput AC stays OPEN and is now openly worse than it looked:** the one number we
       had has been withdrawn. `99b` → `97 TIMING=1` is resubmitted; the AC closes on the number that
       run produces, not on this one.

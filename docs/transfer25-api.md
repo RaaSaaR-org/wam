@@ -281,6 +281,16 @@ some have control weight = 0."* Three consequences, none of them optional:
    `CheckpointConfig.download()` → `hf.download()`. So a cold run pulls ~22 GB **from inside
    whatever it is doing** — and in the TIMING path, from inside the measured window.
 
+**Measured 2026-08-22 (job 189401), and it is better than the above implies.** Staging all four and
+diffing sha256 against `99`'s `STAGED.json`: `edge`, `depth` and `seg` are **byte-identical** to the
+files `99` staged at `ce8440327…`, despite three different revision labels. Only `vis`
+(`general/blur`, `82ede02539a4b141`) is genuinely new. So the differing revisions are commit labels
+over unchanged content, and `PR-08` §6's `FROZEN` claim survives **as a statement about bytes** for
+the three controls we had — which is the only form of it that was ever checkable, since §9 already
+showed the repo id and revision identify nothing on their own. It also answers the question `99`
+left open as `"variant_selected": null`: upstream's table selects the **5.53 GB** member of each
+undocumented pair, for all four controls.
+
 `99b_stage_transfer25_multibranch.sbatch` warms exactly those four by calling the *same*
 `MODEL_CHECKPOINTS[ModelKey(variant=key)]` lookup and the *same* `download_checkpoint()`, so a pass
 there is evidence the run will not download, not a claim that it should not have to. It records
