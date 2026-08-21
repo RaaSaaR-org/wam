@@ -93,6 +93,21 @@ DEFAULT_ASSET_SUBPATH = "/Isaac/Robots/Unitree/G1/g1.usd"
 #: USD itself during research, only cross-checked against the vendor URDF.
 EXPECTED_NUM_DOFS = 29 + 2 * len(DEX3_FINGER_JOINTS)
 
+#: Ground-truth render channel -> Replicator annotator name, the copy of
+#: ``isaac_binding.GROUND_TRUTH_ANNOTATORS`` this script tests the vendor API with. Duplicated
+#: for the same reason as the naming candidates above (this script must not believe anything
+#: the binding believes); ``tests/test_isaac_binding.py`` asserts the two copies are identical.
+#: Checked only with --ground-truth-annotators — see check N for why it is not on by default.
+GROUND_TRUTH_ANNOTATORS: dict[str, str] = {
+    "depth": "distance_to_camera",
+    "segmentation": "semantic_segmentation",
+}
+
+#: ``init_params`` the binding constructs those annotators with, duplicated and pinned for the
+#: same reason: a preflight that proved a COLORISED segmentation works would say nothing about
+#: the one the binding actually asks for.
+ANNOTATOR_INIT_PARAMS: dict[str, dict[str, Any]] = {"segmentation": {"colorize": False}}
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
@@ -101,6 +116,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--device", default="cuda:0", help="physics device")
     p.add_argument("--camera-hw", type=int, nargs=2, default=(256, 256), metavar=("H", "W"))
     p.add_argument("--warmup-frames", type=int, default=20, help="max render ticks for a frame")
+    p.add_argument(
+        "--ground-truth-annotators",
+        action="store_true",
+        help="also run check N (distance_to_camera + semantic_segmentation, PR-08 §4)",
+    )
     p.add_argument("--out", default=None, help="write the JSON report here")
     p.add_argument("--gui", action="store_true", help="run with a window (default: headless)")
     return p.parse_args(argv)
@@ -513,6 +533,145 @@ def check_camera(report: Report, api: dict[str, Any], hw: tuple[int, int], warmu
     )
 
 
+def check_ground_truth_annotators(
+    report: Report, api: dict[str, Any], hw: tuple[int, int], warmup: int
+) -> None:
+    """N. The two ground-truth annotators PR-08 §4's error budget is measured against.
+
+    OFF unless ``--ground-truth-annotators`` is passed, for the same reason the binding
+    attaches them only on request: no rollout needs depth or segmentation, and failing the
+    preflight that gates EVERY Isaac rollout on an annotator none of them uses would block the
+    box for nothing (the EFFORT_GETTER_CANDIDATES note above is the same judgement). The
+    calibration rig does need them, and it must see this pass first — without ground-truth
+    depth and segmentation there is no EST_DRIFT_P95, and G0b's tolerance cannot be computed.
+
+    Four assumptions, every one of them UNVERIFIED until this runs:
+
+    1. Both annotator names exist in this build's registry.
+    2. ``distance_to_camera`` returns a float array shaped (H, W) — the binding also accepts
+       (H, W, 1) and this records which one arrived.
+    3. It returns something with finite geometry in it at all. Whether the BACKGROUND comes
+       back as ``inf`` is recorded rather than checked — a closed stage legitimately has no
+       escaping rays — but ``depth_finite_range`` is where a finite sentinel would show up,
+       and a finite sentinel is the dangerous one: it enters the budget as a real distance.
+    4. ``semantic_segmentation`` returns ``{"data": ids, "info": {"idToLabels": ...}}`` rather
+       than a bare array, and honours ``init_params={"colorize": False}`` so the ids are
+       integer labels and not an RGBA picture of them.
+
+    The label map itself is RECORDED, never asserted: which semantics the stage carries is a
+    property of the scene, not of the vendor API, and an empty map on a bare G1 stage is
+    correct.
+    """
+    import numpy as np
+    import omni.replicator.core as rep
+
+    rm = api["RenderingManager"]
+    height, width = hw
+    rep.orchestrator.set_capture_on_play(False)
+    render_product = rep.create.render_product("/OmniverseKit_Persp", resolution=(width, height))
+
+    annotators: dict[str, Any] = {}
+    for channel, name in GROUND_TRUTH_ANNOTATORS.items():
+        init_params = ANNOTATOR_INIT_PARAMS.get(channel)
+        try:
+            annotator = (
+                rep.AnnotatorRegistry.get_annotator(name)
+                if init_params is None
+                else rep.AnnotatorRegistry.get_annotator(name, init_params=dict(init_params))
+            )
+            annotator.attach(render_product)
+        except Exception as exc:  # noqa: BLE001 - the whole point is to report, not to raise
+            report.check(f"annotator_{channel}_attaches", False, f"{name!r}: {exc!r}")
+            continue
+        report.check(f"annotator_{channel}_attaches", True, name)
+        annotators[channel] = annotator
+
+    data: dict[str, Any] = {}
+    ticks = 0
+    for ticks in range(1, warmup + 1) if annotators else ():
+        rm.render()
+        for channel, annotator in annotators.items():
+            if channel in data:
+                continue
+            payload = annotator.get_data()
+            if isinstance(payload, dict):
+                if payload.get("data") is not None and getattr(payload["data"], "size", 0) > 0:
+                    data[channel] = payload
+            elif payload is not None and getattr(payload, "size", 0) > 0:
+                data[channel] = payload
+        if len(data) == len(annotators):
+            break
+    report.record("ground_truth_warmup_ticks", ticks)
+
+    if "depth" in annotators:
+        if report.check(
+            "depth_returns_data", "depth" in data, f"still empty after {warmup} render ticks"
+        ):
+            depth = np.asarray(data["depth"])
+            report.record("depth_shape", list(depth.shape))
+            report.record("depth_dtype", str(depth.dtype))
+            report.check(
+                "depth_is_hw_float",
+                depth.ndim in (2, 3) and depth.dtype.kind == "f",
+                f"{depth.shape} {depth.dtype} (the binding squeezes a trailing (H, W, 1))",
+            )
+            finite = np.isfinite(depth)
+            report.record("depth_finite_fraction", round(float(finite.mean()), 4))
+            report.record(
+                "depth_finite_range",
+                [float(depth[finite].min()), float(depth[finite].max())] if finite.any() else [],
+            )
+            # RECORDED, not checked: whether any ray escapes the scene is a property of the
+            # STAGE, not of the vendor API, and a closed room legitimately has none. What the
+            # rig has to read out of the report is whether background came back as `inf` or
+            # as a finite sentinel that would enter the error budget as a real distance —
+            # depth_finite_range is the number that answers it.
+            report.record("depth_background_is_inf", bool(not finite.all()))
+            report.check(
+                "depth_has_finite_values",
+                bool(finite.any()),
+                "every pixel is inf/NaN — the camera sees no geometry at all, so there is "
+                "nothing to calibrate an estimator against",
+            )
+
+    if "segmentation" in annotators:
+        if report.check(
+            "segmentation_returns_data",
+            "segmentation" in data,
+            f"still empty after {warmup} render ticks",
+        ):
+            payload = data["segmentation"]
+            is_dict = isinstance(payload, dict)
+            report.record("segmentation_payload_is_dict", is_dict)
+            ids = np.asarray(payload["data"] if is_dict else payload)
+            report.record("segmentation_shape", list(ids.shape))
+            report.record("segmentation_dtype", str(ids.dtype))
+            report.check(
+                "segmentation_ids_are_not_colorized",
+                ids.dtype.kind in "iu" and (ids.ndim == 2 or ids.shape[-1] == 1),
+                f"{ids.shape} {ids.dtype} — an (H, W, 4) uint8 array means colorize=False did "
+                f"not take effect and every centroid would be measured off a palette",
+            )
+            info = payload.get("info") if is_dict else None
+            report.record("segmentation_info_keys", sorted(info) if isinstance(info, dict) else [])
+            report.record(
+                "segmentation_id_to_labels",
+                (info or {}).get("idToLabels") if isinstance(info, dict) else None,
+            )
+            report.check(
+                "segmentation_carries_id_to_labels",
+                isinstance(info, dict) and "idToLabels" in info,
+                "no idToLabels — the ids are per-annotator and mean nothing without it, so a "
+                "centroid could not be attributed to an object",
+            )
+
+    for annotator in annotators.values():
+        try:
+            annotator.detach([render_product])
+        except Exception:  # noqa: BLE001, S110 - teardown must not mask a real finding
+            pass
+
+
 def check_threading(report: Report) -> None:
     """M. The main-thread rule, and the guard that enforces it.
 
@@ -605,6 +764,10 @@ def main(argv: list[str] | None = None) -> int:
             check_gains(report, robot)
             check_determinism(report, api, robot)
             check_camera(report, api, tuple(args.camera_hw), args.warmup_frames)
+            if args.ground_truth_annotators:
+                check_ground_truth_annotators(
+                    report, api, tuple(args.camera_hw), args.warmup_frames
+                )
         finally:
             app.close()
 

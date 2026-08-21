@@ -152,7 +152,7 @@ the same composition shape as `mujoco_g1.py`: `IsaacG1Robot` **holds** a `G1Adap
 four protocol methods, and adds `render_frames`, `reset()`, `clear_estop()`, `sim_time_ns`,
 `close()`.
 
-One extra layer that MuJoCo does not need. `IsaacBinding` is a 17-method protocol between the
+One extra layer that MuJoCo does not need. `IsaacBinding` is a 20-member protocol between the
 transport and Omniverse, with two implementations: `IsaacSimBinding` (the real one — **written
 against NVIDIA's documentation and never executed**, because Isaac Sim runs on Linux + an NVIDIA
 GPU) and `FakeIsaacBinding` (a caricature PD integrator that runs anywhere). Everything above the
@@ -177,6 +177,14 @@ the box: it is the gate that turns each documented assumption into pass/fail bef
 3. **The gains in `configs/robot/isaac_g1.yaml` are unmeasured.** They are Isaac Lab's published
    G1 magnitudes and disagree with the MuJoCo rig's measured ones by an order of magnitude. An
    Isaac number and a MuJoCo number are not comparable until someone measures on the box.
+
+Ground-truth depth and segmentation (`distance_to_camera` / `semantic_segmentation`, PR-08 §4)
+are **opt-in and off by default**: `IsaacSimBinding(ground_truth=("depth", "segmentation"))`, then
+`binding.render_depth(cam)` / `binding.render_segmentation(cam)`. Without the flag those two calls
+raise rather than returning zeros, and `render_frames` stays RGB-only on every backend —
+`Observation.images` is a versioned contract and the calibration rig is a render-to-disk job, not a
+policy input. Preflight `--ground-truth-annotators` (check N) is what proves the two annotator
+names on the box.
 
 Setup, the preflight's 31 checks, and the full list of ways this differs from the MuJoCo backend:
 `docs/isaac.md`.

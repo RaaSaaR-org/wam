@@ -1301,6 +1301,32 @@ def test_an_unknown_camera_is_refused_at_construction() -> None:
         IsaacG1Robot(binding=make_binding(), cameras=("head",))
 
 
+def test_ground_truth_is_reached_through_the_binding_and_leaves_render_frames_alone() -> None:
+    """PR-08 §4's calibration rig is not a policy: it wants depth and segmentation, and it
+    gets them from ``robot.binding``, not from ``render_frames``.
+
+    ``render_frames`` stays ``{camera: uint8 [n, H, W, 3]}`` on every backend — it is the
+    thing that becomes ``Observation.images``, which is a versioned contract, and PR-08 asks
+    for a render-to-disk rig, not for a policy input. This test pins that split: the extra
+    channels exist, and the observation path did not notice.
+    """
+    robot = IsaacG1Robot(
+        binding=make_binding(render_hw=(32, 48), ground_truth=("depth", "segmentation"))
+    )
+    tick = robot.sim_time_ns
+
+    frames = robot.render_frames(1)
+    assert set(frames) == {"persp"}
+    assert frames["persp"].shape == (1, 32, 48, 3)
+    assert frames["persp"].dtype == np.uint8
+
+    depth = robot.binding.render_depth("persp")
+    segmentation = robot.binding.render_segmentation("persp")
+    assert depth is not None and depth.shape == (32, 48)
+    assert segmentation is not None and segmentation.ids.shape == (32, 48)
+    assert robot.sim_time_ns == tick
+
+
 # -- construction guards ------------------------------------------------------------------------------
 
 
