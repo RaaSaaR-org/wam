@@ -248,3 +248,54 @@ behaviour and not something this repo documents.
 
 **Staging those weights is a download at scale and is the project owner's call**, per the
 sub-project rule. Nothing here initiates it.
+
+## 10. Two controls is a different code path, and it discards your checkpoint
+
+*Added 2026-08-22, after job 189142 measured a crash and called it throughput.*
+
+PR-08's committed control set is `depth:0.5,seg:0.5`. **Two hint keys is not "§9 twice".** It is a
+different branch of `Control2WorldInference.__init__`, and the two branches disagree about almost
+everything §9 established.
+
+```
+len(batch_hint_keys) == 1   inference.py:52-62    honours args.checkpoint_path via
+                                                  has_checkpoint_override; `model` picks the variant
+len(batch_hint_keys)  > 1   inference.py:64-72    NEVER READS args.checkpoint_path. Builds
+                                                  checkpoint_list from MODEL_CHECKPOINTS for ALL of
+                                                  CONTROL_KEYS = ["edge","vis","depth","seg"], and
+                                                  hardcodes experiment = "multibranch_720p_t24_…"
+```
+
+Upstream's own comment on the second branch: *"Multi-control: load ALL control modalities even if
+some have control weight = 0."* Three consequences, none of them optional:
+
+1. **`99`'s staged tree is unused on the committed control set.** Not overridden — not consulted.
+   The 29 GB at `${TRANSFER_CHECKPOINT_PATH}` and the sha256s in `STAGED.json` describe bytes this
+   path does not load, and the sbatch's `=== generator … (FROZEN)` log line is a claim about them.
+2. **`general/blur` is required.** `ModelVariant.VIS` is backed by
+   `general/blur/ba2f44f2-…_ema_bf16.pt` (`checkpoints_transfer2.py:74-88`) — the directory `99`
+   deliberately skips as *"a control PR-08 does not use"*. PR-08 does not use it. Upstream loads it.
+3. **Each branch is fetched at its own pinned revision, and none is `TRANSFER_MODEL_REVISION`.**
+   `load_multi_branch_checkpoints` calls `download_checkpoint(...)` per entry
+   (`vid2vid_model_control_vace_rectified_flow.py:664-672`), which resolves through
+   `CheckpointConfig.download()` → `hf.download()`. So a cold run pulls ~22 GB **from inside
+   whatever it is doing** — and in the TIMING path, from inside the measured window.
+
+`99b_stage_transfer25_multibranch.sbatch` warms exactly those four by calling the *same*
+`MODEL_CHECKPOINTS[ModelKey(variant=key)]` lookup and the *same* `download_checkpoint()`, so a pass
+there is evidence the run will not download, not a claim that it should not have to. It records
+repo, revision, filename, uuid and sha256 per branch in `MULTIBRANCH_STAGED.json`. Resolving through
+upstream's own table rather than a typed-in uuid is also what keeps §9's name-collision trap shut:
+`MODEL_CHECKPOINTS` selects between the colliding registrations, and we do not.
+
+### `model` has a default and the default is unreachable
+
+`SetupArguments.model` is declared with a default (`config.py:305`), which reads as optional. It is
+not. `validate_model` is a **`mode="before"`** validator (`:263-270`): it runs on the raw input dict,
+before pydantic applies any default, and raises `ValueError("model is required")` for a key it would
+have filled in one step later. Omitting it dies **after** the checkpointer loads, which is what made
+job 189142 look like a 118-second episode instead of an argument error.
+
+Which name to pass follows from the branch table above: with one control it *is* the variant
+selector and must be that control; with several, upstream only reads `.distilled` off it. The driver
+passes `sorted(hint_keys)[0]` — exact in the first case, inert in the second.
