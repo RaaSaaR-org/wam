@@ -296,6 +296,34 @@ Three standing results, none of which this task may quietly step over:
 - [ ] Nothing is generated, trained or submitted under this task until the above is reviewed.
       → **standing.** Also gated on T-39 reporting, per PR-08 §1.
 
+**2026-08-22 — PR-08 §4's calibration rig exists, and the one thing still missing is a segmenter.**
+§4 step 0 (the annotators) landed 2026-08-21 as `5ef3535`, which unblocked step 1 for the first
+time. `scripts/measure_est_drift.py` is steps 1–4, split into two subcommands on purpose:
+- `capture` drives an `IsaacBinding` and writes rgb + ground-truth depth + segmentation ids (with
+  their `idToLabels`) per frame. It runs today against `FakeIsaacBinding` and stamps
+  `is_simulated_binding` into the header, so a laptop capture can never be read as ground truth.
+- `measure` is a pure function of that directory: estimated-vs-true object-centroid distance per
+  frame, p95 → `EST_DRIFT_P95`, plus absolute depth error over the object with the `inf` background
+  excluded and counted. It reuses `centroid_of_mask` and `distribution` from `measure_geom_tol.py`
+  rather than reimplementing them, because §6 SUBTRACTS the two numbers and two implementations of
+  "centroid" is two different quantities.
+It refuses in the same shapes `measure_geom_tol` does — no estimator, ungated estimator, partial
+run, coverage below the floor, mixed geometry — and it additionally cross-checks the committed
+`GEOM_TOL` artifact's pixel grid, because nothing else in the pipeline checks that the subtraction
+is arithmetic. `is_lower_bound: true` is unconditional and not a flag (§4's stated weakness).
+22 tests in `tests/test_measure_est_drift.py`, none needing Isaac or a GPU.
+
+**The blocker is now precisely one thing, and it is shared.** Both halves of §8 item 4 need an
+object segmenter, and §4 step 2 requires it to be *the same one*. Neither has it. What was found on
+the cluster while looking: **`sam2` 1.1.0 is already installed** in the Transfer2.5 venv, with its
+hiera configs, and Cosmos drives it at
+`cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py` naming
+`SAM2_MODEL_CHECKPOINT = "facebook/sam2-hiera-large"`. **No checkpoint is staged** — nothing under
+`checkpoints/` or the hub cache matches. So wiring the *generator's own* segmenter is a ~900 MB
+fetch plus an adapter, and it closes `GEOM_TOL` and `EST_DRIFT_P95` together. Which segmenter to
+commit to is a registered choice (it sets both gate numbers), so it is recorded here rather than
+taken.
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above
