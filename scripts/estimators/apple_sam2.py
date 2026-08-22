@@ -119,6 +119,16 @@ DROPPED and COUNTED into ``coverage``. Returning the previous frame's mask, or r
 destroy that: one invents a displacement that was never observed, the other kills a run over a
 frame that is not an error.
 
+**It will not return a mask of an object it was not asked for.** As of 2026-08-22 every non-empty
+mask is checked against a second, non-learned opinion about where the fruit is — the warm-and-
+saturated colour predicate ``build_identity_calibration.apple_mask`` uses, reimplemented here as
+:func:`object_color_reference` — and a mask whose IoU against it is below
+:data:`MASK_VALIDITY_MIN_IOU` is REFUSED: :func:`segment` returns all-False, exactly as it does for a
+frame with no detection, and the frame is counted in :data:`MASK_REFUSED_FRAMES`. This is a validity
+check on the OUTPUT and it is emphatically NOT a change to the detection — see the block above
+:data:`MASK_VALIDITY_MIN_IOU`, and PR-08 V6 (``docs/preregistration/PR-08-V6-mask-validity.md``),
+which registers it.
+
 **It will not rescale a float image.** ``rgb`` must be ``uint8``. A float array in [0, 1] and a
 float array in [0, 255] are indistinguishable from the array alone and rescale to different
 pictures, which is a different detection, which is a different centroid.
@@ -343,6 +353,54 @@ RETRY_TEXT_THRESHOLD = float(os.environ.get("WAM_PR08_RETRY_TEXT_THRESHOLD", "0.
 #: leaving as a coincidence a later edit could break from either side.
 BOX_SELECTION = "highest_score"
 
+# -- THE VALIDITY CHECK ON THE OUTPUT, WHICH IS NOT A CHANGE TO THE DETECTION ----------------------
+#
+# WHAT IT IS FOR. Job 189637 drove this adapter over 382 frames of AppleToPlate (24 episodes) and a
+# local CPU audit over 169 more, and both found the same defect: on twelve frames the detector
+# returned a confident, well-formed box on THE PLATE, and SAM 2 dutifully segmented it. Those masks
+# are ~30 900 px against a median apple of 6 185, they sit at 0.97-0.98 plate overlap, they score
+# 0.167-0.309 where the correct masks score a median 0.829 — and they produce a centroid, a
+# displacement and a p95 that all look exactly like measurements. That is the failure mode
+# GATE_QUALIFICATION_BLOCKERS's first entry names in as many words. In episode_000094 the segmenter
+# OSCILLATES between the two objects (f00149 plate -> f00150 apple, 471 px -> f00151 apple, 670 px
+# -> f00152 plate), so the corruption hits both tails at once: near-zero displacements while it is
+# locked on the stationary plate, and a recorded 245.9 px step at every switch.
+#
+# WHY IT IS NOT A SEGMENTER CHANGE, WHICH §4 STEP 2 WOULD FORBID. It alters no threshold, no prompt,
+# no retry and no box rule: the detector runs at the generator's operating point, SAM 2 is prompted
+# with exactly the box upstream's rule selects, and the mask drawn is bit for bit the mask that was
+# drawn before. What changes is WHICH FRAMES WE ARE WILLING TO MEASURE ON — this adapter's callers
+# already drop and count frames with no mask, and a refused frame joins them. §4 step 2 asks that
+# GEOM_TOL and EST_DRIFT_P95 come from the same segmenter at the same operating point, and they
+# still do, because the filter is applied identically on both sides of §6's subtraction by living
+# HERE, in the one module both harnesses call. Do NOT "fix" the plate masks by raising
+# BOX_THRESHOLD: that would be our detector rather than the generator's, and it would budget for an
+# error nobody commits (see the comment above BOX_THRESHOLD).
+#
+# WHY THE EXACT THRESHOLD DOES NOT MATTER, WHICH IS THE ARGUMENT FOR ADMITTING IT AT ALL. Over the
+# 382 audited frames the two populations do not overlap and are not close to overlapping: every
+# correct mask scores IoU >= 0.7492 against the colour reference and every plate mask scores exactly
+# 0.0000. Any cut in (0.0, 0.7492) produces the IDENTICAL partition of those frames, so this number
+# is not a coined one — it is a value read off a gap. That claim is not left as prose:
+# ``tests/test_apple_sam2_estimator.py`` sweeps the range against the audit's own recorded IoUs and
+# fails if the partition ever moves. Registered as PR-08 V6 (T40_RULE_V6),
+# docs/preregistration/PR-08-V6-mask-validity.md, before any gate number is measured with it.
+#
+# NO ENV OVERRIDE, DELIBERATELY. Every other knob here is overridable because upstream could move
+# it. This one is ours, it decides which frames enter a committed measurement, and a knob that can
+# silently change the measured population between two runs is precisely what SEGMENTER_CONTRACT
+# exists to prevent — so it is a constant, it is IN that contract, and moving it means editing this
+# file, the committed configs/transfer25/pr08_geom_tol.json and a pre-registration together.
+MASK_VALIDITY_MIN_IOU = 0.10
+
+#: The reference, named in the contract so an artifact says which second opinion was used. It is
+#: NOT ground truth and is never treated as such — it is a non-learned opinion about where the fruit
+#: is, which is exactly what makes a disagreement with SAM 2 informative. The same three numbers
+#: ``build_identity_calibration.apple_mask`` uses, which is what ``probe-scan`` measured all 154 447
+#: frames of this corpus with, so "the fruit is not visible here" means the same thing in the census
+#: and in this refusal.
+MASK_VALIDITY_REFERENCE = "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)"
+
 #: THE ONE REMAINING DIFFERENCE FROM UPSTREAM, named so it cannot be mistaken for an equivalence.
 #: Upstream drives ``SAM2VideoPredictor.from_pretrained(...).init_state(video_path=...)`` and
 #: PROPAGATES one mask through the clip; this adapter segments each frame independently, because the
@@ -378,7 +436,11 @@ ESTIMATOR_VERSION = (
     f"prompt={OBJECT_TEXT_PROMPT!r};"
     f"box_thr={BOX_THRESHOLD};text_thr={TEXT_THRESHOLD};"
     f"retry_box_thr={RETRY_BOX_THRESHOLD};retry_text_thr={RETRY_TEXT_THRESHOLD};"
-    f"box_sel={BOX_SELECTION};prop={PROPAGATION}"
+    f"box_sel={BOX_SELECTION};prop={PROPAGATION};"
+    # In the version string because it decides which frames a recorded number was measured on, and
+    # an artifact whose version cannot answer "was the mask-validity filter on?" cannot be compared
+    # against one measured before it existed.
+    f"mask_val_min_iou={MASK_VALIDITY_MIN_IOU}"
 )
 
 #: The join key PR-08 §4 step 2 is checked on. It is :data:`ESTIMATOR_NAME` and it is spelled once:
@@ -415,6 +477,15 @@ SEGMENTER_CONTRACT: dict[str, Any] = {
     "retry_box_threshold": RETRY_BOX_THRESHOLD,
     "retry_text_threshold": RETRY_TEXT_THRESHOLD,
     "box_selection": BOX_SELECTION,
+    # NOT a detection parameter — a validity check on the output, and therefore a statement about
+    # WHICH FRAMES were measured rather than about how a mask was drawn. It is in the contract for
+    # exactly the reason the thresholds are: GEOM_TOL and EST_DRIFT_P95 are subtracted in §6, and a
+    # GEOM_TOL measured with the filter minus an EST_DRIFT_P95 measured without it is a subtraction
+    # over two different frame populations that would still look like arithmetic. Absence counts as
+    # a disagreement in contract_disagreements(), so an artifact from before PR-08 V6 now fails the
+    # cross-check instead of pooling silently.
+    "mask_validity_min_iou": MASK_VALIDITY_MIN_IOU,
+    "mask_validity_reference": MASK_VALIDITY_REFERENCE,
     "propagation": PROPAGATION,
     "upstream_propagation": UPSTREAM_PROPAGATION,
     "pixel_grid_hw": list(PIXEL_GRID_HW),
@@ -649,6 +720,39 @@ SEGMENT_CALLS = 0
 NO_DETECTION_FRAMES = 0
 EMPTY_MASK_FRAMES = 0
 
+#: Frames on which a non-empty mask was drawn and then REFUSED by the mask-validity check, and of
+#: those, the ones where the colour reference found no fruit at all in the frame. Three events that
+#: all end in an all-False mask and MUST NOT be collapsed into one number:
+#:
+#:   ``NO_DETECTION_FRAMES``          the detector found no box at either threshold.
+#:   ``EMPTY_MASK_FRAMES``            a box was found and SAM 2 returned nothing inside it.
+#:   ``MASK_REFUSED_FRAMES``          a box was found, SAM 2 filled it, and what it filled was not
+#:                                    the object — the plate, the hand, the tabletop.
+#:
+#: The split of the third one matters as much as the third one existing. ``*_NO_REFERENCE_FRAMES``
+#: is the sub-case where the colour reference itself is empty, i.e. THE FRUIT IS NOT VISIBLE AT ALL
+#: — a genuinely hard frame, refused because nothing here can confirm the mask, not because the mask
+#: was demonstrably wrong. That is the threat to validity PR-08 V6 records: those refusals remove
+#: hard frames from the measured population, and for a p95 that gets SUBTRACTED from GEOM_TOL that
+#: plausibly errs in the generator's favour. It is counted so the size of the effect is a number
+#: rather than a worry — and so that a pass over a corpus this colour predicate does not fit (an
+#: Isaac render, a restyled clip) announces itself as "the reference found nothing on N frames"
+#: instead of as a low coverage nobody can explain.
+MASK_REFUSED_FRAMES = 0
+MASK_REFUSED_NO_REFERENCE_FRAMES = 0
+
+#: The validity IoU of every frame the check RAN on, in call order — the same design, for the same
+#: reasons, as :data:`DETECTION_SCORES`: raw values pool exactly through JSON where a histogram only
+#: pools if it was binned identically, and a distribution recorded as a digest cannot answer the
+#: question nobody has asked yet. The check runs on frames that got a box AND a non-empty mask, so
+#: ``len(MASK_VALIDITY_IOU) == SEGMENT_CALLS - NO_DETECTION_FRAMES - EMPTY_MASK_FRAMES``, and it is
+#: not index-aligned to frames. Cumulative like every counter here.
+#:
+#: It is what makes the refusal PER-FRAME evidence rather than a tally: an audit rig that segments
+#: one frame at a time reads the value this frame appended and can show the filter fired on exactly
+#: the frames a person flagged. ``scripts/audit_apple_masks.py`` does precisely that.
+MASK_VALIDITY_IOU: list[float] = []
+
 #: Frames where the first pass found nothing and upstream's single (0.10, 0.10) retry fired, and of
 #: those, the ones where it produced a box. The gap between them and ``NO_DETECTION_FRAMES`` is the
 #: only visible trace of how much of this run's ``coverage`` was bought at the lower threshold.
@@ -707,6 +811,8 @@ def stats() -> dict[str, Any]:
         "retry_box_threshold": RETRY_BOX_THRESHOLD,
         "retry_text_threshold": RETRY_TEXT_THRESHOLD,
         "box_selection": BOX_SELECTION,
+        "mask_validity_min_iou": MASK_VALIDITY_MIN_IOU,
+        "mask_validity_reference": MASK_VALIDITY_REFERENCE,
         "propagation": PROPAGATION,
         "upstream_propagation": UPSTREAM_PROPAGATION,
         "detection_params_source": (
@@ -724,6 +830,9 @@ def stats() -> dict[str, Any]:
         "n_frames_with_empty_mask": EMPTY_MASK_FRAMES,
         "n_frames_retry_fired": RETRY_FRAMES,
         "n_frames_retry_recovered": RETRY_RECOVERED_FRAMES,
+        "n_frames_mask_refused": MASK_REFUSED_FRAMES,
+        "n_frames_mask_refused_no_reference": MASK_REFUSED_NO_REFERENCE_FRAMES,
+        "n_mask_validity_iou": len(MASK_VALIDITY_IOU),
         "n_detection_scores": len(DETECTION_SCORES),
         "detection_scores_attr": "DETECTION_SCORES",
         "detection_scores_meaning": (
@@ -760,8 +869,31 @@ def stats() -> dict[str, Any]:
             "the detector found a box and SAM 2 returned nothing inside it. That drops the step "
             "exactly like a no-detection frame, but it is NOT the same event — it is the segmenter "
             "failing on a frame where the object was found — so it is counted separately. "
-            "n_frames_without_detection + n_frames_with_empty_mask is the whole of the coverage "
-            "shortfall this module is responsible for."
+            "n_frames_without_detection + n_frames_with_empty_mask + n_frames_mask_refused is the "
+            "whole of the coverage shortfall this module is responsible for."
+        ),
+        "mask_validity_iou_attr": "MASK_VALIDITY_IOU",
+        "mask_validity_meaning": (
+            "a non-empty mask whose IoU against the colour reference named in "
+            "mask_validity_reference is below mask_validity_min_iou is REFUSED: segment() returns "
+            "all-False and the frame is counted in n_frames_mask_refused. It is a THIRD event, not "
+            "a no-detection frame and not an empty mask: the detector found a box, SAM 2 filled it, "
+            "and what it filled contained essentially none of the object claimed. The per-frame "
+            "values are on the module attribute named by mask_validity_iou_attr, in call order, one "
+            "per frame the check ran on — so len(MASK_VALIDITY_IOU) == n_segment_calls - "
+            "n_frames_without_detection - n_frames_with_empty_mask. This is a check on the OUTPUT "
+            "and changes no threshold, prompt, retry or box rule; the detection operating point is "
+            "still the generator's, as PR-08 §4 step 2 requires. Registered as PR-08 V6 "
+            "(T40_RULE_V6), docs/preregistration/PR-08-V6-mask-validity.md."
+        ),
+        "mask_validity_threat_to_validity": (
+            "n_frames_mask_refused_no_reference counts the refusals where the colour reference "
+            "found NO fruit anywhere in the frame — the fruit is fully occluded or out of frame, so "
+            "nothing here can confirm any mask. Refusing those removes HARD frames from the "
+            "measured population, which for EST_DRIFT_P95 — a p95 that is SUBTRACTED from GEOM_TOL "
+            "— plausibly makes the number smaller and the resulting tolerance WIDER, i.e. it errs "
+            "in the generator's favour. That is recorded rather than glossed; PR-08 V6 §5 says what "
+            "would measure it."
         ),
     }
 
@@ -1040,6 +1172,51 @@ def _as_uint8_rgb(rgb: np.ndarray) -> np.ndarray:
             "Convert at the source, where the range is known."
         )
     return np.ascontiguousarray(arr[:, :, :3])
+
+
+# -- the second opinion the validity check is made of ----------------------------------------------
+
+
+def object_color_reference(rgb: np.ndarray) -> np.ndarray:
+    """``(H, W)`` bool: where a non-learned colour predicate says the fruit is.
+
+    The warm-and-saturated discriminator ``build_identity_calibration.apple_mask`` uses, restated
+    here rather than imported: this module is imported as ``estimators.apple_sam2`` by two harnesses
+    and a cluster job, and reaching back into ``scripts/build_identity_calibration.py`` from inside
+    it would make the estimator depend on the calibration tooling's import graph for a three-line
+    predicate. The two copies are pinned to each other by a test that asserts they agree pixel for
+    pixel (``tests/test_apple_sam2_estimator.py``), which is the check that a restatement needs and
+    an import would not have.
+
+    IT IS NOT GROUND TRUTH, and nothing here treats it as such. It cannot say where the apple's
+    boundary is, it fails on shadowed fruit, and a mask that agrees with it is not thereby correct.
+    The only claim it is used for is the one it can support: a mask containing essentially NONE of
+    the warm, saturated pixels in a frame that has some is not a mask of the fruit. On this corpus
+    the cloth and the plate are neutral to within two counts and the robot is black or bare metal
+    (the identity-calibration seed observations), so the only saturated warm thing in any of these
+    frames is the fruit.
+
+    Raw predicate, not one grown connected component, and no minimum area: an occluded frame is the
+    case of interest here, not an error.
+    """
+    arr = _as_uint8_rgb(rgb)
+    r = arr[:, :, 0].astype(np.int16)
+    b = arr[:, :, 2].astype(np.int16)
+    mx, mn = arr.max(2), arr.min(2)
+    saturation = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1.0), 0.0)
+    return (r > 90) & ((r - b) > 50) & (saturation > 0.35)
+
+
+def mask_validity_iou(mask: np.ndarray, reference: np.ndarray) -> float:
+    """Intersection over union of two boolean masks; 0.0 when the union is empty.
+
+    Symmetric on purpose. "How much of the mask is object" alone would pass a mask that covers the
+    apple AND the whole plate, and "how much of the object is masked" alone would pass a mask that
+    covers the entire frame. The failure this filter exists for produces both shapes.
+    """
+    inter = int(np.logical_and(mask, reference).sum())
+    union = int(np.logical_or(mask, reference).sum())
+    return float(inter) / float(union) if union else 0.0
 
 
 def _device() -> str:
@@ -1323,8 +1500,17 @@ def segment(rgb: np.ndarray) -> np.ndarray:
     An empty mask from a box that WAS detected drops identically but is a different event, so it is
     counted separately in :data:`EMPTY_MASK_FRAMES`; a coverage shortfall with no recorded
     explanation is a run someone has to do again to find out why.
+
+    **A mask of the wrong object is refused, and is a THIRD event.** A non-empty mask containing
+    essentially none of the warm, saturated pixels :func:`object_color_reference` finds is not a
+    mask of the fruit — on this corpus it is the plate — and it comes back all-False, counted in
+    :data:`MASK_REFUSED_FRAMES` and never folded into either of the two above. It is a check on the
+    OUTPUT: the detection operating point, the prompt, the retry and the box rule are untouched, so
+    this is still the segmenter §4 step 2 asks for, applied identically to both sides of §6's
+    subtraction by living in the module both harnesses call.
     """
     global SEGMENT_CALLS, NO_DETECTION_FRAMES, EMPTY_MASK_FRAMES
+    global MASK_REFUSED_FRAMES, MASK_REFUSED_NO_REFERENCE_FRAMES
 
     frame = _as_uint8_rgb(rgb)
     SEGMENT_CALLS += 1
@@ -1349,6 +1535,26 @@ def segment(rgb: np.ndarray) -> np.ndarray:
     mask = mask.astype(bool)
     if not mask.any():
         EMPTY_MASK_FRAMES += 1
+        return mask
+
+    # THE VALIDITY CHECK, and it is a check on this mask rather than on how it was produced: the
+    # box above is the box upstream's rule selected at upstream's thresholds, and the mask is the
+    # one SAM 2 drew for it. Nothing is re-detected, re-prompted or re-drawn. All that is decided
+    # here is whether this frame is one we are willing to MEASURE on — the same decision the two
+    # callers already make for every frame this function returns all-False for. See the block above
+    # MASK_VALIDITY_MIN_IOU for why that is not the segmenter change §4 step 2 forbids, and for why
+    # the exact threshold is a value read off a gap rather than a coined number.
+    reference = object_color_reference(frame)
+    overlap = mask_validity_iou(mask, reference)
+    MASK_VALIDITY_IOU.append(overlap)
+    if overlap < MASK_VALIDITY_MIN_IOU:
+        MASK_REFUSED_FRAMES += 1
+        if not reference.any():
+            # The fruit is not visible at all, so this refusal is "nothing here can confirm the
+            # mask", not "the mask is demonstrably the plate". Counted apart because the two have
+            # opposite implications for the budget — see stats()['mask_validity_threat_to_validity'].
+            MASK_REFUSED_NO_REFERENCE_FRAMES += 1
+        return np.zeros((h, w), dtype=bool)
     return mask
 
 

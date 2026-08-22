@@ -447,6 +447,120 @@ def test_the_recorder_is_cross_checked_against_the_adapters_own_counters(monkeyp
     assert "no-detection" in res.recorder_note
 
 
+# -- PR-08 V6: the refusal, per frame ----------------------------------------------------------------
+#
+# The 2026-08-22 run of this script found twelve frames carrying a confident, well-formed mask of the
+# PLATE. The adapter now refuses such a mask and returns all-False. What this file has to do about
+# that is show WHICH frames it fired on — a run-level count is a claim a reviewer cannot check
+# against the contact sheets they are looking at — and keep flagging everything it flagged before.
+
+
+def with_validity_filter(mod, *, min_iou=0.10):
+    """Wrap a stub adapter's ``segment`` in the filter the real adapter now applies.
+
+    Deliberately a wrapper rather than an edit to ``make_stub_adapter``: every other test in this
+    file drives an adapter WITHOUT the filter, which is also what an older adapter looks like from
+    here, and both cases have to keep working.
+    """
+    mod.MASK_VALIDITY_IOU = []
+    mod.MASK_REFUSED_FRAMES = 0
+    mod.MASK_REFUSED_NO_REFERENCE_FRAMES = 0
+    inner = mod.segment
+
+    def segment(rgb):
+        mask = inner(rgb)
+        if not mask.any():
+            return mask
+        reference = aud.warm_apple_mask(np.asarray(rgb))
+        inter = int((mask & reference).sum())
+        union = int((mask | reference).sum())
+        iou = (inter / union) if union else 0.0
+        mod.MASK_VALIDITY_IOU.append(iou)
+        if iou < min_iou:
+            mod.MASK_REFUSED_FRAMES += 1
+            if not reference.any():
+                mod.MASK_REFUSED_NO_REFERENCE_FRAMES += 1
+            return np.zeros_like(mask)
+        return mask
+
+    mod.segment = segment
+    return mod
+
+
+def test_a_refusal_is_recorded_per_frame_and_not_only_tallied(monkeypatch):
+    """A future audit has to be able to show the filter fired on exactly the frames a person
+    flagged, so the IoU it decided on and the refusal itself land on the frame's own record."""
+    frame = scene((300.0, 240.0), 30.0)                     # apple at (300, 240), plate at (430, 300)
+    apple_box = [270, 210, 330, 270]
+    plate_box = [360, 230, 500, 370]
+    scripts = {0: [([0.83], [apple_box])], 1: [([0.26], [plate_box])]}
+    mod = with_validity_filter(make_stub_adapter(lambda i: scripts[i]))
+    _install(monkeypatch, mod)
+    method = mgt.sam2_method(40)
+    recorder = aud.attach_recorder(mod)
+    mask_fn = lambda f: method.mask_fn(f, method)  # noqa: E731
+    frame_bgr = np.ascontiguousarray(frame[:, :, ::-1])
+
+    good = aud.audit_one_frame(mod, mask_fn, frame_bgr, recorder)
+    assert good.mask.any() and good.mask_refused is False
+    assert good.mask_validity_iou is not None and good.mask_validity_iou > 0.2
+
+    refused = aud.audit_one_frame(mod, mask_fn, frame_bgr, recorder)
+    assert not refused.mask.any(), "the mask of the plate must not come back"
+    assert refused.mask_refused is True
+    assert refused.mask_refused_no_reference is False
+    assert refused.mask_validity_iou == 0.0
+    assert refused.score == pytest.approx(0.26, abs=1e-5)   # the detection evidence is not lost
+    assert refused.no_detection is False and refused.empty_mask is False
+    assert refused.recorder_inconsistent is False, "a refusal is a RECORDED reason for an empty mask"
+
+
+def test_an_adapter_without_the_filter_records_no_refusals_rather_than_failing(monkeypatch):
+    """`present: false` in the artifact, not zeros that read as 'it never fired'."""
+    mod = make_stub_adapter(lambda i: [([0.5], [[10, 10, 50, 50]])])
+    _install(monkeypatch, mod)
+    method = mgt.sam2_method(40)
+    res = aud.audit_one_frame(mod, lambda f: method.mask_fn(f, method),
+                              np.zeros((H, W, 3), dtype=np.uint8), aud.attach_recorder(mod))
+    assert res.mask_refused is False
+    assert res.mask_validity_iou is None, "None is 'the check did not run', 0.0 is 'it ran and failed'"
+
+
+def test_an_all_false_mask_with_no_recorded_reason_is_a_defect(monkeypatch):
+    """There are exactly three reasons for an empty mask. A fourth is a step silently dropped from
+    every coverage number downstream, and this is the check that would notice."""
+    mod = make_stub_adapter(lambda i: [([0.5], [[10, 10, 50, 50]])])
+    _install(monkeypatch, mod)
+    method = mgt.sam2_method(40)
+    recorder = aud.attach_recorder(mod)
+    inner = mod.segment
+    mod.segment = lambda rgb: np.zeros_like(inner(rgb))      # empty, and nothing counted
+
+    res = aud.audit_one_frame(mod, lambda f: method.mask_fn(f, method),
+                              np.zeros((H, W, 3), dtype=np.uint8), recorder)
+    assert res.recorder_inconsistent is True
+    assert "no recorded reason" in res.recorder_note
+
+
+def test_the_refusal_flag_is_additive_and_weakens_nothing():
+    """A refused frame is still held to every other flag. `disagrees_with_warm_apple` in particular
+    is what a WRONG refusal looks like from here, and it must survive the fix."""
+    t = aud.TriageThresholds()
+    refused_with_fruit_visible = _rec(
+        mask_refused=True, mask_area_px=0, warm_apple_px=6000, warm_apple_iou=0.0,
+        detection_score=0.19,
+    )
+    flags = aud.flag_frame(refused_with_fruit_visible, median_warm_px=6000, frame_px=H * W,
+                           thresholds=t)
+    assert "mask_refused" in flags
+    assert "disagrees_with_warm_apple" in flags, "a refusal must not silence the fruit-is-visible tell"
+    assert "low_score" in flags
+    assert aud.FLAG_MEANING["mask_refused"]
+    assert "mask_refused_no_reference" in aud.flag_frame(
+        _rec(mask_refused=True, mask_refused_no_reference=True, mask_area_px=0),
+        median_warm_px=6000, frame_px=H * W, thresholds=t)
+
+
 # -- overlays --------------------------------------------------------------------------------------
 
 

@@ -63,6 +63,24 @@ raw scores per episode so the merge pools them exactly. The place existing is no
 existing and neither is a discharge — see ``full_pass_gap`` in the artifact, which now says which
 run has to be done rather than which code has to be written.
 
+WHAT A RE-RUN SHOWS AFTER PR-08 V6
+----------------------------------
+The 2026-08-22 run of this script (job 189637, 382 frames, 24 episodes) is what produced the finding
+PR-08 V6 registers: **twelve frames carried a confident, well-formed mask of the PLATE**, all in
+``episode_000094``, every one at IoU 0.0000 against the colour heuristic while every correct mask
+scored >= 0.7492. The adapter now refuses such a mask — ``segment()`` returns all-False and counts
+the frame — so a re-run brings those twelve back as **refusals** rather than as masks, carrying the
+``mask_refused`` flag and a ``mask_validity_iou`` of 0.0 in ``frames[*]``, with the run's totals in
+``mask_validity_filter``.
+
+**The flagging is not weakened by this and must not be.** ``mask_refused`` is ADDITIVE: every other
+flag still applies to a refused frame, and ``disagrees_with_warm_apple`` in particular — the fruit
+is plainly visible and the returned mask is nowhere near it — is exactly what a WRONG refusal would
+look like from here. A frame that is suspicious in any of the old ways and survives the filter is
+still flagged in all of them. An all-False mask with no recorded reason is now itself a
+``recorder_inconsistent``: there are exactly three reasons (no detection, empty mask, validity
+refusal) and a fourth would be a step silently dropped from every coverage number downstream.
+
 THE SAMPLING RULE
 -----------------
 Deterministic, no RNG, and recorded in the artifact so the sample can be rebuilt and its bias
@@ -297,6 +315,17 @@ FLAG_MEANING: dict[str, str] = {
                      "too big to be the fruit resting on it.",
     "disagrees_with_warm_apple": "the fruit is plainly visible to the colour heuristic and the mask "
                                  "is somewhere else.",
+    "mask_refused": "PR-08 V6's mask-validity filter refused this frame: the adapter drew a "
+                    "non-empty mask, found it contained essentially none of the object, and "
+                    "returned all-False. This flag is not a defect — it is the fix working, and it "
+                    "is here so a reviewer can see WHICH frames it fired on rather than a count. "
+                    "The mask that was refused is not shown, because it was not returned; the "
+                    "detector box that produced it is.",
+    "mask_refused_no_reference": "the same refusal, on a frame where the colour heuristic found no "
+                                 "fruit AT ALL. Nothing here can confirm or deny the mask, so this "
+                                 "is the sub-case that removes a HARD frame from the measured "
+                                 "population rather than a wrong one — PR-08 V6's threat to "
+                                 "validity, made countable.",
     "recorder_inconsistent": "the post-processing recorder and the adapter's own counters disagree "
                              "about what happened on this frame. Trust the counters and read this "
                              "as a defect in the audit, not in the adapter.",
@@ -696,7 +725,19 @@ COUNTER_NAMES = (
     "EMPTY_MASK_FRAMES",
     "RETRY_FRAMES",
     "RETRY_RECOVERED_FRAMES",
+    # PR-08 V6's mask-validity filter. Read by NAME and defaulted to 0 by `read_counters`, so this
+    # script still runs against an adapter that predates the filter — the artifact then records
+    # zero refusals, which for such an adapter is the truth.
+    "MASK_REFUSED_FRAMES",
+    "MASK_REFUSED_NO_REFERENCE_FRAMES",
 )
+
+#: The adapter attribute holding the per-frame validity IoU, in call order. Read the same way
+#: ``measure_geom_tol.ADAPTER_SCORES_ATTR`` is: an optional declaration, absent without consequence
+#: beyond being recorded as absent. What it buys is that the refusal is PER FRAME evidence — a
+#: future audit can show the filter fired on exactly the frames a person flagged — rather than a
+#: run-level tally that has to be taken on trust.
+VALIDITY_IOU_ATTR = "MASK_VALIDITY_IOU"
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -775,6 +816,32 @@ def read_counters(module: Any) -> dict[str, int]:
     return {name: int(getattr(module, name, 0)) for name in COUNTER_NAMES}
 
 
+def _validity_mark(module: Any) -> int | None:
+    """How many validity IoUs the adapter has recorded, or None when it records none."""
+    seq = getattr(module, VALIDITY_IOU_ATTR, None)
+    if not isinstance(seq, Sequence) or isinstance(seq, (str, bytes)):
+        return None
+    return len(seq)
+
+
+def _validity_since(module: Any, mark: int | None) -> float | None:
+    """The single IoU recorded since ``mark``, or None when the check did not run on this frame.
+
+    None rather than 0.0 on purpose, and for the reason ``DETECTION_SCORES`` gives for the same
+    shape: 0.0 is a validity IoU that was measured and was zero — a mask on the wrong object — and
+    "the check did not run" (no detection, or SAM 2 returned nothing) is not that claim.
+    """
+    if mark is None:
+        return None
+    now = _validity_mark(module)
+    if now is None or now != mark + 1:
+        return None
+    try:
+        return round(float(getattr(module, VALIDITY_IOU_ATTR)[mark]), 4)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 @dataclass
 class FrameResult:
     """What one frame did, in the shape the artifact carries it."""
@@ -787,6 +854,9 @@ class FrameResult:
     retry_recovered: bool
     no_detection: bool
     empty_mask: bool
+    mask_refused: bool = False
+    mask_refused_no_reference: bool = False
+    mask_validity_iou: float | None = None
     postprocess_calls: list[dict[str, Any]] = field(default_factory=list)
     recorder_inconsistent: bool = False
     recorder_note: str = ""
@@ -806,6 +876,7 @@ def audit_one_frame(
     if recorder is not None:
         recorder.calls.clear()
     before = read_counters(module)
+    validity_before = _validity_mark(module)
     mask = np.asarray(mask_fn(frame_bgr)).astype(bool)
     after = read_counters(module)
 
@@ -816,6 +887,12 @@ def audit_one_frame(
     retry_recovered = delta("RETRY_RECOVERED_FRAMES") > 0
     no_detection = delta("NO_DETECTION_FRAMES") > 0
     empty_mask = delta("EMPTY_MASK_FRAMES") > 0
+    mask_refused = delta("MASK_REFUSED_FRAMES") > 0
+    mask_refused_no_reference = delta("MASK_REFUSED_NO_REFERENCE_FRAMES") > 0
+    # The per-frame IoU the filter decided on, taken as a DIFFERENCE for the same reason the
+    # counters are: the adapter's list is cumulative over the import and a bare [-1] would read the
+    # previous frame's value on any frame where the check did not run.
+    validity_iou = _validity_since(module, validity_before)
 
     calls = list(recorder.calls) if recorder is not None else []
     scores: list[float] = []
@@ -844,6 +921,14 @@ def audit_one_frame(
         elif not no_detection and box is None:
             inconsistent = True
             note = "the adapter did not count a no-detection frame and the recorder saw no box"
+    # An all-False mask must have a recorded reason. There are exactly three — no detection, an
+    # empty mask from a detected box, and a refusal by the mask-validity filter — and a fourth,
+    # unexplained one would be a step silently dropped from every coverage number downstream. This
+    # is the check that would notice.
+    if not inconsistent and not mask.any() and not (no_detection or empty_mask or mask_refused):
+        inconsistent = True
+        note = ("the adapter returned an all-False mask and counted no no-detection, no empty mask "
+                "and no validity refusal — a dropped step with no recorded reason")
 
     return FrameResult(
         mask=mask,
@@ -854,6 +939,9 @@ def audit_one_frame(
         retry_recovered=retry_recovered,
         no_detection=no_detection,
         empty_mask=empty_mask,
+        mask_refused=mask_refused,
+        mask_refused_no_reference=mask_refused_no_reference,
+        mask_validity_iou=validity_iou,
         postprocess_calls=calls,
         recorder_inconsistent=inconsistent,
         recorder_note=note,
@@ -899,6 +987,14 @@ def flag_frame(
         flags.append("no_detection")
     if record.get("empty_mask"):
         flags.append("empty_mask")
+    # ADDITIVE. The filter refusing a frame does not suppress any other flag, and nothing below is
+    # skipped for a refused frame: a refusal that fired for the wrong reason has to stay visible,
+    # and `disagrees_with_warm_apple` in particular still fires on a refused frame whose fruit was
+    # plainly visible — which is what a false refusal would look like.
+    if record.get("mask_refused"):
+        flags.append("mask_refused")
+    if record.get("mask_refused_no_reference"):
+        flags.append("mask_refused_no_reference")
     if record.get("retry_fired"):
         flags.append("retry_fired")
     if record.get("retry_recovered"):
@@ -1265,6 +1361,12 @@ def run_audit(args: argparse.Namespace) -> int:
                 "retry_recovered": result.retry_recovered,
                 "no_detection": result.no_detection,
                 "empty_mask": result.empty_mask,
+                # PR-08 V6, per frame rather than only in the run's totals: this is what lets a
+                # later reader check that the filter fired on exactly the frames a person flagged
+                # in this artifact's predecessor, instead of taking a count on trust.
+                "mask_refused": result.mask_refused,
+                "mask_refused_no_reference": result.mask_refused_no_reference,
+                "mask_validity_iou": result.mask_validity_iou,
                 "postprocess_calls": result.postprocess_calls,
                 "recorder_inconsistent": result.recorder_inconsistent,
                 "recorder_note": result.recorder_note,
@@ -1367,6 +1469,13 @@ def _caption_lines(rec: dict[str, Any]) -> list[str]:
         extra.append("NO DETECTION")
     if rec["empty_mask"]:
         extra.append("EMPTY MASK")
+    if rec.get("mask_refused"):
+        # The IoU the filter decided on, not the returned mask's — the returned mask is empty, so
+        # the caption would otherwise read "IoU 0.00" for a refusal and for an occlusion alike.
+        vi = rec.get("mask_validity_iou")
+        extra.append("REFUSED" + ("" if vi is None else f" (val IoU {vi:.2f})"))
+    if rec.get("mask_refused_no_reference"):
+        extra.append("no fruit visible")
     lines.append("  ".join(extra) if extra else " ")
     if rec["flags"]:
         # Wrapped rather than truncated: the tile is 320 px wide and a cut-off flag list drops the
@@ -1471,6 +1580,31 @@ def build_artifact(
             "per_stratum": {s: sum(1 for r in records if r["stratum"] == s) for s in STRATUM_ORDER},
             "flag_counts": flag_counts,
             "flag_meaning": FLAG_MEANING,
+        },
+        # PR-08 V6's filter, as a run-level total beside the per-frame `mask_refused` in `frames`.
+        # Kept out of `blocker_2_numbers` on purpose: that block is spelled in the blocker's own
+        # words and nothing here may quietly restate a blocker as satisfied.
+        "mask_validity_filter": {
+            "min_iou": stats.get("mask_validity_min_iou"),
+            "reference": stats.get("mask_validity_reference"),
+            "n_frames_refused": sum(1 for r in records if r.get("mask_refused")),
+            "n_frames_refused_no_reference": sum(
+                1 for r in records if r.get("mask_refused_no_reference")),
+            "validity_iou_distribution": distribution(
+                [r["mask_validity_iou"] for r in records if r.get("mask_validity_iou") is not None]
+            ),
+            "present": stats.get("mask_validity_min_iou") is not None,
+            "note": (
+                "The adapter refuses a non-empty mask containing essentially none of the object it "
+                "claims to be, and returns all-False — which both PR-08 §4 harnesses already drop "
+                "and count. `n_frames_refused_no_reference` is the sub-case where the colour "
+                "reference found no fruit anywhere, i.e. the refusal removed a HARD frame rather "
+                "than a wrong one; see PR-08 V6's threat to validity. A refused frame carries the "
+                "`mask_refused` flag, and every other flag still applies to it — in particular "
+                "`disagrees_with_warm_apple`, which is what a WRONG refusal would look like. "
+                "`present` is false against an adapter that predates the filter, where the zeros "
+                "above are 'no such mechanism' rather than 'it never fired'."
+            ),
         },
         # The names blocker 2 uses, spelled exactly as it spells them, so the claim can be checked
         # against the blocker without a translation step.

@@ -319,9 +319,31 @@ def staged(monkeypatch):
     return module, state
 
 
-def _frame(h=48, w=64) -> np.ndarray:
+#: Where the fruit is in every stub frame, and it is the box ``_install``'s default detection
+#: returns for a reason: since 2026-08-22 the adapter REFUSES a mask that contains essentially none
+#: of the object (PR-08 V6), and ``_StubPredictor.predict`` returns the prompted box as the mask. A
+#: frame of pure noise would therefore be refused on every test in this file — correctly, which is
+#: the point. So the stub frames contain an apple where the stub detector says one is.
+STUB_APPLE_BOX = (10, 10, 30, 30)
+
+
+def _frame(h=48, w=64, apple: tuple[int, int, int, int] | None = STUB_APPLE_BOX) -> np.ndarray:
+    """A noisy but COLD frame with a warm, saturated blob at ``apple``.
+
+    Cold everywhere else on purpose: the reference predicate is ``r > 90 and r - b > 50 and
+    saturation > 0.35``, so the background is drawn from a blue-dominant range that cannot satisfy
+    it whatever the noise does. ``apple=None`` gives a frame with no fruit in it at all, which is
+    the occlusion case and is refused.
+    """
     rng = np.random.default_rng(0)
-    return rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+    frame = np.empty((h, w, 3), dtype=np.uint8)
+    frame[:, :, 0] = rng.integers(0, 80, size=(h, w), dtype=np.uint8)     # R low: cold
+    frame[:, :, 1] = rng.integers(0, 256, size=(h, w), dtype=np.uint8)
+    frame[:, :, 2] = rng.integers(120, 256, size=(h, w), dtype=np.uint8)  # B high: cold
+    if apple is not None:
+        x0, y0, x1, y1 = apple
+        frame[y0:y1, x0:x1] = (220, 30, 30)
+    return frame
 
 
 # -- the contract -------------------------------------------------------------------------------------
@@ -1127,7 +1149,9 @@ def test_allowing_the_download_skips_the_cache_check_entirely(monkeypatch):
     """Otherwise the guard would still be consulting a cache it has just been told not to require."""
     monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
     monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
-    state = _install(monkeypatch, detections=[[(0.9, [1.0, 1.0, 5.0, 5.0])]])
+    # The box is STUB_APPLE_BOX rather than an arbitrary corner of the frame because the mask this
+    # produces has to survive the mask-validity filter for `.any()` below to be about the cache.
+    state = _install(monkeypatch, detections=[[(0.9, [10.0, 10.0, 30.0, 30.0])]])
 
     def snapshot_download(**kwargs):
         raise AssertionError("the cache must not be consulted once the fetch is permitted")
@@ -1585,3 +1609,377 @@ def test_recording_the_scores_did_not_qualify_the_gate(loaded):
                for b in module.GATE_QUALIFICATION_BLOCKERS)
     assert not any("detection-score distribution" in d
                    for d in module.GATE_QUALIFICATION_DISCHARGED)
+
+
+# -- PR-08 V6: the mask-validity filter --------------------------------------------------------------
+#
+# THE FINDING IT ANSWERS. Job 189637 drove this adapter over 382 frames of AppleToPlate (24
+# episodes, artifact runs/pr08-mask-audit/MASK_AUDIT.json) and a local CPU audit over 169 more, and
+# both found the same defect: twelve frames carried a confident, well-formed mask of THE PLATE. Those
+# masks are ~30 900 px against a median apple of 6 185, they sit at 0.97-0.98 plate overlap, and they
+# produce a centroid, a displacement and a p95 that all look exactly like measurements.
+#
+# THE ARGUMENT THESE TESTS HAVE TO CARRY. A threshold introduced into a gate path is a number
+# somebody chose, and PR-08 §4 step 2 is about not choosing numbers. The defence is that this one
+# does not matter: the two populations are separated by a gap so wide that every threshold inside it
+# produces the IDENTICAL partition of the audited frames. That is a checkable claim and it is checked
+# here rather than asserted in prose.
+
+
+#: The audit's own per-frame numbers: ``(episode, frame_index, IoU of the returned mask against the
+#: colour heuristic, 1 when the audit flagged it plate_overlap)``. EMBEDDED rather than read from the
+#: artifact because ``runs/`` is not tracked — a test that skipped when the file was absent would be
+#: a test that never ran in CI, which for the load-bearing claim of a pre-registration is no test at
+#: all. ``test_the_embedded_audit_numbers_are_the_artifacts_own`` re-checks them against the artifact
+#: on any machine that still has it, so the copy cannot drift where it can be compared.
+AUDIT_FRAMES: tuple[tuple, ...] = (
+    ("000000",0,0.9715), ("000000",159,0.9781), ("000000",160,0.9781), ("000000",167,0.9818),
+    ("000000",168,0.9775), ("000000",175,0.9813), ("000000",176,0.9838), ("000000",183,0.9818),
+    ("000000",184,0.9817), ("000000",196,0.9796), ("000000",393,0.9737), ("000000",470,0.9733),
+    ("000000",471,0.9742), ("000000",478,0.9734), ("000000",479,0.9734), ("000000",589,0.9749),
+    ("000018",0,0.9688), ("000018",112,0.9703), ("000018",113,0.9712), ("000018",120,0.9693),
+    ("000018",121,0.9676), ("000018",128,0.9719), ("000018",129,0.9697), ("000018",132,0.9748),
+    ("000018",136,0.9714), ("000018",137,0.9751), ("000018",140,0.9694), ("000018",141,0.9714),
+    ("000018",265,0.9792), ("000018",397,0.9755), ("000036",0,0.9748), ("000036",92,0.9755),
+    ("000036",93,0.9757), ("000036",100,0.97), ("000036",101,0.9674), ("000036",108,0.9554),
+    ("000036",109,0.9546), ("000036",116,0.9677), ("000036",117,0.9637), ("000036",131,0.9661),
+    ("000036",133,0.9713), ("000036",134,0.9705), ("000036",136,0.9671), ("000036",137,0.9725),
+    ("000036",261,0.9714), ("000036",392,0.9764), ("000055",0,0.9659), ("000055",104,0.9782),
+    ("000055",105,0.975), ("000055",112,0.9661), ("000055",113,0.9679), ("000055",118,0.9709),
+    ("000055",119,0.9642), ("000055",120,0.9641), ("000055",121,0.9662), ("000055",128,0.9747),
+    ("000055",129,0.9747), ("000055",133,0.9731), ("000055",267,0.9695), ("000055",400,0.9688),
+    ("000073",0,0.9792), ("000073",64,0.9775), ("000073",65,0.9786), ("000073",72,0.9828),
+    ("000073",73,0.9815), ("000073",80,0.9579), ("000073",81,0.9706), ("000073",88,0.9522),
+    ("000073",89,0.9583), ("000073",103,0.894), ("000073",104,0.8989), ("000073",107,0.8932),
+    ("000073",108,0.8897), ("000073",166,0.931), ("000073",331,0.9773), ("000073",497,0.978),
+    ("000091",0,0.9829), ("000091",109,0.9692), ("000091",110,0.9716), ("000091",117,0.9641),
+    ("000091",118,0.9632), ("000091",125,0.9449), ("000091",126,0.9414), ("000091",133,0.8984),
+    ("000091",134,0.9008), ("000091",150,0.8962), ("000091",151,0.8904), ("000091",156,0.8638),
+    ("000091",157,0.8871), ("000091",162,0.9519), ("000091",325,0.9675), ("000091",487,0.9649),
+    ("000094",81,0.9827), ("000094",82,0.9814), ("000094",90,0.973), ("000094",91,0.9687),
+    ("000094",106,0.8977), ("000094",107,0.8585), ("000094",108,0.0,1), ("000094",109,0.0,1),
+    ("000094",129,0.0,1), ("000094",130,0.0,1), ("000094",133,0.0,1), ("000094",134,0.0,1),
+    ("000094",136,0.0,1), ("000094",137,0.0,1), ("000094",143,0.0,1), ("000094",144,0.0,1),
+    ("000094",149,0.0,1), ("000094",150,0.7834), ("000094",151,0.8493), ("000094",152,0.0,1),
+    ("000094",153,0.8765), ("000094",154,0.9266), ("000094",208,0.9438), ("000094",209,0.9458),
+    ("000110",0,0.9598), ("000110",62,0.9676), ("000110",63,0.9682), ("000110",70,0.9484),
+    ("000110",71,0.9483), ("000110",78,0.9506), ("000110",79,0.9508), ("000110",86,0.8679),
+    ("000110",87,0.9362), ("000110",89,0.9328), ("000110",90,0.9186), ("000110",138,0.96),
+    ("000110",277,0.9608), ("000110",415,0.9775), ("000128",0,0.9647), ("000128",94,0.9699),
+    ("000128",95,0.9697), ("000128",102,0.9582), ("000128",103,0.9594), ("000128",110,0.9589),
+    ("000128",111,0.9651), ("000128",118,0.9616), ("000128",119,0.9689), ("000128",150,0.9509),
+    ("000128",243,0.7492), ("000128",244,0.7712), ("000128",245,0.7918), ("000128",299,0.9558),
+    ("000128",449,0.9566), ("000146",0,0.9718), ("000146",116,0.9767), ("000146",117,0.9733),
+    ("000146",124,0.9789), ("000146",125,0.9798), ("000146",132,0.9759), ("000146",133,0.9781),
+    ("000146",139,0.9761), ("000146",140,0.9747), ("000146",141,0.9765), ("000146",221,0.974),
+    ("000146",222,0.9716), ("000146",241,0.9725), ("000146",242,0.969), ("000146",279,0.9751),
+    ("000146",418,0.9708), ("000165",0,0.9603), ("000165",79,0.9394), ("000165",80,0.9356),
+    ("000165",81,0.9359), ("000165",90,0.9648), ("000165",91,0.9634), ("000165",98,0.9438),
+    ("000165",99,0.9407), ("000165",106,0.9422), ("000165",107,0.9439), ("000165",114,0.9533),
+    ("000165",115,0.9526), ("000165",127,0.9495), ("000165",254,0.9553), ("000165",381,0.9666),
+    ("000183",0,0.9705), ("000183",33,0.9694), ("000183",34,0.9726), ("000183",41,0.9718),
+    ("000183",42,0.973), ("000183",49,0.9708), ("000183",50,0.9683), ("000183",57,0.9628),
+    ("000183",58,0.9742), ("000183",123,0.9577), ("000183",124,0.9646), ("000183",126,0.9612),
+    ("000183",129,0.9545), ("000183",130,0.9592), ("000183",252,0.968), ("000183",378,0.9746),
+    ("000201",0,0.9675), ("000201",93,0.9714), ("000201",94,0.9732), ("000201",101,0.9711),
+    ("000201",102,0.9704), ("000201",109,0.9733), ("000201",110,0.9731), ("000201",117,0.9764),
+    ("000201",118,0.9765), ("000201",124,0.9771), ("000201",234,0.971), ("000201",235,0.9729),
+    ("000201",249,0.9577), ("000201",270,0.9704), ("000201",271,0.9716), ("000201",373,0.9686),
+    ("000219",0,0.9667), ("000219",95,0.9682), ("000219",96,0.9712), ("000219",103,0.9677),
+    ("000219",104,0.9726), ("000219",111,0.9725), ("000219",112,0.9714), ("000219",119,0.9732),
+    ("000219",120,0.9719), ("000219",128,0.9333), ("000219",166,0.946), ("000219",167,0.9449),
+    ("000219",171,0.9495), ("000219",172,0.9453), ("000219",256,0.9702), ("000219",384,0.968),
+    ("000237",0,0.9382), ("000237",117,0.9396), ("000237",118,0.9354), ("000237",125,0.9377),
+    ("000237",126,0.9374), ("000237",133,0.9359), ("000237",134,0.9381), ("000237",141,0.937),
+    ("000237",142,0.9396), ("000237",149,0.9348), ("000237",189,0.9514), ("000237",190,0.9506),
+    ("000237",194,0.9537), ("000237",195,0.9555), ("000237",298,0.9586), ("000237",447,0.9626),
+    ("000256",0,0.9627), ("000256",107,0.9238), ("000256",108,0.9227), ("000256",115,0.9212),
+    ("000256",116,0.9141), ("000256",123,0.9441), ("000256",124,0.9475), ("000256",130,0.9354),
+    ("000256",131,0.9385), ("000256",132,0.9469), ("000256",218,0.9245), ("000256",219,0.9182),
+    ("000256",222,0.9248), ("000256",223,0.9372), ("000256",260,0.9659), ("000256",390,0.9771),
+    ("000274",0,0.9723), ("000274",149,0.966), ("000274",150,0.9593), ("000274",157,0.9572),
+    ("000274",158,0.952), ("000274",165,0.9386), ("000274",166,0.9443), ("000274",171,0.9306),
+    ("000274",173,0.9329), ("000274",174,0.9386), ("000274",280,0.959), ("000274",281,0.9533),
+    ("000274",286,0.9514), ("000274",287,0.9291), ("000274",343,0.957), ("000274",514,0.9608),
+    ("000292",0,0.9719), ("000292",20,0.9783), ("000292",21,0.9777), ("000292",28,0.979),
+    ("000292",29,0.9777), ("000292",36,0.9756), ("000292",37,0.9753), ("000292",44,0.9744),
+    ("000292",45,0.9725), ("000292",68,0.9633), ("000292",69,0.9623), ("000292",77,0.9643),
+    ("000292",78,0.9631), ("000292",126,0.9712), ("000292",252,0.9731), ("000292",378,0.9615),
+    ("000310",0,0.9767), ("000310",138,0.959), ("000310",139,0.9615), ("000310",146,0.9704),
+    ("000310",147,0.9675), ("000310",153,0.9692), ("000310",154,0.9658), ("000310",155,0.9648),
+    ("000310",158,0.9548), ("000310",159,0.9777), ("000310",162,0.9776), ("000310",163,0.9784),
+    ("000310",186,0.9667), ("000310",371,0.9747), ("000310",557,0.9751), ("000328",0,0.9748),
+    ("000328",99,0.9632), ("000328",100,0.9645), ("000328",107,0.9631), ("000328",108,0.9543),
+    ("000328",115,0.9476), ("000328",116,0.9589), ("000328",123,0.954), ("000328",124,0.9539),
+    ("000328",138,0.9469), ("000328",139,0.9457), ("000328",149,0.9447), ("000328",168,0.9478),
+    ("000328",169,0.945), ("000328",299,0.9663), ("000328",448,0.9533), ("000346",0,0.9725),
+    ("000346",124,0.9586), ("000346",125,0.955), ("000346",132,0.9534), ("000346",133,0.9553),
+    ("000346",140,0.9472), ("000346",141,0.9324), ("000346",148,0.9715), ("000346",149,0.9688),
+    ("000346",154,0.9723), ("000346",179,0.9178), ("000346",180,0.9195), ("000346",195,0.9298),
+    ("000346",196,0.9267), ("000346",307,0.973), ("000346",461,0.973), ("000365",0,0.9756),
+    ("000365",80,0.9407), ("000365",81,0.9176), ("000365",83,0.9471), ("000365",84,0.9536),
+    ("000365",101,0.9702), ("000365",102,0.9674), ("000365",109,0.9663), ("000365",110,0.9655),
+    ("000365",117,0.9671), ("000365",118,0.9705), ("000365",121,0.9722), ("000365",125,0.9749),
+    ("000365",126,0.9671), ("000365",242,0.969), ("000365",363,0.974), ("000383",0,0.9469),
+    ("000383",71,0.9459), ("000383",72,0.9482), ("000383",79,0.9256), ("000383",80,0.9391),
+    ("000383",87,0.8162), ("000383",88,0.8497), ("000383",89,0.906), ("000383",90,0.9008),
+    ("000383",94,0.9131), ("000383",95,0.9281), ("000383",96,0.9628), ("000383",134,0.9392),
+    ("000383",267,0.9694), ("000383",401,0.9682), ("000401",0,0.9747), ("000401",104,0.9111),
+    ("000401",105,0.9095), ("000401",112,0.9356), ("000401",113,0.9286), ("000401",118,0.9348),
+    ("000401",119,0.9448), ("000401",120,0.9314), ("000401",121,0.9357), ("000401",125,0.9383),
+    ("000401",128,0.9414), ("000401",129,0.9414), ("000401",136,0.9373), ("000401",137,0.9361),
+    ("000401",251,0.9719), ("000401",376,0.9755),
+)
+
+#: The 12 the audit flagged as the plate, by identity rather than by IoU — otherwise the sweep below
+#: would be checking that a threshold partitions the frames the way the threshold partitions them.
+AUDIT_PLATE_FRAMES = frozenset((ep, fi) for ep, fi, _iou, *flag in AUDIT_FRAMES if flag)
+
+AUDIT_ARTIFACT = _REPO / "runs" / "pr08-mask-audit" / "MASK_AUDIT.json"
+
+
+def _audit_partition(threshold: float) -> frozenset:
+    """Which audited frames the filter refuses at ``threshold``."""
+    return frozenset(
+        (ep, fi) for ep, fi, iou, *_ in AUDIT_FRAMES if iou < threshold
+    )
+
+
+def test_the_two_populations_are_separated_by_a_gap_and_not_by_a_threshold():
+    """The whole basis for admitting a number here: there is nothing in between to get wrong."""
+    correct = [iou for ep, fi, iou, *_ in AUDIT_FRAMES if (ep, fi) not in AUDIT_PLATE_FRAMES]
+    plate = [iou for ep, fi, iou, *_ in AUDIT_FRAMES if (ep, fi) in AUDIT_PLATE_FRAMES]
+
+    assert len(AUDIT_FRAMES) == 382 and len(plate) == 12
+    assert max(plate) == 0.0, "a mask of the plate contains NO warm apple pixels, exactly"
+    assert min(correct) == pytest.approx(0.7492), "the lowest correct mask still agrees strongly"
+
+
+def test_every_threshold_in_the_gap_partitions_the_audited_frames_identically():
+    """THE INSENSITIVITY EVIDENCE, made checkable rather than assertable.
+
+    PR-08 V6 rests on this: the value of ``MASK_VALIDITY_MIN_IOU`` cannot be tuned to flatter a
+    number, because moving it anywhere inside the gap changes nothing at all. The sweep is run at 1
+    pp steps across the whole gap and the partition is compared to the frames a PERSON flagged as
+    the plate in the contact sheets, not to anything this threshold computed.
+    """
+    thresholds = [round(0.01 * k, 2) for k in range(1, 75)]  # 0.01 .. 0.74, i.e. inside (0, 0.7492)
+    for t in thresholds:
+        assert _audit_partition(t) == AUDIT_PLATE_FRAMES, (
+            f"the partition moved at threshold {t}: the gap runs from 0.0 to 0.7492 and every cut "
+            "inside it must refuse exactly the twelve plate frames and nothing else"
+        )
+
+
+def test_the_threshold_this_module_ships_is_inside_that_range(loaded):
+    """A plateau nobody's value sits on would be an argument about a different number."""
+    module, _ = loaded
+    assert 0.0 < module.MASK_VALIDITY_MIN_IOU < 0.7492
+    assert _audit_partition(module.MASK_VALIDITY_MIN_IOU) == AUDIT_PLATE_FRAMES
+
+
+def test_the_embedded_audit_numbers_are_the_artifacts_own():
+    """Where the artifact is still on disk, the embedded copy is compared to it frame for frame."""
+    if not AUDIT_ARTIFACT.is_file():
+        pytest.skip(f"{AUDIT_ARTIFACT} is not on this machine (runs/ is not tracked)")
+    import json
+
+    frames = json.loads(AUDIT_ARTIFACT.read_text(encoding="utf-8"))["frames"]
+    theirs = {
+        (f["episode"].replace("episode_", ""), int(f["frame_index"])):
+            (round(float(f["warm_apple_iou"]), 4), "plate_overlap" in f["flags"])
+        for f in frames
+    }
+    ours = {(ep, fi): (iou, bool(flag)) for ep, fi, iou, *flag in AUDIT_FRAMES}
+    assert ours == theirs
+
+
+# -- what the filter does to a frame -------------------------------------------------------------
+
+
+def test_a_confident_mask_of_the_wrong_object_is_refused(monkeypatch):
+    """The finding, reproduced in miniature: a well-formed mask containing none of the fruit.
+
+    It comes back all-False — which both PR-08 §4 harnesses already drop and count — rather than as
+    a centroid that would have looked like a measurement.
+    """
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    state = _install(monkeypatch, detections=[[(0.26, [34.0, 4.0, 60.0, 44.0])]])
+    module = _fresh_import(monkeypatch)
+
+    mask = module.segment(_frame())
+    assert not mask.any()
+    assert module.MASK_REFUSED_FRAMES == 1
+    assert module.MASK_VALIDITY_IOU == [pytest.approx(0.0)]
+    # The box SAM 2 was prompted with is still the detector's own: nothing was re-detected.
+    assert state["predictors"][0].boxes_seen[0].tolist() == [34.0, 4.0, 60.0, 44.0]
+
+
+def test_a_correct_mask_is_returned_untouched(monkeypatch):
+    """The filter is a gate on the output, not a post-processing of it: an accepted mask is bit for
+    bit the mask SAM 2 drew."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[(0.83, [10.0, 10.0, 30.0, 30.0])]])
+    module = _fresh_import(monkeypatch)
+
+    mask = module.segment(_frame())
+    expected = np.zeros((48, 64), dtype=bool)
+    expected[10:30, 10:30] = True
+    assert np.array_equal(mask, expected)
+    assert module.MASK_REFUSED_FRAMES == 0
+    assert module.MASK_VALIDITY_IOU == [pytest.approx(1.0)]
+
+
+def test_a_refusal_is_a_third_event_and_never_collapses_into_the_other_two(monkeypatch):
+    """No detection, an empty mask and a refusal all drop the step and all mean different things.
+
+    Collapsing them would make a coverage shortfall unreadable: "the apple was not there", "the
+    segmenter failed on a frame where it was" and "the segmenter masked the plate" call for three
+    different responses, and only the third one is a defect in what the mask says.
+    """
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[
+        [],                                         # no detection
+        [(0.9, [4.0, 4.0, 4.0, 4.0])],              # a box, and SAM 2 fills nothing
+        [(0.26, [34.0, 4.0, 60.0, 44.0])],          # a box, filled, and it is not the fruit
+        [(0.83, [10.0, 10.0, 30.0, 30.0])],         # the fruit
+    ])
+    module = _fresh_import(monkeypatch)
+
+    for _ in range(4):
+        module.segment(_frame())
+
+    record = module.stats()
+    assert record["n_segment_calls"] == 4
+    assert record["n_frames_without_detection"] == 1
+    assert record["n_frames_with_empty_mask"] == 1
+    assert record["n_frames_mask_refused"] == 1
+    assert record["n_frames_mask_refused_no_reference"] == 0
+    # The check ran on the two frames that produced a mask, and on no others.
+    assert record["n_mask_validity_iou"] == 2
+    assert len(module.MASK_VALIDITY_IOU) == (
+        record["n_segment_calls"]
+        - record["n_frames_without_detection"]
+        - record["n_frames_with_empty_mask"]
+    )
+
+
+def test_a_frame_with_no_visible_fruit_is_refused_and_counted_as_the_hard_case(monkeypatch):
+    """THE THREAT TO VALIDITY, pinned from the code's side.
+
+    When the fruit is not visible at all, nothing here can confirm any mask, so the frame is
+    refused — and that refusal removes a HARD frame from the measured population rather than a wrong
+    one. For EST_DRIFT_P95, a p95 that is SUBTRACTED from GEOM_TOL, that plausibly makes the number
+    smaller and the tolerance wider, i.e. it errs in the generator's favour. It is counted apart so
+    the size of the effect is a number in every artifact rather than an argument.
+    """
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[(0.21, [10.0, 10.0, 30.0, 30.0])]])
+    module = _fresh_import(monkeypatch)
+
+    assert not module.segment(_frame(apple=None)).any()
+    assert module.MASK_REFUSED_FRAMES == 1
+    assert module.MASK_REFUSED_NO_REFERENCE_FRAMES == 1
+    assert module.NO_DETECTION_FRAMES == 0
+    assert "SUBTRACTED" in module.stats()["mask_validity_threat_to_validity"]
+
+
+def test_a_refused_frame_still_records_its_detection_score(monkeypatch):
+    """The evidence blocker 2 asks for must not be destroyed by the fix for blocker 1.
+
+    The plate masks in the audit scored 0.167-0.309 against a median 0.829 for the correct ones, and
+    that separation is only visible if a refused frame's score is still in the list.
+    """
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[(0.26, [34.0, 4.0, 60.0, 44.0])]])
+    module = _fresh_import(monkeypatch)
+
+    module.segment(_frame())
+    assert module.DETECTION_SCORES == [pytest.approx(0.26)]
+    assert module.stats()["n_detection_scores"] == 1
+
+
+def test_the_filter_changed_no_detection_parameter(loaded):
+    """§4 step 2: the operating point is the GENERATOR's, and a validity check on the output is not
+    permission to go and improve the detector."""
+    module, state = loaded
+    module.segment(_frame())
+
+    assert module.BOX_THRESHOLD == 0.15
+    assert module.TEXT_THRESHOLD == 0.25
+    assert module.RETRY_BOX_THRESHOLD == 0.1
+    assert module.RETRY_TEXT_THRESHOLD == 0.1
+    assert module.BOX_SELECTION == "highest_score"
+    assert module.OBJECT_TEXT_PROMPT == "apple."
+    assert state["thresholds"] == [(0.15, 0.25)]
+
+
+def test_the_colour_reference_is_the_census_own_predicate(loaded):
+    """Pinned to the copy in scripts/audit_apple_masks.py pixel for pixel.
+
+    The predicate is restated in the adapter rather than imported, so the thing that keeps the two
+    from drifting has to be a test. If they drift, "the fruit is not visible here" stops meaning the
+    same thing in the census, in the audit and in this refusal.
+    """
+    module, _ = loaded
+    import audit_apple_masks as audit
+
+    rng = np.random.default_rng(7)
+    for _ in range(5):
+        frame = rng.integers(0, 256, size=(31, 37, 3), dtype=np.uint8)
+        assert np.array_equal(module.object_color_reference(frame), audit.warm_apple_mask(frame))
+    assert np.array_equal(
+        module.object_color_reference(_frame()), audit.warm_apple_mask(_frame())
+    )
+
+
+def test_the_reference_finds_the_fruit_and_nothing_else_in_a_stub_frame(loaded):
+    """A sanity check on the fixture itself: a test whose frames were all reference-empty would pass
+    the refusal tests for the wrong reason."""
+    module, _ = loaded
+    reference = module.object_color_reference(_frame())
+    expected = np.zeros((48, 64), dtype=bool)
+    expected[10:30, 10:30] = True
+    assert np.array_equal(reference, expected)
+    assert not module.object_color_reference(_frame(apple=None)).any()
+
+
+def test_the_contract_carries_the_filter_so_two_artifacts_can_be_compared(loaded):
+    """§6 subtracts GEOM_TOL and EST_DRIFT_P95. A GEOM_TOL measured with the filter minus an
+    EST_DRIFT_P95 measured without it is a subtraction across two different frame populations, and
+    it would still look like arithmetic. Absence is a disagreement in contract_disagreements(), so
+    recording it here is what makes the mismatch refusable."""
+    module, _ = loaded
+    assert module.SEGMENTER_CONTRACT["mask_validity_min_iou"] == module.MASK_VALIDITY_MIN_IOU
+    assert module.SEGMENTER_CONTRACT["mask_validity_reference"] == module.MASK_VALIDITY_REFERENCE
+    assert f"mask_val_min_iou={module.MASK_VALIDITY_MIN_IOU}" in module.ESTIMATOR_VERSION
+    assert _contract_doc()["segmenter"]["mask_validity_min_iou"] == module.MASK_VALIDITY_MIN_IOU
+
+
+def test_measure_geom_tol_differences_the_new_counters_as_this_runs_numbers(loaded):
+    """Otherwise the refusal count in an artifact would be a lifetime total of the process."""
+    import measure_geom_tol as mgt
+
+    module, _ = loaded
+    for key in ("n_frames_mask_refused", "n_frames_mask_refused_no_reference",
+                "n_mask_validity_iou"):
+        assert key in mgt.ADAPTER_RUN_COUNTERS
+        assert key in module.stats()
+
+
+def test_producing_the_fix_did_not_accept_it(loaded):
+    """Blocker 1 is discharged by a person looking at the evidence and editing the tuple, not by an
+    adapter that has stopped producing the masks the evidence was about. Nothing here may flip it,
+    and blocker 3 — per-frame segmentation vs upstream's propagation — is untouched by any of it."""
+    module, _ = loaded
+    assert module.GATE_QUALIFIED is False
+    assert any("NOBODY HAS LOOKED AT A MASK" in b for b in module.GATE_QUALIFICATION_BLOCKERS)
+    assert any("PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in b
+               for b in module.GATE_QUALIFICATION_BLOCKERS)
+    assert len(module.GATE_QUALIFICATION_BLOCKERS) == 3
+    assert not any("mask-validity" in d.lower() for d in module.GATE_QUALIFICATION_DISCHARGED)

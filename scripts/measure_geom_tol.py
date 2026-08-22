@@ -1231,6 +1231,14 @@ ADAPTER_RUN_COUNTERS: tuple[str, ...] = (
     "n_frames_with_empty_mask",
     "n_frames_retry_fired",
     "n_frames_retry_recovered",
+    # PR-08 V6's mask-validity filter: frames on which the adapter drew a mask and then REFUSED it
+    # because it contained essentially none of the object. Differenced like the rest, and listed
+    # here rather than left to the descriptive half, because "the filter fired on 12 frames of this
+    # run" and "it has fired 12 times since this interpreter started" are different claims and only
+    # the first one belongs beside a coverage number.
+    "n_frames_mask_refused",
+    "n_frames_mask_refused_no_reference",
+    "n_mask_validity_iou",
     "n_detection_scores",
 )
 
