@@ -726,11 +726,19 @@ stage_repo() {
   local role=$1 repo=$2 rev=$3 list=$4 out snap resolved
   echo
   echo "=== fetching   ${role}: ${repo} @ ${rev}"
-  # `hf download` prints the snapshot path on stdout and its progress on stderr, so the last stdout
-  # line is the path. Captured and CHECKED rather than assumed: a client that changes its output
-  # would otherwise hand the manifest builder a progress string and produce an empty record.
-  out=$(uvx hf@latest download "${repo}" --revision "${rev}")
-  snap=$(printf '%s\n' "${out}" | tail -n 1)
+  # --quiet, AND the path is recovered by pattern rather than by position. THIS EXACT DEFECT HAS
+  # ALREADY COST THIS PROJECT A QUEUE CYCLE ONCE: 100_fetch_pr08_source failed on 2026-08-20 with
+  # the download SUCCEEDED, because hf >= 1.28 decorates stdout -- a green "✓ Downloaded" line and
+  # then an INDENTED "  path: <dir>" -- so `tail -n 1` returns "  path: …", which is not a
+  # directory, and the guard correctly rejected a good fetch. It happened again here on 2026-08-22
+  # as job 189452, 12 seconds in, after all nine files had landed. `--quiet` is documented as
+  # printing one path per line, and the sed strips the decoration if a future client ignores that;
+  # taking the last line that IS a directory is what makes this independent of the layout.
+  out=$(uvx hf@latest download "${repo}" --revision "${rev}" --quiet)
+  snap=$(printf '%s\n' "${out}" \
+    | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^[[:space:]]*path:[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | while IFS= read -r line; do [[ -d "${line}" ]] && printf '%s\n' "${line}"; done \
+    | tail -n 1)
   if [[ ! -d "${snap}" ]]; then
     echo "FATAL: ${repo}: 'hf download' did not name a directory. Last stdout line was:"
     echo "         ${snap}"

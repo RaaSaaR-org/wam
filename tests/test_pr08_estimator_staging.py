@@ -691,3 +691,45 @@ def test_a_different_repo_is_still_fatal_when_pinned(tmp_path: Path) -> None:
     done = _run_checker(tmp_path, _write_adapter(tmp_path), [art])
     assert done.returncode == 2, done.stdout + done.stderr
     assert "DISAGREES" in done.stdout
+
+
+# -- the defect that has now cost two queue cycles ------------------------------------------------
+#
+# 100_fetch_pr08_source, 2026-08-20: "failed with the download SUCCEEDED". hf >= 1.28 decorates
+# stdout with a green "✓ Downloaded" and an indented "  path: <dir>", so a `tail -n 1` directory
+# guard rejects a good fetch. This job reproduced it exactly on 2026-08-22 as job 189452 -- 12
+# seconds in, after all nine files had landed. These tests are the regression for the SECOND time.
+
+
+def test_the_download_asks_for_undecorated_output() -> None:
+    text = _text()
+    assert "--quiet" in text, (
+        "hf decorates stdout without --quiet, which is how job 189452 called a successful "
+        "download FATAL"
+    )
+    for line in text.splitlines():
+        if "hf@latest download" in line:
+            assert "--quiet" in line, line
+
+
+def test_the_snapshot_path_is_not_taken_by_position_alone() -> None:
+    """--quiet is the fix; not depending on the layout is the belt. A future client that ignores
+    its own --quiet contract must not be able to break this again."""
+    text = _text()
+    i = text.find("hf@latest download")
+    assert i != -1
+    window = text[i : i + 600]
+    assert '[[ -d "${line}" ]]' in window, (
+        "the path must be recovered by testing which line IS a directory, not by position"
+    )
+    assert "path:" in window, "the decoration must be stripped explicitly too"
+
+
+def test_the_reason_is_recorded_at_the_code_that_carries_it() -> None:
+    """A bug that recurs after being written down once was written down in the wrong place. It is
+    now in the function, not only in the task file."""
+    text = _text()
+    i = text.find("hf@latest download")
+    window = text[max(0, i - 1200) : i]
+    assert "100_fetch_pr08_source" in window
+    assert "189452" in window
