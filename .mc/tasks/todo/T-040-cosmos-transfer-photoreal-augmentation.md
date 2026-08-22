@@ -406,6 +406,143 @@ blocked on a codec rather than on GPU-hours.**
 else to run. Installing it on the workstation's RTX 5090 (32 GB, driver 595.84) is ~10–20 GB and is
 the project owner's call. PR-08 §1's generation gate is untouched and remains the owner's call.
 
+**2026-08-22, afternoon — the throughput measurement ran at last, and the corpus codec killed it.**
+
+Job **189584** (`TIMING=1 STYLE_SET=train`) was submitted at `--mem=192G --time=01:30:00` and Slurm
+planned it for 2026-08-23T11:45. Cutting it to `--mem=96G --time=01:00:00` via
+`scontrol update` halved its billing weight (49 -> 25) and it **backfilled 22 hours early**, starting
+2026-08-22T13:51. Then it FAILED in 3:36 with exit 1, inside Cosmos-Transfer2.5's own SAM 2 helper:
+
+    Processing video: .../episode_000000.mp4 ... Number of frames: 590
+    Converting video.. Done extracting frames. 0 frames extracted
+    [1/1] episode_000000__train-01-oak-tungsten__r00 error RuntimeError: no images found in <tmpdir>
+
+preceded by hundreds of `[av1] Missing Sequence Header` and `Your platform doesn't suppport hardware
+accelerated AV1 decoding`. **The job refused to write `THROUGHPUT.json`**, on its own stated grounds
+that "a wall clock around a failed unit is not a throughput number, and PR-08 §8 item 3 derives the
+budget from this file". That refusal is the file behaving correctly; §8 item 3 is still OPEN.
+
+**This is the THIRD job lost to one defect,** and the first two were ours rather than upstream's:
+186357 (372 clips captioned, 0 captions), 189585 (the GEOM_TOL pilot, dead at 7 s), now 189584.
+Job 189586's `CLIP_DECODE_PROBE.json` pins it exactly, in the generation venv:
+
+  * `cv2` 4.11.0 — `FFMPEG: YES`, `avcodec 59.37.100` — **cannot decode this AV1 corpus**;
+  * `av` (PyAV) 16.0.1 via **libdav1d** — decodes it; `imageio` 2.37.0 — decodes it;
+  * `ffmpeg_av1_decoders: null` — **there is no ffmpeg CLI on PATH in that environment at all**;
+  * upstream reads clips with `cv2.VideoCapture`, in
+    `cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_utils.py`.
+
+So this one cannot be fixed the way ours was. Our own `measure_geom_tol.py` got a decoder seam and
+picks PyAV; **upstream's reader is cv2 and cv2 bundles its own libav**, so no PATH change reaches it.
+
+**The transcode objection is withdrawn, by measurement.** This file previously argued against
+re-encoding the corpus because "a lossy transcode would sit between the tolerance and the pixels the
+generator sees", at the fraction-of-a-pixel scale GEOM_TOL is denominated in. Measured 2026-08-22
+with PyAV 18.0.0 on `episode_000000`:
+
+  * AV1 -> `rgb24` -> `VideoFrame.from_ndarray(..., 'rgb24')` -> `yuv420p` @ `crf=0` is **NOT**
+    bit-exact: max abs channel delta **7-10/255** over 24 frames. That is the RGB<->YUV chroma
+    round-trip, not the codec. This is the naive route and it must not be used.
+  * The decoded `av.VideoFrame` passed **straight to the encoder in its native `yuv420p` planes**,
+    with `pix_fmt` carried from the input and `crf=0`, is **BIT-EXACT — max abs channel delta 0** on
+    every one of the 24 frames compared after decoding both sides back to `rgb24`.
+
+There is no loss, so there is nothing to sit between the tolerance and the pixels, and the objection
+does not survive its own measurement. Cost: 3 076 473 B -> 9 336 753 B for one clip (`preset
+veryfast`; `slow` gives 9 121 825 B, 2.4 % better), i.e. the corpus's 929 424 549 B of video becomes
+roughly **2.8 GB**. `/valhalla` has 4.5 PB free, so the size is not a consideration.
+
+Caveat recorded for whoever implements it: setting `frame.pts = None` before encoding works for a
+short prefix and then dies on a full clip with `av.error.ArgumentError ... returned 22` out of
+`mux`. Timestamps have to be handled, not nulled.
+
+**Resubmission path once a transcoded tree exists.** `97_transfer25_restyle.sbatch` takes
+`SOURCE=${SOURCE:-${PROJ}/data/pr08-apple-640x480}`, and its only path refusal (line 659) is against
+the converted 120x160 corpus, so a sibling tree is accepted as long as its manifest declares
+640x480.
+
+**2026-08-22, evening — the codec blocker is closed by measurement, and the GEOM_TOL pilot moved
+the shape of the remaining work.**
+
+*The transcode.* `scripts/transcode_corpus_lossless.py` (new) re-encoded the whole corpus AV1 ->
+H.264 and **proved** rather than assumed the result: every clip is compared back against its source
+in **both** `yuv420p` and `rgb24`, and a clip that cannot be proven loses the tree its
+`manifest.json`, which is precisely what makes `97_transfer25_restyle.sbatch` reject it. Result:
+
+    OK: 402/402 clips PROVEN bit-exact (171625 frames, stride 1)
+        929,424,549 B in -> 6,534,455,777 B out (7.03x), 693.2 s wall, 0 pts repaired
+
+The mux error I could not get past was **not** the transcode being impossible. `frame.pts = None`
+makes libx264 invent timestamps the mp4 muxer rejects with errno 22; the fix is to copy the
+**container's** `time_base` (`1/15360` here — deriving it from the 30 fps frame rate silently
+rescales every timestamp) and carry the source pts through. `pts_repaired` is **0** on this corpus:
+the timestamps were never missing, only discarded. `threads=1` is pinned so an output digest does
+not depend on `--jobs`; x264 frame threading changes the bitstream without changing the pixels.
+
+Two things I had told the task were wrong and are corrected here: the tree is **6.5 GB, not 2.8 GB**
+(the smaller figures came from the truncated files the crashing runs left behind), and on a full
+590-frame clip `medium` beats `veryfast` by **4.9 %**, not 2.4 %, with `medium` <= `slow`.
+
+*The clearance, which is the part that counts.* Bit-exactness is a claim about this workstation's
+encoder. The question the three lost jobs asked is whether the **generation venv's** cv2 4.11.0 /
+avcodec 59.37.100 can read the result, and only that venv's own interpreter can answer it. Job
+**189605** ran `verify_clip_decode.py` over the tree on `/valhalla`:
+
+    cv2 4.11.0 from .../third_party/cosmos-transfer2.5/.venv/...
+    checking 402 clips, 3 frame(s) each
+    OK: 402/402 clips decoded (640x480 @ 30.0 fps)   -> exit 0
+
+`decord`, which threw `DECORDError` on the AV1 original and which upstream reaches for in 13 files,
+now returns all 590 frames. All four readers upstream actually uses work.
+
+**`104_probe_clip_decode.sbatch` gained `LIMIT`/`FRAMES` overrides and a codec-aware verdict,
+because a FAILURE is categorical and a PASS is not.** Its default `--limit 4` was correct for
+diagnosing AV1 — four clips failing identically settles 402 — and wrong for clearing a candidate
+tree, where one unreadable file is job 186357 again (372 clips captioned, zero captions, nothing
+crashed). The artifact now records `verify_clip_decode_limit` and
+`verify_clip_decode_covers_whole_corpus`, so a 4-clip run cannot later be cited as clearing the
+corpus, and the verdict branch distinguishes a diagnosis run from a clearance run instead of
+printing "this probe is wrong about its own premise" at a corpus that was never AV1.
+
+*What the GEOM_TOL pilot found.* Job **189588** (`PILOT=1`) measured the cost instead of guessing
+it: **0.0833 s/frame** plus **116 s** fixed load (interpreter, torch, ~3.7 GB of GroundingDINO +
+SAM 2 weights), so the full 402-episode measurement is **4.005 GPU-h** and wants `05:30:00` against
+a **4 h `MaxWall`**. It ended `single_job_feasible: false`. Both passes carry `gate_qualified: false`
+and exit 3 — `--limit` disqualifies a sample from being the gate by construction, so **nothing in
+`GEOM_TOL_PILOT.json` is GEOM_TOL**. The answer is the shard/merge path now in
+`measure_geom_tol.py` (`--shard I`, `--merge`) and `103_measure_geom_tol.sbatch` (8-way array at
+`%4`, merge as a separate **no-GPU** CPU job under `2cpu-single-host`). GEOM_TOL is a **median**, so
+a merge that averages shard medians returns a plausible wrong number rather than an error — that
+path is under adversarial verification before it is given four GPU-hours.
+
+*Arm C's identity prompt is measured, and it fails.* Calibration attempt 2 passed all five floors,
+including the abstention probes at **10/10** where attempt 1 scored 2/10 — confirming attempt 1's
+own diagnosis, since the only change was replacing manufactured occlusion with real corpus
+occlusion. The census bounding that number is recorded rather than glossed: of 154 447 frames
+searched, exactly **24** are genuinely undecidable and all 24 are one ~1.4 s occlusion in
+`episode_000094`, so ten correct answers are ten correlated successes. Run blind over the 40-episode
+sheet, the committed prompt scored:
+
+    verdicts    match 0 | mismatch 40 | unsure 0   (coverage 1.000)
+    axes        table:40, background:29
+
+All 40 say the same two things — the cloth is **dark grey, not black**, and a pale strip of the
+surface behind it runs along the top edge. `apple`, `lighting`, `plate` and `other` are **0**. So
+`T40-TODO-01-identity-prompt-provenance` was right on the facts: a machine caption of
+`episode_000135_clip000` applied to all 402 describes none of the 40 sampled. The correction is a
+minimal one to two clauses, re-measured blind with fresh judges; `configs/transfer25/styles.toml`
+is **not** edited here and flipping that todo's status stays a person's step per the judge doc §7.6.
+
+*§8 status after today.* Item 5 is **closed** — `distance_to_camera` and `semantic_segmentation`
+are wired in `src/wam/robot/isaac_binding.py` with tests. Item 3 is running as job **189609**
+(`TIMING=1`, `--time=02:00:00 --mem=98304`, against the transcoded tree). Item 4 is half-blocked:
+GEOM_TOL is now schedulable, `EST_DRIFT_P95` still has nowhere to run. **Item 7 is untouched and
+not an engineering question.**
+
+**Still blocked on a human, unchanged:** Isaac Sim for `EST_DRIFT_P95`; PR-08 §1's generation gate;
+and whether the corrected identity prompt is pasted into the committed style source.
+
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above

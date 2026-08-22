@@ -65,6 +65,10 @@ source /valhalla/projects/ehpc-aif-2026pg01-905/caches.sh
 PROJ=/valhalla/projects/ehpc-aif-2026pg01-905
 WAM=${PROJ}/wam
 SOURCE=${SOURCE:-${PROJ}/data/pr08-apple-640x480}
+# LIMIT/FRAMES are overridable because the sample size that answers "does this fail"
+# is not the sample size that answers "does this hold". See the comment on (1) below.
+LIMIT=${LIMIT:-4}
+FRAMES=${FRAMES:-3}
 OUT=${PROJ}/runs/${RUN_ID:-pr08-geom-tol}
 mkdir -p "${OUT}"
 
@@ -74,12 +78,18 @@ echo "=== python     $(command -v python)"
 echo "=== framework  ${FRAMEWORK}"
 
 # (1) The consumer's own gate, run with the consumer's own interpreter — the one thing
-# verify_clip_decode.py's docstring insists on. --limit 4 because the answer here is categorical:
-# if four AV1 clips fail identically, the 398 others are not a different question.
+# verify_clip_decode.py's docstring insists on. The default LIMIT=4 because a FAILURE is
+# categorical: if four AV1 clips fail identically, the 398 others are not a different question.
+#
+# A PASS IS NOT CATEGORICAL AND MUST NOT BE SAMPLED. Four clips decoding proves the venv can read
+# the codec; it does not prove that all 402 files in a transcoded tree are intact, and job 186357
+# is what a partial read costs — 372 clips captioned, zero captions, nothing crashed. So when this
+# job is pointed at a candidate corpus in order to CLEAR it rather than to diagnose it, run
+# LIMIT=0 (every clip). That is the run whose exit code anyone is entitled to cite.
 echo
-echo "=== (1) verify_clip_decode.py, cv2, 4 clips ==================================================="
+echo "=== (1) verify_clip_decode.py, cv2, LIMIT=${LIMIT} (0 = every clip) ==========================="
 set +e
-python "${WAM}/scripts/verify_clip_decode.py" "${SOURCE}/videos" --limit 4 --frames 3 \
+python "${WAM}/scripts/verify_clip_decode.py" "${SOURCE}/videos" --limit "${LIMIT}" --frames "${FRAMES}" \
   --report "${OUT}/clip_decode_cv2.json" 2>&1 | grep -v "^\[av1 @" | tail -25
 CV2_RC=${PIPESTATUS[0]}
 set -e
@@ -88,7 +98,8 @@ echo "=== verify_clip_decode.py exited ${CV2_RC} (0 = every sampled clip decoded
 # (2)-(4). One python process, because every answer is an import away and three processes would
 # only make the log harder to read. Nothing here raises: a decoder that is absent, or present and
 # broken, is a RESULT — the whole point is a table of what this machine can and cannot do.
-SOURCE="${SOURCE}" OUT="${OUT}" FRAMEWORK="${FRAMEWORK}" CV2_RC="${CV2_RC}" python - <<'PY'
+SOURCE="${SOURCE}" OUT="${OUT}" FRAMEWORK="${FRAMEWORK}" CV2_RC="${CV2_RC}" \
+  LIMIT="${LIMIT}" FRAMES="${FRAMES}" python - <<'PY'
 import json, os, pathlib, subprocess, sys, traceback
 
 src = pathlib.Path(os.environ["SOURCE"])
@@ -100,6 +111,13 @@ rec = {
                "pilot) died because cv2 could not, and this project already lost job 186357 to the "
                "identical failure on a sibling corpus.",
     "clip": str(clip),
+    "source": str(src),
+    "clips_on_disk": len(sorted((src / "videos").glob("*.mp4"))),
+    # The sample size is part of the result. LIMIT=0 means every clip was read; anything else
+    # means this exit code covers a SAMPLE and may not be cited as clearing the corpus.
+    "verify_clip_decode_limit": int(os.environ["LIMIT"]),
+    "verify_clip_decode_frames_per_clip": int(os.environ["FRAMES"]),
+    "verify_clip_decode_covers_whole_corpus": os.environ["LIMIT"] == "0",
     "verify_clip_decode_cv2_exit": int(os.environ["CV2_RC"]),
 }
 
@@ -193,13 +211,40 @@ except FileNotFoundError:
     rec["ffmpeg_av1_decoders"] = None
     print("    no ffmpeg on PATH")
 
-path = out / "CLIP_DECODE_PROBE.json"
-path.write_text(json.dumps(rec, indent=2) + "\n")
-print(f"\n=== wrote {path}")
-
 usable = [d["lib"] for d in rec["decoders"] if d.get("ok")]
+
+# WHICH CORPUS THIS IS, because the same exit code means two different things. This job was
+# written to diagnose the AV1 original; pointed at a transcoded candidate it is a CLEARANCE run,
+# and printing the diagnosis verdict there would tell the reader the opposite of the truth. The
+# codec comes out of the source manifest rather than out of the path, and a manifest that does
+# not say is reported as unknown rather than guessed.
+try:
+    _sm = json.loads((src / "manifest.json").read_text())
+    _codecs = [c.lower() for c in (_sm.get("source", {}).get("codecs") or _sm.get("codecs") or [])]
+    _materialized = _sm.get("source", {}).get("materialized") or _sm.get("materialized")
+except Exception as exc:                                     # noqa: BLE001 - a result, not a crash
+    _codecs, _materialized = [], f"unreadable: {exc}"
+rec["source_codecs"] = _codecs
+rec["source_materialized"] = _materialized
+is_av1 = "av1" in _codecs
+whole = rec["verify_clip_decode_covers_whole_corpus"]
+
 print("\n=== VERDICT")
-if rec["verify_clip_decode_cv2_exit"] == 0:
+if rec["verify_clip_decode_cv2_exit"] == 0 and not is_av1:
+    print(f"    CLEARED: cv2 {rec.get('cv2_version', '?')} read {'every one of' if whole else 'a SAMPLE of'} "
+          f"{rec['clips_on_disk']} clips")
+    print(f"    in codec {_codecs or ['unknown']} (materialized: {_materialized}).")
+    if whole:
+        print("    This is the run whose exit code may be cited: the generator's own interpreter,")
+        print("    the generator's own cv2, every clip in the tree. The AV1 blocker that killed")
+        print("    186357, 189584 and 189585 is gone for THIS corpus.")
+    else:
+        print("    THIS DOES NOT CLEAR THE CORPUS. A failure is categorical; a pass is not. Re-run")
+        print("    with LIMIT=0 before anyone cites this. 186357 captioned 372 clips, produced")
+        print("    zero captions, and crashed nowhere.")
+    if usable:
+        print(f"    Also readable here: {', '.join(usable)}.")
+elif rec["verify_clip_decode_cv2_exit"] == 0:
     print("    cv2 decodes the corpus. 189585's failure was not the codec and this probe is wrong")
     print("    about its own premise -- read the log before believing either.")
 elif usable:
@@ -212,4 +257,12 @@ else:
     print("    the measurement uses -- it is whether the generator can read it either, and 189584")
     print("    will answer that when it starts. Do not transcode before that answer arrives: a")
     print("    corpus that the GENERATOR reads fine needs no transcode, only a reader.")
+
+# WRITTEN LAST, ON PURPOSE. It used to be written before the verdict block, so every field the
+# verdict derives -- source_codecs, source_materialized -- was missing from the artifact while
+# being printed to a log that scrolls away. The JSON is the thing that gets cited; it must carry
+# everything the verdict was computed from.
+path = out / "CLIP_DECODE_PROBE.json"
+path.write_text(json.dumps(rec, indent=2) + "\n")
+print(f"\n=== wrote {path}")
 PY
