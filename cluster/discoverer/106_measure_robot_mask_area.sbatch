@@ -219,7 +219,12 @@
 # on the command line, exactly the way --time already is, and the SHARD path REFUSES to run when
 # SLURM_ARRAY_TASK_ID is unset rather than quietly measuring shard 0 and calling it the corpus.
 #SBATCH --open-mode=append
-#SBATCH -o /valhalla/projects/ehpc-aif-2026pg01-905/logs/robot-mask-area.%j.out
+# %A_%a, NOT %j. For an array task %j is a per-task job id, but the SHARD path is the
+# only one that ever runs as an array and job 189658 proved the cost of getting this
+# wrong: four tasks wrote to one geom-tol.189658.out, so three headers were lost and the
+# surviving one described a different shard than the progress lines under it. %A_%a keeps
+# the array grouped and the tasks separate; a non-array run still gets %A as its own id.
+#SBATCH -o /valhalla/projects/ehpc-aif-2026pg01-905/logs/robot-mask-area.%A_%a.out
 
 set -euo pipefail
 
