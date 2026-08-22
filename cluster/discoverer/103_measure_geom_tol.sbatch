@@ -65,6 +65,46 @@
 #     total cost           unchanged by imbalance, because the sum is N x L + (14 418 - L) either
 #                          way: 8 x load + the corpus = 4.24 GPU-h. Sharding costs 0.13 GPU-h over
 #                          N = 4, which is the four extra model loads, and that is the whole price.
+#
+# ------------------------------------------------------------------------------------------------
+# MEASURED 2026-08-22 BY JOB 189658, AND EVERY ESTIMATE ABOVE IS ~2x OPTIMISTIC. READ THIS FIRST.
+#
+# The paragraph below this block says "a 2x error in that extrapolation is entirely plausible."
+# It was 2x. Job 189658 ran --array=0-3%4 --time=02:00:00 against the H.264 corpus:
+#
+#     shard 0 = 42 673 frames (100 episodes) -> did NOT finish in 7 200 s
+#                                            => p > (7200 - 116)/42673 = 0.1660 s/frame
+#     shard 2 = 48 766 frames (114 episodes) -> cancelled; it could not have finished either
+#
+# So p >= 0.166 against the pilot's 0.0833: AT LEAST 1.99x. The cause is not contention and not
+# the corpus. THE PILOT MEASURED A DIFFERENT SEGMENTER. GEOM_TOL_PILOT.json was produced on
+# 2026-08-22 at box_threshold 0.35 with no retry branch; scripts/estimators/apple_sam2.py has
+# since moved to Cosmos-Transfer2.5's OWN operating point, 0.15 with a single (0.10, 0.10) retry,
+# because PR-08 section 4 step 2 requires our detection point to BE the generator's. A lower box
+# threshold means more boxes survive detection, and every surviving box costs a SAM 2 pass.
+# apple_sam2.GATE_QUALIFICATION_BLOCKERS[0] says this in as many words -- "it is also evidence
+# about a configuration THIS FILE HAS SINCE REPLACED" -- and the array was sized off it anyway.
+#
+# USE p = 0.18 s/frame UNTIL A PILOT RE-MEASURES IT AT THE CURRENT OPERATING POINT. Then:
+#
+#     full corpus          171 625 x 0.18                          = 30 893 s = 8.58 GPU-h
+#                          (+ N model loads; at N = 8, 8.85 GPU-h)
+#     heaviest at N = 8    24 546 x 0.18 + 120                      =  4 538 s = 75 m 38 s
+#     that shard x 1.25                                             =  5 673 s = 94 m 33 s
+#     requested --time                                              =  02:00:00
+#                          -> 1.59x the heaviest-shard estimate, 2.1x to the 4 h wall.
+#     heaviest at N = 4    48 766 x 0.18 + 120                      =  8 898 s = 148 m
+#                          -> DOES NOT FIT THE 4 h WALL WITH ANY MARGIN. N = 4 IS NOT AN OPTION.
+#
+# AND THE REASON N = 4 WAS CHOSEN ANYWAY, so the next person does not repeat it: the QoS has
+# MaxSubmitJobsPU = 8, an N-task array is N submissions, and two other jobs were already pending,
+# so --array=0-7 was REJECTED outright with QOSMaxSubmitJobPerUserLimit. The fix is to clear the
+# queue and submit N = 8, NOT to shard coarser. Sharding coarser trades a scheduling constraint
+# for a wall-clock cliff, and the wall does not negotiate: a shard that overruns loses everything
+# it computed, because every shard exits 3 while GATE_QUALIFIED is false and the resume check
+# refuses a non-gate-qualified artifact. Job 189658 cost roughly six GPU-hours and produced no
+# artifact at all.
+# ------------------------------------------------------------------------------------------------
 # Frames are still not balanced, so 58/402 is itself a count-based floor on the real worst case.
 # The SHARD branch's own run-time estimate below prints the EVEN-SPLIT figure — it re-reads the
 # pilot at run time and does not know the partition — and says so where it prints it.
