@@ -650,6 +650,54 @@ estimator "that recovers on the next frame". The plate lock is a run of **~35 co
 in a **per-frame** estimator. The failure mode it attributes to propagation occurs without it.
 
 
+**2026-08-22, late night — the robot masker fails on a third of frames, and the GEOM_TOL array
+died proving the pilot's cost model was measured against a segmenter that no longer exists.**
+
+*The finding that stops the next 9.5 GPU-h.* `106_measure_robot_mask_area.sbatch` PILOT (job
+**189707**, 9 min 35 s) measured the thing the G0c bound would have been derived from:
+
+    empty_mask.fraction   0.352   (565 frames)      seconds_per_frame  0.1981
+    full_run_seconds      34099  ->  9.47 GPU-h     single_job_feasible  false
+
+**`robot_composite.check_mask` refuses a clip on an empty robot mask — "zero is zero", no
+threshold.** At 35.2 % essentially every clip refuses at generation time, so **G0c cannot run and
+PR-08 cannot generate**, whatever value the area bound takes. A local strided pass over all 402
+episodes independently measured **37 %**. The full measurement was **not** submitted: a distribution
+produced by a detector that fails on a third of its frames is a distribution of the failure, and a
+bound read off it would be meaningless. The open question, being diagnosed now, is whether **the
+robot is genuinely out of shot** in those frames — in which case an empty mask is the CORRECT answer
+and `check_mask`'s rule is what is wrong, since G0c composites real robot pixels and there are none
+to composite — or whether **detection is failing**, in which case the rule is right and the detector
+is not. Opposite fixes; the artifact cannot tell them apart. Whether the empty frames cluster in
+time within an episode or spread uniformly probably decides it.
+
+*The array, and a mistake worth not repeating.* Job **189658** (`--array=0-3%4 --time=02:00:00`)
+produced **no artifact at all** at a cost of roughly six GPU-hours: shard 0 TIMEOUT at 2:00:21,
+shard 2 cancelled once it was arithmetically certain to overrun, shards 1 and 3 into the wall
+behind them. Shard 0 is exactly **42 673 frames** and did not finish in 7 200 s, so
+
+    p > (7200 - 116) / 42673 = 0.1660 s/frame   against the pilot's 0.0833  ->  at least 1.99x
+
+**The cause is not contention and not the corpus: the GEOM_TOL pilot measured a different
+segmenter.** `GEOM_TOL_PILOT.json` was produced at `box_threshold` 0.35 with no retry branch, and
+the adapter has since moved to Cosmos-Transfer2.5's own operating point (0.15, single (0.10, 0.10)
+retry) because §4 step 2 requires our detection point to **be** the generator's. A lower threshold
+means more boxes survive and every surviving box costs a SAM 2 pass. **Two places in this repository
+said so before the fact** — `GATE_QUALIFICATION_BLOCKERS[0]`'s *"evidence about a configuration THIS
+FILE HAS SINCE REPLACED"*, and 103's own header, *"a 2x error in that extrapolation is entirely
+plausible"* — and the array was sized off the stale number anyway. 103's header now carries the
+measured correction, why `N = 4` was chosen (`MaxSubmitJobsPU=8` rejected `--array=0-7` outright),
+and the conclusion that **N = 4 is not an option**: at 0.18 s/frame its heaviest shard is 148 min
+against a 4 h wall. `%j` also does not disambiguate array tasks — all four wrote to one log file —
+now `%A_%a` in both array-capable jobs.
+
+*Independent cross-check on the cost.* The robot pilot's **0.1981 s/frame** and the GEOM_TOL
+overrun's **> 0.166** are the same detector stack at the same operating point, measured by two
+unrelated routes on two different days. **So both remaining §8 measurements are ~9.5 and ~8.6
+GPU-h — about 18 GPU-hours before a single clip is generated**, against the ~4 GPU-h the original
+pilot implied for GEOM_TOL alone.
+
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above
