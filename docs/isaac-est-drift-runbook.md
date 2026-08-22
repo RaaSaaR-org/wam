@@ -726,6 +726,17 @@ weakest kind of bound.**
 
 ### (a) MuJoCo — the renderer this repo already has
 
+> **CHOSEN, 2026-08-22, and registered.** The project owner picked this route over Isaac. The
+> amendment §6 says it needs exists as **`docs/preregistration/PR-08-V5-ground-truth-route.md`**,
+> rule `T40_RULE_V5`, registered **before any capture was run** (V5 is the number because
+> `PR-08-V4` was already taken by an unsigned draft on the T-39 premise). The shim is
+> `src/wam/robot/mujoco_binding.py` and the harness knob is
+> `measure_est_drift.py capture --backend mujoco`; the Isaac path is unchanged in every flag,
+> default and refusal. **The "an orange cube is not an apple" objection below did not have to be
+> taken** — an apple mesh was found reachable offline (§7's table, and V5 §4.2). Everything else
+> below stands as written, including the direction argument, which V5 §3 states as an argument
+> with the limb that is *not* argued named beside it.
+
 **Verified on this box, 2026-08-22**, with no install and no network:
 
 ```
@@ -934,7 +945,7 @@ disqualifier in §4.7.
 | the annotator path is clear of the sm_120 Replicator hang (§1.4) | preflight check N returning at all |
 | first-boot shader-compile time | a stopwatch on the first `preflight_isaac.py` |
 | the composite route's error direction (§6c) | the same-frame comparison described there |
-| an apple mesh reachable offline for the MuJoCo route (§6a) | a look at what MuJoCo Menagerie and this box already carry |
+| ~~an apple mesh reachable offline for the MuJoCo route (§6a)~~ | **ANSWERED 2026-08-22: yes.** ManiSkill2-real2sim's `apple/collision.obj` (Apache-2.0), vendored inside SimplerEnv inside `~/IsaacLab-Arena/submodules/Isaac-GR00T/external_dependencies/`, 17 723 verts / 35 390 tris, 80.8 mm across, user-readable. Nothing was downloaded. The Arena `apple_01.usd` in the Isaac docker asset cache is **not** usable — USD (MuJoCo does not import it) and root-owned mode 600. Menagerie/robosuite/dm_control are not on this box at all. **So §6a's "an orange cube is not an apple" objection does not have to be taken**, and route (a) is registered as `T40_RULE_V5` (`docs/preregistration/PR-08-V5-ground-truth-route.md` §4.2), which also records what remains true about the substitution: it is a convex-decomposition proxy, untextured, rasterised, and a static prop |
 | whether any public RGB-D+mask corpus contains an apple (§6b) | reading the object lists before downloading anything |
 | Isaac Sim 5.1.0's Python and torch versions (§1.2, UNVERIFIED — nothing on this page depends on them) | fetching 5.1.0's own install page, which nobody has |
 | that HE ships no segmentation masks (§6b) — its dataset card lists RGB/depth/LiDAR/tactile/IMU and no masks, which is an absence of mention | the repository file listing, read before anyone plans that route |

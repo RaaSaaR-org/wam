@@ -8,6 +8,7 @@ getting it *wrong* is reachable here.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import pathlib
 import sys
@@ -702,7 +703,258 @@ def test_recording_the_estimator_stats_changed_no_number_this_script_already_pro
     before = json.loads((tmp_path / "before.json").read_text())
     after = json.loads((tmp_path / "after.json").read_text())
 
-    assert set(after) - set(before) == {"estimator_stats"}
+    # `estimator_stats` is the addition this test was written for. PR-08-V5 (2026-08-22) added
+    # three more and they are additive in the SAME sense: they record which ground-truth route a
+    # capture came from and which way that route's error points. Over a FakeIsaacBinding capture
+    # — which is what `capture` is — there is no route, the pair below falls back to the old
+    # unconditional stamp verbatim, and the `differing == []` assertion is what proves it.
+    assert set(after) - set(before) == {
+        "estimator_stats",
+        "error_direction",
+        "error_direction_measured",
+        "ground_truth_route",
+    }
     assert set(before) - set(after) == set()
+    assert after["is_lower_bound"] is before["is_lower_bound"] is True
+    assert after["is_lower_bound_reason"] == before["is_lower_bound_reason"]
     differing = sorted(k for k in before if k != "measured_utc" and before[k] != after[k])
-    assert differing == [], f"recording the estimator's stats changed {differing}"
+    # The `capture` block gained five keys under PR-08-V5 — which backend rendered it, which
+    # ground-truth route that is, and the object-substitution limitations a budget measured on a
+    # stand-in object must not be readable without. Over a fake capture every one of them is
+    # null and every key that was already there is unchanged, which is the whole claim.
+    assert differing == ["capture"], f"recording the estimator's stats changed {differing}"
+    added = set(after["capture"]) - set(before["capture"])
+    assert added == {
+        "backend",
+        "ground_truth_route",
+        "object_limitations",
+        "n_scene_states_scheduled",
+        "n_scene_states_visited",
+    }
+    assert all(after["capture"][k] is None for k in added)
+    assert {k: after["capture"][k] for k in before["capture"]} == before["capture"]
+
+
+# -- PR-08-V5: the second ground-truth route, and what widening the allow-list may not do --------
+#
+# `T40_RULE_V5` (docs/preregistration/PR-08-V5-ground-truth-route.md, registered 2026-08-22 before
+# any capture was run) generalises §4's ground-truth source from Isaac specifically to "a simulator
+# with ground-truth segmentation". Two things in this file move with it and nothing else does: the
+# `capture_is_not_from_isaac_sim` check becomes an ALLOW-LIST, and the `is_lower_bound` stamp
+# becomes per-route. Both are the kind of edit that could quietly let a laptop capture become G0b's
+# budget, so every test below is about what must still be refused.
+
+
+class _NotAGroundTruthBinding(FakeIsaacBinding):
+    """A binding whose class name is not in the allow-list. Same behaviour, different name."""
+
+
+class MuJoCoGroundTruthBinding(FakeIsaacBinding):  # noqa: N801 - the NAME is the thing under test
+    """A stand-in whose CLASS NAME is the one the allow-list carries.
+
+    Deliberately a rename of the fake and nothing more: the allow-list is a lookup on
+    ``type(binding).__name__``, so this is exactly what it sees, and testing it this way needs no
+    GL context, no mesh and no MuJoCo. The real binding's own behaviour is
+    ``tests/test_mujoco_binding.py``'s subject.
+    """
+
+
+def test_the_fake_is_not_in_the_allow_list_and_must_not_be(tmp_path):
+    """Every capture anyone has run so far came from FakeIsaacBinding, whose "ground truth" is a
+    moving square. It is the thing `capture_is_not_from_isaac_sim` exists to catch."""
+    assert "FakeIsaacBinding" not in ed.GROUND_TRUTH_BINDINGS
+    assert ed.ground_truth_route("FakeIsaacBinding") is None
+    assert ed.ground_truth_route(None) is None
+    assert ed.ground_truth_route("SomethingSomebodyWroteLastNight") is None
+
+
+def test_an_unlisted_binding_is_still_stamped_simulated(tmp_path):
+    binding = _NotAGroundTruthBinding(cameras=("persp",), ground_truth=("depth", "segmentation"))
+    header = ed.capture_frames(binding, "persp", 1, tmp_path / "cap", steps_per_frame=1)
+    assert header["is_simulated_binding"] is True
+    assert header["ground_truth_route"] is None
+
+
+def test_a_listed_binding_is_ground_truth_and_carries_its_route(tmp_path):
+    binding = MuJoCoGroundTruthBinding(cameras=("persp",), ground_truth=("depth", "segmentation"))
+    header = ed.capture_frames(binding, "persp", 1, tmp_path / "cap", steps_per_frame=1)
+    assert header["is_simulated_binding"] is False
+    assert header["ground_truth_route"] == "mujoco"
+
+
+def _reroute(capture: pathlib.Path, binding_name: str) -> pathlib.Path:
+    """Rewrite a capture header's binding name, leaving the frames alone.
+
+    The frames are the fake's and stay the fake's — this exercises the ROUTING, which is a
+    property of the header, and only the routing."""
+    header = json.loads((capture / "capture.json").read_text())
+    header["binding"] = binding_name
+    route = ed.ground_truth_route(binding_name)
+    header["is_simulated_binding"] = route is None
+    header["ground_truth_route"] = (route or {}).get("route")
+    (capture / "capture.json").write_text(json.dumps(header, indent=2), encoding="utf-8")
+    return capture
+
+
+def _measure(capture, tmp_path, name: str = "out"):
+    out = tmp_path / f"{name}.json"
+    ed.main(
+        ["measure", "--capture", str(capture), "--estimators", _naive_estimator(tmp_path),
+         "--object-class", "apple", "--min-coverage", "0.0", "--out", str(out)]
+    )
+    return json.loads(out.read_text())
+
+
+def test_a_mujoco_capture_is_not_disqualified_for_not_being_isaac(capture, tmp_path):
+    doc = _measure(_reroute(capture, "MuJoCoGroundTruthBinding"), tmp_path)
+    assert "capture_is_not_from_isaac_sim" not in doc["gate_disqualified_reasons"]
+    # And the reasons that have nothing to do with the route are untouched: widening the
+    # ground-truth source does not gate-qualify an estimator nobody has looked at a mask from.
+    assert "estimator_not_gate_qualified" in doc["gate_disqualified_reasons"]
+    assert doc["gate_qualified"] is False
+
+
+def test_the_mujoco_route_does_not_inherit_isaacs_lower_bound_sentence(capture, tmp_path):
+    """§6 SUBTRACTS this number from GEOM_TOL, so which way its error points is the property that
+    decides whether an error in the budget lands in the generator's favour or against it. The
+    Isaac sentence says "plausibly optimistic"; saying that about a route whose argued direction
+    is the opposite would be worse than saying nothing."""
+    doc = _measure(_reroute(capture, "MuJoCoGroundTruthBinding"), tmp_path)
+    assert doc["is_lower_bound"] is False
+    assert "Isaac renders" not in doc["is_lower_bound_reason"]
+    assert "T40_RULE_V5" in doc["is_lower_bound_reason"]
+    assert doc["ground_truth_route"] == "mujoco"
+
+
+def test_the_conservative_direction_is_recorded_as_argued_and_not_as_measured(capture, tmp_path):
+    """`is_lower_bound: false` on its own reads as "so it is an upper bound", which is a claim no
+    route here has earned. The direction is a separate field and it says who established it."""
+    doc = _measure(_reroute(capture, "MuJoCoGroundTruthBinding"), tmp_path)
+    assert "conservative" in doc["error_direction"]
+    assert doc["error_direction_measured"] is False
+    assert "ARGUMENT and not a measurement" in doc["is_lower_bound_reason"]
+
+
+def test_the_isaac_route_is_stamped_exactly_as_it_was_before_v5(capture, tmp_path):
+    """THE NON-REGRESSION. Whatever V5 did, an Isaac capture's two fields are the strings the
+    unconditional stamp wrote, Humanoid-Everyday sentence and all — correcting that one is the
+    runbook's §7 defect 4 and a judgement for whoever owns PR-08, not a side effect of this."""
+    doc = _measure(_reroute(capture, "IsaacSimBinding"), tmp_path)
+    assert doc["is_lower_bound"] is True
+    assert doc["is_lower_bound_reason"] == (
+        "measured on Isaac renders, not RealSense footage (PR-08 §4). The confirmatory "
+        "measurement against Humanoid Everyday is blocked on that corpus's licence and is "
+        "deliberately off the critical path."
+    )
+    assert doc["error_direction_measured"] is False
+
+
+def test_a_capture_from_nothing_recognised_keeps_the_old_unconditional_stamp(capture, tmp_path):
+    """The fallback is the old behaviour on purpose, so widening the route moved no string on the
+    path that already existed. What such a capture gets instead is the new direction field and
+    the disqualifier — neither of which existed to be changed."""
+    doc = _measure(capture, tmp_path)
+    assert doc["is_lower_bound"] is True
+    assert "capture_is_not_from_isaac_sim" in doc["gate_disqualified_reasons"]
+    assert doc["error_direction"] == "unknown — not a ground-truth capture"
+    assert doc["ground_truth_route"] is None
+
+
+def test_a_header_cannot_buy_a_route_it_did_not_come_from(capture, tmp_path):
+    """`ground_truth_route` is resolved from the BINDING CLASS NAME, not from the header's own
+    route string, so hand-editing the string does not make a fake capture ground truth."""
+    header = json.loads((capture / "capture.json").read_text())
+    header["ground_truth_route"] = "mujoco"
+    header["is_simulated_binding"] = False
+    (capture / "capture.json").write_text(json.dumps(header, indent=2), encoding="utf-8")
+    doc = _measure(capture, tmp_path)
+    assert "capture_is_not_from_isaac_sim" in doc["gate_disqualified_reasons"]
+    assert doc["is_lower_bound"] is True
+
+
+# -- the mujoco backend's own command-line refusals ----------------------------------------------
+
+
+def test_the_backend_defaults_to_isaac_so_nothing_existing_moved(contract, tmp_path):
+    """--backend is new, its default is the old behaviour, and the capture header proves it."""
+    contract(grid=(12, 20))
+    assert ed.main(_capture_argv(tmp_path)) == 0
+    header = json.loads((tmp_path / "cap" / "capture.json").read_text())
+    assert header["binding"] == "FakeIsaacBinding"
+    assert header["camera"] == "persp"
+    assert header["asset_source"].startswith("isaacsim.storage.native")
+
+
+def test_the_mujoco_backend_refuses_the_isaac_fake(contract, tmp_path, capsys):
+    """--fake is FakeIsaacBinding. There is nothing for it to stand in for here: the mujoco
+    backend already runs on CPU with no install, which is why it was chosen."""
+    contract(grid=(12, 20))
+    argv = ["capture", "--backend", "mujoco", "--fake", "--out", str(tmp_path / "c"),
+            "--frames", "1"]
+    assert ed.main(argv) == 2
+    assert "FakeIsaacBinding" in capsys.readouterr().err
+
+
+def test_the_mujoco_backend_refuses_a_usd_prim_path(contract, tmp_path, capsys):
+    """--camera-prim names a USD prim and an MJCF has no prims. Accepting it silently would
+    record a camera_prim in the header that nothing ever read."""
+    contract(grid=(12, 20))
+    argv = ["capture", "--backend", "mujoco", "--out", str(tmp_path / "c"), "--frames", "1",
+            "--camera-prim", "ego=/World/Scene/EgoCam"]
+    assert ed.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "MJCF" in err and "head" in err
+
+
+def test_the_mujoco_backend_refuses_a_grid_that_disagrees_with_the_contract(
+    contract, tmp_path, capsys
+):
+    """Same refusal, same reason, same place as the Isaac path: PR-08 §6 computes
+    GEOM_TOL - EST_DRIFT_P95 and that is arithmetic on one pixel grid only. Refused before
+    anything is compiled or rendered."""
+    contract(grid=(12, 20))
+    argv = ["capture", "--backend", "mujoco", "--out", str(tmp_path / "c"), "--frames", "1",
+            "--render-hw", "480", "640"]
+    assert ed.main(argv) == 2
+    assert "resolution_disagrees_with_geom_tol" in capsys.readouterr().err
+
+
+def test_the_mujoco_backend_refuses_when_no_contract_states_a_grid(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", tmp_path / "absent.json")
+    argv = ["capture", "--backend", "mujoco", "--out", str(tmp_path / "c"), "--frames", "1"]
+    assert ed.main(argv) == 2
+    assert "states no pixel grid" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("mujoco") is None,
+    reason="reaches MuJoCoGroundTruthBinding.__init__, which imports mujoco (optional 'sim' extra)",
+)
+def test_the_mujoco_backend_refuses_a_mesh_that_does_not_exist(contract, tmp_path, capsys):
+    """It does not fall back to the scene's orange cube, and it does not fetch one."""
+    contract(grid=(12, 20))
+    argv = ["capture", "--backend", "mujoco", "--out", str(tmp_path / "c"), "--frames", "1",
+            "--object-mesh", str(tmp_path / "no-such-apple.obj")]
+    assert ed.main(argv) == 2
+    assert "no-such-apple.obj" in capsys.readouterr().err
+
+
+def test_the_mujoco_backend_refuses_zero_scene_states(contract, tmp_path, capsys):
+    contract(grid=(12, 20))
+    argv = ["capture", "--backend", "mujoco", "--out", str(tmp_path / "c"), "--frames", "1",
+            "--scene-states", "0"]
+    assert ed.main(argv) == 2
+    assert "--scene-states" in capsys.readouterr().err
+
+
+def test_the_mujoco_backends_default_stage_is_the_committed_scene():
+    """Named once, and not a second literal: the Isaac answer is unchanged."""
+    from wam.robot.mujoco_binding import DEFAULT_SCENE
+
+    assert ed.resolve_stage(None, None, "mujoco") == (
+        str(DEFAULT_SCENE), "wam.robot.mujoco_binding.DEFAULT_SCENE"
+    )
+    assert ed.resolve_stage(None, None) == (
+        None, "isaacsim.storage.native.get_assets_root_path() + DEFAULT_ASSET_SUBPATH"
+    )
+    assert ed.resolve_stage(None, "/tmp/x.xml", "mujoco") == ("/tmp/x.xml", "--scene")

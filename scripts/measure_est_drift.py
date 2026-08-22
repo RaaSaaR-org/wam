@@ -70,16 +70,26 @@ object (occluded by the Dex3 hand, or out of frame) has no centroid and therefor
 displacement. It is DROPPED and COUNTED. Folding it in as 0 px would pull the p95 down, which
 *widens* G0b, which looks conservative and is the opposite.
 
-THE NUMBER IS A LOWER BOUND, AND THE ARTIFACT SAYS SO
------------------------------------------------------
+THE NUMBER IS A BOUND, ITS DIRECTION IS PER-ROUTE, AND THE ARTIFACT SAYS WHICH
+------------------------------------------------------------------------------
 PR-08 §4's stated weakness, unedited: *"Isaac frames are not real frames, and a monocular
 estimator's error on synthetic renders is not its error on RealSense footage -- plausibly
 optimistic. So EST_DRIFT_P95 is a lower bound on the real error, it is recorded as such, and a G0b
 margin that only clears under a lower bound is not a pass."*
 
-``is_lower_bound`` is therefore stamped ``true`` unconditionally and is not a flag. The confirmatory
-measurement against Humanoid Everyday's real depth is off the critical path because HE is unlicensed
-(§4), and if that licence resolves this run is repeated rather than adjusted.
+``is_lower_bound`` used to be stamped ``true`` unconditionally. **It is still not a flag** -- no
+command line can move it -- but since PR-08-V5 (``T40_RULE_V5``, 2026-08-22) it is looked up from
+:data:`GROUND_TRUTH_BINDINGS` by the CLASS NAME of the binding the capture header records, because
+§4's ground-truth source is now "a simulator with ground-truth segmentation" rather than Isaac
+specifically and the two routes' errors are argued to point in OPPOSITE directions. The Isaac row
+is byte-for-byte the old stamp; **anything not in that table falls back to it verbatim**, so the
+path that already existed produces the output it always did. Read that table, not this paragraph,
+for which route says what -- and read ``error_direction`` beside the boolean, because
+``is_lower_bound: false`` on its own would read as "so it is an upper bound", which no route here
+has earned.
+
+What is unchanged in kind: the number is a BOUND, its direction is RECORDED, and a G0b margin that
+only clears under a bound pointing the wrong way is not a pass.
 
 WHAT THE ESTIMATOR SAW, RECORDED BESIDE THE BUDGET
 --------------------------------------------------
@@ -172,6 +182,73 @@ DEFAULT_HIST_BIN_PX = 0.5
 #: derived from the object, exactly as GEOM_TOL is, or the subtraction compares two different
 #: things.
 DEFAULT_OBJECT_CLASS = "apple"
+
+#: THE ALLOW-LIST THAT KEEPS A LAPTOP CAPTURE OUT OF A GATE, and what each route's error
+#: direction is. Until 2026-08-22 this was one hard-coded comparison — ``type(binding).__name__
+#: != "IsaacSimBinding"`` — and widening it is the only edit in this file that could let a
+#: capture from something that is not ground truth become G0b's budget. So it is a table, in one
+#: place, with the reason for each entry beside it, rather than a second comparison somewhere.
+#: ``FakeIsaacBinding`` is deliberately ABSENT and must stay absent: it is a plausible integrator
+#: whose "ground truth" is a moving square, and every capture anyone has run so far came from it.
+#:
+#: The MuJoCo entry is `T40_RULE_V5` (``docs/preregistration/PR-08-V5-ground-truth-route.md``,
+#: registered 2026-08-22 before any capture was run): PR-08 §4's ground-truth source becomes "a
+#: simulator with ground-truth segmentation" rather than Isaac specifically, because
+#: ``EST_DRIFT_P95`` is defined purely on segmentation and §4 step 3's depth error is recorded,
+#: not gated.
+#:
+#: ``is_lower_bound`` USED TO BE STAMPED ``True`` UNCONDITIONALLY AND IS NOW PER-ROUTE. That is a
+#: three-line change carrying a large meaning, so: the Isaac row is byte-for-byte what the
+#: unconditional stamp said, including the reason string whose Humanoid-Everyday half the runbook
+#: (§6b, §7 defect 4) argues is stale — correcting THAT is a judgement for whoever owns PR-08 and
+#: is deliberately not made here. The MuJoCo row does not claim a lower bound and does not claim
+#: an upper one: it records the ARGUED direction and states in the same breath that the argument
+#: is not measured. A number whose direction is unknown is worth less than one whose direction is
+#: known, and a number whose direction is *asserted* is worth less than one that says it was
+#: asserted.
+GROUND_TRUTH_BINDINGS: Mapping[str, Mapping[str, Any]] = {
+    "IsaacSimBinding": {
+        "route": "isaac",
+        "is_lower_bound": True,
+        "is_lower_bound_reason": (
+            "measured on Isaac renders, not RealSense footage (PR-08 §4). The confirmatory "
+            "measurement against Humanoid Everyday is blocked on that corpus's licence and is "
+            "deliberately off the critical path."
+        ),
+        "error_direction": "optimistic (lower bound on the real error) — PR-08 §4's own words",
+        "error_direction_measured": False,
+    },
+    "MuJoCoGroundTruthBinding": {
+        "route": "mujoco",
+        # NOT a lower bound, and NOT claimed as an upper one. See error_direction.
+        "is_lower_bound": False,
+        "is_lower_bound_reason": (
+            "PR-08-V5 (T40_RULE_V5): measured on MuJoCo renders with exact per-pixel geom-id "
+            "segmentation. MuJoCo's rasteriser is markedly less photoreal than Isaac's RTX "
+            "path, so a detector trained on photographs does WORSE here, the p95 is LARGER, "
+            "more is subtracted from GEOM_TOL and G0b is STRICTER. The error therefore lands "
+            "against the generator, which is the safe direction and the opposite of the lower "
+            "bound PR-08 §4 warns about. That is an ARGUMENT and not a measurement: this run "
+            "does not establish an upper bound either, and V5 says so."
+        ),
+        "error_direction": (
+            "conservative (argued): less photoreal frames -> larger p95 -> smaller "
+            "GEOM_TOL - EST_DRIFT_P95 -> stricter G0b"
+        ),
+        "error_direction_measured": False,
+    },
+}
+
+
+def ground_truth_route(binding_name: str | None) -> Mapping[str, Any] | None:
+    """The :data:`GROUND_TRUTH_BINDINGS` row for a capture's binding, or ``None``.
+
+    ``None`` is not a default route: every caller treats it as "this capture is not ground
+    truth", which is what ``capture_is_not_from_isaac_sim`` already says.
+    """
+    if not binding_name:
+        return None
+    return GROUND_TRUTH_BINDINGS.get(str(binding_name))
 
 #: Monocular depth estimators this script would know how to drive if one were wired. Names only --
 #: nothing here is imported unless it is present, and nothing is ever fetched.
@@ -394,7 +471,14 @@ def capture_frames(
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         # The name is load-bearing: a capture from the fake binding is a pipeline test and can
         # never be a gate input, and the reader must not have to infer that from the directory.
-        "is_simulated_binding": type(binding).__name__ != "IsaacSimBinding",
+        # The comparison is against GROUND_TRUTH_BINDINGS rather than against one class name
+        # since 2026-08-22 (PR-08-V5); FakeIsaacBinding is not in that table and this still
+        # stamps True for it, which is the whole job of this field.
+        "is_simulated_binding": ground_truth_route(type(binding).__name__) is None,
+        # WHICH ground truth, when it is one. `measure` reads this to decide what it may say
+        # about the number's error direction — a route whose direction is argued conservative
+        # must not inherit the Isaac route's "lower bound" sentence, and vice versa.
+        "ground_truth_route": (ground_truth_route(type(binding).__name__) or {}).get("route"),
     }
     for key, value in dict(provenance or {}).items():
         header.setdefault(key, value)
@@ -825,8 +909,14 @@ def resolve_camera(name: str, prims: Mapping[str, str]) -> str:
     return prims[name]
 
 
-def resolve_stage(asset: str | None, scene: str | None) -> tuple[str | None, str]:
-    """The USD to load, and which flag named it. ``asset`` and ``scene`` are ONE knob.
+def resolve_stage(
+    asset: str | None, scene: str | None, backend: str = "isaac"
+) -> tuple[str | None, str]:
+    """The stage to load, and which flag named it. ``asset`` and ``scene`` are ONE knob.
+
+    ``backend`` decides only what "unnamed" means, and the Isaac answer is unchanged: ``None``
+    plus the sentence naming Isaac's asset root. The MuJoCo route has a committed scene on disk
+    (``configs/sim/g1_scene.xml``) so its unnamed case is a real path and not a resolver call.
 
     ``wam.robot.isaac_g1.IsaacG1Robot`` already treats ``scene_path`` as an alias for ``asset`` and
     refuses both ("they are the same knob"), and ``configs/robot/isaac_g1.yaml`` documents
@@ -848,6 +938,10 @@ def resolve_stage(asset: str | None, scene: str | None) -> tuple[str | None, str
         return scene, "--scene"
     if asset is not None:
         return asset, "--asset"
+    if backend == "mujoco":
+        from wam.robot.mujoco_binding import DEFAULT_SCENE  # noqa: PLC0415
+
+        return str(DEFAULT_SCENE), "wam.robot.mujoco_binding.DEFAULT_SCENE"
     return None, "isaacsim.storage.native.get_assets_root_path() + DEFAULT_ASSET_SUBPATH"
 
 
@@ -868,10 +962,41 @@ def main(argv: list[str] | None = None) -> int:
     cap = sub.add_parser("capture", help="PR-08 §4 step 1 — render Isaac ground truth to a dir")
     cap.add_argument("--out", type=Path, required=True)
     cap.add_argument(
+        "--backend",
+        choices=("isaac", "mujoco"),
+        default="isaac",
+        help="which ground-truth simulator renders step 1 (default: %(default)s). `isaac` is "
+        "PR-08 §4's letter and is unchanged in every flag, default and refusal. `mujoco` is "
+        "T40_RULE_V5 (docs/preregistration/PR-08-V5-ground-truth-route.md): exact per-pixel "
+        "geom-id segmentation out of the committed configs/sim/g1_scene.xml, on CPU, headless. "
+        "EST_DRIFT_P95 is defined on segmentation alone, so the gated number is produced in "
+        "full; §4 step 3's depth error is recorded, not gated.",
+    )
+    cap.add_argument(
         "--camera",
-        default=next(iter(DEFAULT_CAMERA_PRIMS)),
-        help="camera NAME to render from (default: %(default)s). Validated against "
-        "DEFAULT_CAMERA_PRIMS plus every --camera-prim, here rather than after an Isaac boot.",
+        default=None,
+        help="camera NAME to render from. Defaults PER BACKEND: 'persp' for isaac (the viewport "
+        "camera every stage has, taken from DEFAULT_CAMERA_PRIMS itself) and 'head' for mujoco "
+        "(the scene's own D435i stand-in). An isaac camera is validated against "
+        "DEFAULT_CAMERA_PRIMS plus every --camera-prim here rather than after an Isaac boot; a "
+        "mujoco camera is validated against the compiled MJCF, which costs a sub-second compile.",
+    )
+    cap.add_argument(
+        "--object-mesh",
+        default=None,
+        help="mujoco backend only: OBJ/STL for the object the budget is measured on. Defaults "
+        "to the first hit in wam.robot.mujoco_binding.OBJECT_MESH_SEARCH_PATHS and NOTHING IS "
+        "EVER DOWNLOADED; if none is found the run refuses and names every path it looked in. "
+        "It does not fall back to the scene's orange cube — see PR-08-V5 §4.",
+    )
+    cap.add_argument(
+        "--scene-states",
+        type=int,
+        default=20,
+        help="mujoco backend only: how many DISTINCT scene configurations the capture spans "
+        "(default: %(default)s). PR-08 §4.6: a p95 over N frames of one pose is a percentile "
+        "over one viewpoint, so N is counted in configurations and not in frames. The frames "
+        "are divided evenly across them and the count lands in the capture header.",
     )
     cap.add_argument(
         "--camera-prim",
@@ -942,9 +1067,34 @@ def main(argv: list[str] | None = None) -> int:
         try:
             # EVERYTHING THIS CAN REFUSE, REFUSED BEFORE THE BINDING IS CONSTRUCTED. On the real
             # path the next statement starts SimulationApp, loads a stage and resolves 43 DOFs.
+            #
+            # THE ISAAC PATH BELOW IS UNCHANGED. --backend defaults to `isaac`, every branch it
+            # takes is the branch it took before, and the two refusals the mujoco branch adds
+            # (--fake, --camera-prim) fire only when that backend was asked for by name.
+            if args.backend == "mujoco":
+                if args.fake:
+                    raise EstimatorUnavailable(
+                        "--fake is FakeIsaacBinding, which is the Isaac seam's laptop stand-in "
+                        "and not a MuJoCo anything. There is no fake needed here: the mujoco "
+                        "backend runs on CPU with no install, so the thing --fake exists to "
+                        "stand in for is the thing this backend already is."
+                    )
+                if args.camera_prim:
+                    raise EstimatorUnavailable(
+                        "--camera-prim names a USD prim path and the mujoco backend loads an "
+                        "MJCF, which has no prims. Its cameras are the ones the scene declares "
+                        "(`head`, `wrist_left` in configs/sim/g1_scene.xml); select one with "
+                        "--camera NAME."
+                    )
+            camera = args.camera or ("head" if args.backend == "mujoco" else
+                                     next(iter(DEFAULT_CAMERA_PRIMS)))
+            # `persp` and its prim path are an Isaac concept. On the mujoco backend the camera
+            # is validated against the COMPILED MJCF instead — the answer lives there, and the
+            # compile costs under a second, so the argument for checking it here (a typo may not
+            # cost a GPU boot) does not apply and inventing a prim path for it would be fiction.
             prims = resolve_camera_prims(args.camera_prim)
-            camera_prim = resolve_camera(args.camera, prims)
-            asset, asset_source = resolve_stage(args.asset, args.scene)
+            camera_prim = resolve_camera(camera, prims) if args.backend == "isaac" else None
+            asset, asset_source = resolve_stage(args.asset, args.scene, args.backend)
             render_hw, render_hw_source = resolve_render_hw(args.render_hw)
             provenance = {
                 "camera_prim": camera_prim,
@@ -961,11 +1111,46 @@ def main(argv: list[str] | None = None) -> int:
                 "render_hw_source": render_hw_source,
                 "geom_tol_contract": _artifact_label(GEOM_TOL_ARTIFACT),
             }
-            if args.fake:
+            if args.backend == "mujoco":
+                from wam.robot.mujoco_binding import (  # noqa: PLC0415
+                    MuJoCoGroundTruthBinding,
+                    default_scene_schedule,
+                )
+
+                if args.scene_states < 1:
+                    raise EstimatorUnavailable(
+                        f"--scene-states must be >= 1, got {args.scene_states}"
+                    )
+                # THE CALLER OWNS THIS DIVISION, not the binding: `frames` and
+                # `steps_per_frame` live here and the binding only ever sees steps. Spelling it
+                # out means the header can record how many configurations were SCHEDULED beside
+                # how many were VISITED, and a run that ends early cannot be read as if it had
+                # covered the sweep.
+                total_steps = max(1, int(args.frames) * int(args.steps_per_frame))
+                steps_per_state = max(1, total_steps // int(args.scene_states))
+                schedule = default_scene_schedule(int(args.scene_states))
+                try:
+                    binding = MuJoCoGroundTruthBinding(
+                        scene=asset,
+                        object_mesh=args.object_mesh,
+                        cameras=(camera,),
+                        render_hw=render_hw,
+                        ground_truth=("depth", "segmentation"),
+                        schedule=schedule,
+                        steps_per_state=steps_per_state,
+                    )
+                except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                    # Every one of these is a refusal this module wrote deliberately (no mesh,
+                    # unknown camera, a grid past the offscreen buffer, no MuJoCo). Re-raised as
+                    # the harness's own failure so the operator gets `FATAL: ...` and exit 2
+                    # rather than a traceback that reads like a crash.
+                    raise EstimatorUnavailable(str(exc)) from exc
+                provenance.update(binding.provenance())
+            elif args.fake:
                 from wam.robot.isaac_binding import FakeIsaacBinding
 
                 binding = FakeIsaacBinding(
-                    cameras=(args.camera,),
+                    cameras=(camera,),
                     render_hw=render_hw,
                     ground_truth=("depth", "segmentation"),
                 )
@@ -974,14 +1159,22 @@ def main(argv: list[str] | None = None) -> int:
 
                 binding = IsaacSimBinding(
                     asset=asset,
-                    cameras={args.camera: camera_prim},
+                    cameras={camera: camera_prim},
                     render_hw=render_hw,
                     ground_truth=("depth", "segmentation"),
                 )
             try:
                 header = capture_frames(
-                    binding, args.camera, args.frames, args.out, args.steps_per_frame, provenance
+                    binding, camera, args.frames, args.out, args.steps_per_frame, provenance
                 )
+                if args.backend == "mujoco":
+                    # PR-08 §4.6's missing field, filled from the binding rather than from
+                    # arithmetic over --frames: it is the count of configurations the run
+                    # ACTUALLY applied.
+                    header["n_scene_states_visited"] = int(binding.scene_states_visited)
+                    (args.out / "capture.json").write_text(
+                        json.dumps(header, indent=2) + "\n", encoding="utf-8"
+                    )
                 # The grid was REQUESTED before the boot; this is what came back. A binding that
                 # rendered something else has produced a capture `measure` would disqualify, and
                 # the operator should learn that from the run that made it rather than from the run
@@ -1024,7 +1217,16 @@ def main(argv: list[str] | None = None) -> int:
     disqualified: list[str] = []
     if args.limit:
         disqualified.append("partial_run_limit")
-    if header.get("is_simulated_binding", True):
+    # The route the capture came from, or None. Resolved from the binding's CLASS NAME as
+    # recorded in the header rather than from the header's own `ground_truth_route` string,
+    # because the name is what capture_frames stamped `is_simulated_binding` off and a header
+    # hand-edited to claim a route it did not come from must not be able to buy one.
+    route = ground_truth_route(header.get("binding"))
+    if header.get("is_simulated_binding", True) or route is None:
+        # The reason string is KEPT at its 2026-08-21 spelling even though the check it names
+        # is now an allow-list (GROUND_TRUTH_BINDINGS). It is quoted in the runbook's §4.7
+        # table and in this repo's test fixtures, it is still literally true of everything it
+        # fires on, and renaming a committed disqualifier vocabulary buys nothing here.
         disqualified.append("capture_is_not_from_isaac_sim")
 
     try:
@@ -1129,15 +1331,35 @@ def main(argv: list[str] | None = None) -> int:
         "headline_valid": headline_valid,
         "gate_qualified": not disqualified,
         "gate_disqualified_reasons": disqualified,
-        # Unconditional, and not a flag. PR-08 §4: Isaac frames are not real frames, so a monocular
-        # estimator's error on synthetic renders is plausibly optimistic. A G0b margin that only
-        # clears under a lower bound is not a pass.
-        "is_lower_bound": True,
-        "is_lower_bound_reason": (
-            "measured on Isaac renders, not RealSense footage (PR-08 §4). The confirmatory "
-            "measurement against Humanoid Everyday is blocked on that corpus's licence and is "
-            "deliberately off the critical path."
+        # PER-ROUTE SINCE 2026-08-22 (PR-08-V5), AND STILL NOT A FLAG: nothing on the command
+        # line can move these, they are looked up from the binding the capture header names.
+        #
+        # THE FALLBACK IS THE OLD UNCONDITIONAL STAMP, DELIBERATELY. A capture from anything
+        # that is not in GROUND_TRUTH_BINDINGS — the fake, or a stub — keeps the exact pair of
+        # values this file stamped before V5, wording included, so that widening the route
+        # moves NO number and NO string on the path that already existed. (That includes the
+        # Humanoid-Everyday half of the Isaac reason string, which the runbook §7 defect 4
+        # argues is stale; correcting it is a judgement for whoever owns PR-08 and is
+        # deliberately not made here.) What such a capture gets instead is the honest new key
+        # below plus `capture_is_not_from_isaac_sim` in the reasons — neither of which existed
+        # to be changed. See GROUND_TRUTH_BINDINGS for why the MuJoCo row says what it says
+        # and, more importantly, for what it refuses to say.
+        "is_lower_bound": (route or GROUND_TRUTH_BINDINGS["IsaacSimBinding"])["is_lower_bound"],
+        "is_lower_bound_reason": (route or GROUND_TRUTH_BINDINGS["IsaacSimBinding"])[
+            "is_lower_bound_reason"
+        ],
+        # WHICH WAY THE ERROR POINTS, AND WHETHER ANYBODY MEASURED THAT. §6 SUBTRACTS this
+        # number from GEOM_TOL, so the direction is the property that decides whether an error
+        # in the budget lands in the generator's favour or against it — and `is_lower_bound:
+        # false` on its own would read as "so it is an upper bound", which is a claim no route
+        # here has earned.
+        "error_direction": (
+            route["error_direction"] if route else "unknown — not a ground-truth capture"
         ),
+        "error_direction_measured": (
+            bool(route["error_direction_measured"]) if route else False
+        ),
+        "ground_truth_route": header.get("ground_truth_route"),
         "object_class": object_class,
         # Where the object came from, because "apple" appearing in two places is exactly what this
         # field used to hide. `estimator_prompt` means nobody typed it twice.
@@ -1186,6 +1408,17 @@ def main(argv: list[str] | None = None) -> int:
             "asset": header.get("asset"),
             "asset_source": header.get("asset_source"),
             "camera_prim": header.get("camera_prim"),
+            "backend": header.get("backend"),
+            "ground_truth_route": header.get("ground_truth_route"),
+            # WHAT OBJECT THIS BUDGET WAS MEASURED ON, carried as named fields rather than as a
+            # sentence in a docstring. PR-08 §4 measures the estimator's error on the apple; a
+            # simulator route measures it on whatever stands in for one, and an EST_DRIFT_P95
+            # that can be read without also reading the stand-in is an EST_DRIFT_P95 that will
+            # be. `null` for the Isaac route, which declares no such block.
+            "object_limitations": header.get("object_limitations"),
+            "n_scene_states_scheduled": header.get("n_scene_states_scheduled"),
+            # PR-08 §4.6's "N counted in distinct configurations, not frames".
+            "n_scene_states_visited": header.get("n_scene_states_visited"),
             "render_hw_requested": header.get("render_hw_requested"),
             "render_hw_source": header.get("render_hw_source"),
             "captured_utc": header.get("captured_utc"),

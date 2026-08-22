@@ -17,6 +17,7 @@ robot-agnostic. Torch-free, numpy + pydantic.
 | `isaac_binding.py` | `IsaacBinding` protocol + `IsaacSimBinding` (real) and `FakeIsaacBinding` (CPU) |
 | `isaac_transport.py` | `IsaacG1Transport` — the same seam, backed by Isaac Sim / PhysX (optional dep) |
 | `isaac_g1.py` | `IsaacG1Robot` — `G1Adapter` + Isaac transport + USD cameras, episode reset, sim clock |
+| `mujoco_binding.py` | `MuJoCoGroundTruthBinding` — **not a robot and not a transport**: the capture shim `measure_est_drift.py capture --backend mujoco` drives for PR-08 §4 step 1 (`T40_RULE_V5`). Exact per-pixel geom-id segmentation + depth out of `configs/sim/g1_scene.xml`, headless, CPU |
 
 ## The `RobotAdapter` contract
 
