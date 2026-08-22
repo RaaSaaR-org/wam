@@ -1,8 +1,19 @@
 # Consumer contract — `emai/vla-training`
 
-**Written 2026-08-15.** Closes the open acceptance criterion in
+**Written 2026-08-15. Amended 2026-08-22 under `T40_RULE_V7`
+(`docs/preregistration/PR-08-V7-consumer-contract.md`).** Closes the open acceptance criterion in
 `.mc/tasks/todo/T-040-cosmos-transfer-photoreal-augmentation.md` and `PR-08` §8 item 2:
 *"The consumer contract with `emai/vla-training` is written down."*
+
+> **What the 2026-08-22 amendment did.** The project owner fixed `PR-08` §8 item 2 on
+> **`nvidia/GR00T-N1.7-AppleToPlate`** — corpus A below, the corpus `PR-08` §3 chose to restyle —
+> and replaced item 2's three *descriptive* fields (`LeRobot v3.0`, `28-dim arms+hands`, `right
+> hand index-before-middle`) with the measured description of that corpus. Item 2's **fourth**
+> clause — *"the action labels come from the source recording, never from the generator"* — is
+> **unchanged, verbatim**, and is the load-bearing one (§4). Sections changed: §0 (rewritten;
+> the superseded text is preserved verbatim inside it), §2 (evidence base and the hand-order
+> verification status), §3.2, §5, §7, §8. **Nothing in the amendment licenses generation or
+> training** — `T40_RULE_V1` §1 binds in full and `PR-08` §8 items 3 and 4 are still open.
 
 **Producer:** this repo (WAM / `subprojects/data-factory`). **Consumer:** `emai/vla-training`,
 which fine-tunes **NVIDIA Isaac GR00T N1.7** (`nvidia/GR00T-N1.7-3B`) and evaluates in MuJoCo and
@@ -16,28 +27,71 @@ Isaac. This document is what the producer must hand over and what the consumer m
 
 ---
 
-## 0. This contract covers **two** corpora, and PR-08 §8 item 2 names the wrong one
+## 0. This contract is fixed on **corpus A**, and it still covers two corpora
 
 This is the first section because getting it wrong is the failure this document exists to prevent.
 
-`PR-08` §8 item 2 fixes the contract as *"LeRobot v3.0, 28-dim arms+hands, right hand
-index-before-middle"*. Those three fields are a real, coherent contract — **but they describe the
-`unitreerobotics/G1_Dex3_*` corpus (corpus B below), not `nvidia/GR00T-N1.7-AppleToPlate`, which is
-the corpus PR-08 §3 chose to restyle.** For AppleToPlate the on-disk version is **v2.1**, not v3.0,
-and the width is **43-dim in seven groups**, not 28-dim in two.
+**RESOLVED 2026-08-22 by `T40_RULE_V7`.** `PR-08` §8 item 2 is fixed on
+**`nvidia/GR00T-N1.7-AppleToPlate`** — corpus A — which is the corpus `PR-08` §3 chose to restyle
+and the corpus everything under §2 describes. Item 2's three descriptive fields, which described
+corpus B, have been replaced with corpus A's measured description; its fourth clause is unchanged.
+`PR-08` §8 item 2 is **CLOSED**.
+
+Corpus B is still documented here (§3) because **T-043** converts it and because the fields item 2
+used to carry belong to it — a reader who finds those fields quoted somewhere else needs to know
+which dataset they are true of.
 
 | | **Corpus A — AppleToPlate** | **Corpus B — `unitreerobotics/G1_Dex3_*`** |
 |---|---|---|
 | what it is | `nvidia/GR00T-N1.7-AppleToPlate`, 402 ep / 171 625 frames | 13 sets, 3 152 ep / 2 587 515 frames |
 | who targets it | **T-040 / PR-08 restyle**, the whole benchmark, `GR00T-N1.7-ApplePnP-V1` | **T-043** conversion, route 1 |
+| **is this contract's subject** | **YES** — `PR-08` §8 item 2, as amended by `T40_RULE_V7` | no — documented for T-043 and for provenance |
 | LeRobot version | **v2.1** | **v3.0** |
 | state / action width | **43**, seven groups incl. legs + waist | **28**, two blocks, no waist, no legs |
 | camera key | one, `observation.images.ego_view` | `cam_left_high` (+ up to 3 more) |
 | block order | fully specified, §2.4 | **arm-first**, §3, with open sub-questions |
 
-**PR-08 §8 item 2's three fields are therefore correct for corpus B and wrong for corpus A on two
-of three.** `T40_RULE_V1` is a registered rule and is **not edited** (`docs/handoff.md` §3); §7
-below states what a superseding `T40_RULE_V2` would have to say.
+**The corpus's own metadata is the authority for corpus A, and it is on this machine.** Read
+2026-08-22 from
+`~/.cache/huggingface/hub/datasets--nvidia--GR00T-N1.7-AppleToPlate/snapshots/d89c126a713c6632432a607c12661546ff4d6ea9/meta/`:
+
+| field | value | evidence |
+|---|---|---|
+| `codebase_version` | **`v2.1`** | `meta/info.json:2` |
+| scale | 402 episodes / 171 625 frames | `meta/info.json:4-5` |
+| `observation.state` / `action` | `float32`, **`[43]`** both | `meta/info.json:17-25`, `:26-34` |
+| seven groups, same for state and action | §2.4 | `meta/modality.json:2-31`, `:32-60` |
+
+sha256 `0e3dd494…af36` (`info.json`, 174 lines) and `84e5eb4f…0d62a` (`modality.json`, 116 lines).
+Both were diffed on 2026-08-22 against the consumer's checked-in copies at
+`/home/humanoid/develop/vla-training/eval/real_reference/` and are **byte-identical** to them, so
+producer and consumer are not reading two different specifications of this corpus.
+
+### 0.1 Superseded text — what §0 said from 2026-08-15 to 2026-08-22
+
+Preserved verbatim rather than deleted, because the fact that a contract described the wrong
+dataset for a month is part of the record. `T40_RULE_V7` §6 records why nothing failed in the
+meantime: **nothing in the pipeline reads §8 item 2.**
+
+> ## 0. This contract covers **two** corpora, and PR-08 §8 item 2 names the wrong one
+>
+> This is the first section because getting it wrong is the failure this document exists to prevent.
+>
+> `PR-08` §8 item 2 fixes the contract as *"LeRobot v3.0, 28-dim arms+hands, right hand
+> index-before-middle"*. Those three fields are a real, coherent contract — **but they describe the
+> `unitreerobotics/G1_Dex3_*` corpus (corpus B below), not `nvidia/GR00T-N1.7-AppleToPlate`, which is
+> the corpus PR-08 §3 chose to restyle.** For AppleToPlate the on-disk version is **v2.1**, not v3.0,
+> and the width is **43-dim in seven groups**, not 28-dim in two.
+>
+> *(the two-corpus table stood here; it is retained above, with one row added)*
+>
+> **PR-08 §8 item 2's three fields are therefore correct for corpus B and wrong for corpus A on two
+> of three.** `T40_RULE_V1` is a registered rule and is **not edited** (`docs/handoff.md` §3); §7
+> below states what a superseding `T40_RULE_V2` would have to say.
+
+`T40_RULE_V1` remains a registered rule and remains **unedited** (`docs/handoff.md` §3). The
+amendment is `T40_RULE_V7`, alongside it — not an edit to it. What §7 below anticipated a
+superseding rule would have to say is now what one says.
 
 ---
 
@@ -56,9 +110,21 @@ ordinary LeRobot dataset root:
 **Consequence:** the deliverable is a LeRobot dataset root that is byte-compatible with
 `_data/apple_pnp/dataset`. Not a new format, not a sidecar, not a manifest.
 
+⚠ **The first two entry points above are corpus B's route, and must not be pointed at a corpus A
+root.** Added 2026-08-22. `scripts/40_groot_prepare_dataset.sh` converts **v3.0 → v2** and then
+overwrites `meta/modality.json` with the **28-dim** `groot/modality_g1_dex3.json`; corpus A is
+already v2.1 and its `meta/modality.json` is the 43-dim seven-group one, so running that script
+against it would destroy the layout §2.4 depends on. `scripts/41_groot_finetune.sh:25` likewise
+passes the 28-dim `groot/g1_dex3_modality_config.py`. The corpus A route is the third bullet —
+`eu-hub/train_apple_{nvidia,frozen,visual}.sbatch`, which passes
+`new_embodiment_config_defaults.py`. Which of the two the consumer would actually use for a
+delivered restyled root is **not settled from this side**: see §7.1.
+
 ---
 
 ## 2. Corpus A — `nvidia/GR00T-N1.7-AppleToPlate` (the PR-08 target)
+
+**This is the corpus the contract is fixed on** (§0, `T40_RULE_V7`).
 
 Evidence base, all read 2026-08-15:
 `/home/humanoid/develop/vla-training/eval/real_reference/info.json` and `.../modality.json`
@@ -66,6 +132,12 @@ Evidence base, all read 2026-08-15:
 `/home/humanoid/models/GR00T-N1.7-ApplePnP-V1/exported_leapp.yaml` — the ONNX export of the model
 actually fine-tuned on this corpus. The export is the authority for *what the model eats*; the
 `meta/` files are the authority for *what goes on disk*.
+
+**Added 2026-08-22.** The corpus's **own** `meta/info.json` and `meta/modality.json` are present on
+this workstation (path and hashes in §0) and were diffed against the two checked-in copies above:
+**byte-identical**. Every `info.json:` / `modality.json:` line citation in this section therefore
+resolves the same way against either file. Where the two disagree with the export, the `meta/`
+files win for on-disk layout and the export wins for the model boundary, exactly as stated above.
 
 ### 2.1 On-disk layout and LeRobot version
 
@@ -144,6 +216,14 @@ takes seven tensors, including `left_leg` and `right_leg` (`exported_leapp.yaml:
 This is the reason `datasets/gr00t-apple-full/` is not merely low-res (120×160) but structurally
 insufficient as a source.
 
+**Independently re-derived 2026-08-22**, on `data/chunk-000/episode_000000.parquet` (590 rows) in
+the corpus snapshot, with `.venv/bin/python` + `pyarrow`:
+`rms(action[15:22] − state[15:22]) = 0.0287 rad` against `rms(action[15:22] − state[22:29]) =
+0.6292 rad` — 22× worse against the *other* arm — and `rms(action[22:29] − state[22:29]) =
+0.0182 rad`. That reproduces point 3's 0.0288 on a single episode by a second route.
+**n = 1 episode**, as `T40_RULE_V2` §4.3 warns; it corroborates `meta/modality.json`, it does not
+replace it.
+
 **Joint element names — the hands are asymmetric AND the action block is permuted.**
 Read from `exported_leapp.yaml` 2026-08-15:
 
@@ -165,6 +245,41 @@ The permutation constants that map decoder output back to dataset/state order ar
 `scripts/33_make_dataset_action31.py:85-89`, whose comment is explicit that Dex3-1 is asymmetric
 and must not be "symmetrically repaired". A producer never emits the export's action permutation
 to disk.
+
+#### ⚠ `[?]` The per-joint hand order is ATTESTED, not MEASURED — status as of 2026-08-22
+
+The **grouping** is measured (`meta/modality.json`: seven joints per hand, at `[29:36]` and
+`[36:43]`). The **element names inside each hand** are not. They come from `exported_leapp.yaml`
+alone — NVIDIA's export of NVIDIA's fine-tune of *this* corpus, which is materially stronger than
+an argument from family resemblance to another Unitree hand, but is still **an assertion in an
+export manifest, never checked against the parquet**. The corpus's own `meta/modality.json` carries
+**no element names at all**, so there is nothing in the corpus's own metadata to check it against.
+
+Two reasons it could not be settled here, both measured 2026-08-22 on the one local episode:
+
+1. **The right hand never moves in `episode_000000`** — the only one of 402 episodes on this
+   workstation. All seven `observation.state[36:43]` columns have per-column std ≤ 3 × 10⁻⁴ (four
+   are exactly 0.0) and `action[36:43]` is identically zero to float precision. A column that does
+   not vary cannot be identified. This reproduces `T40_RULE_V2` §4.2: the episode is a one-armed,
+   left-side demonstration.
+2. **A state↔action comparison cannot see a hand permutation**, the way it can for the arms above.
+   `rms(action[29:36] − state[29:36]) = 0.498` on the *moving* left hand, against 0.0287 for the
+   left arm, and the two blocks do not share a range — state left-hand values run to −0.88 rad
+   while the action column is a near-binary code in [−1, +0.7]. That matches
+   `configs/groot/new_embodiment_config_defaults.py`'s recorded reason for making the hand channels
+   `ABSOLUTE` (*"near-binary open/close codes rather than a continuous trajectory"*). **The hand
+   action block and the hand state block are not the same quantity.**
+
+**What would settle it.** The same method that settled corpus B's block order: correlate against
+the parquet, on episodes where the right hand actually moves, then discriminate the two 2-joint
+pairs against either a Dex3-1 URDF's joint limits or the `action.effort_right_hand[7]` column,
+whose per-element names come from the same ordering and whose torque signature differs between
+fingers under a grasp. Neither is on this box today, and neither is requested here.
+
+Consumers of this section: treat the grouping as `[OK]` and the per-joint names as `[?]`. This is
+the marking `src/wam/robot/g1_dex3_28.py` already applies to `HandJointOrder.NVIDIA_ASYMMETRIC`.
+A silently transposed finger pair produces a policy that closes the wrong digit, without raising
+anything — which is why a probably-correct ordering is still marked unverified.
 
 ### 2.5 The nine extra `action.*` columns
 
@@ -273,8 +388,10 @@ earns no trust about the finger order. The resolution is the same method that se
 order — correlate against the parquet, do not read the card — and the action parquets
 (647 MB, Apache-2.0) have not been fetched. This is a live question with a known-wrong default.
 
-PR-08 §8 item 2's *"right hand index-before-middle"* is **confirmed for corpus A's state block**
-(`exported_leapp.yaml:80-87`) and is **an assumption, not a measurement, for corpus B**. The
+PR-08 §8 item 2's *"right hand index-before-middle"* — the wording used until the 2026-08-22
+amendment — is **attested for corpus A's state block** by `exported_leapp.yaml:85-87` and **not
+verified against corpus A's parquet either** (§2.4's `[?]` block), and is **an assumption, not a
+measurement, for corpus B**. The
 `vla-training` side asserts it for the 28-dim layout at
 `groot/g1_dex3_1cam_modality_config.py:12-14` — an assertion from the same family of sources that
 got the block order wrong, so it carries no weight until measured.
@@ -366,10 +483,17 @@ be trusted.
 
 ### What the consumer may **not** assume
 
-- **Not that anything has been delivered.** Under `PR-08` §1 nothing is generated until T-39
-  reports; §8 lists seven preconditions of which items 2 (this document), 3, 4 and 5 were open as
-  of 2026-08-15. This contract describes the shape of a delivery, not a delivery.
+- **Not that anything has been delivered.** Under `PR-08` §1 nothing is generated until **every**
+  §8 item is closed. Status as of **2026-08-22**, taking only what a registered rule states: item 2
+  (this document) **CLOSED** by `T40_RULE_V7`; item 7 (T-39 has reported) **CLOSED** by
+  `T40_RULE_V4` on `VERDICT N`; **items 3 and 4 remain OPEN** (`T40_RULE_V4` §0, `T40_RULE_V7` §0).
+  Items 1, 5 and 6 are not adjudicated by this document — `T40_RULE_V3` §5.2 is the last record
+  that examined them. §1 is conjunctive, so the prohibition binds in full. This contract describes
+  the shape of a delivery, not a delivery.
 - **Not that a restyled corpus can be reported inside the benchmark table.** See §6, open item 4.
+- **Not that closing item 2 licenses anything.** `T40_RULE_V7` §7: *"a correction to a description
+  is not permission to act on it."* No training run, on generated data or real, is licensed by this
+  document or by the amendment.
 
 ---
 
@@ -409,11 +533,27 @@ Written as gaps, not papered over.
 
 ---
 
-## 7. Disagreements with `PR-08` §8 item 2 / `T40_RULE_V1`
+## 7. Disagreements with `PR-08` §8 item 2 / `T40_RULE_V1` — **D1–D4 RESOLVED 2026-08-22**
 
 `docs/preregistration/PR-08-photoreal-augmentation.md` is a **registered rule and has not been
 edited** (project constraint; `docs/handoff.md` §3 — rules are versioned, never edited in place).
-Recorded here for a superseding **`T40_RULE_V2`**:
+It still has not been edited.
+
+**Resolution.** `T40_RULE_V7` (`docs/preregistration/PR-08-V7-consumer-contract.md`, registered
+2026-08-22) is the superseding rule this section was written for. It disposes of **D1, D2, D3 and
+D4** by replacing §8 item 2's three descriptive fields with corpus A's measured description — each
+field cited to the metadata it was read from — and by keeping item 2's fourth clause verbatim.
+**D5 and D6 are against the data-factory README, not against PR-08, and are unaffected.**
+
+| | disposal |
+|---|---|
+| **D1** v3.0 → **v2.1** | replaced. `meta/info.json:2`, on the corpus's own metadata |
+| **D2** 28-dim → **43-dim, seven groups** | replaced, with all seven slices named. `meta/info.json:17-34`, `meta/modality.json:2-60` |
+| **D3** multi-camera → **exactly one, `ego_view`** | replaced; the camera is now stated in item 2 rather than implied |
+| **D4** right hand index-before-middle | replaced by the **full per-joint order of both hands**, marked `[?]` — attested by `exported_leapp.yaml`, **not** verified against the parquet (§2.4). The old wording named one hand and omitted the asymmetry |
+
+The table below is retained as the record of what was found and when. It is history, not an open
+list.
 
 | # | PR-08 §8 item 2 says | evidence says, for the corpus PR-08 §3 chose | severity |
 |---|---|---|---|
@@ -435,7 +575,43 @@ Two further disagreements are with the **data-factory README**, not with PR-08:
 
 **None of these are edits to a registered rule.** The same three fields are copied into
 `.mc/tasks/todo/T-040-cosmos-transfer-photoreal-augmentation.md:46-48` and `:189-190` — those are
-task text, not registered rule, and can be corrected in place.
+task text, not registered rule, and can be corrected in place. **Still outstanding as of
+2026-08-22:** those two copies were not corrected by the `T40_RULE_V7` change and still carry the
+corpus-B fields.
+
+### 7.1 What this repository could NOT settle about the consumer side
+
+Recorded as the one thing the amendment cannot close from the producer's side. Checked 2026-08-22.
+
+**Settled here.** What the producer *builds* is a v2.1, 43-dim root:
+`scripts/assemble_restyled_lerobot.py` pins `CODEBASE_VERSION = "v2.1"` (`:58`), refuses a v3.0
+source (`:173`), copies the source's `meta/modality.json` through verbatim (`:183`, `:568`),
+rewrites only `episode_index` and `index`, carries all nine `action.*` columns untouched, and
+prints `configs/groot/new_embodiment_config_defaults.py` — the seven-group 43-dim config — as the
+`--modality-config-path` to use (`:601`). Nothing in this repo's *committed configuration* records
+a consumer contract: `configs/transfer25/styles.toml`'s `[consumer]` table (`:534-588`) is about
+which file `97_transfer25_restyle.sbatch` reads and which keys it indexes, and
+`configs/transfer25/pr08_style_partition.json` carries **no `consumer` key at all** (verified:
+`json.load(...).get("consumer") is None`). The table's name is the only thing that suggests
+otherwise.
+
+**Not settled.** **The consumer checkout contains BOTH routes.** At
+`/home/humanoid/develop/vla-training`, HEAD `5be48ff` dated 2026-08-22:
+`scripts/40_groot_prepare_dataset.sh` runs the official **v3.0 → v2** conversion and then drops the
+**28-dim** `groot/modality_g1_dex3.json` into `meta/`, and `scripts/41_groot_finetune.sh:25` passes
+the 28-dim `groot/g1_dex3_modality_config.py` — corpus B's route, carrying **exactly the three
+fields PR-08 §8 item 2 used to name**, which is very likely where they came from. The cluster route
+`eu-hub/train_apple_nvidia.sbatch:99-104` instead passes
+`$ROOT/dataset/new_embodiment_config_defaults.py`, the 43-dim AppleToPlate config. Both are live in
+the same tree, and a read-only checkout is not a commitment. Note also that this checkout's origin
+is `https://github.com/RaaSaaR-org/vla-training.git`; nothing on this machine maps that to the name
+`emai/vla-training` used throughout this repo.
+
+**What would settle it:** a statement from the consumer side — an issue, a commit, or a written
+reply — naming which modality config a delivered restyled AppleToPlate root will be trained under,
+and confirming that the 28-dim `40_*`/`41_*` path is not it. Until that exists, this contract
+describes **what the producer delivers**, measured on the corpus and on the assembler, and does not
+claim to describe what the consumer will do with it.
 
 ---
 
@@ -453,5 +629,19 @@ task text, not registered rule, and can be corrected in place.
 | corpus B intra-hand order | **not measured — three conflicting sources** | — |
 | G0a / G0b / G0c wording | `docs/preregistration/PR-08-photoreal-augmentation.md:159-186` (`T40_RULE_V1`) | 2026-08-15 |
 
+**Added by the 2026-08-22 amendment (`T40_RULE_V7`):**
+
+| claim | source artifact | read / measured |
+|---|---|---|
+| `v2.1`, 402 ep, 171 625 frames, `[43]` state and action, the seven groups | the corpus's **own** `meta/info.json` (sha256 `0e3dd494…af36`) and `meta/modality.json` (sha256 `84e5eb4f…0d62a`) in the HF snapshot `d89c126a…6ea9` | 2026-08-22, `.venv/bin/python` |
+| those two files are **byte-identical** to `vla-training/eval/real_reference/{info.json,modality.json}` | `diff` over `json.tool` output of both pairs | 2026-08-22 |
+| arm block boundaries re-derived: 0.0287 rad vs 0.6292 rad cross-arm; right arm 0.0182 rad | `data/chunk-000/episode_000000.parquet` (590 rows), same snapshot | 2026-08-22, **n = 1 episode** |
+| right hand static in `episode_000000`: state std ≤ 3e-4 on all 7 columns, action identically 0 | same parquet | 2026-08-22, **n = 1 episode** |
+| hand state↔action mismatch (0.498 vs 0.0287; disjoint ranges) — why a hand permutation is invisible to that comparison | same parquet, plus `configs/groot/new_embodiment_config_defaults.py` for the reason | 2026-08-22 |
+| per-joint hand element names | `exported_leapp.yaml:77-79` (left state), `:85-87` (right state), `:259-261` / `:267-269` (decoder) — **attested, `[?]` not `[OK]`** | 2026-08-22 |
+| producer builds v2.1 / 43-dim; no `consumer` key in the partition rendering | `scripts/assemble_restyled_lerobot.py:58,173,183,568,601`; `configs/transfer25/pr08_style_partition.json` | 2026-08-22 |
+| consumer checkout carries both the 28-dim and the 43-dim route | `/home/humanoid/develop/vla-training` @ `5be48ff` — `scripts/40_groot_prepare_dataset.sh`, `scripts/41_groot_finetune.sh:25`, `eu-hub/train_apple_nvidia.sbatch:99-104` | 2026-08-22 |
+| which route the consumer would use for a delivered restyled root | **not settled — §7.1** | — |
+
 **Re-verify §2 in full if the base model, the export, or the corpus changes.** The export was read
-once, on one date, from one artifact.
+once, on one date, from one artifact. Every parquet-derived claim above is **one episode of 402**.

@@ -176,7 +176,7 @@ class HandJointOrder(str, Enum):
 
     [OK] for corpus A (``nvidia/GR00T-N1.7-AppleToPlate``, 43-dim), read from
     ``vla-training/eval/exported_leapp.yaml:72-87`` and recorded at
-    ``docs/contracts/vla-training-consumer.md:152-153``; the decoder-side permutations back to
+    ``docs/contracts/vla-training-consumer.md §2.4:232-233``; the decoder-side permutations back to
     that order are ``[4,5,6,2,3,0,1]`` (left) / ``[4,5,6,0,1,2,3]`` (right)
     (``eval/onnx_leapp_server.py:104-111``). [?] as applied to THIS corpus: it is a candidate,
     not a measurement.
@@ -283,7 +283,7 @@ def hand_joint_names(layout: G1Dex3Layout | None, side: str) -> tuple[str, ...]:
             "index precedes middle, and 'index-first' does not say where the thumb's three "
             "joints go. Writing the missing half here would be an invention. To settle it: "
             f"{_SETTLE_HAND_ORDER}. Only HandJointOrder.NVIDIA_ASYMMETRIC carries a full "
-            "per-joint list (docs/contracts/vla-training-consumer.md:152-153), and that list is "
+            "per-joint list (docs/contracts/vla-training-consumer.md §2.4:232-233), and that list is "
             "[OK] for corpus A and [?] as applied here."
         )
     return names[0] if side == "left" else names[1]

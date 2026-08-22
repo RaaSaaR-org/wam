@@ -7,6 +7,9 @@ unverified and is tested to raise rather than to silently pick an ordering.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import numpy as np
 import pytest
 from pydantic import ValidationError
@@ -46,6 +49,8 @@ from wam.robot.g1_dex3_28 import (
     to_canonical_joint_delta,
     to_canonical_q,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # A layout is a DECLARED assumption, never a default — every test that needs one builds it
 # explicitly and says so, which is exactly what production callers have to do.
@@ -208,11 +213,50 @@ def test_hand_joint_names_returns_the_one_fully_specified_ordering_and_it_is_asy
     left = hand_joint_names(ASSUMED, "left")
     right = hand_joint_names(ASSUMED, "right")
     assert len(left) == len(right) == JOINTS_PER_HAND
-    # docs/contracts/vla-training-consumer.md:152-153 — left is middle-before-index, right is
+    # docs/contracts/vla-training-consumer.md §2.4:232-233 — left is middle-before-index, right is
     # index-before-middle. Symmetrically "repairing" this is a documented mistake.
     assert left == ("thumb_0", "thumb_1", "thumb_2", "middle_0", "middle_1", "index_0", "index_1")
     assert right == ("thumb_0", "thumb_1", "thumb_2", "index_0", "index_1", "middle_0", "middle_1")
     assert left != right
+
+
+def test_contract_hand_order_citation_still_points_at_the_hand_table() -> None:
+    """The one automated reader of the consumer contract.
+
+    ``g1_dex3_28`` cites ``docs/contracts/vla-training-consumer.md`` by LINE NUMBER for the
+    only fully specified hand ordering on record. Nothing parsed that document until this test,
+    which is exactly why ``PR-08`` §8 item 2 could describe the wrong dataset for a month without
+    anything going red (``T40_RULE_V7`` §6). A citation that drifts sends the next reader to the
+    wrong lines, and the failure this whole module exists to prevent is a silently transposed
+    finger pair. So: follow the citation, and check it lands where it claims.
+    """
+    module_src = (_REPO_ROOT / "src" / "wam" / "robot" / "g1_dex3_28.py").read_text()
+    cites = re.findall(
+        r"vla-training-consumer\.md\s*§2\.4:(\d+)-(\d+)",
+        module_src,
+    )
+    assert cites, "g1_dex3_28.py no longer cites the contract's §2.4 hand table by line"
+    assert len(set(cites)) == 1, f"the module cites §2.4 at disagreeing lines: {set(cites)}"
+
+    first, last = (int(n) for n in cites[0])
+    contract = (_REPO_ROOT / "docs" / "contracts" / "vla-training-consumer.md").read_text()
+    lines = contract.splitlines()
+    cited = "\n".join(lines[first - 1 : last])
+
+    # The asymmetry is the point: symmetrically "repairing" it is a documented mistake.
+    left, right = hand_joint_names(ASSUMED, "left"), hand_joint_names(ASSUMED, "right")
+    assert "**state** `left_hand`" in cited and "**state** `right_hand`" in cited
+    for name in left:
+        assert name in cited, f"{name!r} missing from the cited contract lines {first}-{last}"
+    for name in right:
+        assert name in cited
+    assert cited.index("middle_0, middle_1") < cited.index("index_0, index_1, middle_0")
+
+    # And the ordering is ATTESTED, not MEASURED, for this corpus too — the contract must keep
+    # saying so. If somebody measures it against the parquet, this assertion is the place to
+    # record that, together with HandJointOrder's own mark.
+    assert "ATTESTED, not MEASURED" in contract
+    assert provenance(ASSUMED)["hand_joint_order"]["mark"] == "[?]"
 
 
 def test_within_arm_order_is_flagged_unmeasured() -> None:
