@@ -1,0 +1,812 @@
+{
+  "schema": "wam.identity_prompt_evidence/1",
+  "writeup": "docs/preregistration/PR-08-photoreal-augmentation.md",
+  "todo": "T40-TODO-01-identity-prompt-provenance",
+  "evidence_required": "the sampled episode ids, the sample size, and the per-episode verdicts",
+  "produced_by": "scripts/build_identity_prompt_sheet.py verdict",
+  "produced_date": "2026-08-22",
+  "produced_utc": "2026-08-22T15:10:19+00:00",
+  "git_commit": "ee1b6d6973fd02708c8ed71e57be0ce9298e498b",
+  "sheet_id": "862a4548ae25f52ae0f3c0dc238cfb64e2f79d93cf8732059599d90e0bf87cb4",
+  "sheet": "runs/t040-identity-prompt/sheet.jsonl",
+  "manifest": "/home/humanoid/wam-t041/pr08-apple-640x480/manifest.json",
+  "n_episodes_in_manifest": 402,
+  "partition_rule": "T40_STYLES_V1",
+  "partition_content_sha256_at_build": "8d8565ffcd12ad17318f10979abb44f639084e21857866cbc3b2f32f1332628b",
+  "partition_content_sha256_now": "8d8565ffcd12ad17318f10979abb44f639084e21857866cbc3b2f32f1332628b",
+  "prompt": "A red and yellow apple with a glossy surface and a visible stem, on a black cloth covering a flat surface. A white, round plate. Even, bright, top-down lighting with minimal shadows; the lighting highlights the objects without creating harsh contrasts. Contrast between the black background and the white plate and red/yellow apple. Live-action video, realistic. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged.",
+  "caption_provenance": "~/wam-t041/cosmos-g1-embodiment/val/captions/gr00t-n1-7-appletoplate_episode_000135_clip000/caption.json",
+  "sample_scheme": "stratified-systematic/1 \u2014 episode ids sorted, split into sample_size contiguous strata of near-equal size (bounds k*M//N), one episode drawn uniformly at random inside each under sample_seed. Spans the recording order by construction; a fixed stride was rejected because it aliases with any periodicity in that order.",
+  "sample_seed": 40001,
+  "frame_fraction": 0.1,
+  "frame_rule": "one frame per episode at index round(0.1 * (n_frames - 1)), decoded forward (select=eq(n,IDX)), never seeked. Early rather than middle or late because the apple, the cloth, the background, the lighting and the plate are all unoccluded only before the transfer.",
+  "sampled_episodes": [
+    "episode_000003",
+    "episode_000012",
+    "episode_000028",
+    "episode_000038",
+    "episode_000042",
+    "episode_000058",
+    "episode_000066",
+    "episode_000071",
+    "episode_000089",
+    "episode_000093",
+    "episode_000108",
+    "episode_000114",
+    "episode_000122",
+    "episode_000136",
+    "episode_000147",
+    "episode_000150",
+    "episode_000169",
+    "episode_000179",
+    "episode_000181",
+    "episode_000199",
+    "episode_000202",
+    "episode_000212",
+    "episode_000230",
+    "episode_000232",
+    "episode_000244",
+    "episode_000251",
+    "episode_000268",
+    "episode_000274",
+    "episode_000283",
+    "episode_000298",
+    "episode_000308",
+    "episode_000314",
+    "episode_000326",
+    "episode_000340",
+    "episode_000344",
+    "episode_000352",
+    "episode_000370",
+    "episode_000372",
+    "episode_000387",
+    "episode_000394"
+  ],
+  "sample_size": 40,
+  "per_episode_verdicts": {
+    "episode_000003": "mismatch",
+    "episode_000012": "mismatch",
+    "episode_000028": "mismatch",
+    "episode_000038": "mismatch",
+    "episode_000042": "mismatch",
+    "episode_000058": "mismatch",
+    "episode_000066": "mismatch",
+    "episode_000071": "mismatch",
+    "episode_000089": "mismatch",
+    "episode_000093": "mismatch",
+    "episode_000108": "mismatch",
+    "episode_000114": "mismatch",
+    "episode_000122": "mismatch",
+    "episode_000136": "mismatch",
+    "episode_000147": "mismatch",
+    "episode_000150": "mismatch",
+    "episode_000169": "mismatch",
+    "episode_000179": "mismatch",
+    "episode_000181": "mismatch",
+    "episode_000199": "mismatch",
+    "episode_000202": "mismatch",
+    "episode_000212": "mismatch",
+    "episode_000230": "mismatch",
+    "episode_000232": "mismatch",
+    "episode_000244": "mismatch",
+    "episode_000251": "mismatch",
+    "episode_000268": "mismatch",
+    "episode_000274": "mismatch",
+    "episode_000283": "mismatch",
+    "episode_000298": "mismatch",
+    "episode_000308": "mismatch",
+    "episode_000314": "mismatch",
+    "episode_000326": "mismatch",
+    "episode_000340": "mismatch",
+    "episode_000344": "mismatch",
+    "episode_000352": "mismatch",
+    "episode_000370": "mismatch",
+    "episode_000372": "mismatch",
+    "episode_000387": "mismatch",
+    "episode_000394": "mismatch"
+  },
+  "sample_size_at_build": 40,
+  "sampled_episodes_at_build": [
+    "episode_000003",
+    "episode_000012",
+    "episode_000028",
+    "episode_000038",
+    "episode_000042",
+    "episode_000058",
+    "episode_000066",
+    "episode_000071",
+    "episode_000089",
+    "episode_000093",
+    "episode_000108",
+    "episode_000114",
+    "episode_000122",
+    "episode_000136",
+    "episode_000147",
+    "episode_000150",
+    "episode_000169",
+    "episode_000179",
+    "episode_000181",
+    "episode_000199",
+    "episode_000202",
+    "episode_000212",
+    "episode_000230",
+    "episode_000232",
+    "episode_000244",
+    "episode_000251",
+    "episode_000268",
+    "episode_000274",
+    "episode_000283",
+    "episode_000298",
+    "episode_000308",
+    "episode_000314",
+    "episode_000326",
+    "episode_000340",
+    "episode_000344",
+    "episode_000352",
+    "episode_000370",
+    "episode_000372",
+    "episode_000387",
+    "episode_000394"
+  ],
+  "sample_strata": [
+    {
+      "episode": "episode_000003",
+      "hi": 10,
+      "lo": 0,
+      "stratum": 0
+    },
+    {
+      "episode": "episode_000012",
+      "hi": 20,
+      "lo": 10,
+      "stratum": 1
+    },
+    {
+      "episode": "episode_000028",
+      "hi": 30,
+      "lo": 20,
+      "stratum": 2
+    },
+    {
+      "episode": "episode_000038",
+      "hi": 40,
+      "lo": 30,
+      "stratum": 3
+    },
+    {
+      "episode": "episode_000042",
+      "hi": 50,
+      "lo": 40,
+      "stratum": 4
+    },
+    {
+      "episode": "episode_000058",
+      "hi": 60,
+      "lo": 50,
+      "stratum": 5
+    },
+    {
+      "episode": "episode_000066",
+      "hi": 70,
+      "lo": 60,
+      "stratum": 6
+    },
+    {
+      "episode": "episode_000071",
+      "hi": 80,
+      "lo": 70,
+      "stratum": 7
+    },
+    {
+      "episode": "episode_000089",
+      "hi": 90,
+      "lo": 80,
+      "stratum": 8
+    },
+    {
+      "episode": "episode_000093",
+      "hi": 100,
+      "lo": 90,
+      "stratum": 9
+    },
+    {
+      "episode": "episode_000108",
+      "hi": 110,
+      "lo": 100,
+      "stratum": 10
+    },
+    {
+      "episode": "episode_000114",
+      "hi": 120,
+      "lo": 110,
+      "stratum": 11
+    },
+    {
+      "episode": "episode_000122",
+      "hi": 130,
+      "lo": 120,
+      "stratum": 12
+    },
+    {
+      "episode": "episode_000136",
+      "hi": 140,
+      "lo": 130,
+      "stratum": 13
+    },
+    {
+      "episode": "episode_000147",
+      "hi": 150,
+      "lo": 140,
+      "stratum": 14
+    },
+    {
+      "episode": "episode_000150",
+      "hi": 160,
+      "lo": 150,
+      "stratum": 15
+    },
+    {
+      "episode": "episode_000169",
+      "hi": 170,
+      "lo": 160,
+      "stratum": 16
+    },
+    {
+      "episode": "episode_000179",
+      "hi": 180,
+      "lo": 170,
+      "stratum": 17
+    },
+    {
+      "episode": "episode_000181",
+      "hi": 190,
+      "lo": 180,
+      "stratum": 18
+    },
+    {
+      "episode": "episode_000199",
+      "hi": 201,
+      "lo": 190,
+      "stratum": 19
+    },
+    {
+      "episode": "episode_000202",
+      "hi": 211,
+      "lo": 201,
+      "stratum": 20
+    },
+    {
+      "episode": "episode_000212",
+      "hi": 221,
+      "lo": 211,
+      "stratum": 21
+    },
+    {
+      "episode": "episode_000230",
+      "hi": 231,
+      "lo": 221,
+      "stratum": 22
+    },
+    {
+      "episode": "episode_000232",
+      "hi": 241,
+      "lo": 231,
+      "stratum": 23
+    },
+    {
+      "episode": "episode_000244",
+      "hi": 251,
+      "lo": 241,
+      "stratum": 24
+    },
+    {
+      "episode": "episode_000251",
+      "hi": 261,
+      "lo": 251,
+      "stratum": 25
+    },
+    {
+      "episode": "episode_000268",
+      "hi": 271,
+      "lo": 261,
+      "stratum": 26
+    },
+    {
+      "episode": "episode_000274",
+      "hi": 281,
+      "lo": 271,
+      "stratum": 27
+    },
+    {
+      "episode": "episode_000283",
+      "hi": 291,
+      "lo": 281,
+      "stratum": 28
+    },
+    {
+      "episode": "episode_000298",
+      "hi": 301,
+      "lo": 291,
+      "stratum": 29
+    },
+    {
+      "episode": "episode_000308",
+      "hi": 311,
+      "lo": 301,
+      "stratum": 30
+    },
+    {
+      "episode": "episode_000314",
+      "hi": 321,
+      "lo": 311,
+      "stratum": 31
+    },
+    {
+      "episode": "episode_000326",
+      "hi": 331,
+      "lo": 321,
+      "stratum": 32
+    },
+    {
+      "episode": "episode_000340",
+      "hi": 341,
+      "lo": 331,
+      "stratum": 33
+    },
+    {
+      "episode": "episode_000344",
+      "hi": 351,
+      "lo": 341,
+      "stratum": 34
+    },
+    {
+      "episode": "episode_000352",
+      "hi": 361,
+      "lo": 351,
+      "stratum": 35
+    },
+    {
+      "episode": "episode_000370",
+      "hi": 371,
+      "lo": 361,
+      "stratum": 36
+    },
+    {
+      "episode": "episode_000372",
+      "hi": 381,
+      "lo": 371,
+      "stratum": 37
+    },
+    {
+      "episode": "episode_000387",
+      "hi": 391,
+      "lo": 381,
+      "stratum": 38
+    },
+    {
+      "episode": "episode_000394",
+      "hi": 402,
+      "lo": 391,
+      "stratum": 39
+    }
+  ],
+  "verdict_counts": {
+    "match": 0,
+    "mismatch": 40,
+    "unsure": 0
+  },
+  "mismatch_axis_counts": {
+    "apple": 0,
+    "table": 40,
+    "background": 29,
+    "lighting": 0,
+    "plate": 0,
+    "other": 0
+  },
+  "disagreements": [
+    {
+      "episode": "episode_000003",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Dark grey cloth, not black - the black robot gripper in the same frame is visibly far darker than the cloth. Apple, white plate and even lighting fit the prompt.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000003.png",
+      "frame_index": 38
+    },
+    {
+      "episode": "episode_000012",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is dark grey with visible lighter folds and a white strip of surface along the top edge, not black. Apple glossy red/orange with stem, plate white and round, lighting even.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000012.png",
+      "frame_index": 47
+    },
+    {
+      "episode": "episode_000028",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey, not black; grey folds are visible across the whole surface and a paler strip shows at the top edge. Apple, white plate and even bright lighting are as described.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000028.png",
+      "frame_index": 41
+    },
+    {
+      "episode": "episode_000038",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Dark grey cloth, not black, and a bright white strip of the surface behind it runs along the top edge, so the background is not black.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000038.png",
+      "frame_index": 36
+    },
+    {
+      "episode": "episode_000042",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Dark grey cloth with visible grey folds and a white strip of wall at the top, not a black cloth on a black background.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000042.png",
+      "frame_index": 39
+    },
+    {
+      "episode": "episode_000058",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is dark grey with visible grey folds and a thin pale strip at the top edge, not a black cloth on a black background. Glossy red-orange apple with stem, white round plate, even bright lighting.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000058.png",
+      "frame_index": 43
+    },
+    {
+      "episode": "episode_000066",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is medium-dark grey rather than black, with a pale strip visible at the very top of the frame. Everything else fits: glossy red-orange apple with a dark stem, white round plate, even bright lighting.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000066.png",
+      "frame_index": 43
+    },
+    {
+      "episode": "episode_000071",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Dark grey cloth rather than black, with the paler surface strip at the top of the frame. The glossy red/yellow apple, white round plate and even bright lighting all fit.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000071.png",
+      "frame_index": 45
+    },
+    {
+      "episode": "episode_000089",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Backdrop is a dark grey cloth (with a pale strip of surface along the top edge), not black. Glossy red/yellow apple with stem at the left edge, white round plate, even bright lighting.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000089.png",
+      "frame_index": 44
+    },
+    {
+      "episode": "episode_000093",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Charcoal grey cloth with a pale strip along the top edge, not a black background. Apple is glossy red and yellow with a stem, plate white and round, lighting even and bright.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000093.png",
+      "frame_index": 45
+    },
+    {
+      "episode": "episode_000108",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The surface is a dark grey cloth, not black, with a paler strip visible at the top of the frame. Glossy red/yellow apple with stem, white round plate, even bright lighting.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000108.png",
+      "frame_index": 47
+    },
+    {
+      "episode": "episode_000114",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The surface is dark grey cloth (mean RGB ~99) with a paler strip visible at the top, not black. Apple, white round plate and even lighting match.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000114.png",
+      "frame_index": 45
+    },
+    {
+      "episode": "episode_000122",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey (mean RGB ~103) with a paler strip along the top edge, not black. Everything else - apple, white round plate, even bright lighting - matches.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000122.png",
+      "frame_index": 48
+    },
+    {
+      "episode": "episode_000136",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is charcoal grey rather than black and a pale surface strip is visible at the top. Apple is glossy red with a yellow side, plate white and round, lighting even and bright.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000136.png",
+      "frame_index": 36
+    },
+    {
+      "episode": "episode_000147",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey with visible folds and a pale wall strip at the top edge; it is not a black cloth or a black background.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000147.png",
+      "frame_index": 37
+    },
+    {
+      "episode": "episode_000150",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is charcoal/dark grey with clearly visible lighter folds, not black, and a pale white strip of surface still runs along the top edge. Apple is red/orange-yellow and glossy, plate white and round, lighting even and bright.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000150.png",
+      "frame_index": 56
+    },
+    {
+      "episode": "episode_000169",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth reads as dark grey (mean RGB ~100) with a paler strip at the top, not black. Apple, white round plate and lighting match.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000169.png",
+      "frame_index": 40
+    },
+    {
+      "episode": "episode_000179",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is dark grey, not black, with a paler strip at the top edge. The apple in the gripper is glossy red and yellow, the plate white and round, the lighting even and bright.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000179.png",
+      "frame_index": 25
+    },
+    {
+      "episode": "episode_000181",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey rather than black, with grey creases and a pale wall strip along the top edge; the apple, plate and lighting are as described.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000181.png",
+      "frame_index": 38
+    },
+    {
+      "episode": "episode_000199",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is clearly dark grey with lighter creases, not black. Apple is glossy red/yellow, plate white and round, lighting even and bright with minimal shadow.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000199.png",
+      "frame_index": 34
+    },
+    {
+      "episode": "episode_000202",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey charcoal, not black - its folds and weave read plainly grey and it is no darker than frames captioned dark grey. Apple, plate and even bright lighting all fit.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000202.png",
+      "frame_index": 40
+    },
+    {
+      "episode": "episode_000212",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is dark grey with clear lighter folds, not a black cloth or black background. Apple is glossy red/yellow, plate white and round, lighting even and bright.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000212.png",
+      "frame_index": 43
+    },
+    {
+      "episode": "episode_000230",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey with clearly lit grey creases, not black; apple, plate and even lighting otherwise fit.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000230.png",
+      "frame_index": 35
+    },
+    {
+      "episode": "episode_000232",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Charcoal/dark grey cloth (mean RGB ~103), not black, with a paler band at the top of the frame. Apple, white round plate and lighting match.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000232.png",
+      "frame_index": 52
+    },
+    {
+      "episode": "episode_000244",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is charcoal/dark grey with visible grey folds, not black, and a paler strip of the surface shows along the top edge. Apple is red/yellow and glossy with a stem, plate is white and round, lighting is even and bright.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000244.png",
+      "frame_index": 47
+    },
+    {
+      "episode": "episode_000251",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Charcoal grey cloth rather than black - it is no darker than frames whose own caption calls it dark grey. Apple is glossy red and yellow with a stem, plate white and round, lighting even.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000251.png",
+      "frame_index": 43
+    },
+    {
+      "episode": "episode_000268",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The backdrop is a charcoal grey cloth, not black. Glossy red-and-yellow apple with a visible stem, white round plate, even bright top-down lighting.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000268.png",
+      "frame_index": 41
+    },
+    {
+      "episode": "episode_000274",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey with a paler strip of surface along the top edge, not a black background. Glossy red/yellow apple with a stem, white round plate, even bright lighting.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000274.png",
+      "frame_index": 51
+    },
+    {
+      "episode": "episode_000283",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is charcoal grey, not black, and a light strip of the surface is visible along the top of the frame. Apple is glossy red-orange with a stem, plate white and round, lighting even and bright.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000283.png",
+      "frame_index": 38
+    },
+    {
+      "episode": "episode_000298",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is a mid/dark grey velvet (mean RGB ~95), not black, and a pale wall strip shows along the top edge. Apple (red-to-yellow, glossy, stem), white round plate and even bright lighting are as described.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000298.png",
+      "frame_index": 48
+    },
+    {
+      "episode": "episode_000308",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey (mean RGB ~94), not black, with a pale strip of surface along the top edge. Apple, white round plate and lighting match.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000308.png",
+      "frame_index": 52
+    },
+    {
+      "episode": "episode_000314",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey, not black. The apple is also mostly hidden behind the gripper (a blurred red-orange sphere, no stem visible), but the cloth colour alone settles it.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000314.png",
+      "frame_index": 35
+    },
+    {
+      "episode": "episode_000326",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey (mean RGB ~99), not black. The red/yellow glossy apple, white round plate and flat bright lighting are as described.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000326.png",
+      "frame_index": 48
+    },
+    {
+      "episode": "episode_000340",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The surface is a dark grey cloth, clearly grey rather than black, with a paler strip of wall at the top edge.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000340.png",
+      "frame_index": 42
+    },
+    {
+      "episode": "episode_000344",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is dark grey rather than black, with a pale strip at the top edge. Apple is glossy red/orange with a visible stem, plate white and round, lighting even with soft shadows.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000344.png",
+      "frame_index": 75
+    },
+    {
+      "episode": "episode_000352",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "Charcoal grey cloth with grey creases plus a white strip along the top of the frame, not black; the red/yellow stemmed apple and white plate are as described.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000352.png",
+      "frame_index": 42
+    },
+    {
+      "episode": "episode_000370",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is charcoal/dark grey with clearly visible grey folds, not black, and a pale white strip of wall is visible along the top edge, so the background is not black either.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000370.png",
+      "frame_index": 37
+    },
+    {
+      "episode": "episode_000372",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The surface is a mid-dark grey cloth and a pale strip of wall shows along the top edge; nothing in the frame reads as black.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000372.png",
+      "frame_index": 34
+    },
+    {
+      "episode": "episode_000387",
+      "axes": [
+        "table",
+        "background"
+      ],
+      "notes": "The cloth is dark grey (mean RGB ~100), not black, and a pale strip of the surface shows at the top. Apple, white round plate and bright even lighting match.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000387.png",
+      "frame_index": 39
+    },
+    {
+      "episode": "episode_000394",
+      "axes": [
+        "table"
+      ],
+      "notes": "The cloth is dark grey with visible folds and a pale strip along the top edge, not black. The apple (motion-blurred, being moved) is red and yellow and glossy, the plate white and round, lighting even.",
+      "frame": "/home/humanoid/develop/wam/runs/t040-identity-prompt/frames/episode_000394.png",
+      "frame_index": 46
+    }
+  ],
+  "abstentions": [],
+  "coverage": 1.0,
+  "min_coverage": 0.9,
+  "coverage_scope": "fraction of the sampled rows carrying a decidable verdict (match or mismatch). It says nothing about how many matched.",
+  "gate_qualified": true,
+  "gate_disqualified_reasons": [],
+  "judge": null,
+  "judge_note": "Deliberately unset and not chosen by this script. T-041 came back VOID because its VLM judge answered a constant 'NO' to all 80 items and could not clear its own 20/20 calibration set; presuming a judge here would repeat that failure into a pre-commitment that licenses 4020 clips. A human and a VLM fill this identical field and `verdict` applies the identical rule to either.",
+  "notes": [
+    "NO OVERALL PASS IS COMPUTED, AND THIS IS NOT AN OVERSIGHT. The TODO's action says an inconstant appearance IS the finding: 'If the appearance is not constant across the 402, that is the finding and arm C needs a per-episode identity prompt rather than one shared string.' Folding these counts into PASS/FAIL would coin the threshold that decision turns on, after the numbers existed.",
+    "gate_qualified is about the admissibility of this evidence, never about arm C. A gate-qualified run can report every episode as a mismatch.",
+    "The sample can DETECT inconstancy; it cannot certify constancy. Zero mismatches in 40 bounds the rate at about 7.5% at 95% (rule of three), which over 402 episodes still permits roughly 30 disagreeing episodes. If the decision needs certainty, the answer is a census.",
+    "One frame per episode. A change that happens later in an episode \u2014 a light switched mid-clip \u2014 is outside what this sample can see, and a per-episode verdict here is a verdict about one instant of that episode.",
+    "This evidence does not close the TODO and does not license generation. PR-08 \u00a71 gates generation on every \u00a78 item; closing this TODO is an edit to configs/transfer25/styles.toml made by whoever reads these counts."
+  ]
+}

@@ -624,7 +624,19 @@ def cmd_build_sheet(args: argparse.Namespace) -> int:
             try:
                 extract_frame(video, idx, frame, args.ffmpeg)
                 digest = sha256_file(frame)
-                frame_rel = str(frame)
+                # ABSOLUTE, and the row above already records `video` absolutely for the same
+                # reason. `--out runs/t040-identity-prompt` writes a row naming
+                # "runs/t040-identity-prompt/frames/episode_000003.png", which resolves against
+                # whatever CWD the *verdict* step happens to run in — and the verdict step is run
+                # later, by a different person, quite possibly from the sheet's own directory. A
+                # relative path that misses does not raise: `check_frames` classifies it as a frame
+                # that is GONE, so the evidence comes back stamped not gate-qualified with
+                # "40 frame(s) named by the sheet are gone at verdict time" for a sample whose
+                # frames are all sitting on disk untouched. That is the harness losing the gate for
+                # 4020 clips on the caller's shell history. Resolving here costs nothing the digest
+                # check does not already cover: a stale absolute path that finds the wrong file
+                # fails the sha256 and is fatal, exactly as a moved relative one would.
+                frame_rel = str(frame.resolve())
             except SheetError as exc:
                 # One unreadable clip must not cost the other 39 extractions, and it must not be
                 # papered over either: the row is written with a null frame, the episode is named

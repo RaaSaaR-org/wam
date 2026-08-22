@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -828,3 +829,253 @@ def test_reads_the_committed_identity_prompt_and_its_provenance():
         "evidence it closed with is what should be read, not regenerated"
     )
     assert len(identity["partition_content_sha256"]) == 64
+
+
+# ------------------------------------------------------------------------------------------------
+# the fill vocabulary: the two refusals that keep `mismatched_axes` and `verdict` from disagreeing
+# ------------------------------------------------------------------------------------------------
+
+
+def test_an_axis_outside_the_fixed_vocabulary_is_refused(corpus, tmp_path, stub_frames, capsys):
+    """`shadows` is a perfectly sensible thing to see and it is not one of the six words.
+
+    The axis list is what tells whoever repairs arm C *which clause* to make per-episode, and
+    ``mismatch_axis_counts`` in the evidence is a fixed-key tally over ``MISMATCH_AXES``. An
+    unrecognised word does not raise there — it is simply absent from every count, so the artifact
+    reports a mismatch whose axis silently totals zero and a reader adding up the axes finds fewer
+    than there are disagreements. Refuse at the door instead.
+    """
+    out = tmp_path / "sheet"
+    build(corpus, out, "--sample-size", "40")
+    eps = [r["episode"] for r in rows_of(out)]
+    fill(out, {e: ("mismatch" if e == eps[0] else "match") for e in eps},
+         axes={eps[0]: ["shadows"]})
+
+    assert verdict_of(out, tmp_path / "evidence.json") == bips.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "unknown mismatch axis" in err and "shadows" in err
+    assert not (tmp_path / "evidence.json").exists(), "a refusal must write nothing"
+
+
+def test_axes_named_on_a_row_whose_verdict_is_not_mismatch_are_refused(corpus, tmp_path,
+                                                                      stub_frames, capsys):
+    """`verdict: match` plus `mismatched_axes: [table]` is a row that says two things.
+
+    Both readings are defensible — a filler who changed their mind and edited one field, or a
+    filler who meant `mismatch` and edited the other — and picking either one here would be this
+    script inventing the answer for a row somebody actually looked at. It is also the shape a
+    half-finished edit leaves behind, which is precisely when a silent choice is most likely to be
+    wrong.
+    """
+    out = tmp_path / "sheet"
+    build(corpus, out, "--sample-size", "40")
+    eps = [r["episode"] for r in rows_of(out)]
+    fill(out, {e: "match" for e in eps}, axes={eps[3]: ["table"]})
+
+    assert verdict_of(out, tmp_path / "evidence.json") == bips.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "name a mismatched axis while their verdict is not" in err
+    assert eps[3] in err
+
+
+def test_an_abstention_is_reported_separately_and_is_never_folded_into_either_count(
+        corpus, tmp_path, stub_frames):
+    """`unsure` is an abstention, and the evidence has to keep it that way.
+
+    Counting an abstention as a match would manufacture agreement the filler explicitly declined to
+    claim; counting it as a mismatch would manufacture a finding. It lands in its own count, in its
+    own ``abstentions`` list with the note attached, and it is outside the coverage numerator — and
+    two abstentions in forty are 0.95, above the 0.90 floor, so they cost this run nothing. (The
+    synthetic corpus is 120 episodes rather than the committed 402, so the run is disqualified for
+    that and only that; asserting on the reasons rather than on the flag is what keeps this test
+    about abstentions.)
+    """
+    out = tmp_path / "sheet"
+    build(corpus, out, "--sample-size", "40")
+    eps = [r["episode"] for r in rows_of(out)]
+    fill(out, {e: ("unsure" if e in eps[:2] else "match") for e in eps},
+         notes={eps[0]: "the hand covers the apple"})
+
+    art = tmp_path / "evidence.json"
+    verdict_of(out, art)
+    ev = json.loads(art.read_text())
+    assert ev["verdict_counts"] == {"match": 38, "mismatch": 0, "unsure": 2}
+    assert ev["coverage"] == pytest.approx(38 / 40)
+    assert [a["episode"] for a in ev["abstentions"]] == eps[:2]
+    assert ev["abstentions"][0]["notes"] == "the hand covers the apple"
+    assert ev["disagreements"] == []
+    assert not any("coverage" in r for r in ev["gate_disqualified_reasons"]), (
+        "0.95 is above the floor; an abstention above it must not cost anything"
+    )
+
+
+# ------------------------------------------------------------------------------------------------
+# rows and metas that did not come out of build-sheet at all
+# ------------------------------------------------------------------------------------------------
+
+
+def test_a_row_missing_a_schema_field_is_refused_by_file_and_line(corpus, tmp_path, stub_frames,
+                                                                  capsys):
+    """A filler who regenerates the sheet from a spreadsheet loses fields, and loses them quietly.
+
+    Without this check the missing key surfaces as a ``KeyError`` several functions later, from a
+    traceback that names neither the file nor the row — and a traceback is the one failure mode a
+    person is most likely to work around by editing until it stops.
+    """
+    out = tmp_path / "sheet"
+    build_and_fill(corpus, out)
+    rows = rows_of(out)
+    del rows[2]["sheet_id"]
+    write_rows(out, rows)
+
+    assert verdict_of(out, tmp_path / "evidence.json") == bips.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "sheet.jsonl:3" in err and "sheet_id" in err
+    assert "not a row this script wrote" in err
+
+
+def test_an_empty_sheet_is_refused_rather_than_reported_as_a_sample_of_nothing(
+        corpus, tmp_path, stub_frames, capsys):
+    """Zero rows must not divide into zero coverage and a clean set of zero counts."""
+    out = tmp_path / "sheet"
+    build_and_fill(corpus, out)
+    (out / "sheet.jsonl").write_text("")
+
+    assert verdict_of(out, tmp_path / "evidence.json") == bips.EXIT_FATAL
+    assert "has no rows" in capsys.readouterr().err
+
+
+def test_a_meta_declaring_another_schema_cannot_have_its_gate_stamp_read(corpus, tmp_path,
+                                                                         stub_frames, capsys):
+    """``gate_qualified`` is only meaningful under the schema that defines what it promises.
+
+    A meta from some other tool can carry the same two keys with the same types and a completely
+    different rule behind them, and reading its stamp would import that rule into this artifact
+    without saying so.
+    """
+    out = tmp_path / "sheet"
+    build_and_fill(corpus, out)
+    meta = meta_of(out)
+    meta["schema"] = "wam.identity_prompt_sheet/2"
+    write_meta(out, meta)
+
+    assert verdict_of(out, tmp_path / "evidence.json") == bips.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "not a meta this script wrote" in err
+
+
+def test_a_meta_whose_sample_size_contradicts_its_own_episode_list_is_refused(
+        corpus, tmp_path, stub_frames, capsys):
+    """The pin has to agree with itself before the rows are checked against it.
+
+    ``sample_size`` and ``sampled_episodes`` are two of the three things ``evidence_required``
+    names. If they disagree, then whichever one ``check_sample_identity`` happened to use would
+    decide whether forty rows are a complete sample or a shrunk one, and the artifact would report
+    the other.
+    """
+    out = tmp_path / "sheet"
+    build_and_fill(corpus, out)
+    meta = meta_of(out)
+    meta["sample_size"] = 39
+    write_meta(out, meta)
+
+    assert verdict_of(out, tmp_path / "evidence.json") == bips.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "does not match its own" in err and "sampled_episodes" in err
+
+
+def test_a_hand_promoted_meta_cannot_launder_a_late_frame_fraction(corpus, tmp_path, stub_frames):
+    """The sample-size defence, applied to the other derivable build-time rule.
+
+    Emptying ``gate_disqualified_reasons`` and setting ``gate_qualified: true`` is internally
+    consistent AND leaves ``sheet_id`` intact, because the id hashes the fraction rather than the
+    stamp. So the verdict step re-derives the fraction rule from the pinned ``frame_fraction``
+    instead of only inheriting it: a sheet cut at 0.5 — after the grasp, where a mismatch and an
+    occlusion are no longer distinguishable — cannot be promoted into gate-qualified evidence by
+    editing two fields of a JSON file.
+    """
+    out = tmp_path / "sheet"
+    build_and_fill(corpus, out, "--frame-fraction", "0.5")
+    meta = meta_of(out)
+    meta["gate_qualified"] = True
+    meta["gate_disqualified_reasons"] = []
+    write_meta(out, meta)
+
+    art = tmp_path / "evidence.json"
+    assert verdict_of(out, art) == bips.EXIT_NOT_GATE_QUALIFIED
+    ev = json.loads(art.read_text())
+    assert any("--frame-fraction 0.5" in r for r in ev["gate_disqualified_reasons"])
+
+
+# ------------------------------------------------------------------------------------------------
+# the artifact has to survive the two journeys it actually makes: into a TOML file, and across a
+# working directory
+# ------------------------------------------------------------------------------------------------
+
+
+def test_the_emitted_toml_fragment_parses_with_a_note_full_of_quotes_and_backslashes(
+        corpus, tmp_path, stub_frames):
+    """``notes`` is free text a person types, and it is pasted into the file the generator reads.
+
+    ``configs/transfer25/styles.toml`` is parsed by ``check_style_partition.py`` on every run and
+    rendered into the JSON `97` dispatches on. One unescaped quote in a filler's note makes that
+    file unparseable, and the failure surfaces as the style partition being broken rather than as
+    the evidence fragment being malformed. So the fragment is round-tripped here through a real
+    TOML parser, with the characters that break naive quoting.
+    """
+    out = tmp_path / "sheet"
+    build(corpus, out, "--sample-size", "40")
+    eps = [r["episode"] for r in rows_of(out)]
+    nasty = 'cloth reads "grey", not black \\ and the plate is off-white'
+    fill(out, {e: ("mismatch" if e == eps[0] else "match") for e in eps},
+         axes={eps[0]: ["table", "plate"]}, notes={eps[0]: nasty})
+
+    frag = tmp_path / "evidence.toml"
+    verdict_of_with_toml = bips.main([
+        "verdict", "--sheet", str(out), "--styles", str(STYLES),
+        "--out", str(tmp_path / "evidence.json"), "--emit-toml", str(frag),
+    ])
+    assert verdict_of_with_toml in (bips.EXIT_OK, bips.EXIT_NOT_GATE_QUALIFIED)
+
+    parsed = tomllib.loads(frag.read_text())
+    assert parsed["evidence_sample_size"] == 40
+    assert parsed["evidence_verdict_counts"] == {"match": 39, "mismatch": 1, "unsure": 0}
+    assert len(parsed["evidence_sampled_episodes"]) == 40
+    assert parsed["evidence_disagreements"] == [f"{eps[0]} [table,plate] {nasty}"]
+    assert "evidence_status" not in parsed and "status" not in parsed, (
+        "the fragment must not put a pre-typed CLOSED in anybody's clipboard"
+    )
+
+
+def test_a_sheet_built_under_a_relative_out_is_still_readable_from_another_directory(
+        corpus, tmp_path, stub_frames, monkeypatch):
+    """The frames are named absolutely, so the verdict step is not a function of the caller's CWD.
+
+    ``build-sheet --out runs/t040-identity-prompt`` is the invocation the module docstring itself
+    prints, and it used to write rows naming ``runs/t040-identity-prompt/frames/<ep>.png``. Run the
+    verdict step from anywhere else — from the sheet's own directory, say, which is where a person
+    filling it is most likely to be — and every one of those paths misses. That does not raise:
+    ``check_frames`` classifies a path that misses as a frame that is GONE, so a sample whose forty
+    frames are all sitting untouched on disk comes back stamped not gate-qualified, and the reason
+    printed is about frames disappearing rather than about a working directory.
+    """
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    build(corpus, Path("runs") / "t040-identity-prompt", "--sample-size", "40")
+    rel_out = workdir / "runs" / "t040-identity-prompt"
+    assert all(Path(r["frame"]).is_absolute() for r in rows_of(rel_out))
+    fill(rel_out, {r["episode"]: "match" for r in rows_of(rel_out)})
+
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    art = tmp_path / "evidence.json"
+    verdict_of(rel_out, art)
+    ev = json.loads(art.read_text())
+    # The synthetic corpus is 120 episodes, so this run is disqualified for not being the committed
+    # 402 — and for nothing else. A frame reason here would be the CWD bug.
+    assert not any("gone at verdict time" in r for r in ev["gate_disqualified_reasons"]), (
+        ev["gate_disqualified_reasons"]
+    )
+    assert ev["verdict_counts"]["match"] == 40
