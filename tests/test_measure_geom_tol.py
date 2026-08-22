@@ -361,20 +361,277 @@ def test_default_out_is_absolute_and_repo_anchored() -> None:
 
 
 def test_the_default_artifact_does_not_follow_the_callers_cwd(tmp_path: Path, monkeypatch) -> None:
-    """Run from an unrelated directory with no --out: the artifact lands at the anchor, not here."""
-    corpus, masks = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    """Run from an unrelated directory with no --out: the artifact lands at the anchor, not here.
+
+    The anchor is seeded with the committed contract first, because that is what the real tracked
+    path holds and because the run is refused otherwise — see
+    ``test_the_tracked_path_may_not_be_measured_onto_when_the_contract_is_not_there``.
+    """
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
     anchor = tmp_path / "anchor" / "configs" / "transfer25" / "pr08_geom_tol.json"
+    write_contract(anchor)
     monkeypatch.setattr(mgt, "DEFAULT_OUT", anchor)
 
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
-    assert run(["--corpus", str(corpus), "--masks", str(masks)]) == mgt.EXIT_OK
+    assert run(["--corpus", str(corpus), "--method", "sam2"]) == mgt.EXIT_OK
 
     assert anchor.is_file(), "the artifact must land at the repo-anchored default"
     assert list(elsewhere.iterdir()) == [], (
         f"the caller's CWD must stay untouched, found {[p.name for p in elsewhere.iterdir()]}")
     assert json.loads(anchor.read_text())["artifact_path"] == str(anchor)
+
+
+# -- the committed segmenter contract survives the measurement it constrains ----------------------
+#
+# The defect these cover, in one sentence: the pre-measurement contract lives at exactly
+# DEFAULT_OUT_REL, so the first real GEOM_TOL run wrote its own schema over it, the contract was
+# gone, and measure_est_drift refused every later run with geom_tol_does_not_record_segmenter_params
+# — the gate was not wrong, it was unreachable, permanently.
+
+
+def test_a_measurement_carries_the_committed_contract_forward_instead_of_erasing_it(
+    tmp_path, monkeypatch
+) -> None:
+    """The whole point. Measure onto the path that holds the contract and the contract is still
+    there afterwards, byte for byte, in the place the consumer looks — and the number is beside it
+    rather than instead of it."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = write_contract(tmp_path / "pr08_geom_tol.json")
+    committed = json.loads(out.read_text())
+
+    assert run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)]) == mgt.EXIT_OK
+    rec = json.loads(out.read_text())
+
+    for key in mgt.CONTRACT_SECTION_FIELDS:
+        assert rec[key] == committed[key], f"{key} was altered by the measurement"
+    assert rec["GEOM_TOL_px"] is not None
+    # Both places the reader looks, and they mean different things: what was committed, and what
+    # ran. The guard has just proved them equal.
+    assert mgt.committed_segmenter_contract(rec) == (committed["segmenter"], "segmenter")
+    assert rec["mask_method"]["params"]["segmenter"] == committed["segmenter"]
+
+
+def test_the_measurement_fills_the_contracts_null_slot_rather_than_leaving_two_spellings(
+    tmp_path, monkeypatch
+) -> None:
+    """``run_g0_gates._first_present`` REFUSES a document stating one quantity under two spellings
+    that disagree. A contract slot left null beside a measured ``GEOM_TOL_px`` is exactly that, so
+    carrying the contract forward without filling ``geom_tol_px`` would have replaced one
+    unreachable gate with another."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = write_contract(tmp_path / "pr08_geom_tol.json")
+    assert run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)]) == mgt.EXIT_OK
+
+    rec = json.loads(out.read_text())
+    assert rec["geom_tol_px"] == rec["GEOM_TOL_px"]
+    assert rec["geom_tol_source"], "the slot must say who measured it, not merely hold a float"
+    # EST_DRIFT_P95 is measured by the other script and this one must not appear to have.
+    assert rec["est_drift_p95_px"] is None
+    assert rec["gate_margin_px"] is None
+
+
+def test_a_measurement_does_not_erase_an_est_drift_budget_already_in_the_file(
+    tmp_path, monkeypatch
+) -> None:
+    """A GEOM_TOL run must not delete a measurement of something else.
+
+    The record this module builds carries ``est_drift_p95_px: None`` hardcoded — this script does
+    not measure that number — so copying the contract forward without care would null a budget
+    somebody had already carried into the committed document, on a re-measure. ``gate_margin_px``
+    is the opposite case: it is DERIVED, so carrying the old one forward would leave the artifact
+    disagreeing with its own arithmetic, which run_g0_gates refuses outright."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = write_contract(tmp_path / "pr08_geom_tol.json",
+                         est_drift_p95_px=0.5, est_drift_source="pr08_est_drift.json",
+                         est_drift_estimator_name="sam2-hiera-large+gdino-base",
+                         gate_margin_px=99.0)
+
+    assert run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)]) == mgt.EXIT_OK
+    rec = json.loads(out.read_text())
+    assert rec["est_drift_p95_px"] == 0.5, "a GEOM_TOL run must not erase EST_DRIFT_P95"
+    assert rec["est_drift_source"] == "pr08_est_drift.json"
+    assert rec[mgt.EST_DRIFT_NAME_FIELD] == "sam2-hiera-large+gdino-base", (
+        "the join key travels with the number it names, or the number cannot be joined to this half"
+    )
+    assert rec["gate_margin_px"] == rec["geom_tol_px"] - 0.5, (
+        "the margin is derived from THIS tolerance, not carried from the last one"
+    )
+
+
+def test_a_carried_budget_survives_a_document_that_never_declared_the_name_slot(
+    tmp_path, monkeypatch
+) -> None:
+    """A document committed before ``est_drift_estimator_name`` existed declares the SHORTER
+    measurement_fields list. Taking that list alone would drop the name from the artifact written
+    over it — carrying the budget forward while losing the only evidence of which segmenter
+    produced it, which is refused three lines later. The carry is the union of the two lists."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = write_contract(
+        tmp_path / "pr08_geom_tol.json",
+        measurement_fields=["geom_tol_px", "geom_tol_source", "est_drift_p95_px",
+                            "est_drift_source", "gate_margin_px"],
+        est_drift_p95_px=0.5,
+        est_drift_estimator_name="sam2-hiera-large+gdino-base",
+    )
+    assert run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)]) == mgt.EXIT_OK
+    rec = json.loads(out.read_text())
+    assert rec[mgt.EST_DRIFT_NAME_FIELD] == "sam2-hiera-large+gdino-base"
+
+
+@pytest.mark.parametrize(
+    "extra,needle",
+    [
+        ({"est_drift_p95_px": 0.5}, "and no est_drift_estimator_name"),
+        (
+            {"est_drift_p95_px": 0.5, "est_drift_estimator_name": "some-other-segmenter"},
+            "would name two segmenters",
+        ),
+    ],
+)
+def test_a_budget_whose_segmenter_is_unnamed_or_different_writes_nothing(
+    tmp_path, monkeypatch, extra, needle
+) -> None:
+    """PR-08 §6 subtracts EST_DRIFT_P95 from GEOM_TOL and §4 step 2 requires one segmenter behind
+    both. A number in this document with no name beside it leaves run_g0_gates unable to check that
+    for ever — a gate that cannot say yes — and a name that disagrees is two quantities being
+    subtracted. Both stop the run with nothing written, where the fix is free."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = write_contract(tmp_path / "pr08_geom_tol.json", **extra)
+    before = out.read_bytes()
+
+    code = run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)])
+    assert code == mgt.EXIT_FATAL
+    assert out.read_bytes() == before, "nothing may be written when the join key is not there"
+    assert not mgt.sidecar_path(out).exists()
+
+
+def test_a_run_whose_segmenter_disagrees_with_the_contract_writes_nothing_at_all(
+    tmp_path, monkeypatch
+) -> None:
+    """The reason the contract is committed FIRST. A threshold moved after seeing the number is
+    invisible in the result — the same adapter at two thresholds returns two plausible tolerances
+    under one ESTIMATOR_NAME — so the disagreement has to stop the run, and it has to name the
+    field."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = write_contract(tmp_path / "pr08_geom_tol.json",
+                         {**STUB_CONTRACT, "box_threshold": 0.35})
+    before = out.read_bytes()
+
+    rc = run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)])
+    assert rc == mgt.EXIT_FATAL
+    assert out.read_bytes() == before, "the committed contract must survive a refused run untouched"
+    assert not mgt.sidecar_path(out).exists()
+
+
+def test_a_disagreeing_run_names_the_field_and_both_values(tmp_path, monkeypatch, capsys) -> None:
+    """"The segmenters disagree" is not an actionable message: a moved box_threshold and a moved
+    checkpoint revision have different fixes."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = write_contract(tmp_path / "pr08_geom_tol.json",
+                         {**STUB_CONTRACT, "box_threshold": 0.35})
+    run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)])
+
+    err = capsys.readouterr().err
+    assert "box_threshold" in err
+    assert "0.35" in err and "0.15" in err
+    assert "before the measurement and never after it" in err
+
+
+def test_a_method_that_cannot_state_its_segmenter_may_not_overwrite_a_contract(
+    tmp_path, monkeypatch
+) -> None:
+    """``--method precomputed`` and ``hsv-red-diagnostic`` produce no segmenter contract, so a
+    tolerance they wrote over the committed one would leave §4 step 2 permanently unanswerable —
+    and the file would still look like a finished gate artifact."""
+    corpus, masks = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    out = write_contract(tmp_path / "pr08_geom_tol.json")
+    before = out.read_bytes()
+
+    rc = run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(out)])
+    assert rc == mgt.EXIT_FATAL
+    assert out.read_bytes() == before
+
+
+def test_a_scratch_out_that_holds_no_contract_is_overwritten_as_before(
+    tmp_path, monkeypatch
+) -> None:
+    """The guard is about a file that made a pre-commitment, not about every existing file. A
+    diagnostic re-run over yesterday's scratch artifact must still work, or the guard becomes a
+    thing people route around with rm."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    out = tmp_path / "scratch.json"
+    out.write_text(json.dumps({"schema": "something-else", "GEOM_TOL_px": 99.0}))
+    assert run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)]) == mgt.EXIT_OK
+    assert json.loads(out.read_text())["GEOM_TOL_px"] == 2.0
+    # Nothing was carried forward, because there was no contract to carry.
+    assert "segmenter" not in json.loads(out.read_text())
+
+
+def test_the_tracked_path_may_not_be_measured_onto_when_the_contract_is_not_there(
+    tmp_path, monkeypatch
+) -> None:
+    """The other half. A deleted or never-created contract would let a measurement write the
+    tracked path with nothing to have been checked against, and the artifact is then
+    indistinguishable from one that WAS checked. ``git checkout`` is cheaper than a re-run of a
+    402-episode corpus."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 5))})
+    anchor = tmp_path / "configs" / "transfer25" / "pr08_geom_tol.json"
+    monkeypatch.setattr(mgt, "DEFAULT_OUT", anchor)
+
+    assert run(["--corpus", str(corpus), "--method", "sam2"]) == mgt.EXIT_FATAL
+    assert not anchor.exists()
+    # ...and an --out elsewhere is untouched by that rule: it is scratch, and scratch is free.
+    assert run(["--corpus", str(corpus), "--method", "sam2",
+                "--out", str(tmp_path / "scratch.json")]) == mgt.EXIT_OK
+
+
+def test_an_adapter_that_declares_no_segmenter_contract_is_not_gate_qualified(
+    tmp_path, monkeypatch
+) -> None:
+    """Gate qualification is the claim that this number may set G0b's tolerance, and PR-08 §4 step 2
+    is uncheckable against a module that never said what operating point it ran at. An uncheckable
+    requirement reads downstream exactly like a satisfied one, which is why this is withheld here
+    rather than left to the consumer."""
+    install_adapter(monkeypatch, with_contract=False)
+    method = mgt.resolve_method(mgt._parse_args(["--corpus", str(tmp_path), "--method", "sam2"]))
+    assert method.gate_qualified is False
+    assert "SEGMENTER_CONTRACT" in method.params["gate_qualification_withheld_reason"]
+    assert method.params["segmenter"] is None
+
+
+def test_the_merge_wears_the_same_contract_guard_as_the_measurement(tmp_path) -> None:
+    """--merge writes the committed path too — that is what the merge is FOR — so a merged artifact
+    that could erase the contract would reopen the hole on the second of the two write paths."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    shards = _sharded(tmp_path, corpus, masks, 3)
+    out = write_contract(tmp_path / "pr08_geom_tol.json")
+    before = out.read_bytes()
+
+    # These shards were measured with --masks, which states no segmenter contract.
+    assert run(["--merge", *shards, "--out", str(out)]) == mgt.EXIT_FATAL
+    assert out.read_bytes() == before
 
 
 # -- FIX 3: the committed artifact is on a TRACKED path, with a sidecar ----------------------------
@@ -572,6 +829,47 @@ def red_blob_segment(rgb: np.ndarray) -> np.ndarray:
     return (arr[..., 0] > 200) & (arr[..., 1] < 50) & (arr[..., 2] < 50)
 
 
+#: The shape ``scripts/estimators/apple_sam2.SEGMENTER_CONTRACT`` has, small enough to read in a
+#: failure message and complete enough that a field can be perturbed one at a time. The real one is
+#: not imported: these tests must run with no transformers, no weights and no GPU, and a fixture
+#: that drags the adapter in would be asserting that this machine can load SAM 2.
+STUB_CONTRACT: dict = {
+    "method_name": "sam2-hiera-large+gdino-base",
+    "detector": {"repo": "IDEA-Research/grounding-dino-base", "revision": "12bdfa31"},
+    "segmenter": {"repo": "facebook/sam2-hiera-large", "revision": "e6a8e880"},
+    "depth": {"repo": "depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf",
+              "revision": "d2fc6a93"},
+    "object_text_prompt": "apple.",
+    "box_threshold": 0.15,
+    "text_threshold": 0.25,
+    "box_selection": "highest_score",
+    "propagation": "per_frame",
+    "pixel_grid_hw": [480, 640],
+}
+
+
+def write_contract(path: Path, contract: dict | None = None, **extra) -> Path:
+    """Put a pre-measurement contract document at ``path``, in the committed file's own shape.
+
+    Mirrors ``configs/transfer25/pr08_geom_tol.json``: a contract section named by
+    ``contract_fields``, a measurement section of nulls named by ``measurement_fields``. Written by
+    hand rather than copied from the repo so a test can perturb one field and still be a valid
+    document — and so these tests do not fail when the real contract is legitimately re-committed.
+    """
+    doc = {
+        "spec_version": "1.0.0",
+        "what_this_is": "test fixture standing in for the committed PR-08 contract",
+        "contract_fields": list(mgt.CONTRACT_SECTION_FIELDS),
+        "measurement_fields": list(mgt.CONTRACT_MEASUREMENT_FIELDS),
+        "segmenter": dict(contract or STUB_CONTRACT),
+        **{k: None for k in mgt.CONTRACT_MEASUREMENT_FIELDS},
+        **extra,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=2) + "\n")
+    return path
+
+
 def install_adapter(
     monkeypatch,
     *,
@@ -582,17 +880,23 @@ def install_adapter(
     available: bool | None = True,
     segment=red_blob_segment,
     with_depth: bool = True,
+    contract: dict | None = None,
+    with_contract: bool = True,
 ) -> types.ModuleType:
     """Install a stub of ``estimators.apple_sam2`` satisfying the estimator contract.
 
     ``None`` for ``gate_qualified`` or ``available`` means the attribute is ABSENT, which is a
     different statement from False and is tested separately: absent is what a module written without
-    thinking about the gate looks like.
+    thinking about the gate looks like. ``with_contract=False`` is the same distinction for
+    ``SEGMENTER_CONTRACT``: a module that never declared its operating point, which cannot be
+    gate-qualified because PR-08 §4 step 2 would be uncheckable against it.
     """
     mod = types.ModuleType(SAM2_SPEC)
     mod.ESTIMATOR_NAME = name
     mod.ESTIMATOR_VERSION = version
     mod.segment = segment
+    if with_contract:
+        mod.SEGMENTER_CONTRACT = dict(contract or {**STUB_CONTRACT, "method_name": name})
     if with_depth:
         mod.estimate_depth = lambda rgb: np.zeros(np.asarray(rgb).shape[:2], dtype="float32")
     if gate_qualified is not None:
@@ -1174,25 +1478,64 @@ def test_the_masks_path_writes_the_same_order(tmp_path) -> None:
 
 
 def _est_drift_fields_read_from_source() -> set[str]:
-    """Every ``doc.get("...")`` literal inside ``measure_est_drift.cross_check_geom_tol``.
+    """Every ``.get("...")`` literal ``measure_est_drift.cross_check_geom_tol`` reaches.
 
-    Parsed out of that function's source rather than copied from it, so the day it grows a field
-    this test fails here instead of the field being silently absent from every artifact this module
-    writes.
+    Parsed out of source rather than copied from it, so the day the reader grows a field this test
+    fails here instead of the field being silently absent from every artifact this module writes.
+
+    IT FOLLOWS THE READER INTO ITS HELPERS, and that is not thoroughness — it is the repair of a
+    real hole. The walk used to cover ``cross_check_geom_tol``'s own body only, so when the
+    committed-contract lookup moved into ``committed_segmenter_contract()`` the two names it reads
+    (``segmenter``, ``params``) vanished from this check AND from
+    ``CROSS_CHECK_FIELDS_READ_BY_EST_DRIFT``, and the artifact went on publishing
+    ``cross_check_limits.fields_it_reads`` as a list that understated what the reader read. A guard
+    that a refactor can disarm is not a guard; this one resolves every call to a module-level
+    function of ``measure_est_drift`` and walks that too, transitively.
     """
     import ast
     import inspect
     import textwrap
+    import types
 
-    fn = ast.parse(textwrap.dedent(inspect.getsource(ed.cross_check_geom_tol)))
     keys: set[str] = set()
-    for node in ast.walk(fn):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get" and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)):
-            keys.add(node.args[0].value)
+    seen: set[str] = set()
+    queue = [ed.cross_check_geom_tol]
+    while queue:
+        fn = queue.pop()
+        if fn.__name__ in seen:
+            continue
+        seen.add(fn.__name__)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if (isinstance(node.func, ast.Attribute) and node.func.attr == "get" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                keys.add(node.args[0].value)
+            # A bare name that resolves to a function on the reader's module is a place the read
+            # could have moved to. Imported names resolve too: `committed_segmenter_contract` is
+            # measure_geom_tol's, reached through measure_est_drift's namespace, which is exactly
+            # the refactor that hid it.
+            if isinstance(node.func, ast.Name):
+                target = getattr(ed, node.func.id, None)
+                if isinstance(target, types.FunctionType):
+                    queue.append(target)
     return keys
+
+
+def test_the_guard_over_the_consumers_reads_follows_it_into_its_helpers() -> None:
+    """The guard above is only worth having if a read that MOVES cannot escape it.
+
+    ``committed_segmenter_contract`` is where the segmenter lookup lives, it is imported into
+    ``measure_est_drift`` from ``measure_geom_tol``, and its two literals must be found. If this
+    fails, the parser has stopped following the reader and the declaration test below is passing
+    vacuously."""
+    reached = _est_drift_fields_read_from_source()
+    assert {"segmenter", "params"} <= reached, (
+        "the walk no longer reaches committed_segmenter_contract(); the field declaration is "
+        "unguarded again"
+    )
 
 
 def test_the_fields_the_consumer_reads_are_the_fields_this_module_declares() -> None:
@@ -1204,23 +1547,33 @@ def test_the_fields_the_consumer_reads_are_the_fields_this_module_declares() -> 
     assert "frame_hw" not in mgt.CROSS_CHECK_FIELDS_REQUIRED
 
 
-def test_the_consumers_grid_check_is_absence_permissive_and_the_producer_closes_its_half(
+def test_a_stripped_artifact_is_disqualified_by_name_and_would_never_have_been_written(
     tmp_path, monkeypatch
 ) -> None:
-    """``if theirs_hw is not None and ...``: an artifact with no ``resolution_hw`` passes the grid
-    comparison by saying nothing, and downstream that is indistinguishable from a comparison that
-    ran and agreed — the default-permissive shape this repo has already removed once. The reader is
-    not this module's to fix. What is: never being the producer of such an artifact."""
+    """An artifact with no ``resolution_hw`` used to pass the consumer's grid comparison BY SAYING
+    NOTHING (``if theirs_hw is not None and ...``), which downstream is indistinguishable from a
+    comparison that ran and agreed. The reader was repaired on 2026-08-22: each field it needs and
+    does not find is its own ``geom_tol_does_not_record_<field>``. This asserts BOTH halves — the
+    reader refusing, and this module never being the producer of such an artifact — because either
+    one alone is a check that can be removed without a test noticing."""
     out = _sam2_artifact(tmp_path, monkeypatch)
     monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", out)
     monkeypatch.setattr(ed, "_REPO_ROOT", out.parent)
 
-    # The consumer, demonstrated on a stripped artifact: two different grids, and it says nothing.
     stripped = json.loads(out.read_text())
     stripped.pop("resolution_hw")
+    # The contract carried into the artifact states the grid too, so strip that as well: this test
+    # is about a document that says NOTHING about its grid, not about the fallback path.
+    stripped.pop("segmenter", None)
+    stripped["mask_method"]["params"].pop("segmenter", None)
     out.write_text(json.dumps(stripped))
     reasons, compare = ed.cross_check_geom_tol([7, 9])
-    assert "resolution_disagrees_with_geom_tol" not in reasons
+    assert "geom_tol_does_not_record_resolution_hw" in reasons, (
+        "silence about the grid must disqualify, not pass"
+    )
+    assert "resolution_disagrees_with_geom_tol" not in reasons, (
+        "and it must not be reported as a comparison that ran"
+    )
     assert compare["geom_tol_resolution_hw"] is None
 
     # The producer's half: that record would never have been written.
@@ -1258,28 +1611,54 @@ def test_consumer_asserts_names_the_join_key_it_is_organised_around(tmp_path, mo
 
     join = [a for a in asserts if "mask_method.name" in a and "estimators.name" in a]
     assert join, "the segmenter join key is absent from the artifact's own checklist"
-    assert "NOTHING ENFORCES THIS" in join[0], "and it must say that nobody checks it for you"
+    # The entry must tell a consumer WHAT IN THIS DOCUMENT to check the name against. Until
+    # 2026-08-22 it named only the other artifact and the measurement-time enforcement inside
+    # measure_est_drift, so a consumer holding a finished tolerance had nothing to compare and
+    # run_g0_gates could only answer "could not check" — for ever, on every run.
+    assert mgt.EST_DRIFT_NAME_FIELD in join[0], (
+        "the checklist must name the field this document carries the other half's segmenter in"
+    )
+    assert "measurement-time" in join[0] or "measurement time" in join[0], (
+        "and it must still say which half of the check runs only while the measurement is running"
+    )
+    assert "NOTHING ENFORCES THIS" not in join[0], (
+        "that claim was falsified when cross_check_geom_tol gained the name comparison"
+    )
+    assert any("segmenter" in a and "revision" in a for a in asserts), (
+        "a name is not a segmenter: the checklist must name the block, not only the string"
+    )
     assert any("resolution_hw" in a for a in asserts)
     # Every field the consumer's cross-check reads is named somewhere in the checklist it follows.
     for field in mgt.CROSS_CHECK_FIELDS_REQUIRED:
         assert any(field in a for a in asserts), field
 
 
-def test_the_artifact_records_where_the_consumer_is_weaker_than_it_reads(
+def test_the_artifact_records_what_the_consumer_checks_and_does_not_still_claim_the_old_limits(
     tmp_path, monkeypatch
 ) -> None:
-    """Both limits are in the machine-readable artifact, not only in a docstring in this repo — the
-    consumer reads the JSON."""
+    """``cross_check_limits`` is the one field whose job is to tell a later reader what was and was
+    not compared, so a falsified statement in it is worse than an absent one.
+
+    Two of its keys asserted, into every artifact this module wrote, that the consumer never
+    compared the estimator name and that its grid check passed on absence. Both were closed on
+    2026-08-22, hours before this artifact's shape was last edited. This asserts the replacements
+    say the true thing AND that the falsified keys are gone — a stale limit is a reader re-checking
+    by hand something the machine already checks, and a reader who finds one wrong stops trusting
+    the rest of the block."""
     rec = json.loads(_sam2_artifact(tmp_path, monkeypatch).read_text())
     limits = rec["cross_check_limits"]
 
     assert limits["fields_it_reads"] == list(mgt.CROSS_CHECK_FIELDS_READ_BY_EST_DRIFT)
     assert limits["fields_this_artifact_guarantees"] == list(mgt.CROSS_CHECK_FIELDS_REQUIRED)
-    assert "never asserts mask_method.name == estimators.name" in \
-        limits["estimator_name_is_recorded_not_compared"]
-    assert "absence" in limits["grid_comparison_is_absence_permissive"] or \
-        "WITHOUT it" in limits["grid_comparison_is_absence_permissive"]
     assert "cross_check_geom_tol" in limits["checked_by"]
+    assert "estimator_name_is_recorded_not_compared" not in limits
+    assert "grid_comparison_is_absence_permissive" not in limits
+    assert "mask_method_disagrees_with_estimator" in limits["what_the_reader_now_enforces"]
+    assert "segmenter_params_disagree_with_geom_tol" in limits["what_the_reader_now_enforces"]
+    # The limit that is REAL and replaces them: none of it runs for a consumer holding two
+    # finished artifacts.
+    assert "checked by nobody" in limits["it_only_runs_at_measurement_time"]
+    assert "REFUSES" in limits["the_committed_contract_is_write_protected_here"]
 
 
 # -- the file's own claims about itself -------------------------------------------------------------
@@ -1429,3 +1808,1011 @@ def test_the_pyav_reader_yields_bgr_because_everything_downstream_assumes_cv2s_o
     # Lossy codec: assert the ordering, not the exact values.
     assert r > 200 and b < 60 and g < 60, f"expected BGR of pure red, got (b,g,r)=({b},{g},{r})"
     assert fps == pytest.approx(30.0)
+
+
+# -- sharding, and the merge that has to put the median back together ------------------------------
+#
+# The pilot (cluster job 189588) measured the full GEOM_TOL run at 4.005 GPU-h against a 4 h MaxWall
+# on every Discoverer+ QoS, so the committed number cannot be produced by one job. It is produced by
+# N and merged, and the merge is where the interesting failures live:
+#
+#   the median is         GEOM_TOL is "the median per-step object-centroid displacement in the
+#   averaged instead      source clips" (PR-08 §6). A median does NOT decompose. The median of the
+#   of pooled             shard medians has the right units and a plausible magnitude and is a
+#                         different number, and nothing downstream re-derives GEOM_TOL, so the error
+#                         is permanent and invisible. The fixture below is built so the two ANSWERS
+#                         DIFFER — a merge that averaged would fail loudly rather than by luck.
+#
+#   a shard goes missing  Seven of eight array tasks land, the eighth hits the wall. A merge over
+#   and the merge         seven shards is a median over 7/8 of the corpus wearing the name of the
+#   proceeds              whole. Every refusal here is fatal with nothing written.
+#
+#   a shard artifact is   A shard is a partial measurement. If one can be committed as GEOM_TOL then
+#   committed as the      the gate is set from a twelfth of the corpus. Three independent statements
+#   number                stop it: a different schema, GEOM_TOL_px null, is_shard true.
+#
+#   the partition moves   An --episode-range is an index into the episode list, so one added clip
+#   under the chain       renumbers everything after it — and shards are computed by different jobs
+#                         at different times. Assignment is a digest of the episode KEY instead, and
+#                         PYTHONHASHSEED makes hash() the wrong digest.
+
+
+def _sharded(tmp_path: Path, corpus: Path, masks: Path, n: int,
+             extra: list[str] | None = None) -> list[str]:
+    """Run all ``n`` shards over the same corpus and return their artifact paths."""
+    paths = []
+    for i in range(n):
+        p = tmp_path / f"shard-{i}.json"
+        rc = run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(p),
+                  "--shard", str(i), "--num-shards", str(n), *(extra or [])])
+        assert rc == mgt.EXIT_OK, f"shard {i} exited {rc}"
+        paths.append(str(p))
+    return paths
+
+
+def _eleven_episode_corpus(tmp_path: Path) -> tuple[Path, Path]:
+    """Eleven episodes of differing length and speed, chosen so the shards are UNBALANCED.
+
+    Under the key digest at N=3 this splits 6/2/3, which is the realistic case and is also the case
+    where averaging the shard medians is most obviously wrong: the pooled median is 3.1623 px and
+    the median of the three shard medians is 2.7361 px. A fixture that split evenly and moved at one
+    speed would let a merge that averaged pass.
+    """
+    return make_corpus(tmp_path, {
+        f"ep{i:02d}": walk((10, 10 + 3 * i), (1 + (i % 5), i % 3), 6 + (i % 4))
+        for i in range(11)
+    })
+
+
+def test_a_shard_that_measured_less_than_it_was_assigned_stops_the_merge(tmp_path: Path) -> None:
+    """THE COVERAGE PROOF WAS WEAKER THAN THE ARTIFACT IT WROTE.
+
+    The union was taken over each shard's ASSIGNED ``episode_keys`` while the pooled displacements
+    come from ``per_episode``, so an episode assigned and never measured was in the first list and
+    absent from the second, nothing fired, and ``merged_from.refusals_checked`` recorded "the union
+    of covered episodes is not the corpus, exactly once each" as a check that had been performed.
+    A later reader trusting that line would believe measurement coverage was proved when only
+    assignment coverage was — on the one number PR-08 §6 defines over the whole source corpus and
+    that nobody re-derives.
+    """
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    shards = _sharded(tmp_path, corpus, masks, 3)
+
+    victim = Path(shards[0])
+    rec = json.loads(victim.read_text())
+    dropped = rec["per_episode"].pop()["episode"]
+    victim.write_text(json.dumps(rec))
+
+    out = tmp_path / "merged.json"
+    assert run(["--merge", *shards, "--out", str(out)]) == mgt.EXIT_FATAL
+    assert not out.exists()
+    assert dropped  # the episode that vanished is named in the refusal, checked below
+
+
+def test_that_refusal_names_the_unaccounted_episode_and_the_arithmetic(
+    tmp_path: Path, capsys
+) -> None:
+    """A merge refusal has to say which episode and how the counts fail to add up, because the fix
+    is to re-run one shard and the operator has to know which."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    shards = _sharded(tmp_path, corpus, masks, 3)
+    victim = Path(shards[0])
+    rec = json.loads(victim.read_text())
+    dropped = rec["per_episode"].pop()["episode"]
+    victim.write_text(json.dumps(rec))
+
+    run(["--merge", *shards, "--out", str(tmp_path / "merged.json")])
+    err = capsys.readouterr().err
+    assert dropped in err
+    assert "UNACCOUNTED FOR" in err
+    assert "measured" in err and "skipped" in err
+
+
+def test_an_episode_a_shard_was_not_assigned_cannot_be_pooled_by_it(tmp_path: Path) -> None:
+    """The count identity alone is satisfiable by a shard that measured somebody else's episode and
+    skipped one of its own — a double-count in the median and a hole in the corpus at once."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    shards = _sharded(tmp_path, corpus, masks, 3)
+
+    a, b = Path(shards[0]), Path(shards[1])
+    rec_a, rec_b = json.loads(a.read_text()), json.loads(b.read_text())
+    rec_a["per_episode"].append(dict(rec_b["per_episode"][0]))
+    rec_a["n_episodes_skipped_no_masks"] = 1
+    a.write_text(json.dumps(rec_a))
+
+    assert run(["--merge", *shards, "--out", str(tmp_path / "merged.json")]) == mgt.EXIT_FATAL
+
+
+def test_an_episode_a_shard_legitimately_skipped_still_merges_and_is_counted(
+    tmp_path: Path
+) -> None:
+    """PARITY WITH THE UN-SHARDED RUN, which is the property the whole merge design rests on.
+
+    An episode with no mask directory is skipped and named on both paths, so the merge must accept
+    it — refusing here would make a merged run stricter than the single-job run it is supposed to be
+    identical to. What it must NOT do is call that corpus coverage: ``coverage_proof`` records the
+    measured count and the skipped count separately, so the artifact states what was proved."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    import shutil
+
+    victim = sorted(p for p in masks.iterdir() if p.is_dir())[0]
+    shutil.rmtree(victim)
+
+    shards = _sharded(tmp_path, corpus, masks, 3)
+    out = tmp_path / "merged.json"
+    assert run(["--merge", *shards, "--out", str(out)]) in (mgt.EXIT_OK,
+                                                            mgt.EXIT_NOT_GATE_QUALIFIED)
+    proof = json.loads(out.read_text())["merged_from"]["coverage_proof"]
+    assert proof["corpus_episodes"] == 11
+    assert proof["assigned_episodes"] == 11
+    assert proof["measured_episodes"] == 10
+    assert proof["skipped_no_masks"] == 1
+
+
+def test_the_merge_refuses_two_shards_that_read_two_cameras_or_two_corpora(
+    tmp_path: Path
+) -> None:
+    """``corpus_episode_keys_sha256`` digests episode KEYS, so two roots holding the same episode
+    names agree on it while holding different pixels — and ``camera_key`` selects which pixels were
+    measured at all. Both are carried into the committed artifact from shard 0, so a disagreement
+    means the artifact names one corpus and one camera while half its displacements came from
+    somewhere else."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+
+    for field, value in (("camera_key", "wrist"), ("corpus", "/somewhere/else")):
+        shards = _sharded(tmp_path, corpus, masks, 3)
+        victim = Path(shards[0])
+        rec = json.loads(victim.read_text())
+        rec[field] = value
+        victim.write_text(json.dumps(rec))
+        assert run(["--merge", *shards, "--out", str(tmp_path / f"{field}.json")]) == \
+            mgt.EXIT_FATAL, field
+
+
+def test_the_shards_cover_every_episode_exactly_once(tmp_path: Path) -> None:
+    """The property the whole merge rests on. Not "the counts add up" — WHICH episodes.
+
+    Eight shards reporting 50 episodes each sum to 400 whether they covered 400 distinct episodes or
+    380 with 20 counted twice, so the artifact records the keys and this asserts on the keys.
+    """
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+
+    seen: list[str] = []
+    for p in paths:
+        rec = json.loads(Path(p).read_text())
+        seen += rec["shard"]["episode_keys"]
+        assert rec["shard"]["n_episodes_in_shard"] == len(rec["shard"]["episode_keys"])
+        assert rec["n_episodes"] == len(rec["shard"]["episode_keys"])
+
+    expected = json.loads(Path(paths[0]).read_text())["corpus_episode_keys"]
+    assert len(expected) == 11
+    assert sorted(seen) == sorted(expected), "the union must be the corpus"
+    assert len(seen) == len(set(seen)), "no episode may be measured twice"
+    # And unbalanced, on purpose: a fixture that happened to split evenly would not exercise the
+    # case the assignment rule was chosen for.
+    sizes = sorted(len(json.loads(Path(p).read_text())["shard"]["episode_keys"]) for p in paths)
+    assert sizes[0] != sizes[-1], "this fixture is meant to be unbalanced"
+
+
+def test_every_episode_index_is_its_place_in_the_full_enumeration(tmp_path: Path) -> None:
+    """The merge's sort key. A serial number within the shard would rebuild the pool in the wrong
+    order, which the median would survive and mean_px, std_px and the histogram would not."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+
+    got: dict[int, str] = {}
+    for p in paths:
+        for ep in json.loads(Path(p).read_text())["per_episode"]:
+            got[ep["episode_index"]] = ep["episode"]
+    assert sorted(got) == list(range(11))
+    assert [got[i] for i in range(11)] == [f"ep{i:02d}" for i in range(11)]
+
+
+def test_adding_an_episode_moves_that_episode_and_no_other(tmp_path: Path) -> None:
+    """Why the assignment is a digest of the KEY and not a slice of the LIST.
+
+    A shard chain is resumable: shard 3 may be computed on Tuesday and shard 7 re-run on Wednesday
+    after a preemption. With an --episode-range, one clip added in between renumbers every episode
+    after it, and the resulting artifacts overlap on some episodes and skip others while each one
+    stays internally consistent. Here, the new episode moves and nothing else does.
+    """
+    before = {k: mgt.shard_of(k, 8) for k in (f"ep{i:02d}" for i in range(11))}
+    after = {k: mgt.shard_of(k, 8) for k in
+             list(f"ep{i:02d}" for i in range(11)) + ["ep05b"]}
+    assert all(after[k] == before[k] for k in before), "no existing episode may move"
+    assert "ep05b" in after
+
+
+def test_the_partition_does_not_depend_on_the_interpreters_hash_seed(tmp_path: Path) -> None:
+    """``hash(key) % N`` is the obvious spelling and would silently break every array job.
+
+    ``PYTHONHASHSEED`` is randomised per interpreter, so each Slurm array task would compute a
+    different partition of the same corpus — producing shards that cover some episodes twice and
+    others never, each internally consistent and each individually well-formed. This runs the
+    assignment under two fixed, different seeds and requires the same answer.
+    """
+    import os
+    import subprocess
+
+    prog = (
+        "import sys; sys.path.insert(0, %r); import measure_geom_tol as m;"
+        "print(','.join(str(m.shard_of('ep%%02d' %% i, 8)) for i in range(11)))"
+        % str(_REPO_ROOT / "scripts")
+    )
+    outs = []
+    for seed in ("0", "12345"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        outs.append(subprocess.run([sys.executable, "-c", prog], env=env, check=True,
+                                   capture_output=True, text=True).stdout.strip())
+    assert outs[0] == outs[1], f"the partition moved with PYTHONHASHSEED: {outs}"
+    assert outs[0] == ",".join(str(mgt.shard_of(f"ep{i:02d}", 8)) for i in range(11))
+
+
+# -- THE important one: the merged number is the un-sharded number, exactly ------------------------
+
+
+#: Fields that CANNOT match between a merged artifact and an un-sharded one, because they describe
+#: how the artifact was produced rather than what was measured. Everything else must be equal, and
+#: the list is short on purpose: an exact whole-record comparison is a far easier property to defend
+#: than "equal in the fields we thought to check".
+_PROVENANCE_ONLY = {
+    "measured_by",            # "... --merge" vs "..."
+    "measured_utc",           # a timestamp
+    "artifact_path",          # different --out
+    "artifact_sha256_sidecar",
+    "merged_from",            # exists only on the merged side
+}
+
+
+def test_the_merged_artifact_is_the_unsharded_artifact_exactly(tmp_path: Path) -> None:
+    """GEOM_TOL merged from three shards equals GEOM_TOL measured in one pass. Exactly — ``==``.
+
+    Not ``approx``. A merge that pooled correctly but rebuilt the array in shard order would pass an
+    approximate check on the median (order-invariant) while quietly changing ``mean_px``, ``std_px``
+    and the histogram counts, which are floating-point sums and are not. So the assertion is on the
+    WHOLE record minus five provenance fields, and the exactness is not a coincidence: shards emit
+    raw float64 displacements, ``float -> JSON -> float`` is the identity (``json.dumps`` renders a
+    float with ``repr``, the shortest round-tripping string since Python 3.1), and the merge
+    rebuilds the pool in the corpus's own enumeration order via ``episode_index``.
+    """
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    full = tmp_path / "full.json"
+    assert run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(full)]) == mgt.EXIT_OK
+    reference = json.loads(full.read_text())
+
+    merged_path = tmp_path / "merged.json"
+    assert run(["--merge", *_sharded(tmp_path, corpus, masks, 3),
+                "--out", str(merged_path)]) == mgt.EXIT_OK
+    merged = json.loads(merged_path.read_text())
+
+    assert merged["GEOM_TOL_px"] == reference["GEOM_TOL_px"], "the headline, bit for bit"
+    differing = sorted(k for k in set(reference) | set(merged)
+                       if k not in _PROVENANCE_ONLY and reference.get(k) != merged.get(k))
+    assert differing == [], f"merged and un-sharded disagree on {differing}"
+    # Named individually as well, so a future change that shrinks the record cannot make the
+    # comparison above vacuous for the fields that matter most.
+    for key in ("distribution", "per_episode", "coverage", "n_steps_measured", "n_steps_total",
+                "n_steps_dropped_object_not_visible", "n_frames", "n_episodes",
+                "n_episodes_found", "resolution_hw", "mask_method", "step_frames",
+                "gate_qualified", "headline_valid", "schema"):
+        assert merged[key] == reference[key], key
+    assert merged["schema"] == mgt.SCHEMA
+
+
+def test_the_median_of_the_shard_medians_is_not_the_answer(tmp_path: Path) -> None:
+    """The failure the whole design exists against, made visible on this fixture.
+
+    If the merge averaged (or medianed) the shard medians it would report 2.7361 px where the
+    corpus's median is 3.1623 px — a 13 % error in a gate tolerance, in the right units, from an
+    artifact that looks finished. This asserts the two are DIFFERENT here, so the equality test
+    above cannot be passing by accident on a fixture where every route gives the same answer.
+    """
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+    shard_medians = [json.loads(Path(p).read_text())["shard_median_px"] for p in paths]
+
+    merged_path = tmp_path / "merged.json"
+    assert run(["--merge", *paths, "--out", str(merged_path)]) == mgt.EXIT_OK
+    pooled = json.loads(merged_path.read_text())["GEOM_TOL_px"]
+
+    assert float(np.median(shard_medians)) != pytest.approx(pooled, rel=1e-3), (
+        "this fixture is supposed to separate the two statistics", shard_medians, pooled)
+    assert float(np.mean(shard_medians)) != pytest.approx(pooled, rel=1e-3)
+
+
+#: Fields of a merged artifact that record WHEN and WHERE this particular merge ran, rather than
+#: what it measured. Excluded from the two determinism comparisons below, and from nothing else.
+_MERGE_RUN_LOCAL = {"measured_utc", "artifact_path", "artifact_sha256_sidecar"}
+
+
+def test_the_merged_artifact_does_not_depend_on_the_order_the_shards_were_merged_in(
+        tmp_path: Path) -> None:
+    """Merging the same shards forwards, backwards and shuffled gives ONE artifact.
+
+    This is not a style point. ``--merge`` is pointed at a DIRECTORY by the sbatch, and the order a
+    directory scan yields is the filesystem's business — ``shard-10.json`` sorts before
+    ``shard-2.json``, and a re-run that rewrites one file can move it. If the record depended on
+    that order then GEOM_TOL, or the histogram counts beside it, would depend on which machine
+    globbed the directory, and the artifact's sha256 sidecar would stop being reproducible from its
+    inputs. The mechanism that makes it not depend on it is that every list in the merged record is
+    rebuilt in a key the shards carry — ``episode_index`` for the pool, ``shard.index`` for the
+    provenance — and never in the order the arguments arrived.
+    """
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path / "p", corpus, masks, 3)
+
+    def merged(order: list[str], tag: str) -> dict:
+        out = tmp_path / tag / "merged.json"
+        assert run(["--merge", *order, "--out", str(out)]) == mgt.EXIT_OK
+        return json.loads(out.read_text())
+
+    forward = merged(list(paths), "fwd")
+    for tag, order in (("rev", list(reversed(paths))), ("mix", [paths[1], paths[2], paths[0]])):
+        other = merged(order, tag)
+        differing = sorted(k for k in set(forward) | set(other)
+                           if k not in _MERGE_RUN_LOCAL and forward.get(k) != other.get(k))
+        assert differing == [], f"merge order {tag} changed {differing}"
+    # Including the provenance block, which is the one that names the shards and could plausibly
+    # have been built in argument order.
+    assert [s["index"] for s in forward["merged_from"]["shards"]] == [0, 1, 2]
+
+    # AND ON A FIXTURE WHERE THE ORDER COULD SHOW. Everything above is measured from precomputed
+    # masks, where every field the merge templates forward is identical across the shards by the
+    # time the refusals have run — so the comparison passes even if the template were taken from
+    # "whichever shard was listed first" rather than from shard 0. `decoder.note` is the ONE
+    # templated field the merge deliberately allows to differ between shards (each probes its own
+    # first clip), so it is the only lever that can tell the two rules apart. Give the shards
+    # different notes and the choice becomes observable.
+    def with_notes(i, rec):
+        rec["decoder"] = {"name": "pyav", "version": "16.0.1", "selected": "auto",
+                          "note": f"Selected by --decoder auto after probing ep{i:02d}.mp4"}
+
+    noted = _shards_then(tmp_path / "noted", 3, with_notes)
+    first = merged(list(noted), "n-fwd")
+    last = merged(list(reversed(noted)), "n-rev")
+    assert first["decoder"]["note"] == last["decoder"]["note"], (
+        "the templated decoder block must come from shard 0, not from whichever shard the "
+        "directory scan happened to yield first")
+    assert "ep00.mp4" in first["decoder"]["note"]
+
+
+def test_two_different_partitions_of_one_corpus_merge_to_the_same_artifact(tmp_path: Path) -> None:
+    """N=2 and N=5 over ONE corpus produce one GEOM_TOL, one distribution, one per_episode.
+
+    The number PR-08 §6 defines is a property of the corpus, so how many jobs happened to measure it
+    must not be visible in it. It is worth pinning separately from the un-sharded comparison because
+    the two failures are different: that test would catch a merge that pooled in shard order at a
+    FIXED N, and this one catches a merge that pooled correctly but let N leak into a count, a
+    coverage figure or a histogram — which is what "re-run it at N=16 because N=8 hit the wall"
+    would silently do to a committed tolerance.
+
+    ``merged_from`` is the one field that differs, and differing is its job: it names the shards, so
+    it is the record OF the partition rather than a number contaminated by it.
+    """
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+
+    def merged(n: int) -> dict:
+        out = tmp_path / f"n{n}" / "merged.json"
+        assert run(["--merge", *_sharded(tmp_path / f"p{n}", corpus, masks, n),
+                    "--out", str(out)]) == mgt.EXIT_OK
+        return json.loads(out.read_text())
+
+    two, five = merged(2), merged(5)
+    differing = sorted(k for k in set(two) | set(five)
+                       if k not in _MERGE_RUN_LOCAL and two.get(k) != five.get(k))
+    assert differing == ["merged_from"], f"the partition leaked into {differing}"
+    assert two["GEOM_TOL_px"] == five["GEOM_TOL_px"], "the headline, bit for bit, across partitions"
+    assert two["merged_from"]["num_shards"] == 2 and five["merged_from"]["num_shards"] == 5
+
+
+def test_the_decoders_probe_note_is_the_one_field_a_partition_shows_through(
+        tmp_path: Path) -> None:
+    """A KNOWN, DELIBERATE EXCEPTION, pinned here so it is documented rather than discovered.
+
+    Every fixture above reads precomputed masks, so ``decoder`` is null and the two determinism
+    tests never see it. The real run decodes video, and ``--decoder auto`` writes into
+    ``decoder.note`` WHICH CLIP it probed — each shard probes its own first clip. The merge takes
+    the whole ``decoder`` block from shard 0's template (it compares only name and version across
+    shards, deliberately: comparing the note would refuse every correct sharded run), so the merged
+    artifact's note names shard 0's first clip and not the corpus's.
+
+    That makes ``decoder.note`` partition-dependent, and it means the merged artifact is NOT quite
+    byte-identical to an un-sharded run on the video path. It is prose provenance that no consumer
+    reads, and every shard's own note is preserved under ``merged_from.shards[].decoder_note``, so
+    nothing is lost — but the claim "identical to what a single un-sharded run would have written"
+    is exact only up to this field, and a test that says so is cheaper than a reader discovering it
+    in a diff of two committed artifacts.
+    """
+    def notes_from(n: int, first_clip) -> dict:
+        def mutate(i, rec):
+            rec["decoder"] = {"name": "pyav", "version": "16.0.1", "selected": "auto",
+                              "note": f"Selected by --decoder auto after probing {first_clip(i)}"}
+        out = tmp_path / f"m{n}" / "merged.json"
+        assert run(["--merge", *_shards_then(tmp_path, n, mutate),
+                    "--out", str(out)]) == mgt.EXIT_OK
+        return json.loads(out.read_text())
+
+    three = notes_from(3, lambda i: f"ep{i:02d}.mp4")
+    # The SAME corpus re-sharded; only shard 0's probe clip moves.
+    two = notes_from(2, lambda i: f"ep{i + 5:02d}.mp4")
+
+    assert three["GEOM_TOL_px"] == two["GEOM_TOL_px"], "the number is not affected"
+    assert three["distribution"] == two["distribution"]
+    assert three["decoder"]["name"] == two["decoder"]["name"] == "pyav"
+    assert three["decoder"]["note"] != two["decoder"]["note"], (
+        "if this ever becomes equal the exception has been closed and this test should be deleted")
+    # Nothing is lost: each partition still names every clip its own shards probed.
+    assert len({s["decoder_note"] for s in three["merged_from"]["shards"]}) == 3
+
+
+def test_json_carries_a_float64_displacement_back_unchanged(tmp_path: Path) -> None:
+    """The lossless claim the merge's exactness rests on, asserted rather than assumed.
+
+    If this ever stopped holding, every merged GEOM_TOL would be off by an unstated amount and the
+    module docstring's "there is no error bound to prove because there is no error" would be a lie.
+    """
+    rng = np.random.default_rng(0)
+    values = np.concatenate([
+        rng.random(512) * 1e3,
+        np.asarray([0.0, np.nextafter(0.0, 1.0), 1 / 3, np.hypot(3.0, 4.0), 1e-300, 1e300]),
+    ])
+    back = np.asarray(json.loads(json.dumps([float(v) for v in values])), dtype=float)
+    assert np.array_equal(back, values), "float -> JSON -> float must be the identity"
+
+
+# -- a shard artifact must never be mistakable for the committed number -----------------------------
+
+
+def test_a_shard_artifact_cannot_be_read_as_geom_tol(tmp_path: Path) -> None:
+    """Three independent statements, because a single flag is one oversight away from being ignored."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    rec = json.loads(Path(_sharded(tmp_path, corpus, masks, 3)[0]).read_text())
+
+    assert rec["schema"] == mgt.SHARD_SCHEMA != mgt.SCHEMA
+    assert rec["GEOM_TOL_px"] is None
+    assert rec["is_shard"] is True
+    assert rec["shard_median_px"] is not None, "the diagnostic is recorded, just not called GEOM_TOL"
+    assert "median does not decompose" in rec["geom_tol_px_is_null_because"]
+    # gate_qualified on a shard is "fit to be merged", and the artifact says so in words rather
+    # than leaving a reader to infer it from a flag that reads like the gate's.
+    assert rec["gate_qualified"] is True
+    assert "FIT TO BE MERGED" in rec["gate_qualified_scope"]
+
+
+def test_a_shard_refuses_to_write_the_committed_artifact_path(tmp_path: Path, capsys) -> None:
+    """N array tasks writing one path is a race whose winner is whichever task finished last, and
+    what it leaves behind is one shard of the corpus sitting where the gate reads GEOM_TOL."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    rc = run(["--corpus", str(corpus), "--masks", str(masks), "--shard", "0", "--num-shards", "3",
+              "--out", str(mgt.DEFAULT_OUT)])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "refuses to write the tracked default" in err
+    assert "race" in err
+
+
+def test_shard_and_num_shards_go_together(tmp_path: Path, capsys) -> None:
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    rc = run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(tmp_path / "s.json"),
+              "--shard", "0"])
+    assert rc == mgt.EXIT_FATAL
+    assert "go together" in capsys.readouterr().err
+
+
+def test_a_shard_index_outside_the_partition_is_refused(tmp_path: Path, capsys) -> None:
+    """--shard 3 --num-shards 3 measures the empty set and would report it as a clean run."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    rc = run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(tmp_path / "s.json"),
+              "--shard", "3", "--num-shards", "3"])
+    assert rc == mgt.EXIT_FATAL
+    assert "out of range" in capsys.readouterr().err
+
+
+def test_merging_and_sharding_on_one_command_line_are_refused(tmp_path: Path, capsys) -> None:
+    rc = run(["--merge", str(tmp_path / "a.json"), "--shard", "0", "--num-shards", "2",
+              "--out", str(tmp_path / "m.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "two different jobs on one command line" in capsys.readouterr().err
+
+
+def test_corpus_is_still_required_when_not_merging(tmp_path: Path, capsys) -> None:
+    """--corpus stopped being argparse-required so the merge job can run with no data mounted.
+    Every other invocation must still refuse without it, with a reason and not a usage block."""
+    rc = run(["--out", str(tmp_path / "g.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "--corpus is required" in capsys.readouterr().err
+
+
+# -- the merge's refusals. Each one its own message, each one fatal with nothing written ------------
+
+
+def _shards_then(tmp_path: Path, n: int, mutate) -> list[str]:
+    """Build ``n`` shards over the standard fixture, then let ``mutate(index, record)`` edit them.
+
+    Hand-editing the JSON is not a contrivance: a stale copy in a scan directory, a shard written by
+    an older version of the script, and a job that was pointed at the wrong corpus all reach the
+    merge as exactly this — a well-formed artifact that disagrees with its siblings.
+    """
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, n)
+    for i, p in enumerate(paths):
+        rec = json.loads(Path(p).read_text())
+        mutate(i, rec)
+        Path(p).write_text(json.dumps(rec, indent=2) + "\n")
+    return paths
+
+
+def test_a_missing_shard_is_refused_rather_than_merged(tmp_path: Path, capsys) -> None:
+    """Seven of eight array tasks land and the eighth hits the wall. The merge must not proceed."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+    out = tmp_path / "merged.json"
+
+    assert run(["--merge", paths[0], paths[2], "--out", str(out)]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "shard(s) 1 of 3 are missing" in err
+    assert "plausible magnitude" in err
+    assert not out.exists(), "a refused merge writes nothing"
+
+
+def test_two_artifacts_claiming_the_same_shard_are_refused(tmp_path: Path, capsys) -> None:
+    """A stale copy left in the scan directory would weight its episodes twice in the median."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+    stale = tmp_path / "shard-0-rerun.json"
+    stale.write_text(Path(paths[0]).read_text())
+
+    rc = run(["--merge", *paths, str(stale), "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "both claim shard index 0" in capsys.readouterr().err
+
+
+def test_shards_from_two_different_partitions_are_refused(tmp_path: Path, capsys) -> None:
+    def mutate(i, rec):
+        if i == 1:
+            rec["shard"]["num_shards"] = 4
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "disagree on num_shards" in err
+    assert "two DIFFERENT partitions" in err
+
+
+def test_shards_that_did_not_enumerate_the_same_corpus_are_refused(tmp_path: Path, capsys) -> None:
+    def mutate(i, rec):
+        if i == 2:
+            rec["shard"]["corpus_episode_keys_sha256"] = "0" * 64
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "the corpus they enumerated" in capsys.readouterr().err
+
+
+def test_shards_that_disagree_on_the_mask_method_are_refused(tmp_path: Path, capsys) -> None:
+    """PR-08 §4 step 2 requires ONE segmenter behind GEOM_TOL, because §6 subtracts EST_DRIFT_P95
+    from it and that subtraction is arithmetic only between two numbers from the same estimator."""
+    def mutate(i, rec):
+        if i == 1:
+            rec["mask_method"]["version"] = "9.9.9"
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "disagree on the mask method" in err
+    assert "PR-08 §4 step 2" in err
+
+
+def test_shards_that_disagree_on_the_decoder_are_refused(tmp_path: Path, capsys) -> None:
+    """Two readers of the same AV1 bytes are not obviously the same quantity — job 189585 read 590
+    frames off a container header and decoded none of them."""
+    def mutate(i, rec):
+        rec["decoder"] = {"name": "pyav" if i else "cv2", "version": "1.0", "selected": "auto",
+                          "note": f"probed clip {i}"}
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "disagree on the decoder" in capsys.readouterr().err
+
+
+def test_shards_whose_decoders_only_probed_different_clips_still_merge(tmp_path: Path) -> None:
+    """The other half of that refusal, and the reason it compares name and version only.
+
+    ``--decoder auto`` records WHICH clip it probed in ``decoder.note``, and each shard probes its
+    own first clip. Comparing the whole block would refuse every correct sharded run there will
+    ever be — a refusal that fires on the normal case is not a safeguard, it is an outage.
+    """
+    def mutate(i, rec):
+        rec["decoder"] = {"name": "pyav", "version": "16.0.1", "selected": "auto",
+                          "note": f"Selected by --decoder auto after probing ep{i:02d}.mp4"}
+    paths = _shards_then(tmp_path, 3, mutate)
+    out = tmp_path / "merged.json"
+    assert run(["--merge", *paths, "--out", str(out)]) == mgt.EXIT_OK
+    rec = json.loads(out.read_text())
+    assert rec["decoder"]["name"] == "pyav"
+    # ... and every shard's note is kept, so which clip each one probed is still recoverable.
+    notes = [s["decoder_note"] for s in rec["merged_from"]["shards"]]
+    assert len(set(notes)) == 3
+
+
+def test_shards_that_disagree_on_the_pixel_grid_are_refused(tmp_path: Path, capsys) -> None:
+    def mutate(i, rec):
+        if i == 0:
+            rec["resolution_hw"] = [480, 640]
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "the pixel grid" in err
+    assert "two units" in err
+
+
+def test_shards_that_disagree_on_the_step_are_refused(tmp_path: Path, capsys) -> None:
+    """GEOM_TOL scales ~linearly with what a step is taken to be, and PR-08 §6 never defines one."""
+    def mutate(i, rec):
+        if i == 2:
+            rec["step_frames"] = 2
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "step_frames" in capsys.readouterr().err
+
+
+def test_shards_that_disagree_on_the_coverage_floor_are_refused(tmp_path: Path, capsys) -> None:
+    def mutate(i, rec):
+        if i == 1:
+            rec["min_coverage"] = 0.5
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "min_coverage" in capsys.readouterr().err
+
+
+def test_a_gate_qualification_split_between_shards_is_refused(tmp_path: Path, capsys) -> None:
+    """One shard says it is fit to be merged and another says it is not. The pooled artifact would
+    be neither, and its gate flag would be a claim about only some of its own inputs."""
+    def mutate(i, rec):
+        if i == 1:
+            rec["gate_qualified"] = False
+            rec["gate_disqualified_reasons"] = ["coverage 0.400 < --min-coverage 0.9"]
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "disagree on gate_qualified" in err
+    assert "coverage 0.400" in err, "the refusal must say WHY the odd shard was disqualified"
+
+
+def test_shards_that_all_say_they_are_unfit_merge_into_a_disqualified_artifact(
+    tmp_path: Path,
+) -> None:
+    """Not a disagreement, so not a refusal — PR-08 §6 records GEOM_TOL regardless of verdict. The
+    artifact is written, stamped, and exits 3 so no chain treats it as the committed number."""
+    def mutate(i, rec):
+        rec["gate_qualified"] = False
+        rec["gate_disqualified_reasons"] = ["mask method 'synthetic-oracle' is not gate-qualified"]
+        rec["mask_method"]["gate_qualified"] = False
+    paths = _shards_then(tmp_path, 3, mutate)
+    out = tmp_path / "merged.json"
+    assert run(["--merge", *paths, "--out", str(out)]) == mgt.EXIT_NOT_GATE_QUALIFIED
+    rec = json.loads(out.read_text())
+    assert rec["gate_qualified"] is False
+    assert rec["GEOM_TOL_px"] is not None
+    assert any("shard 0:" in r for r in rec["gate_disqualified_reasons"])
+
+
+def test_an_episode_in_a_shard_it_does_not_hash_to_is_refused(tmp_path: Path, capsys) -> None:
+    """The merge re-derives the assignment rule rather than trusting the artifact. This catches an
+    artifact written under a different partition rule — including the PYTHONHASHSEED class of bug
+    the rule exists to make impossible."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+    victim = Path(paths[0])
+    rec = json.loads(victim.read_text())
+    stolen = json.loads(Path(paths[1]).read_text())["shard"]["episode_keys"][0]
+    rec["shard"]["episode_keys"].append(stolen)
+    victim.write_text(json.dumps(rec, indent=2) + "\n")
+
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "do not hash to it" in err
+    assert stolen in err
+
+
+def test_a_union_that_is_not_the_whole_corpus_is_refused(tmp_path: Path, capsys) -> None:
+    """The shards are all present, all agree, and together they have a hole in them. A merge that
+    cannot prove it saw every episode is not a merge."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+    victim = Path(paths[2])
+    rec = json.loads(victim.read_text())
+    dropped = rec["shard"]["episode_keys"].pop()
+    rec["shard"]["n_episodes_in_shard"] = len(rec["shard"]["episode_keys"])
+    rec["per_episode"] = [e for e in rec["per_episode"] if e["episode"] != dropped]
+    victim.write_text(json.dumps(rec, indent=2) + "\n")
+
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "do not cover the corpus exactly once" in err
+    assert "NEVER MEASURED (1)" in err
+    assert dropped in err
+
+
+def test_a_shard_that_reports_only_its_median_cannot_be_merged(tmp_path: Path, capsys) -> None:
+    """The refusal that stands between the merge and averaging medians. A shard that dropped its raw
+    displacements would leave the merge nothing to pool, and there is no correct fallback."""
+    def mutate(i, rec):
+        if i == 1:
+            for ep in rec["per_episode"]:
+                ep.pop("displacements_px")
+    paths = _shards_then(tmp_path, 3, mutate)
+    rc = run(["--merge", *paths, "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "a median does not" in err
+    assert "averaging medians is the wrong number" in err
+
+
+def test_a_finished_geom_tol_is_not_an_input_to_a_merge(tmp_path: Path, capsys) -> None:
+    """Merging the committed artifact back in would pool the corpus with itself."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    full = tmp_path / "full.json"
+    run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(full)])
+    rc = run(["--merge", str(full), "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "not an input to a merge" in capsys.readouterr().err
+
+
+def test_a_shard_named_explicitly_and_absent_is_a_missing_shard_not_a_filter(
+    tmp_path: Path, capsys
+) -> None:
+    rc = run(["--merge", str(tmp_path / "nope.json"), "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_a_merge_over_no_shards_is_a_missing_input_and_not_an_empty_result(
+    tmp_path: Path, capsys
+) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    rc = run(["--merge", str(empty), "--out", str(tmp_path / "merged.json")])
+    assert rc == mgt.EXIT_FATAL
+    assert "found no shard artifacts at all" in capsys.readouterr().err
+
+
+def test_a_directory_of_shards_merges_and_skips_what_is_not_a_shard(tmp_path: Path, capsys) -> None:
+    """The shape the sbatch's MERGE step uses: point it at the run directory. That directory also
+    holds the pilot artifact and, after the first merge, the merged one — a scan that refused on
+    those would be unusable, so they are skipped with a line saying so."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir()
+    for i in range(3):
+        p = shard_dir / f"shard-{i}.json"
+        assert run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(p),
+                    "--shard", str(i), "--num-shards", "3"]) == mgt.EXIT_OK
+    (shard_dir / "GEOM_TOL_PILOT.json").write_text(
+        json.dumps({"schema": "wam.pr08_geom_tol_pilot/1"}))
+
+    out = tmp_path / "merged.json"
+    assert run(["--merge", str(shard_dir), "--out", str(out)]) == mgt.EXIT_OK
+    err = capsys.readouterr().err
+    assert "skipping" in err and "GEOM_TOL_PILOT.json" in err
+    assert json.loads(out.read_text())["n_episodes"] == 11
+
+
+# -- what the merged artifact has to carry for the consumers downstream -----------------------------
+
+
+def test_the_merged_artifact_carries_what_the_gate_consumers_read(tmp_path: Path) -> None:
+    """97_transfer25_restyle.sbatch and measure_est_drift.cross_check_geom_tol() read this file and
+    nothing else. A merged artifact missing one of their fields passes their checks by saying
+    nothing, which is worse than failing them."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    out = tmp_path / "merged.json"
+    assert run(["--merge", *_sharded(tmp_path, corpus, masks, 3), "--out", str(out)]) == mgt.EXIT_OK
+    rec = json.loads(out.read_text())
+
+    assert mgt.missing_cross_check_fields(rec) == []
+    for key in ("mask_method", "decoder", "resolution_hw", "coverage", "min_coverage",
+                "GEOM_TOL_px", "gate_qualified", "step_frames", "consumer_asserts",
+                "cross_check_limits", "notes", "est_drift_p95_blocked_by"):
+        assert key in rec, key
+    assert rec["mask_method"]["params"], "params is what makes the estimator re-runnable"
+    assert rec["GEOM_TOL_px"] is not None
+    # A sidecar, exactly as the un-sharded path writes: the merged file IS the pre-commitment.
+    side = mgt.sidecar_path(out)
+    assert side.read_text().strip() == hashlib.sha256(out.read_bytes()).hexdigest()
+    # And none of the shard-only fields survived into it.
+    for key in mgt.SHARD_ONLY_FIELDS:
+        assert key not in rec, f"{key} is a shard field and must not reach the committed artifact"
+    assert "displacements_px" not in rec["per_episode"][0]
+
+
+def test_the_merged_artifact_names_the_shards_it_was_built_from(tmp_path: Path) -> None:
+    """Traceability, in the shape AC-04 asks for everywhere else: which files, and their digests."""
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+    paths = _sharded(tmp_path, corpus, masks, 3)
+    out = tmp_path / "merged.json"
+    run(["--merge", *paths, "--out", str(out)])
+    merged = json.loads(out.read_text())["merged_from"]
+
+    assert merged["num_shards"] == 3
+    assert [s["index"] for s in merged["shards"]] == [0, 1, 2]
+    for s in merged["shards"]:
+        assert s["sha256"] == hashlib.sha256(Path(s["path"]).read_bytes()).hexdigest()
+    assert sum(s["n_episodes"] for s in merged["shards"]) == 11
+    assert "does NOT decompose" in merged["pooling"]
+
+
+def test_an_empty_shard_names_the_partition_and_not_the_corpus(tmp_path: Path, capsys) -> None:
+    """--num-shards near the episode count leaves shards empty by chance, and an empty shard cannot
+    be written honestly: it decodes no frame, so it has no pixel grid, and an artifact with a null
+    ``resolution_hw`` is one the consumer's cross-check passes by comparing nothing. The refusal has
+    to point at the partition — left to fall through, the run dies on "no episode yielded any
+    frames", which is a sentence about the clips and sends the operator to the wrong place.
+    """
+    corpus, masks = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    empty = next(i for i in range(64) if mgt.shard_of("ep0", 64) != i)
+    rc = run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(tmp_path / "s.json"),
+              "--shard", str(empty), "--num-shards", "64"])
+    assert rc == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "holds no episodes" in err
+    assert "Lower --num-shards" in err
+    assert not (tmp_path / "s.json").exists()
+
+
+# -- --carry-est-drift: the merge that used to be a person with a text editor ----------------------
+#
+# PR-08 §8 item 4 wants two numbers committed, and they are measured by two scripts into two files.
+# Somebody merges them into the one document the gate reads, and the thing that merge can drop is
+# the SEGMENTER NAME — at which point run_g0_gates can never establish §4 step 2's "the same
+# segmenter" and no G0b run can return 0. These pin that the merge is code, and that every way it
+# can produce a document nobody may gate on stops it with nothing written.
+
+
+def _est_artifact(path: Path, **over) -> Path:
+    doc = {
+        "schema": "wam.est_drift/1",
+        "gate_qualified": True,
+        "est_drift_p95_px": 0.5,
+        "is_lower_bound": True,
+        "measured_utc": "2026-08-22T00:00:00+00:00",
+        "resolution_hw": [480, 640],
+        "estimators": {"name": "sam2-hiera-large+gdino-base"},
+        "geom_tol_cross_check": {"this_segmenter_contract": dict(STUB_CONTRACT)},
+        **over,
+    }
+    path.write_text(json.dumps(doc, indent=2) + "\n")
+    return path
+
+
+def test_carrying_a_budget_writes_the_number_the_name_and_the_margin(tmp_path: Path) -> None:
+    """The number alone is not carryable: PR-08 §6 subtracts it and §4 step 2 asks which segmenter
+    produced it, so the name travels with it mechanically instead of being retyped."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"},
+                         est_drift_p95_blocked_by="steps 1-4 have not been run here")
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_OK
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px"] == 0.5
+    assert doc[mgt.EST_DRIFT_NAME_FIELD] == "sam2-hiera-large+gdino-base"
+    assert "pr08_est_drift.json" in doc["est_drift_source"]
+    assert "sha256=" in doc["est_drift_source"], "AC-04: which bytes the number came out of"
+    assert doc["gate_margin_px"] == pytest.approx(3.0)
+    # The document must not go on explaining an absence that is no longer there.
+    assert doc["est_drift_p95_blocked_by"] is None
+    # The contract section is untouched: this mode carries a measurement, it does not re-commit.
+    assert doc["segmenter"] == STUB_CONTRACT
+    assert mgt.sidecar_path(out).read_text().strip() == hashlib.sha256(
+        out.read_bytes()).hexdigest()
+
+
+def test_carrying_a_budget_declares_the_name_slot_for_the_next_measurement(tmp_path: Path) -> None:
+    """A later measure run copies the measurement slots the document DECLARES. A carry into a
+    document whose list predates the name slot must add it, or the next measurement drops the name
+    and is then refused for having dropped it."""
+    out = write_contract(
+        tmp_path / "pr08_geom_tol.json",
+        measurement_fields=["geom_tol_px", "geom_tol_source", "est_drift_p95_px",
+                            "est_drift_source", "gate_margin_px"],
+        mask_method={"name": "sam2-hiera-large+gdino-base"},
+    )
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_NOT_GATE_QUALIFIED
+    assert mgt.EST_DRIFT_NAME_FIELD in json.loads(out.read_text())["measurement_fields"]
+
+
+def test_carrying_a_budget_into_a_document_with_no_tolerance_is_not_a_gate(tmp_path: Path) -> None:
+    """Half of PR-08 §8 item 4 is not the gate. The number is recorded, gate_margin_px stays null,
+    and the exit status says so rather than reading as a finished commitment."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json",
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_NOT_GATE_QUALIFIED
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px"] == 0.5
+    assert doc["gate_margin_px"] is None
+
+
+def test_a_non_positive_margin_is_carried_and_reported_rather_than_widened(tmp_path: Path) -> None:
+    """PR-08 §6: a margin <= 0 is the FINDING. The number is written — that is the record — and the
+    status refuses to call it a gate. The move is a better estimator, never a wider tolerance."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=0.4, GEOM_TOL_px=0.4,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_NOT_GATE_QUALIFIED
+    assert json.loads(out.read_text())["gate_margin_px"] == pytest.approx(-0.1)
+
+
+@pytest.mark.parametrize(
+    "over,needle",
+    [
+        ({"gate_qualified": False, "gate_disqualified_reasons": ["capture_is_not_from_isaac_sim"]},
+         "capture_is_not_from_isaac_sim"),
+        ({"est_drift_p95_px": None}, "There is no number to carry"),
+        ({"estimators": {}}, "no estimators.name"),
+        ({"schema": "something/else"}, "does not carry schema"),
+        ({"resolution_hw": [256, 256]}, "two pixel grids"),
+        ({"geom_tol_cross_check": {"this_segmenter_contract":
+                                   dict(STUB_CONTRACT, box_threshold=0.35)}},
+         "box_threshold"),
+        ({"estimators": {"name": "some-other-segmenter"}}, "would name two segmenters"),
+    ],
+)
+def test_a_budget_that_cannot_be_joined_to_this_document_is_not_carried(
+    tmp_path: Path, over: dict, needle: str, capsys
+) -> None:
+    """Every one of these is a way GEOM_TOL - EST_DRIFT_P95 stops being arithmetic: a disqualified
+    or absent measurement, an unidentifiable file, a different pixel grid, a segmenter whose
+    parameters differ field for field, a different segmenter entirely. None of them is visible in
+    the result — two plausible pixel numbers subtract to a plausible pixel number — so each stops
+    the carry with the document untouched."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _est_artifact(tmp_path / "pr08_est_drift.json", **over)
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    assert needle in capsys.readouterr().err
+    assert out.read_bytes() == before, "nothing may be written when the join fails"
+    assert not mgt.sidecar_path(out).exists()
+
+
+def test_carrying_into_a_document_that_does_not_exist_refuses(tmp_path: Path, capsys) -> None:
+    """This mode fills two slots in a COMMITTED document; it does not create one. A file it
+    invented would carry an EST_DRIFT_P95 and no committed segmenter contract — precisely the
+    document PR-08 §4 step 2 cannot be checked against."""
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+    out = tmp_path / "nothing_here.json"
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    assert "does not exist" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_carrying_into_a_document_with_no_segmenter_block_refuses(tmp_path: Path, capsys) -> None:
+    """A document with no contract cannot be joined to anything. Restore it from git rather than
+    letting a budget land in a file that can never support the claim it is subtracted under."""
+    out = tmp_path / "pr08_geom_tol.json"
+    out.write_text(json.dumps({"geom_tol_px": 3.5}, indent=2) + "\n")
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    assert "records no segmenter block" in capsys.readouterr().err
+
+
+def test_carry_is_not_a_measurement_and_refuses_to_share_a_command_line_with_one(
+    tmp_path: Path, capsys
+) -> None:
+    """It copies a number somebody else measured. Combined with --merge or --shard, one of the two
+    jobs on the command line is being ignored, and which one is not obvious from the output."""
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+    rc = run(["--carry-est-drift", str(est), "--merge", str(tmp_path), "--out", str(tmp_path / "o")])
+    assert rc == mgt.EXIT_FATAL
+    assert "MEASURES NOTHING" in capsys.readouterr().err

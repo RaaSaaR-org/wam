@@ -31,10 +31,31 @@ wired in this repo. The failure names every package it looked for, exactly as
 worse than in ``measure_geom_tol``: this number is SUBTRACTED from the tolerance, so an
 underestimate silently *widens* the gate and every G0b pass inherits the slack.
 
-**It will not use a different segmenter from GEOM_TOL's.** §4 step 2 says "the *same* segmenter",
-and §6 subtracts the two numbers. Two segmenters is two different quantities and the subtraction is
-not arithmetic. When ``configs/transfer25/pr08_geom_tol.json`` exists, its recorded mask method is
-read and a mismatch disqualifies the run rather than being noted in passing.
+**It will not use a different segmenter from GEOM_TOL's, and "different" is not judged by the
+name.** §4 step 2 says "the *same* segmenter", and §6 subtracts the two numbers. Two segmenters is
+two different quantities and the subtraction is not arithmetic. The committed artifact
+``configs/transfer25/pr08_geom_tol.json`` carries a ``segmenter`` block — the prompt, both detection
+thresholds, the single retry pair, the box-selection rule, the propagation mode and the two
+checkpoint pins — and
+``cross_check_geom_tol`` compares it field for field against the estimator module's own
+``SEGMENTER_CONTRACT``. Any disagreement disqualifies. The method NAME is compared as well and used
+to be the whole of the check, which was the weakest possible version of it: the identical adapter at
+``box_threshold`` 0.35 and at 0.15 detects on different frames, produces different centroids, and
+reports the same ``ESTIMATOR_NAME`` throughout.
+
+WHERE THAT BLOCK LIVES IS DECIDED IN ONE PLACE, NOT TWO. ``committed_segmenter_contract`` and
+``contract_disagreements`` are imported from ``measure_geom_tol`` — the module that WRITES the
+document — rather than restated here. A reader and a writer that each keep their own idea of where
+the block lives is how a cross-check comes to look somewhere empty and pass: it would compare an
+absent dict against an absent dict and report a clean check. The same functions therefore answer
+"where is it" for the producer's overwrite guard and for this consumer's cross-check.
+
+**It will not let the object be named twice.** ``--object-class`` defaults to the estimator's own
+``OBJECT_TEXT_PROMPT``, and an explicitly typed value that names a different object is FATAL rather
+than measured. An apple mask scored against a plate's ground truth produces a large, plausible p95,
+no crash and no coverage drop — and that p95 is subtracted from ``GEOM_TOL``. An estimator that
+declares no prompt cannot be checked this way and the run carries
+``estimator_does_not_declare_object_prompt``.
 
 **It will not compare pixels across resolutions.** Same reason, same rule as ``measure_geom_tol``:
 GEOM_TOL is measured at the source grid, so a drift measured on a differently-sized Isaac render is
@@ -63,7 +84,8 @@ measurement against Humanoid Everyday's real depth is off the critical path beca
 EXIT STATUS
 -----------
 0   measured with a gate-qualified estimator pair, coverage above ``--min-coverage``.
-2   fatal: nothing was measured (no estimator, no capture, no object label, mixed geometry).
+2   fatal: nothing was measured (no estimator, no capture, no object label, mixed geometry, or
+    ``--object-class`` naming a different object from the segmenter's prompt).
 3   measured, but the number MUST NOT be used as G0b's budget -- ungated estimator, coverage below
     the floor, a partial run, a segmenter that disagrees with GEOM_TOL's, or a resolution that does.
     The artifact is still written, because "we tried and this is what came out" is a record.
@@ -74,7 +96,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -83,14 +105,29 @@ import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from measure_geom_tol import (  # noqa: E402
     CANDIDATE_SEGMENTERS,
     _importable,
     _local_weight_hits,
     centroid_of_mask,
+    # ONE implementation of "where the committed segmenter block lives" and "on which fields do
+    # two of them disagree", imported from the PRODUCER rather than restated here. Two copies of
+    # this pair is how a cross-check comes to look somewhere the writer does not write: the reader
+    # would still pass, having compared an empty dict against an empty dict.
+    committed_segmenter_contract,
+    contract_disagreements,
     distribution,
 )
+
+# The camera map the binding itself defaults to, imported rather than restated. `capture`'s
+# --camera used to default to "ego", a name no default Isaac stage carries, so the DEFAULT value
+# raised `unknown camera 'ego'` after a full Isaac boot. A default that comes from the same dict
+# the binding validates against cannot be wrong in that way, and an unknown name is now an
+# argparse error on a laptop instead. Torch-free, numpy-only module: importing it costs nothing
+# and it does not pull Isaac in (every isaacsim import lives inside IsaacSimBinding.__init__).
+from wam.robot.isaac_binding import DEFAULT_CAMERA_PRIMS  # noqa: E402
 
 SCHEMA = "wam.est_drift/1"
 WRITEUP = "docs/preregistration/PR-08-photoreal-augmentation.md"
@@ -258,12 +295,26 @@ def depth_error(estimated: np.ndarray, true: np.ndarray, mask: np.ndarray | None
 # -- capture -------------------------------------------------------------------------------------
 
 
-def capture_frames(binding: Any, camera: str, n_frames: int, out: Path, steps_per_frame: int) -> dict:
+def capture_frames(
+    binding: Any,
+    camera: str,
+    n_frames: int,
+    out: Path,
+    steps_per_frame: int,
+    provenance: Mapping[str, Any] | None = None,
+) -> dict:
     """Drive an already-constructed binding and write ground truth to ``out``. Returns the header.
 
     Takes the binding rather than building one so that the caller owns the Isaac boot -- and so
     that this whole path is exercisable against ``FakeIsaacBinding`` on a laptop, which is the only
     reason any of it is testable before an Isaac node exists.
+
+    ``provenance`` is what the CALLER knows and this function cannot see: which USD stage was
+    loaded, which prim the camera name resolved to, which grid was requested and where that number
+    came from. It is merged into the header verbatim (existing keys win, so no caller can overwrite
+    ``is_simulated_binding`` or the measured ``resolution_hw``) and travels into the EST_DRIFT_P95
+    artifact, because "the true segmentation" is only auditable if the artifact says what scene it
+    was the true segmentation OF.
 
     Warmup is a real state, not an error: ``render_*`` returns ``None`` until the renderer settles,
     and a frame is written only when ALL THREE channels are present. A partially-written frame would
@@ -324,6 +375,8 @@ def capture_frames(binding: Any, camera: str, n_frames: int, out: Path, steps_pe
         # never be a gate input, and the reader must not have to infer that from the directory.
         "is_simulated_binding": type(binding).__name__ != "IsaacSimBinding",
     }
+    for key, value in dict(provenance or {}).items():
+        header.setdefault(key, value)
     (out / "capture.json").write_text(json.dumps(header, indent=2) + "\n", encoding="utf-8")
     return header
 
@@ -365,6 +418,18 @@ class Estimators:
         self.gate_qualified = bool(getattr(module, "GATE_QUALIFIED", False))
         self.name = str(getattr(module, "ESTIMATOR_NAME", spec))
         self.version = str(getattr(module, "ESTIMATOR_VERSION", "unversioned"))
+        # WHAT THE SEGMENTER ACTUALLY IS, not just what it is called. `name` alone was the whole of
+        # the §4 step 2 cross-check until 2026-08-22, and two runs can share a name while
+        # disagreeing about the prompt, the detection thresholds, the retry and the box rule —
+        # every one of which decides which frames get a mask and where its centroid lands. A module
+        # that declares nothing here is not assumed to agree with anything: `main` disqualifies it
+        # by its own name (`estimator_does_not_declare_segmenter_contract`).
+        contract = getattr(module, "SEGMENTER_CONTRACT", None)
+        self.segmenter_contract = dict(contract) if isinstance(contract, Mapping) else None
+        # The prompt the segmenter grounds on, so `--object-class` can DEFAULT to it instead of
+        # being typed a second time next to it. See `resolve_object_class`.
+        prompt = getattr(module, "OBJECT_TEXT_PROMPT", None)
+        self.object_text_prompt = prompt if isinstance(prompt, str) and prompt.strip() else None
 
     def segment(self, rgb: np.ndarray) -> np.ndarray:
         return np.asarray(self.module.segment(rgb))
@@ -396,6 +461,82 @@ def resolve_estimators(spec: str) -> Estimators:
     return Estimators(module, spec)
 
 
+def _normalise_object(text: str) -> str:
+    """The comparable form of an object name: GroundingDINO's phrase and Replicator's label meet.
+
+    The segmenter's prompt is a lowercase period-terminated phrase (``"apple."``) because that is
+    GroundingDINO's documented input format; the ground truth's label is Replicator's semantic class
+    string (``"apple"``, sometimes ``"Apple"``). They name the same object in two notations, so the
+    comparison strips the notation and nothing else. It deliberately does NOT strip words: ``"red
+    apple."`` against a scene labelled ``"apple"`` is exactly the disagreement worth stopping on,
+    because whichever of the two is wrong, the mask and the truth are then about different things.
+    """
+    return text.strip().lower().rstrip(".").strip()
+
+
+def object_class_mismatch_message(requested: str, prompt: str, spec: str) -> str:
+    return "\n".join([
+        "FATAL: --object-class and the estimator's own text prompt name different objects, so this",
+        "       run would compare one object's mask against another object's ground truth. Nothing",
+        "       was written.",
+        "",
+        f"       --object-class      {requested!r}   (the label looked up in Replicator's idToLabels)",
+        f"       {spec} OBJECT_TEXT_PROMPT  {prompt!r}   (what the segmenter grounds on)",
+        "",
+        "       This is refused rather than measured because it does not fail loudly on its own: an",
+        "       apple mask scored against a plate's ground truth yields a large, entirely plausible",
+        "       p95, no crash, and no drop in coverage — and that p95 is SUBTRACTED from GEOM_TOL in",
+        "       PR-08 §6 G0b. It was a written gate-qualification blocker on the adapter until this",
+        "       check existed.",
+        "",
+        "       Fix it at whichever end is wrong, deliberately:",
+        "         - drop --object-class entirely; it defaults to the estimator's own prompt, which",
+        "           is the spelling that cannot disagree with itself, or",
+        "         - set WAM_PR08_OBJECT_PROMPT so the segmenter grounds on the object the capture",
+        "           actually labels.",
+        "       Changing either one moves both PR-08 §4 numbers, so it is a registered choice and",
+        "       not a flag to sweep.",
+    ])
+
+
+def resolve_object_class(requested: str | None, est: "Estimators") -> tuple[str, str, list[str]]:
+    """The object to score against, where it came from, and any disqualifying reasons.
+
+    ONE OBJECT, NAMED ONCE. The object segmented and the object scored against used to be two
+    independent knobs — ``$WAM_PR08_OBJECT_PROMPT`` in the estimator module, ``--object-class``
+    here — and nothing compared them. The estimator cannot see this flag, so the check has to live
+    on this side, and the cheapest correct version of it is to stop asking twice: ``--object-class``
+    now defaults to the estimator's own prompt. An explicitly typed value that disagrees is FATAL
+    rather than disqualifying, because unlike a coverage shortfall there is no number worth writing
+    down: every displacement in the run would be a distance between two different objects.
+
+    An estimator that declares no prompt (a stub, a third-party module) is not assumed to agree:
+    the run proceeds on the requested class — there is nothing else to proceed on — and carries
+    ``estimator_does_not_declare_object_prompt`` so the artifact cannot be read as having checked.
+
+    EVERY PATH RETURNS THE NORMALISED FORM, and that is a fix rather than a tidy-up. The agreement
+    path used to return the RAW ``requested`` string while the default path returned the normalised
+    one, so two spellings this function had just declared equivalent behaved differently
+    downstream: ``object_ids()`` compares ``label.strip().lower() == object_class.strip().lower()``
+    and does NOT strip GroundingDINO's trailing period, so ``--object-class "apple."`` — the exact
+    spelling the flag's own help text invites, since it defaults to the estimator's
+    ``OBJECT_TEXT_PROMPT`` — matched no Replicator label, every frame counted as
+    ``frames_without_label``, and the run ended at coverage 0.0 reporting "the apple is not in this
+    scene" about a notation difference. ``_normalise_object`` strips the notation and nothing else,
+    so this cannot silently widen what matches: ``"red apple."`` still disagrees with ``"apple"``.
+    """
+    prompt = est.object_text_prompt
+    if prompt is None:
+        return _normalise_object(requested or DEFAULT_OBJECT_CLASS), "flag_or_default", [
+            "estimator_does_not_declare_object_prompt"
+        ]
+    if requested is None:
+        return _normalise_object(prompt), "estimator_prompt", []
+    if _normalise_object(requested) != _normalise_object(prompt):
+        raise EstimatorUnavailable(object_class_mismatch_message(requested, prompt, est.spec))
+    return _normalise_object(requested), "flag_agrees_with_estimator_prompt", []
+
+
 def _artifact_label(path: Path) -> str:
     """Repo-relative when it is under the repo, absolute otherwise. Never raises.
 
@@ -410,7 +551,9 @@ def _artifact_label(path: Path) -> str:
 
 
 def cross_check_geom_tol(
-    resolution_hw: list[int], estimator_name: str | None = None
+    resolution_hw: list[int],
+    estimator_name: str | None = None,
+    segmenter_contract: Mapping | None = None,
 ) -> tuple[list[str], dict]:
     """Disqualifying reasons from GEOM_TOL's committed artifact, plus what was compared.
 
@@ -418,6 +561,19 @@ def cross_check_geom_tol(
     measured in the same units on the same grid with the same estimator. Nothing else in the
     pipeline checks it, and a mismatch is invisible in the result: two plausible pixel numbers
     subtract to a plausible pixel number.
+
+    **"The same segmenter" is now checked as a segmenter and not as a string.** Until 2026-08-22
+    this function compared the pixel grid, the gate flag and the method NAME — and a name is the one
+    thing about a segmenter that cannot change when its behaviour does. The same adapter at
+    ``box_threshold`` 0.35 and at 0.15 detects on different frames, produces different masks and
+    different centroids, and reports the identical ``ESTIMATOR_NAME`` while doing it. So
+    ``segmenter_contract`` (the adapter's ``SEGMENTER_CONTRACT``) is compared field for field
+    against the block committed beside GEOM_TOL, and any difference disqualifies.
+
+    ``segmenter_contract=None`` means THIS side declared nothing, which is not a way to pass: it is
+    the two existing unit-level callers, and ``main`` turns a silent estimator into
+    ``estimator_does_not_declare_segmenter_contract`` on its own. A committed document that records
+    no contract while this side has one is ``geom_tol_does_not_record_segmenter_params``.
     """
     if not GEOM_TOL_ARTIFACT.is_file():
         return (
@@ -430,13 +586,26 @@ def cross_check_geom_tol(
                 # is a step they should not have to take.
                 "this_resolution_hw": list(resolution_hw),
                 "this_estimator_name": estimator_name,
+                "this_segmenter_contract": (
+                    dict(segmenter_contract) if segmenter_contract is not None else None
+                ),
             },
         )
     doc = json.loads(GEOM_TOL_ARTIFACT.read_text(encoding="utf-8"))
     reasons: list[str] = []
-    theirs_hw = doc.get("resolution_hw") or doc.get("frame_hw")
+    theirs_contract, contract_at = committed_segmenter_contract(doc)
+    theirs_contract = theirs_contract or {}
+    # The pre-measurement contract records neither of the two fields the measured artifact leads
+    # with, so both are resolved through it as a fallback rather than read from one place. The
+    # method name is the same string in both shapes by construction — it is the adapter's
+    # ESTIMATOR_NAME — and the grid is the corpus's, which the contract commits to before anyone
+    # has rendered a frame at it.
+    theirs_hw = doc.get("resolution_hw") or doc.get("frame_hw") or theirs_contract.get(
+        "pixel_grid_hw"
+    )
     method = doc.get("mask_method") or {}
     theirs_method = method.get("name") if isinstance(method, Mapping) else None
+    theirs_method = theirs_method or theirs_contract.get("method_name")
 
     # ABSENCE IS NOT AGREEMENT. The first version of this function read
     # `if theirs_hw is not None and ... != ...`, so a GEOM_TOL artifact that simply did not
@@ -465,16 +634,200 @@ def cross_check_geom_tol(
     if theirs_method is not None and estimator_name is not None and theirs_method != estimator_name:
         reasons.append("mask_method_disagrees_with_estimator")
 
+    # THE JOIN KEY IS A NAME, AND A NAME IS NOT A SEGMENTER. Everything above compares labels: two
+    # runs agreeing on `grounding-dino+sam2+depth-anything-v2` have agreed on a string. §4 step 2
+    # asks for the same SEGMENTER, so the parameters that decide which frames get a mask and where
+    # its centroid falls are compared too — the prompt, both thresholds, the retry pair, the box
+    # rule, the propagation mode and the two checkpoint pins. A cross-check that cannot see the
+    # segmenter is not checking it, whatever it prints.
+    disagreements: list[dict] = []
+    if segmenter_contract is not None:
+        if not theirs_contract:
+            reasons.append("geom_tol_does_not_record_segmenter_params")
+        else:
+            disagreements = contract_disagreements(segmenter_contract, theirs_contract)
+            if disagreements:
+                reasons.append("segmenter_params_disagree_with_geom_tol")
+
     return reasons, {
         "geom_tol_artifact": _artifact_label(GEOM_TOL_ARTIFACT),
         "geom_tol_resolution_hw": theirs_hw,
         "geom_tol_gate_qualified": doc.get("gate_qualified"),
         "geom_tol_mask_method": doc.get("mask_method"),
         "geom_tol_mask_method_name": theirs_method,
+        "geom_tol_segmenter_contract": theirs_contract or None,
+        "geom_tol_segmenter_contract_at": contract_at,
         "this_resolution_hw": list(resolution_hw),
         "this_estimator_name": estimator_name,
-        "join_key": "measure_geom_tol mask_method.name == this artifact's estimators.name",
+        "this_segmenter_contract": (
+            dict(segmenter_contract) if segmenter_contract is not None else None
+        ),
+        "segmenter_param_disagreements": disagreements,
+        "join_key": (
+            "measure_geom_tol mask_method.name == this artifact's estimators.name, AND the "
+            "committed segmenter block (top-level `segmenter`, or mask_method.params.segmenter) == "
+            "this estimator module's SEGMENTER_CONTRACT, field for field"
+        ),
     }
+
+
+# -- capture's command line, decided before Isaac boots --------------------------------------------
+#
+# WHAT THE THREE FUNCTIONS BELOW HAVE IN COMMON IS *WHEN* THEY FIRE. Every one of them refuses a
+# capture on a laptop, in milliseconds, for a mistake that used to be found either after a full
+# Isaac boot (an unknown camera name) or not at all until `measure` disqualified a finished capture
+# (the pixel grid). That is the same defect twice: the cheapest possible error discovered in the
+# most expensive possible place, on the one path in this repository that needs a GPU and a stage.
+
+
+def contract_pixel_grid_hw() -> tuple[list[int] | None, str | None]:
+    """``[H, W]`` the committed GEOM_TOL contract pins, and where in the document it was found.
+
+    **THE GRID IS NOT A LITERAL IN THIS FILE, AND MUST NOT BECOME ONE.** ``[480, 640]`` written
+    here would be a second copy of a pre-commitment that lives in exactly one place on purpose:
+    the day the contract's ``pixel_grid_hw`` moved, `capture` would go on rendering the old grid
+    and every run would be disqualified by ``resolution_disagrees_with_geom_tol`` with nothing in
+    the record naming the stale copy. So the document that decides the grid decides it for the
+    capture too, read at run time, through the same ``committed_segmenter_contract`` the
+    cross-check reads — one implementation of "where the block lives", for the producer, the
+    cross-check and now the renderer.
+
+    ``(None, None)`` when there is no artifact, or it states no grid. That is a refusal for the
+    caller and never a licence to pick a number.
+    """
+    if not GEOM_TOL_ARTIFACT.is_file():
+        return None, None
+    try:
+        doc = json.loads(GEOM_TOL_ARTIFACT.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(doc, Mapping):
+        return None, None
+    contract, where = committed_segmenter_contract(doc)
+    grid = (contract or {}).get("pixel_grid_hw")
+    at = f"{where}.pixel_grid_hw" if where else None
+    if grid is None:
+        # The measured artifact leads with these two instead; the contract has neither until a
+        # measurement lands. Same precedence as cross_check_geom_tol(), for the same reason.
+        for key in ("resolution_hw", "frame_hw"):
+            if doc.get(key) is not None:
+                grid, at = doc[key], key
+                break
+    if grid is None or len(list(grid)) != 2:
+        return None, None
+    return [int(v) for v in grid], at
+
+
+def resolve_render_hw(requested: Sequence[int] | None) -> tuple[tuple[int, int], str]:
+    """The grid to render at, and where that number came from. Refuses rather than guessing.
+
+    PR-08 §6 subtracts ``EST_DRIFT_P95`` from ``GEOM_TOL``, which is arithmetic on ONE pixel grid.
+    ``cross_check_geom_tol`` already disqualifies a capture measured on another — but it does so
+    after the render, and a render is the expensive half of this path. So the same comparison is
+    made here, against the same committed number, before a simulator is booted.
+
+    An explicit ``--render-hw`` that disagrees with the contract is FATAL and not a warning: there
+    is no version of that run whose p95 is subtractable from ``GEOM_TOL``, so rendering it would
+    only produce an artifact that has to be thrown away. Changing the grid is a reviewed edit to
+    the committed contract, made before a measurement and never after one.
+    """
+    grid, where = contract_pixel_grid_hw()
+    label = _artifact_label(GEOM_TOL_ARTIFACT)
+    if grid is None:
+        raise EstimatorUnavailable(
+            f"{label} states no pixel grid, so --render-hw has no default and this capture cannot "
+            "be shown to be on GEOM_TOL's grid.\n"
+            "       That file is PR-08 §4 step 2's pre-commitment (the segmenter, its pins and "
+            "`pixel_grid_hw`).\n"
+            "       Restore it from git rather than passing a grid by hand: a capture rendered at "
+            "a number nobody\n"
+            "       committed to is not a gate input at any resolution, and "
+            "GEOM_TOL - EST_DRIFT_P95 across two\n"
+            "       grids is two plausible pixel numbers subtracting to a meaningless one."
+        )
+    if requested is None:
+        return (grid[0], grid[1]), f"{label} {where}"
+    got = [int(v) for v in requested]
+    if got != grid:
+        raise EstimatorUnavailable(
+            f"--render-hw {got[0]} {got[1]} disagrees with the committed grid {grid[0]}x{grid[1]} "
+            f"({label} {where}).\n"
+            "       This is `resolution_disagrees_with_geom_tol`, refused BEFORE the render "
+            "instead of after it:\n"
+            "       PR-08 §6 computes GEOM_TOL - EST_DRIFT_P95 and that subtraction is only "
+            "arithmetic on one pixel\n"
+            "       grid, so the capture this would produce could never be a gate input. Drop the "
+            "flag to take the\n"
+            "       committed grid, or move the contract in a reviewed commit of its own — before "
+            "the measurement."
+        )
+    return (got[0], got[1]), f"--render-hw (equal to {label} {where})"
+
+
+def resolve_camera_prims(declared: Sequence[str] | None) -> dict[str, str]:
+    """:data:`DEFAULT_CAMERA_PRIMS` extended by each ``NAME=/Prim/Path`` on the command line.
+
+    The default map is one entry — ``persp`` -> the viewport camera every stage has — because that
+    is all the bare ``g1.usd`` carries. A scene authored for §4 step 1 (table, plate, apple, an
+    ego-like camera) adds prims, and this is how a capture names one without editing the binding.
+    The extension exists so that validating ``--camera`` against a dict cannot paint a real scene
+    into a corner: the check stays exact, and the operator states what the stage has.
+    """
+    prims = dict(DEFAULT_CAMERA_PRIMS)
+    for item in declared or ():
+        name, sep, prim = str(item).partition("=")
+        name, prim = name.strip(), prim.strip()
+        if not sep or not name or not prim.startswith("/"):
+            raise EstimatorUnavailable(
+                f"--camera-prim {item!r} is not NAME=/Prim/Path. The prim path is absolute and "
+                "must already exist on the stage; Isaac's camera setup raises if it does not."
+            )
+        prims[name] = prim
+    return prims
+
+
+def resolve_camera(name: str, prims: Mapping[str, str]) -> str:
+    """The USD prim ``name`` maps to, or a refusal naming every camera there is.
+
+    A camera name is checked HERE, against the same dict the binding would check it against, and
+    not inside the binding — where the check happens after ``SimulationApp`` has started, the
+    stage has loaded and the articulation has resolved. A typo costing a full Isaac boot is the
+    most expensive way this repository has to spell a typo.
+    """
+    if name not in prims:
+        raise EstimatorUnavailable(
+            f"unknown camera {name!r}; known: {sorted(prims)}. Isaac's own default stage carries "
+            f"only {sorted(DEFAULT_CAMERA_PRIMS)} (the viewport camera), and the binding would "
+            "raise this same error after a full Isaac boot. Name the stage's camera with "
+            "--camera-prim NAME=/Prim/Path and then select it with --camera NAME."
+        )
+    return prims[name]
+
+
+def resolve_stage(asset: str | None, scene: str | None) -> tuple[str | None, str]:
+    """The USD to load, and which flag named it. ``asset`` and ``scene`` are ONE knob.
+
+    ``wam.robot.isaac_g1.IsaacG1Robot`` already treats ``scene_path`` as an alias for ``asset`` and
+    refuses both ("they are the same knob"), and ``configs/robot/isaac_g1.yaml`` documents
+    ``sim.scene`` as that alias. This mirrors it rather than inventing a third vocabulary for the
+    same USD path.
+
+    ``None`` keeps the binding's own behaviour: resolve Isaac's asset root and load the bare
+    ``g1.usd``. That stage has no table, no plate and no apple — PR-08 §4 step 1's object simply is
+    not in it — so the resulting capture measures nothing, and the header says which stage it was
+    so a reader of the artifact can tell that case from a measurement.
+    """
+    if asset is not None and scene is not None:
+        raise EstimatorUnavailable(
+            "pass either --asset or --scene (they are the same knob: a USD path, referenced onto "
+            "the stage). wam.robot.isaac_g1.IsaacG1Robot refuses the same pair for the same "
+            "reason — two names for one stage is one of them being ignored silently."
+        )
+    if scene is not None:
+        return scene, "--scene"
+    if asset is not None:
+        return asset, "--asset"
+    return None, "isaacsim.storage.native.get_assets_root_path() + DEFAULT_ASSET_SUBPATH"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -483,9 +836,52 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    # PR-08 §4 step 1. Every option below that is not --out or --frames exists because of a way
+    # this subcommand used to be unable to produce a gate-qualified capture at all: the grid it
+    # rendered at (nothing could set it, and the constructor default disagreed with the committed
+    # contract, so EVERY Isaac capture was stamped resolution_disagrees_with_geom_tol), the stage
+    # it loaded (nothing could name one, so only the bare g1.usd — with no apple in it — could be
+    # captured) and the camera it rendered from (the DEFAULT value was a name no Isaac stage has,
+    # and the error arrived after a full Isaac boot). All three are checked before the binding is
+    # constructed; see resolve_render_hw / resolve_stage / resolve_camera.
     cap = sub.add_parser("capture", help="PR-08 §4 step 1 — render Isaac ground truth to a dir")
     cap.add_argument("--out", type=Path, required=True)
-    cap.add_argument("--camera", default="ego")
+    cap.add_argument(
+        "--camera",
+        default=next(iter(DEFAULT_CAMERA_PRIMS)),
+        help="camera NAME to render from (default: %(default)s). Validated against "
+        "DEFAULT_CAMERA_PRIMS plus every --camera-prim, here rather than after an Isaac boot.",
+    )
+    cap.add_argument(
+        "--camera-prim",
+        action="append",
+        default=[],
+        metavar="NAME=/Prim/Path",
+        help="declare a camera the STAGE carries, e.g. ego=/World/Scene/EgoCam. Repeatable. The "
+        "prim must already exist on the stage or Isaac's camera setup raises.",
+    )
+    cap.add_argument(
+        "--asset",
+        default=None,
+        help="USD to reference onto the stage (default: Isaac's asset root + the bare G1 "
+        "g1.usd, which has no table, no plate and no apple — see the runbook §4.2).",
+    )
+    cap.add_argument(
+        "--scene",
+        default=None,
+        help="alias for --asset, the spelling configs/robot/isaac_g1.yaml uses (sim.scene). "
+        "Passing both is refused: they are the same knob.",
+    )
+    cap.add_argument(
+        "--render-hw",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("H", "W"),
+        help="(H, W) of every render product. DEFAULTS TO THE COMMITTED CONTRACT's "
+        "segmenter.pixel_grid_hw (configs/transfer25/pr08_geom_tol.json) and is refused when it "
+        "disagrees with it — GEOM_TOL - EST_DRIFT_P95 is arithmetic on one grid only.",
+    )
     cap.add_argument("--frames", type=int, default=64)
     cap.add_argument("--steps-per-frame", type=int, default=1)
     cap.add_argument(
@@ -503,7 +899,15 @@ def main(argv: list[str] | None = None) -> int:
         help="importable module defining segment(rgb) and estimate_depth(rgb). 'auto' fails loudly "
         "and is the honest default until one is wired.",
     )
-    mea.add_argument("--object-class", default=DEFAULT_OBJECT_CLASS)
+    mea.add_argument(
+        "--object-class",
+        default=None,
+        help="the semantic label whose centroid is scored, looked up in the capture's idToLabels. "
+        "DEFAULTS to the estimator module's own OBJECT_TEXT_PROMPT so the object cannot be named "
+        "twice and disagree with itself; an explicit value naming a different object is fatal. "
+        f"Falls back to {DEFAULT_OBJECT_CLASS!r} only for an estimator that declares no prompt, and "
+        "that run is disqualified.",
+    )
     mea.add_argument("--min-area-px", type=int, default=40)
     mea.add_argument("--largest-component", action="store_true", default=True)
     mea.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
@@ -515,21 +919,64 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "capture":
         try:
+            # EVERYTHING THIS CAN REFUSE, REFUSED BEFORE THE BINDING IS CONSTRUCTED. On the real
+            # path the next statement starts SimulationApp, loads a stage and resolves 43 DOFs.
+            prims = resolve_camera_prims(args.camera_prim)
+            camera_prim = resolve_camera(args.camera, prims)
+            asset, asset_source = resolve_stage(args.asset, args.scene)
+            render_hw, render_hw_source = resolve_render_hw(args.render_hw)
+            provenance = {
+                "camera_prim": camera_prim,
+                "camera_prims_declared": {
+                    k: v for k, v in prims.items() if DEFAULT_CAMERA_PRIMS.get(k) != v
+                },
+                # The stage is provenance and not decoration: a capture of the bare g1.usd and a
+                # capture of an apple-to-plate scene are indistinguishable in the frames if the
+                # segmentation happens to be empty in both, and only one of them is a measurement
+                # that failed. `asset: null` is the honest record of "Isaac's own default".
+                "asset": asset,
+                "asset_source": asset_source,
+                "render_hw_requested": list(render_hw),
+                "render_hw_source": render_hw_source,
+                "geom_tol_contract": _artifact_label(GEOM_TOL_ARTIFACT),
+            }
             if args.fake:
-                sys.path.insert(0, str(_REPO_ROOT / "src"))
                 from wam.robot.isaac_binding import FakeIsaacBinding
 
                 binding = FakeIsaacBinding(
-                    cameras=(args.camera,), ground_truth=("depth", "segmentation")
+                    cameras=(args.camera,),
+                    render_hw=render_hw,
+                    ground_truth=("depth", "segmentation"),
                 )
             else:
-                sys.path.insert(0, str(_REPO_ROOT / "src"))
                 from wam.robot.isaac_binding import IsaacSimBinding
 
-                binding = IsaacSimBinding(ground_truth=("depth", "segmentation"))
-            header = capture_frames(
-                binding, args.camera, args.frames, args.out, args.steps_per_frame
-            )
+                binding = IsaacSimBinding(
+                    asset=asset,
+                    cameras={args.camera: camera_prim},
+                    render_hw=render_hw,
+                    ground_truth=("depth", "segmentation"),
+                )
+            try:
+                header = capture_frames(
+                    binding, args.camera, args.frames, args.out, args.steps_per_frame, provenance
+                )
+                # The grid was REQUESTED before the boot; this is what came back. A binding that
+                # rendered something else has produced a capture `measure` would disqualify, and
+                # the operator should learn that from the run that made it rather than from the run
+                # that reads it two machines later.
+                if list(header.get("resolution_hw") or []) != list(render_hw):
+                    raise EstimatorUnavailable(
+                        f"asked for {list(render_hw)} and the binding rendered "
+                        f"{header.get('resolution_hw')}. The frames under {args.out} are not on "
+                        "GEOM_TOL's grid and `measure` would disqualify them with "
+                        "resolution_disagrees_with_geom_tol; nothing downstream should read them."
+                    )
+            finally:
+                # A leaked SimulationApp wedges the interpreter (isaac_binding's module docstring),
+                # so the app the capture opened is closed on the way out whichever way it goes —
+                # including the refusal three lines above, which is raised with Isaac still up.
+                binding.close()
         except EstimatorUnavailable as exc:
             print(f"FATAL: {exc}", file=sys.stderr)
             return 2
@@ -566,9 +1013,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not est.gate_qualified:
         disqualified.append("estimator_not_gate_qualified")
+    if est.segmenter_contract is None:
+        # Not "probably the same segmenter". §4 step 2's requirement is unverifiable against a
+        # module that will not say what it runs, and unverifiable is not satisfied.
+        disqualified.append("estimator_does_not_declare_segmenter_contract")
+
+    # Before any frame is read: a mismatch here makes every displacement in the run a distance
+    # between two different objects, and there is no partial artifact worth writing from that.
+    try:
+        object_class, object_class_source, object_reasons = resolve_object_class(
+            args.object_class, est
+        )
+    except EstimatorUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    disqualified += object_reasons
 
     resolution_hw = list(header.get("resolution_hw") or [])
-    geom_reasons, geom_compare = cross_check_geom_tol(resolution_hw, est.name)
+    geom_reasons, geom_compare = cross_check_geom_tol(
+        resolution_hw, est.name, est.segmenter_contract
+    )
     disqualified += geom_reasons
 
     pairs: list[tuple[tuple[float, float] | None, tuple[float, float] | None]] = []
@@ -585,7 +1049,7 @@ def main(argv: list[str] | None = None) -> int:
         id_to_labels = {int(k): v for k, v in labels_raw.items()}
         shapes.add((int(true_ids.shape[0]), int(true_ids.shape[1])))
 
-        wanted, seen = object_ids(id_to_labels, args.object_class)
+        wanted, seen = object_ids(id_to_labels, object_class)
         vocab.update(seen)
         if not wanted:
             frames_without_label += 1
@@ -647,7 +1111,12 @@ def main(argv: list[str] | None = None) -> int:
             "measurement against Humanoid Everyday is blocked on that corpus's licence and is "
             "deliberately off the critical path."
         ),
-        "object_class": args.object_class,
+        "object_class": object_class,
+        # Where the object came from, because "apple" appearing in two places is exactly what this
+        # field used to hide. `estimator_prompt` means nobody typed it twice.
+        "object_class_source": object_class_source,
+        "object_class_requested": args.object_class,
+        "estimator_object_text_prompt": est.object_text_prompt,
         "label_vocabulary_seen": sorted(vocab),
         "n_frames": n_steps,
         "n_frames_found": n_found,
@@ -672,6 +1141,17 @@ def main(argv: list[str] | None = None) -> int:
             "binding": header.get("binding"),
             "is_simulated_binding": header.get("is_simulated_binding"),
             "camera": header.get("camera"),
+            # WHICH STAGE THIS WAS THE TRUE SEGMENTATION OF. §4 step 1 renders "N Isaac episodes",
+            # and an artifact that does not say what was in the scene cannot be audited later: a
+            # p95 over the bare g1.usd (no table, no plate, no apple) and a p95 over an
+            # apple-to-plate scene look identical in this file otherwise. Copied from the capture
+            # header, which is written by the run that rendered the frames; `null` on a capture
+            # made before these fields existed, which is itself the answer to "was it recorded".
+            "asset": header.get("asset"),
+            "asset_source": header.get("asset_source"),
+            "camera_prim": header.get("camera_prim"),
+            "render_hw_requested": header.get("render_hw_requested"),
+            "render_hw_source": header.get("render_hw_source"),
             "captured_utc": header.get("captured_utc"),
         },
     }

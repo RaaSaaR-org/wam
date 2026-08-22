@@ -32,27 +32,42 @@ above the seam is genuinely testable even though the vendor half cannot be. Run 
 
 | | pins torch to | how well that is established |
 |---|---|---|
-| `isaacsim-core==6.0.1.0` | **2.11.0** | **not confirmed from an NVIDIA-hosted page.** It is the researched pin this backend was designed around, recorded in `src/wam/robot/isaac_binding.py`'s module docstring and in `ISAAC_MISSING_MSG`. NVIDIA's own Isaac Lab pip page still documents Isaac Sim **5.1.0** with torch **2.7.0** as of 2026-08-05, and the 6.0 figure came from a third-party doc mirror. Nobody here has read the wheel metadata |
+| `isaacsim-core==6.0.1.0` | **2.11.0** | **CONFIRMED 2026-08-22, from an NVIDIA-hosted page, and read twice by two sessions independently.** <https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_python.html> gives `pip install torch==2.11.0 --index-url .../cu128` (or `/cu130`) as the step *before* the `isaacsim` install line. This row previously read *"not confirmed from an NVIDIA-hosted page … the 6.0 figure came from a third-party doc mirror"*; that was true on 2026-08-05 and is not true now. Nobody has still read the wheel metadata — the confirmation is NVIDIA's documentation, not the wheel — so §1's `pip show torch` stays in the sequence. See `docs/isaac-est-drift-runbook.md` §1.3 and §1.5 |
 | this repo's `uv.lock` | **2.13.0**, from PyPI | verified by reading the file — `uv.lock:1969-1971`, `name = "torch"` / `version = "2.13.0"` / `source = { registry = "https://pypi.org/simple" }` |
 
-**Confirm the left-hand row on the box** — one line after the install in §1:
-`.venv-isaac/bin/pip show torch`. The conclusion survives being wrong about the exact number: the
-two venvs are needed unless Isaac's pin turns out to be *exactly* 2.13.0. If it is, say so and this
-whole page collapses into one venv.
+**Confirm the left-hand row on the box anyway** — one line after the install in §1:
+`$ISAAC_VENV/bin/pip show torch`. Documentation is not a wheel, and the thing that would actually
+break is a resolver quietly replacing 2.11.0 during the `isaacsim` step. The conclusion survives
+being wrong about the exact number: the two venvs are needed unless Isaac's pin turns out to be
+*exactly* 2.13.0. If it is, say so and this whole page collapses into one venv.
 
 Installing one over the other gives you a broken half either way: Isaac's tensor backend against a
 torch it was not built for, or the Wan backbone against a torch two minor versions back. There is
 also a second, independent conflict, and this one *is* confirmed on NVIDIA's own docs — **Isaac Sim
-6.x requires Python 3.12** (5.1 wanted 3.11), and `preflight_isaac.py` check A fails a non-3.12
-interpreter for that reason.
+6.0.1 requires Python 3.12 exactly**: PyPI publishes `Requires-Python: ==3.12.*` and the install
+page says *"Isaac Sim requires Python 3.12"*, both re-confirmed 2026-08-22. `preflight_isaac.py`
+check A fails a non-3.12 interpreter for that reason. (That 5.1 wanted 3.11 is **UNVERIFIED** — it
+comes from a 2026-08-05 reading of Isaac Lab's pip page, not from 5.1's own requirements page, and
+nothing here depends on it.)
 
 So the box runs **two interpreters**, and the split is drawn at the seam that already exists and is
 already tested (T-20, `docs/local_gpu.md` §4):
 
 ```
-.venv          (WAM venv,   torch 2.13)      scripts/serve_policy.py    -> ws://127.0.0.1:8765
-.venv-isaac    (Isaac venv, Isaac's torch)   scripts/rollout.py --policy remote --server-uri ...
+.venv                      (WAM venv,   torch 2.13)   scripts/serve_policy.py -> ws://127.0.0.1:8765
+~/wam-t041/.venv-isaac     (Isaac venv, torch 2.11)   scripts/rollout.py --policy remote --server-uri ...
 ```
+
+**The Isaac venv lives OUTSIDE the working tree, and that is a correction made 2026-08-22.** This
+page said `/home/humanoid/develop/wam/.venv-isaac` from 2026-08-05 until then. `.gitignore` line 5
+is `.venv/`, which does **not** match `.venv-isaac/` — `git check-ignore -v .venv-isaac/x` matches
+nothing, verified — so that instruction would have dropped a **~25 GB untracked tree into a working
+tree that concurrent sessions run `git status` against and commit into**, one `git add -A` away from
+a catastrophic commit. `~/wam-t041/` is this project's existing out-of-tree area on this box (the
+PR-08 corpus, the HF cache, `workstation_env.sh`), it is on the same filesystem as the repo so the
+move costs no disk, and it puts the tree where `git status` cannot see it at all — which is a
+stronger fix than widening `.gitignore`, because a pattern is one edit away from being wrong again.
+`docs/isaac-est-drift-runbook.md` §2 carries the same decision and the same reasoning.
 
 The consequence for the code, and it is enforced: **`isaac_binding.py`, `isaac_transport.py` and
 `isaac_g1.py` import numpy and nothing heavier.** No torch, directly or transitively. Proved in a
@@ -66,39 +81,69 @@ That is what makes the Isaac venv able to run the rollout at all.
 
 ---
 
-## 1. Install Isaac Sim 6.0.1 into its own venv
+## 1. Install Isaac Sim 6.0.1 into its own venv, outside the working tree
 
-NVIDIA's stated requirements for Isaac Sim (read from their requirements page on 2026-08-05,
-x86_64 table): **16 GB VRAM minimum** ("GPUs with less than 16GB VRAM may be insufficient to run a
-complex scene"), 32 GB RAM minimum / 64 GB recommended, 50 GB SSD minimum / 500 GB recommended,
-Ubuntu 22.04 or 24.04, Linux driver **595.58.03**. A 5090 is 32 GiB, which clears the VRAM minimum
-on its own — but not while `serve_policy.py` is also resident. That is §3, and it is the constraint
-that actually bites.
+NVIDIA's stated requirements for Isaac Sim 6.0 (their requirements page, read 2026-08-05 and
+re-read 2026-08-22, x86_64 table): **16 GB VRAM minimum** ("GPUs with less than 16GB VRAM may be
+insufficient to run a complex scene"), 32 GB RAM minimum / 64 GB recommended, 50 GB SSD minimum /
+500 GB recommended, Ubuntu 22.04 or 24.04, Linux driver **595.58.03**. The GPU rows are minimum
+**GeForce RTX 4080**, recommended **GeForce RTX 5080**, ideal **RTX PRO 6000 Blackwell**, and
+*"GPUs without RT Cores (A100, H100) are not supported"* — all re-confirmed 2026-08-22. **No NVIDIA
+page consulted names the RTX 5090 by model**; that this box's card is covered is an inference from
+the 5080 row (same architecture, same compute capability, larger part) and it is UNVERIFIED until
+`preflight_isaac.py` exits 0 here. `docs/isaac-est-drift-runbook.md` §1 is where that argument is
+written out in full.
+
+A 5090 is 32 GiB, which clears the VRAM minimum on its own — but not while `serve_policy.py` is also
+resident. That is §3, and it is the constraint that actually bites.
 
 ```bash
-# a SECOND venv, on python 3.12 exactly — not the one docs/local_gpu.md §0 built
-python3.12 -m venv .venv-isaac
-. .venv-isaac/bin/activate
-pip install --upgrade pip                        # NVIDIA's docs ask for this first
+# a SECOND venv, on python 3.12 exactly — not the one docs/local_gpu.md §0 built, and NOT
+# inside the working tree (see §0).
+export ISAAC_VENV=~/wam-t041/.venv-isaac
+python3.12 -m venv "$ISAAC_VENV"
+"$ISAAC_VENV"/bin/pip install --upgrade pip      # NVIDIA's docs ask for this first
+
+# torch FIRST, pinned, from the CUDA build that carries sm_120 — NVIDIA's own order (see below)
+"$ISAAC_VENV"/bin/pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 
 # Isaac Sim itself — NVIDIA's documented install line for 6.0.1, verbatim
-pip install "isaacsim[all,extscache]==6.0.1.0" --extra-index-url https://pypi.nvidia.com
+"$ISAAC_VENV"/bin/pip install "isaacsim[all,extscache]==6.0.1.0" --extra-index-url https://pypi.nvidia.com
 
-# what torch did that pull? THIS is the answer to §0's open question — record it.
-pip show torch
+# did the resolver keep 2.11.0, or replace it during the step above? Record it either way.
+"$ISAAC_VENV"/bin/pip show torch
 
 # and WAM itself. The base dependency set is numpy + pydantic + pyyaml + typing-extensions —
 # no torch — and `serve` adds websockets, which --policy remote needs.
-pip install -e '.[serve]'
+"$ISAAC_VENV"/bin/pip install -e /home/humanoid/develop/wam'[serve]'
 ```
 
-**Let Isaac resolve its own torch; do not pre-install one.** The version above is exactly the thing
-§0 could not confirm, so pinning it by hand would be guessing where the resolver knows. If the
-wheel Isaac pulls has no sm_120 kernels you will find out at the first kernel launch with
-`no kernel image is available for execution on the device` — the fix is then to reinstall **the same
-version** from the cu128 index (`pip install torch==<what pip show said> --index-url
-https://download.pytorch.org/whl/cu128`), which is the same reasoning `docs/local_gpu.md` §0a
-applies to the WAM venv.
+**Install torch first, pinned to 2.11.0 from the cu128 index. This REVERSES what this page said
+until 2026-08-22, and the reversal is the point.** The instruction here used to be *"Let Isaac
+resolve its own torch; do not pre-install one"*, and its stated reason was that the version was the
+one thing §0 could not confirm, so pinning it by hand would be guessing where the resolver knows.
+**That reason has expired by evidence:** NVIDIA's own installation page pins torch to 2.11.0 and
+gives that line *before* the `isaacsim` line — confirmed 2026-08-22, and re-confirmed the same day
+by a second session reading the page independently (`docs/isaac-est-drift-runbook.md` §1.5). It is
+no longer guessing; it is following the vendor.
+
+The second reason to pre-install is one the old text conceded in its own escape hatch: **only a
+pre-install lets you *choose* the CUDA build.** A wheel with no sm_120 cubins still reports compute
+capability `(12, 0)` — that number comes from the driver — and then dies at the first kernel launch
+with `no kernel image is available for execution on the device`. Letting the resolver pick means
+finding that out on the first render instead of at install time. `docs/local_gpu.md` §0a applies the
+same reasoning to the WAM venv on this same card. Take **cu128** unless something forces CUDA 13, in
+which case the `/cu130` line on the same NVIDIA page is the alternative.
+
+If `pip show torch` reports something other than 2.11.0 after the `isaacsim` step, the resolver
+overrode the pin: reinstall **that** version from the cu128 index rather than assuming, and record
+that it differed, because nothing downstream will say so.
+
+**Two documents, one instruction.** `docs/isaac-est-drift-runbook.md` §2 gives this same sequence
+for the `EST_DRIFT_P95` measurement. They were briefly contradictory — this page said "do not
+pre-install", that page pre-installed — and were reconciled in one change on 2026-08-22. If a later
+reader finds them disagreeing again, one has been edited without the other and **neither should be
+trusted until they are re-reconciled**.
 
 **Do not run `uv sync` in this checkout, in either venv.** `docs/local_gpu.md` §0a explains why for
 the WAM venv (it reconciles the environment to `uv.lock` and will remove or replace a hand-installed
@@ -107,9 +152,9 @@ break Isaac instead.
 
 **On `isaac-python`.** `scripts/preflight_isaac.py` and `isaac_binding.ISAAC_MISSING_MSG` both say
 to run things with "Isaac Sim's own interpreter (`isaac-python`)". With the pip install above, that
-interpreter *is* `.venv-isaac/bin/python` — there is no separate binary to find. `isaac-python` /
+interpreter *is* `$ISAAC_VENV/bin/python` — there is no separate binary to find. `isaac-python` /
 `./python.sh` is what the archive and container installs ship; if you installed that way, substitute
-it everywhere this page says `.venv-isaac/bin/python`. Either way the rule is the same one those
+it everywhere this page says `$ISAAC_VENV/bin/python`. Either way the rule is the same one those
 messages are protecting: **never run the Isaac side out of `.venv`.**
 
 ---
@@ -117,7 +162,7 @@ messages are protecting: **never run the Isaac side out of `.venv`.**
 ## 2. `scripts/preflight_isaac.py` — run this FIRST, and read the JSON
 
 ```bash
-.venv-isaac/bin/python scripts/preflight_isaac.py --out runs/preflight/isaac.json
+"$ISAAC_VENV"/bin/python scripts/preflight_isaac.py --out runs/preflight/isaac.json
 ```
 
 Exit code is 0 iff every check passed. It is the Isaac equivalent of `preflight_gpu.py`, with one
@@ -200,7 +245,8 @@ python scripts/serve_policy.py --joint --offload-text \
 # prints: serving ws://127.0.0.1:8765
 
 # terminal 2 — Isaac venv. Holds Isaac Sim. No weights, no torch on the WAM side of anything.
-. .venv-isaac/bin/activate
+. ~/wam-t041/.venv-isaac/bin/activate
+cd /home/humanoid/develop/wam        # the venv is out of tree (§0); the code is not
 python scripts/rollout.py --robot isaac_g1 --policy remote --server-uri ws://127.0.0.1:8765 \
     --instruction "move the apple to the plate" --rollouts 1
 ```
@@ -255,7 +301,7 @@ torch on the policy path, one process. It is the cheapest way to find out whethe
 works at all, and it is what to run immediately after the preflight passes:
 
 ```bash
-.venv-isaac/bin/python scripts/rollout.py --robot isaac_g1 --policy dummy --rollouts 1
+"$ISAAC_VENV"/bin/python scripts/rollout.py --robot isaac_g1 --policy dummy --rollouts 1
 ```
 
 Everything above the `G1Transport` seam is byte-identical to the MuJoCo and DDS backends — joint
@@ -386,6 +432,7 @@ The preflight is the record of the assumption; the binding is the assumption.
 
 ## See also
 
+- `docs/isaac-est-drift-runbook.md` — the one measurement this backend is currently needed for (PR-08 §4's `EST_DRIFT_P95`): what NVIDIA's docs say about Blackwell/sm_120 and which release that forces (§1; §1.5 is what a second, independent re-fetch of every one of those URLs confirmed and what it corrected, and it is what closed §0's torch-pin row above), the install and preflight invocation for it (§2–§3), and the alternatives to installing Isaac at all (§6)
 - `docs/local_gpu.md` — the WAM venv, the torch build, `preflight_gpu.py`, the VRAM budget (§0c), `--offload-text` (§0b), the closed loop (§4)
 - `scripts/preflight_isaac.py` — the gate in §2; its module docstring is the authoritative record of every Isaac API assumption
 - `src/wam/robot/isaac_binding.py` — the one module allowed to import `omni`/`isaacsim`/`pxr`, plus `FakeIsaacBinding`

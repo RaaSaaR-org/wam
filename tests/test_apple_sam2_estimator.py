@@ -759,15 +759,17 @@ def test_the_prompt_is_lowercased_and_period_terminated_for_grounding_dino(monke
     assert state["prompts"] == ["apple."]
 
 
-def test_the_prompt_the_harness_cannot_see_is_at_least_recorded_and_named(loaded):
-    """--object-class is set separately and this module cannot see it, so the mismatch cannot be
-    refused here. It is put in front of whoever reads the artifact instead, and named as a blocker
-    rather than left as a thing someone would have to already know."""
+def test_the_prompt_the_harness_cannot_see_is_recorded_and_no_longer_only_recorded(loaded):
+    """This module still cannot see ``--object-class``, but the coupling is no longer left to a
+    reader: the flag defaults to this prompt and refuses an explicit value that disagrees, so the
+    blocker that named the coupling is discharged — in the harness, with the discharge written
+    down rather than the blocker quietly disappearing."""
     module, _ = loaded
     record = module.stats()
     assert record["object_text_prompt"] == "apple."
     assert "--object-class" in record["object_text_prompt_note"]
-    assert any("--object-class" in b for b in module.GATE_QUALIFICATION_BLOCKERS)
+    assert not any("--object-class" in b for b in module.GATE_QUALIFICATION_BLOCKERS)
+    assert any("--object-class" in d for d in module.GATE_QUALIFICATION_DISCHARGED)
 
 
 def test_the_configured_thresholds_reach_the_post_processor(loaded):
@@ -776,6 +778,102 @@ def test_the_configured_thresholds_reach_the_post_processor(loaded):
     module.segment(_frame())
     assert state["thresholds"] == [(module.BOX_THRESHOLD, module.TEXT_THRESHOLD)]
     assert state["target_sizes"] == [[(48, 64)]]
+
+
+# -- the generator's operating point, not ours ---------------------------------------------------------
+
+
+def test_the_detection_thresholds_are_the_generators_own_numbers(loaded):
+    """PR-08 §4 step 2 asks for THE SAME segmenter as Cosmos-Transfer2.5's, and a checkpoint id is
+    not an operating point: the same GroundingDINO at 0.35 and at 0.15 detects on different frames,
+    which is a different mask, a different centroid and a different no-detection rate.
+
+    These four numbers are read off the generator's own
+    ``cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py`` (cluster copy, 2026-08-22),
+    which post-processes at ``threshold=0.15, text_threshold=0.25`` and retries once at
+    ``(0.1, 0.1)``. They are restated here rather than imported from the module under test, because
+    a test that reads the constant it checks cannot notice the constant moving — and the one edit
+    this file exists to catch is somebody "tuning" them on AppleToPlate, which would make this a
+    different segmenter from the one that draws the conditioning masks.
+    """
+    module, _ = loaded
+    assert module.BOX_THRESHOLD == 0.15
+    assert module.TEXT_THRESHOLD == 0.25
+    assert module.RETRY_BOX_THRESHOLD == 0.1
+    assert module.RETRY_TEXT_THRESHOLD == 0.1
+    assert module.BOX_SELECTION == "highest_score"
+
+
+def test_the_retry_fires_only_when_the_first_pass_found_no_box_at_all(monkeypatch):
+    """Upstream retries on ``len(boxes) == 0`` and on nothing else. Retrying on a low score, or
+    looping the thresholds down until something appears, is a detector of our own design — and a
+    budget measured with it is a budget for an error the generator does not commit."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    # Frame 1: a weak box, well under the 0.35 this module used to use but over 0.15. Frame 2:
+    # nothing at either pass.
+    state = _install(monkeypatch, detections=[[(0.17, [10.0, 10.0, 30.0, 30.0])], [], []])
+    module = _fresh_import(monkeypatch)
+
+    assert module.segment(_frame()).any()
+    assert state["thresholds"] == [(0.15, 0.25)], "a box was found; there is nothing to retry"
+    assert module.RETRY_FRAMES == 0
+
+    assert not module.segment(_frame()).any()
+    assert state["thresholds"][1:] == [(0.15, 0.25), (0.1, 0.1)], "exactly one retry, at (0.1, 0.1)"
+    assert module.RETRY_FRAMES == 1
+    assert module.RETRY_RECOVERED_FRAMES == 0
+    assert module.NO_DETECTION_FRAMES == 1
+
+
+def test_a_box_found_only_by_the_retry_is_used_and_counted(monkeypatch):
+    """The retry buys coverage by accepting a weak detection, and on an occluded frame a weak
+    detection lands on something that is not the apple — raising coverage while degrading the mask,
+    i.e. hiding inside the one number the harness gates on. It is upstream's behaviour so it stays;
+    counting it is what makes its contribution visible instead of assumed."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    state = _install(monkeypatch, detections=[[], [(0.12, [8.0, 8.0, 20.0, 20.0])]])
+    module = _fresh_import(monkeypatch)
+
+    assert module.segment(_frame()).any()
+    assert state["thresholds"] == [(0.15, 0.25), (0.1, 0.1)]
+    assert state["predictors"][0].boxes_seen[0].tolist() == [8.0, 8.0, 20.0, 20.0]
+    assert module.RETRY_FRAMES == 1
+    assert module.RETRY_RECOVERED_FRAMES == 1
+    assert module.NO_DETECTION_FRAMES == 0
+    record = module.stats()
+    assert record["n_frames_retry_fired"] == 1
+    assert record["n_frames_retry_recovered"] == 1
+
+
+def test_the_retry_pass_also_takes_the_highest_scoring_box(monkeypatch):
+    """The selection rule does not change between the two passes — upstream sorts once, after
+    whichever post-processing produced boxes."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    state = _install(monkeypatch, detections=[[], [
+        (0.11, [0.0, 0.0, 60.0, 44.0]),    # the whole table, found only at the retry threshold
+        (0.13, [12.0, 8.0, 26.0, 22.0]),   # the apple, barely
+    ]])
+    module = _fresh_import(monkeypatch)
+    module.segment(_frame())
+
+    assert state["predictors"][0].boxes_seen[0].tolist() == [12.0, 8.0, 26.0, 22.0]
+
+
+def test_the_detector_runs_once_even_when_the_post_processing_runs_twice(monkeypatch):
+    """post_process_grounded_object_detection is a pure function of the outputs and the two
+    thresholds, so a second forward pass would buy identical logits at the price of a second
+    inference over every no-detection frame — of which this corpus has many."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    state = _install(monkeypatch, detections=[[], []])
+    module = _fresh_import(monkeypatch)
+    module.segment(_frame())
+
+    assert len(state["thresholds"]) == 2, "two post-processings"
+    assert state["prompts"] == ["apple."], "one processor call, i.e. one forward pass"
 
 
 # -- depth: metric or nothing -----------------------------------------------------------------------------
@@ -873,8 +971,55 @@ def test_it_does_not_claim_to_be_a_gate_estimator_and_says_why(loaded):
     assert module.GATE_QUALIFIED is False
     assert module.GATE_QUALIFICATION_BLOCKERS
     joined = " ".join(module.GATE_QUALIFICATION_BLOCKERS)
-    assert "Never executed" in joined
     assert "coverage" in joined
+    # The two that survive 2026-08-22 and are the reason the flag is still False: no human has
+    # looked at a mask this adapter produced, and it re-detects per frame where the generator
+    # propagates one mask across the clip.
+    assert "NOBODY HAS LOOKED AT A MASK" in joined
+    assert "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in joined
+
+
+def test_the_stale_never_executed_blocker_is_withdrawn_by_evidence_and_not_by_deletion(loaded):
+    """Job 189583 staged all three checkpoints at the pinned revisions and 189588 drove this
+    adapter over 720 corpus frames, so 'never executed, no checkpoint staged' is false and must not
+    keep standing. It is ALSO not simply gone: a blocker that vanishes between two commits looks
+    identical whether it was satisfied or deleted by whoever found it inconvenient, and only one of
+    those is allowed to shorten the list."""
+    module, _ = loaded
+    assert not any("Never executed" in b for b in module.GATE_QUALIFICATION_BLOCKERS)
+    discharged = " ".join(module.GATE_QUALIFICATION_DISCHARGED)
+    assert "189583" in discharged and "189588" in discharged
+    assert module.stats()["gate_qualification_discharged"] == list(
+        module.GATE_QUALIFICATION_DISCHARGED
+    )
+
+
+def test_execution_is_not_confused_with_correctness(loaded):
+    """The distinction the rewritten blocker 1 rests on, asserted so a later edit cannot blur it:
+    coverage 1.0 says a box came back on every frame, not that it was the apple's box."""
+    module, _ = loaded
+    blocker = next(b for b in module.GATE_QUALIFICATION_BLOCKERS if "LOOKED AT A MASK" in b)
+    assert "coverage 1.0" in blocker
+    assert "not that it was the APPLE's box" in blocker
+
+
+def test_the_pilot_job_the_withdrawal_rests_on_is_labelled_as_an_untracked_claim(loaded):
+    """Blocker 1's central factual claim — that this adapter has run end to end over the corpus —
+    rests on job 189588, and 189588 is recorded in no tracked file in this repository.
+    ``.mc/tasks/todo/T-040-*.md`` records 189583, 189584, 189585 and 189586 and not that one.
+
+    A blocker tuple is where this project writes down what is and is not established, so a number
+    cited there that nobody can look up has to say so in the same sentence. It must also say that
+    the run it cites predates the operating point this file now pins: the pilot ran at
+    box_threshold 0.35 with no retry branch, which is a different segmenter from the one whose
+    output the blocker is reasoning about."""
+    module, _ = loaded
+    blocker = next(b for b in module.GATE_QUALIFICATION_BLOCKERS if "LOOKED AT A MASK" in b)
+    assert "189588" in blocker
+    assert "NOT RECORDED ANYWHERE TRACKED" in blocker, (
+        "the untracked citation must be labelled where it is used, not only in a report"
+    )
+    assert "0.35" in blocker, "and it must say the pilot ran at the superseded operating point"
 
 
 def test_measure_est_drift_reads_the_flag_as_false(loaded):
@@ -1034,3 +1179,316 @@ def test_the_declared_checkpoints_measure_geom_tol_records_carry_the_commits(loa
     for value in declared.values():
         repo, _, revision = value.partition("@")
         assert CONTRACT_PINS[repo] == revision
+
+
+# -- the committed segmenter contract ------------------------------------------------------------------
+#
+# configs/transfer25/pr08_geom_tol.json is the file PR-08 §4 step 2 is checked against: it records
+# WHICH segmenter both halves of §6's subtraction must have used, and it is committed BEFORE either
+# number is measured so that the method cannot be chosen after seeing the result. These tests are
+# the reason it cannot rot: the module and the file are compared field for field, and the sidecar is
+# compared to the bytes.
+
+GEOM_TOL_CONTRACT = _REPO / "configs" / "transfer25" / "pr08_geom_tol.json"
+
+
+def _contract_doc() -> dict:
+    import json
+
+    return json.loads(GEOM_TOL_CONTRACT.read_text(encoding="utf-8"))
+
+
+def test_the_committed_contract_is_the_modules_own_segmenter_block(loaded):
+    """Field for field, not "looks similar". Every entry in this block changes which frames get a
+    mask or where its centroid lands — the prompt, both thresholds, the retry pair, the box rule,
+    the propagation mode, the two checkpoint pins — and the whole purpose of committing it early is
+    that a later edit to the module has to be an edit to the committed file too, in the same
+    reviewable change."""
+    module, _ = loaded
+    assert _contract_doc()["segmenter"] == module.SEGMENTER_CONTRACT
+
+
+def test_the_committed_contract_names_the_join_key_and_the_pinned_weights(loaded):
+    """A contract that named a segmenter loosely would be worse than none: it would read as a check
+    that ran and agreed."""
+    module, _ = loaded
+    block = _contract_doc()["segmenter"]
+    assert block["method_name"] == module.ESTIMATOR_NAME
+    assert block["detector"]["revision"] == CONTRACT_PINS[block["detector"]["repo"]]
+    assert block["segmenter"]["revision"] == CONTRACT_PINS[block["segmenter"]["repo"]]
+    assert block["depth"]["revision"] == CONTRACT_PINS[block["depth"]["repo"]]
+    assert block["box_threshold"] == 0.15
+    assert block["text_threshold"] == 0.25
+    assert block["retry_box_threshold"] == 0.1
+    assert block["retry_text_threshold"] == 0.1
+    assert block["box_selection"] == "highest_score"
+    assert block["propagation"] == "per_frame"
+    assert block["upstream_propagation"] == "sam2_video_predictor"
+    assert block["pixel_grid_hw"] == [480, 640]
+
+
+def test_the_committed_document_is_a_contract_plus_a_measurement_and_never_only_a_measurement():
+    """The file is ONE document in TWO declared sections and this asserts the invariant that holds
+    in both of its lifetimes, rather than the one that holds only today.
+
+    Before GEOM_TOL is measured every measurement slot is null: a contract that arrived with numbers
+    in it would be a measurement that chose its own method afterwards, which is the failure the
+    committed style partition exists to prevent. Afterwards ``measure_geom_tol.py`` writes its
+    artifact over this same path — that path is its default ``--out`` and its ``--merge`` target —
+    and the contract section has to still be there, because the day it is not is the day
+    ``cross_check_geom_tol`` refuses every run with ``geom_tol_does_not_record_segmenter_params``.
+    A test that only asserted the nulls would go red on the commit that lands the number, and the
+    obvious fix for a red test is to delete it."""
+    doc = _contract_doc()
+    # 1.1.0 (2026-08-22) added the `est_drift_estimator_name` measurement slot. The contract
+    # section is otherwise untouched — same segmenter block, byte for byte — and the bump is here
+    # so that a slot cannot be added to this document without the change being reviewed.
+    assert doc["spec_version"] == "1.1.0"
+    assert "§4 step 2" in doc["what_this_is"]
+
+    # The contract section names itself, and names what may be filled in. Both lists are what
+    # measure_geom_tol.merge_committed_contract() copies forward and fills.
+    assert set(doc["contract_fields"]) == {
+        "spec_version", "what_this_is", "contract_fields", "measurement_fields", "segmenter"
+    }
+    assert set(doc["measurement_fields"]) == {
+        "geom_tol_px", "geom_tol_source", "est_drift_p95_px", "est_drift_source",
+        # THE JOIN KEY, and a slot rather than a note in somebody's head. PR-08 §4 step 2 requires
+        # both halves of GEOM_TOL - EST_DRIFT_P95 to come from one segmenter; the two numbers are
+        # measured by two scripts into two files and merged here, and run_g0_gates can only check
+        # the claim if the name arrives with the number.
+        "est_drift_estimator_name",
+        "gate_margin_px",
+    }
+    for key in doc["contract_fields"]:
+        assert key in doc, f"the contract section is missing {key}"
+
+    if doc.get("GEOM_TOL_px") is None:
+        for key in doc["measurement_fields"]:
+            assert doc[key] is None, f"{key} must be null until it is measured"
+    else:
+        # A measured artifact landed here. One quantity, one value, under both spellings —
+        # run_g0_gates._first_present refuses a document that states it twice and differently.
+        assert doc["geom_tol_px"] == doc["GEOM_TOL_px"]
+        assert doc["geom_tol_source"], "a measured tolerance must say what produced it"
+
+
+def test_the_measured_artifact_would_still_carry_the_contract_the_reader_looks_for(
+    loaded, tmp_path, monkeypatch
+):
+    """The end-to-end property the whole two-section design exists for, exercised without a GPU:
+    take the REAL committed document, hand it to the writer's carry-forward, and the reader must
+    still find the segmenter block afterwards.
+
+    This is the failure that made the gate unreachable: measure_geom_tol.py's default --out is this
+    file, so the first real run wrote a document with no segmenter anywhere and every later
+    measure_est_drift run refused, correctly and permanently."""
+    import json
+    import shutil
+
+    import measure_est_drift as ed
+    import measure_geom_tol as mgt
+
+    module, _ = loaded
+    target = tmp_path / "pr08_geom_tol.json"
+    shutil.copy(GEOM_TOL_CONTRACT, target)
+
+    # The shape measure_geom_tol builds for a sam2 run, minus everything irrelevant here.
+    record = {
+        "measured_by": "scripts/measure_geom_tol.py",
+        "measured_date": "2026-08-22",
+        "git_commit": "deadbeef",
+        "resolution_hw": [480, 640],
+        "gate_qualified": True,
+        "GEOM_TOL_px": 3.4,
+        "mask_method": {"name": module.ESTIMATOR_NAME,
+                        "params": {"segmenter": dict(module.SEGMENTER_CONTRACT)}},
+    }
+    carried = mgt.merge_committed_contract(target, record)
+    assert carried == module.SEGMENTER_CONTRACT
+    target.write_text(json.dumps(record, indent=2))
+
+    monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", target)
+    reasons, compare = ed.cross_check_geom_tol(
+        [480, 640], module.ESTIMATOR_NAME, module.SEGMENTER_CONTRACT
+    )
+    assert "geom_tol_does_not_record_segmenter_params" not in reasons
+    assert "segmenter_params_disagree_with_geom_tol" not in reasons
+    assert compare["geom_tol_segmenter_contract_at"] == "segmenter"
+
+
+def test_the_contracts_sha256_sidecar_matches_its_bytes():
+    """The same discipline configs/transfer25/pr08_style_partition.json.sha256 uses: hash of the
+    file's bytes, hexdigest plus a newline, so "the file the gate read is the file that was
+    committed" is checkable with sha256sum instead of trusted."""
+    import hashlib
+
+    payload = GEOM_TOL_CONTRACT.read_bytes()
+    sidecar = GEOM_TOL_CONTRACT.parent / (GEOM_TOL_CONTRACT.name + ".sha256")
+    assert sidecar.read_text(encoding="utf-8") == hashlib.sha256(payload).hexdigest() + "\n"
+
+
+def _contract_at(tmp_path, monkeypatch, **overrides):
+    """Point measure_est_drift at a copy of the REAL committed contract, optionally perturbed."""
+    import copy
+    import json
+
+    import measure_est_drift as ed
+
+    doc = _contract_doc()
+    block = copy.deepcopy(doc["segmenter"])
+    block.update(overrides)
+    doc["segmenter"] = block
+    p = tmp_path / "pr08_geom_tol.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", p)
+    return ed
+
+
+def test_the_cross_check_agrees_with_the_real_committed_contract(loaded, tmp_path, monkeypatch):
+    """The baseline the two refusals below are refusals FROM. GEOM_TOL itself is not measured yet,
+    so the run is still disqualified — on the gate flag, which is the honest reason — and not on
+    the segmenter."""
+    module, _ = loaded
+    ed = _contract_at(tmp_path, monkeypatch)
+    reasons, compare = ed.cross_check_geom_tol(
+        [480, 640], module.ESTIMATOR_NAME, module.SEGMENTER_CONTRACT
+    )
+    assert "segmenter_params_disagree_with_geom_tol" not in reasons
+    assert "mask_method_disagrees_with_estimator" not in reasons
+    assert "resolution_disagrees_with_geom_tol" not in reasons
+    assert compare["segmenter_param_disagreements"] == []
+    assert compare["geom_tol_segmenter_contract_at"] == "segmenter"
+    assert "geom_tol_is_not_gate_qualified" in reasons
+
+
+def test_the_cross_check_refuses_a_method_name_mismatch(loaded, tmp_path, monkeypatch):
+    """§4 step 2 says the SAME segmenter. Two names is two quantities, and §6 subtracts them."""
+    module, _ = loaded
+    ed = _contract_at(tmp_path, monkeypatch, method_name="hsv-red-diagnostic")
+    reasons, compare = ed.cross_check_geom_tol(
+        [480, 640], module.ESTIMATOR_NAME, module.SEGMENTER_CONTRACT
+    )
+    assert "mask_method_disagrees_with_estimator" in reasons
+    assert "segmenter_params_disagree_with_geom_tol" in reasons
+    assert [d["field"] for d in compare["segmenter_param_disagreements"]] == ["method_name"]
+
+
+def test_the_cross_check_refuses_a_detection_parameter_mismatch(loaded, tmp_path, monkeypatch):
+    """The failure a name-only check cannot see: the identical adapter, the identical name, one
+    threshold moved. It detects on different frames, produces different centroids, and reports
+    ESTIMATOR_NAME throughout."""
+    module, _ = loaded
+    ed = _contract_at(tmp_path, monkeypatch, box_threshold=0.35)
+    reasons, compare = ed.cross_check_geom_tol(
+        [480, 640], module.ESTIMATOR_NAME, module.SEGMENTER_CONTRACT
+    )
+    assert "mask_method_disagrees_with_estimator" not in reasons, "the NAME still agrees"
+    assert "segmenter_params_disagree_with_geom_tol" in reasons
+    (mismatch,) = compare["segmenter_param_disagreements"]
+    assert mismatch == {"field": "box_threshold", "geom_tol": 0.35, "this_run": 0.15}
+
+
+def test_the_cross_check_refuses_a_committed_document_that_records_no_segmenter(
+    loaded, tmp_path, monkeypatch
+):
+    """The shape measure_geom_tol.py used to write over the contract, and the refusal that made the
+    gate unreachable rather than wrong: a document at the committed path that names a mask_method
+    but no segmenter cannot answer "the same segmenter?", so the run is disqualified. Failing closed
+    is the intended direction, and it is still the behaviour — what changed on 2026-08-22 is that
+    measure_geom_tol refuses to PRODUCE such a document at that path (blocker 3, now discharged),
+    so this shape can only arrive by hand or from an older script."""
+    import json
+
+    import measure_est_drift as ed
+
+    module, _ = loaded
+    p = tmp_path / "pr08_geom_tol.json"
+    p.write_text(json.dumps({
+        "resolution_hw": [480, 640],
+        "gate_qualified": True,
+        "mask_method": {"name": module.ESTIMATOR_NAME, "params": {"checkpoints": {}}},
+        "GEOM_TOL_px": 3.4,
+    }), encoding="utf-8")
+    monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", p)
+    reasons, _ = ed.cross_check_geom_tol(
+        [480, 640], module.ESTIMATOR_NAME, module.SEGMENTER_CONTRACT
+    )
+    assert "geom_tol_does_not_record_segmenter_params" in reasons
+    # The blocker was DISCHARGED, not deleted — this module's own rule is that a condition which
+    # disappears looks the same whether it was satisfied or dropped, and only one of those is
+    # allowed to shorten the list.
+    assert not any("OVERWRITTEN by the measurement" in b
+                   for b in module.GATE_QUALIFICATION_BLOCKERS)
+    assert any("OVERWRITTEN by the measurement" in d and "merge_committed_contract" in d
+               for d in module.GATE_QUALIFICATION_DISCHARGED), (
+        "a blocker closed by another file's change must carry that evidence here"
+    )
+
+
+def test_a_measured_artifact_that_carries_the_contract_forward_is_accepted(
+    loaded, tmp_path, monkeypatch
+):
+    """What the fix for that blocker has to look like from this side: the contract at
+    mask_method.params.segmenter, which is where the reader already looks for it."""
+    import json
+
+    import measure_est_drift as ed
+
+    module, _ = loaded
+    p = tmp_path / "pr08_geom_tol.json"
+    p.write_text(json.dumps({
+        "resolution_hw": [480, 640],
+        "gate_qualified": True,
+        "mask_method": {
+            "name": module.ESTIMATOR_NAME,
+            "params": {"segmenter": module.SEGMENTER_CONTRACT},
+        },
+        "GEOM_TOL_px": 3.4,
+    }), encoding="utf-8")
+    monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", p)
+    reasons, compare = ed.cross_check_geom_tol(
+        [480, 640], module.ESTIMATOR_NAME, module.SEGMENTER_CONTRACT
+    )
+    assert reasons == []
+    assert compare["geom_tol_segmenter_contract_at"] == "mask_method.params.segmenter"
+
+
+def test_the_harness_takes_the_object_from_this_module_instead_of_asking_twice(loaded):
+    """The discharged blocker, exercised through the harness that discharges it: --object-class
+    defaults to this module's prompt, and an explicit value naming another object is fatal rather
+    than measured as a large plausible p95."""
+    import measure_est_drift as ed
+
+    module, _ = loaded
+    est = ed.Estimators(module, MODULE)
+    assert est.object_text_prompt == "apple."
+    assert ed.resolve_object_class(None, est) == ("apple", "estimator_prompt", [])
+    assert ed.resolve_object_class("apple", est)[0] == "apple"
+    # AND THE SPELLING THE HELP TEXT INVITES. --object-class defaults to this module's
+    # OBJECT_TEXT_PROMPT, which is "apple." with GroundingDINO's terminating period, so an operator
+    # copying the documented default and typing it explicitly is the normal case. It used to return
+    # the RAW string on the agreement path while the default path returned the normalised one:
+    # object_ids() compares label.strip().lower() and does NOT strip the period, so "apple." matched
+    # no Replicator label, every frame counted as frames_without_label, and the run ended at
+    # coverage 0.0 reporting "the apple is not in this scene" about a notation difference.
+    assert ed.resolve_object_class("apple.", est)[0] == "apple"
+    assert ed.resolve_object_class("Apple", est)[0] == "apple"
+    # Normalising strips the notation and NOTHING ELSE, so this cannot widen what matches.
+    with pytest.raises(ed.EstimatorUnavailable):
+        ed.resolve_object_class("red apple.", est)
+    with pytest.raises(ed.EstimatorUnavailable) as excinfo:
+        ed.resolve_object_class("plate", est)
+    message = str(excinfo.value)
+    assert "'plate'" in message and "'apple.'" in message
+    assert "SUBTRACTED from GEOM_TOL" in message
+
+
+def test_the_harness_reads_this_modules_contract_as_the_segmenter_it_cross_checks(loaded):
+    """Estimators is what writes the artifact, so a contract it cannot see is a contract nothing
+    downstream can check."""
+    import measure_est_drift as ed
+
+    module, _ = loaded
+    est = ed.Estimators(module, MODULE)
+    assert est.segmenter_contract == module.SEGMENTER_CONTRACT

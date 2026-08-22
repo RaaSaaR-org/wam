@@ -41,6 +41,24 @@ Anything that would make our estimate differ from the generator's — a differen
 different detector, a hand-placed point prompt — makes ``EST_DRIFT_P95`` a budget for an error the
 generator does not commit and leaves the one it does commit unbudgeted.
 
+**The strong reading reaches past the weights, and as of 2026-08-22 so does this module.** A
+checkpoint id is not an operating point: the same GroundingDINO at ``threshold=0.35`` and at
+``threshold=0.15`` returns different boxes on different frames, which is a different mask, a
+different centroid and a different no-detection rate. Upstream's numbers are therefore adopted
+verbatim — ``0.15`` / ``0.25``, one retry at ``(0.10, 0.10)`` when no box is found at all, and the
+highest-scoring box — and they are pinned in :data:`SEGMENTER_CONTRACT`, committed to
+``configs/transfer25/pr08_geom_tol.json`` before the measurement, and cross-checked by
+``measure_est_drift`` field for field. They are not ours to improve; see the comment above
+:data:`BOX_THRESHOLD`.
+
+**One difference remains and it is not papered over.** Upstream propagates a single mask across the
+clip with ``SAM2VideoPredictor``; this adapter segments each frame independently, because
+``segment(rgb)`` is the contract both PR-08 §4 harnesses call. That is the LAST blocker in
+:data:`GATE_QUALIFICATION_BLOCKERS` — named that way and not by an index, because the tuple shrinks
+as blockers are discharged and an index in a comment goes stale silently — with the argument that
+it biases ``EST_DRIFT_P95`` in BOTH
+directions — inflating the per-frame tail we do measure, and hiding the tracking drift we do not.
+
 A REPO ID IS NOT A CHECKPOINT ID: EVERY LOAD IS PINNED TO A COMMIT
 ------------------------------------------------------------------
 ``facebook/sam2-hiera-large`` names a repository, not weights. The repository can move, and a gate
@@ -150,21 +168,27 @@ traceback. Model *loading* stays lazy and module-level-cached, one load per proc
 underway, and an artifact written from a model that never loaded is the thing gate qualification
 exists to prevent.
 
-WHAT IT CANNOT REFUSE, AND SO ONLY RECORDS
--------------------------------------------
-The object this module looks for and the object the harness scores it against are set by two
+WHAT IT CANNOT REFUSE ALONE, AND SO EXPORTS SO THAT SOMETHING ELSE CAN
+-----------------------------------------------------------------------
+The object this module looks for and the object the harness scores it against used to be two
 independent knobs: :data:`OBJECT_TEXT_PROMPT` (``$WAM_PR08_OBJECT_PROMPT``) here, and
 ``measure_est_drift --object-class`` there. Change one and not the other and an apple mask is
 compared against a plate's ground truth: a large but entirely plausible p95, no crash, no drop in
-coverage. This module cannot see the harness's flag, so it cannot refuse the mismatch; it puts the
-prompt into :data:`ESTIMATOR_VERSION` and :func:`stats` so the artifact carries both values side by
-side, and it names the coupling in :data:`GATE_QUALIFICATION_BLOCKERS`.
+coverage. This module still cannot see that flag — but it no longer has to, because the flag now
+DEFAULTS to this module's prompt and an explicit value naming a different object is fatal there.
+The same shape applies to everything else that has to be equal on both sides of §6's subtraction:
+this module cannot check it, so it EXPORTS it, once, as :data:`SEGMENTER_CONTRACT`, and the two
+harnesses do the checking. A constant that is only in the code cannot be cross-checked by a script
+reading two JSON artifacts six months later.
 
 GATE QUALIFICATION
 ------------------
 :data:`GATE_QUALIFIED` is ``False``. See :data:`GATE_QUALIFICATION_BLOCKERS` for the specific,
 checkable conditions and the reasoning; flipping it is a reviewable edit to that tuple, not a
-judgement someone re-makes from scratch. ``measure_est_drift`` reads the flag with a default of
+judgement someone re-makes from scratch. Conditions that HAVE been discharged move to
+:data:`GATE_QUALIFICATION_DISCHARGED` with the evidence, rather than disappearing — a blocker that
+vanishes between two commits looks identical whether it was satisfied or deleted, and only one of
+those is allowed to shorten this list. ``measure_est_drift`` reads the flag with a default of
 ``False`` and stamps ``estimator_not_gate_qualified`` into the artifact, which still gets written —
 "we tried and this is what came out" is a record.
 """
@@ -278,11 +302,63 @@ def normalize_prompt(prompt: str) -> str:
 
 OBJECT_TEXT_PROMPT = normalize_prompt(OBJECT_TEXT_PROMPT_RAW)
 
-#: GroundingDINO's own demo defaults. They are NOT measured on this corpus, and they directly set
-#: how many frames come back empty, which sets ``coverage``, which is a gate condition. That is one
-#: of the blockers below.
-BOX_THRESHOLD = float(os.environ.get("WAM_PR08_BOX_THRESHOLD", "0.35"))
+# THESE FOUR NUMBERS ARE NOT OURS TO TUNE. THEY ARE THE GENERATOR'S, AND THAT IS THE POINT.
+#
+# They are read off Cosmos-Transfer2.5's own auxiliary segmenter,
+# ``cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py`` (the cluster copy, read
+# 2026-08-22), which calls
+#
+#     processor.post_process_grounded_object_detection(..., threshold=0.15, text_threshold=0.25, ...)
+#     if len(boxes) == 0:   # exactly one retry, at threshold=0.1, text_threshold=0.1
+#     sorted_indices = np.argsort(scores)[::-1]   # the highest-scoring box wins
+#
+# The previous values here were 0.35/0.25 — GroundingDINO's demo defaults, which we had copied
+# because they are what everyone copies. That made them OUR numbers, and a number of ours sitting in
+# the detection path is exactly what PR-08 §4 step 2 forbids: it asks for **the same segmenter** the
+# generator will use, so that ``EST_DRIFT_P95`` budgets the error the generator actually commits.
+# At 0.35 we were budgeting for a stricter detector than the one that will draw the conditioning
+# masks — a different no-detection rate, a different set of surviving frames, a different p95 — and
+# calling the difference zero.
+#
+# So: do not "tune" these on AppleToPlate. A threshold that reads better on our corpus makes this
+# adapter a different segmenter from the generator's, which does not improve the budget, it makes it
+# a budget for something else. The only edit that is ever correct here is one that follows upstream
+# after re-reading upstream, and it has to move :data:`SEGMENTER_CONTRACT` and the committed
+# ``configs/transfer25/pr08_geom_tol.json`` with it or the cross-check will refuse the run.
+BOX_THRESHOLD = float(os.environ.get("WAM_PR08_BOX_THRESHOLD", "0.15"))
 TEXT_THRESHOLD = float(os.environ.get("WAM_PR08_TEXT_THRESHOLD", "0.25"))
+
+#: Upstream's single retry when the first pass returns no box at all. It is a real behaviour of the
+#: generator's segmenter and not a robustness flourish: it decides which frames the generator has a
+#: mask for, and therefore which frames it constrains geometrically. Dropping it would leave us
+#: measuring a stricter detector than the one that runs; adding a SECOND retry, or looping down, is
+#: equally forbidden for the same reason. Exactly one, at exactly these two numbers.
+RETRY_BOX_THRESHOLD = float(os.environ.get("WAM_PR08_RETRY_BOX_THRESHOLD", "0.1"))
+RETRY_TEXT_THRESHOLD = float(os.environ.get("WAM_PR08_RETRY_TEXT_THRESHOLD", "0.1"))
+
+#: Upstream takes ``np.argsort(scores)[::-1]`` and uses index 0 — the highest-scoring box. This
+#: adapter already did that, for a reason of its own (see :func:`_best_box`: the largest box a text
+#: prompt returns on a tabletop is routinely the plate-plus-apple region, and a box that CONTAINS
+#: the apple is an ambiguous prompt for SAM 2). The two agreeing is worth stating rather than
+#: leaving as a coincidence a later edit could break from either side.
+BOX_SELECTION = "highest_score"
+
+#: THE ONE REMAINING DIFFERENCE FROM UPSTREAM, named so it cannot be mistaken for an equivalence.
+#: Upstream drives ``SAM2VideoPredictor.from_pretrained(...).init_state(video_path=...)`` and
+#: PROPAGATES one mask through the clip; this adapter segments each frame independently, because the
+#: contract both PR-08 §4 harnesses call is ``segment(rgb) -> mask`` on one frame. See
+#: :data:`GATE_QUALIFICATION_BLOCKERS` for the argument about which way that biases the budget — it
+#: is not one way.
+PROPAGATION = "per_frame"
+UPSTREAM_PROPAGATION = "sam2_video_predictor"
+
+#: The pixel grid both halves of §6's subtraction must be denominated in: AppleToPlate's source
+#: frames at 640x480, written ``[height, width]`` because that is the order ``resolution_hw`` uses
+#: on both sides. This is a claim about the CORPUS recorded in the contract so the two rigs can be
+#: joined on it before either runs; it is not enforcement. The enforcement is
+#: ``measure_est_drift.cross_check_geom_tol`` comparing the committed grid against the capture's
+#: actual one, and ``measure_geom_tol`` refusing a corpus with mixed geometry.
+PIXEL_GRID_HW: tuple[int, int] = (480, 640)
 
 #: ``cuda`` when torch says so, resolved at first load rather than at import so that importing this
 #: module never touches a GPU. The device changes nothing about the numbers and everything about
@@ -300,41 +376,162 @@ ESTIMATOR_VERSION = (
     f"seg={SAM2_MODEL_CHECKPOINT}@{SAM2_MODEL_REVISION};"
     f"depth={DEPTH_MODEL_CHECKPOINT}@{DEPTH_MODEL_REVISION};"
     f"prompt={OBJECT_TEXT_PROMPT!r};"
-    f"box_thr={BOX_THRESHOLD};text_thr={TEXT_THRESHOLD}"
+    f"box_thr={BOX_THRESHOLD};text_thr={TEXT_THRESHOLD};"
+    f"retry_box_thr={RETRY_BOX_THRESHOLD};retry_text_thr={RETRY_TEXT_THRESHOLD};"
+    f"box_sel={BOX_SELECTION};prop={PROPAGATION}"
 )
+
+#: The join key PR-08 §4 step 2 is checked on. It is :data:`ESTIMATOR_NAME` and it is spelled once:
+#: ``measure_geom_tol`` stamps it into ``mask_method.name``, ``measure_est_drift`` into
+#: ``estimators.name``, and the committed contract below into ``segmenter.method_name``. Three
+#: recordings of one string, so equality is by construction rather than by anyone remembering.
+MASK_METHOD_NAME = ESTIMATOR_NAME
+
+#: THE COMMITTED SEGMENTER CONTRACT, in the shape ``configs/transfer25/pr08_geom_tol.json`` carries
+#: it under ``segmenter``.
+#:
+#: PR-08 §4 step 2 says GEOM_TOL and EST_DRIFT_P95 must come from "the same segmenter", and §6
+#: subtracts them. Before this dict existed the only thing either artifact recorded about the
+#: segmenter was a NAME, so two runs could share a name and disagree about the prompt, the
+#: thresholds, the retry and the box rule — every one of which changes which frames get a mask and
+#: where its centroid lands — and the subtraction would still look like arithmetic.
+#:
+#: It is committed BEFORE the measurement, which is the other half of its job. A mask method chosen
+#: (or quietly adjusted) after seeing GEOM_TOL is the failure the style partition is committed early
+#: to prevent, and "we used the same segmenter" is not a checkable claim unless the claim was
+#: written down first. ``measure_est_drift.cross_check_geom_tol`` compares this dict field for field
+#: against the committed file and DISQUALIFIES the run on any disagreement.
+SEGMENTER_CONTRACT: dict[str, Any] = {
+    "method_name": MASK_METHOD_NAME,
+    "detector": {
+        "repo": GROUNDING_DINO_MODEL_CHECKPOINT,
+        "revision": GROUNDING_DINO_MODEL_REVISION,
+    },
+    "segmenter": {"repo": SAM2_MODEL_CHECKPOINT, "revision": SAM2_MODEL_REVISION},
+    "depth": {"repo": DEPTH_MODEL_CHECKPOINT, "revision": DEPTH_MODEL_REVISION},
+    "object_text_prompt": OBJECT_TEXT_PROMPT,
+    "box_threshold": BOX_THRESHOLD,
+    "text_threshold": TEXT_THRESHOLD,
+    "retry_box_threshold": RETRY_BOX_THRESHOLD,
+    "retry_text_threshold": RETRY_TEXT_THRESHOLD,
+    "box_selection": BOX_SELECTION,
+    "propagation": PROPAGATION,
+    "upstream_propagation": UPSTREAM_PROPAGATION,
+    "pixel_grid_hw": list(PIXEL_GRID_HW),
+}
 
 #: Every condition that has to be true before this pair may set ``EST_DRIFT_P95`` or ``GEOM_TOL``.
 #: Written out rather than summarised because :data:`GATE_QUALIFIED` is a claim, and a claim whose
 #: grounds are not written down gets flipped by whoever is in a hurry.
 GATE_QUALIFICATION_BLOCKERS: tuple[str, ...] = (
-    "Never executed. No SAM 2, GroundingDINO or Depth-Anything checkpoint is staged anywhere in "
-    "this project (T-040 notes, 2026-08-21: nothing under checkpoints/ or the hub cache matches), "
-    "so no mask this module produces has ever been looked at. Code written against an unstaged "
-    "checkpoint is a plan, not an instrument, and an instrument that has produced no output cannot "
-    "be asserted to produce correct output.",
-    "BOX_THRESHOLD / TEXT_THRESHOLD are upstream demo defaults, unmeasured on AppleToPlate. They "
-    "set the no-detection rate, which sets `coverage`, which measure_est_drift gates on. A "
-    "threshold chosen after looking at the resulting p95 is the failure the style partition exists "
-    "to prevent, so it has to be chosen before, on a labelled sample, and recorded.",
-    "PR-08 §4 step 2's 'the same segmenter' is not yet establishable: "
-    "configs/transfer25/pr08_geom_tol.json is not committed, so there is no recorded mask method "
-    "for this one to equal. measure_est_drift.cross_check_geom_tol compares the pixel grid and the "
-    "gate flag but NOT the method name, so nothing in the pipeline would catch the mismatch.",
-    "Cosmos-Transfer2.5's sam2_model.py was read for the checkpoint ids and the "
-    "prompt -> box -> mask topology, which is what §4 step 2 needs. Its prompt text, thresholds and "
-    "mask-selection rule were NOT read, so 'the same segmenter' currently means the same weights "
-    "driven our way, not the generator's way.",
-    "The object segmented and the object scored against are set independently: "
-    "$WAM_PR08_OBJECT_PROMPT here, `measure_est_drift --object-class` there. This module cannot see "
-    "that flag, so a mismatch produces a large, plausible p95 rather than a refusal. Both values "
-    "reach the artifact (estimators.version, object_class), so before this pair may set a gate "
-    "someone has to check they name the same object — and preferably the harness should stop "
-    "taking them separately.",
+    "NOBODY HAS LOOKED AT A MASK. The 2026-08-21 wording of this blocker ('never executed, no "
+    "checkpoint staged') is withdrawn as stale: job 189583 staged all three checkpoints at the "
+    "pinned revisions and verified them, and job 189588 drove this adapter end to end over the "
+    "AppleToPlate corpus in the GEOM_TOL pilot — 720 frames, two passes, 480x640, coverage 1.0 on "
+    "both. CITATION CAVEAT, because a blocker tuple is the load-bearing record of what is and is "
+    "not established: 189583 is recorded in .mc/tasks/todo/T-040-*.md, but 189588 IS NOT RECORDED "
+    "ANYWHERE TRACKED IN THIS REPOSITORY — its artifact was not readable from the session that "
+    "wrote this line, and the job id is an untracked claim until GEOM_TOL_PILOT.json lands. It is "
+    "also evidence about a configuration THIS FILE HAS SINCE REPLACED: that pilot necessarily ran "
+    "at the old operating point (box_threshold 0.35, no retry branch), so it is weaker evidence "
+    "for the current adapter than its numbers suggest. So the module runs and produces output. "
+    "What that does NOT establish is that the output "
+    "is right: coverage 1.0 says a box was returned on every frame, not that it was the APPLE's "
+    "box, and this adapter's whole failure mode is a plausible mask on the wrong object (the "
+    "plate, the hand, the whole tabletop) which produces a centroid, a displacement and a p95 that "
+    "all look like measurements. Lowering BOX_THRESHOLD to upstream's 0.15 with a 0.10 retry — "
+    "correct, and required by §4 step 2 — makes coverage an even weaker witness than it was at "
+    "0.35, because more frames now get a box and none of them get checked. Discharged by: a human "
+    "looking at a sample of overlaid masks spanning the corpus (occluded frames, apple-out-of-frame "
+    "frames, and the grasp), and/or a mask-vs-ground-truth IoU distribution from the Isaac capture "
+    "recorded beside the centroid displacement. Neither exists.",
+    "BOX_THRESHOLD / TEXT_THRESHOLD / the retry are unmeasured on AppleToPlate, and after 2026-08-22 "
+    "that is a narrower objection than it was. They are no longer 'upstream demo defaults we "
+    "happened to copy' (0.35/0.25): they are Cosmos-Transfer2.5's own operating point, read off its "
+    "sam2_model.py, which is precisely what §4 step 2 asks for. The choice-defect half of this "
+    "blocker is therefore DISCHARGED and inverted — measuring these on our corpus and moving them "
+    "to whatever reads best would MAKE this a different segmenter from the generator's, and the "
+    "budget would then be a budget for an error nobody commits. What survives is not a choice, it "
+    "is an unknown: nothing has measured what this operating point does on THIS corpus, and the "
+    "retry at (0.10, 0.10) buys detections by accepting weak ones, which on an occluded frame can "
+    "replace an honest all-False mask with a confident box on the wrong object. That inflates "
+    "coverage while degrading the mask, i.e. it hides itself in the one number the harness gates "
+    "on. Discharged by the same evidence as blocker 1, plus the recorded detection-score "
+    "distribution and retry counts (n_frames_retry_fired / n_frames_retry_recovered) from a full "
+    "pass, so the retry's contribution is visible rather than assumed.",
+    "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION, and it is the one difference left. "
+    "Everything else in §4 step 2's 'the same segmenter' now matches Cosmos-Transfer2.5's "
+    "sam2_model.py exactly — both checkpoints at pinned revisions, the 'apple.' phrase, "
+    "threshold=0.15 / text_threshold=0.25, the single (0.10, 0.10) retry when no box is found, and "
+    "highest-score box selection. But upstream drives SAM2VideoPredictor.init_state(video_path=...) "
+    "and PROPAGATES one mask across the clip, while this adapter re-detects and re-segments every "
+    "frame independently, because segment(rgb) is the contract both harnesses call. The bias is "
+    "TWO-SIDED, which is why this cannot be waved through as conservative: (a) independent "
+    "re-detection jitters frame to frame where propagation is temporally smooth, so our tail — and "
+    "EST_DRIFT_P95 is a p95, i.e. the tail — is INFLATED relative to the generator's, which "
+    "subtracts more from GEOM_TOL and tightens G0b (safe); (b) propagation's own characteristic "
+    "failure, drifting off the object and staying off for a run of frames, is invisible to a "
+    "per-frame estimator that recovers on the next frame, so the generator commits an error our "
+    "budget never sees (unsafe). PR-08 §4 already stamps is_lower_bound: true for a different "
+    "reason; with (a) and (b) together this number is neither a lower nor an upper bound on the "
+    "generator's mask error, and a G0b margin that clears only under it is not a pass. Discharged "
+    "by: measuring the same Isaac capture BOTH ways — this adapter per frame, and the video "
+    "predictor propagating from frame 0 — and recording the two p95s, so the direction and size of "
+    "the difference are a measurement rather than the argument above.",
 )
 
-#: Opt-IN, and this module does not opt in. See the blockers above. ``measure_est_drift`` reads this
-#: with a default of False and stamps ``estimator_not_gate_qualified``; the artifact is still
-#: written, and exits 3.
+#: What used to be in the tuple above and is not any more, with the evidence that removed it. A
+#: blocker that simply DISAPPEARS between two commits is indistinguishable from a blocker somebody
+#: deleted because it was in the way, and the whole value of the tuple is that it cannot be reduced
+#: quietly. Kept in ``stats()`` too, so the artifact carries the shrinking as well as the remainder.
+GATE_QUALIFICATION_DISCHARGED: tuple[str, ...] = (
+    "2026-08-22 — 'never executed, no checkpoint staged anywhere in this project' (T-040, "
+    "2026-08-21). Withdrawn by measurement: job 189583 staged facebook/sam2-hiera-large, "
+    "IDEA-Research/grounding-dino-base and depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf "
+    "at the revisions pinned in this file and verified them (PR08_ESTIMATORS_STAGED.json, 5.0 GB); "
+    "job 189588 ran this adapter over the AppleToPlate corpus for 720 frames in two passes at "
+    "480x640. NOT replaced by 'and the output is correct' — see blocker 1, which is what is left of "
+    "it.",
+    "2026-08-22 — 'Cosmos-Transfer2.5's prompt text, thresholds and mask-selection rule were NOT "
+    "read, so the same segmenter means the same weights driven our way'. Discharged by reading "
+    "cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py on the cluster and adopting its "
+    "operating point verbatim: threshold=0.15, text_threshold=0.25, one retry at (0.10, 0.10) when "
+    "no box is found, highest-scoring box wins. Partially: the propagation difference it also "
+    "exposed is now a blocker in its own right.",
+    "2026-08-22 — 'the committed contract can be OVERWRITTEN by the measurement it constrains'. "
+    "configs/transfer25/pr08_geom_tol.json is measure_geom_tol.py's default --out and its --merge "
+    "target, so the first real GEOM_TOL run replaced the pre-commitment with a document that "
+    "mentioned no segmenter anywhere; the cross-check then reported "
+    "geom_tol_does_not_record_segmenter_params on every later run — failing closed, and closed "
+    "forever. Discharged in measure_geom_tol.py, on both write paths, exactly as this blocker "
+    "specified: sam2_method() records SEGMENTER_CONTRACT into mask_method.params.segmenter (where "
+    "the cross-check already looks), merge_committed_contract() compares the block already at "
+    "--out field for field against the adapter this run drove and REFUSES the whole run — exit 2, "
+    "nothing written — on any disagreement, then copies the contract section forward verbatim, and "
+    "refuse_default_out_without_contract() refuses to write the tracked path at all when no "
+    "contract is sitting in it. The file is one document in two declared sections "
+    "(contract_fields / measurement_fields) rather than two files, because measure_est_drift, "
+    "run_g0_gates and 102_stage_sam2_weights.sbatch all resolve the tolerance AND its segmenter "
+    "through that single path.",
+    "2026-08-22 — 'the object segmented and the object scored against are set independently "
+    "($WAM_PR08_OBJECT_PROMPT here, measure_est_drift --object-class there), so a mismatch produces "
+    "a large plausible p95 rather than a refusal'. Discharged in the harness, which is where it "
+    "belonged: measure_est_drift's --object-class now DEFAULTS to this module's own "
+    "OBJECT_TEXT_PROMPT and an explicit value that names a different object is FATAL (exit 2, "
+    "nothing written) instead of being measured. measure_geom_tol has no such flag at all — its "
+    "sam2 method takes the prompt from this module — so there is no longer a second place where the "
+    "object is chosen. This module still cannot see the flag; it no longer has to.",
+)
+
+#: Opt-IN, and this module still does not opt in. THREE conditions above are open, and the two that
+#: matter most are cheap to state: nobody has looked at a mask this adapter produced (the FIRST
+#: blocker), and it is not yet the same segmenter the generator runs — it re-detects per frame where
+#: Transfer2.5 propagates (the LAST). Counted rather than indexed on purpose: the tuple shrank on
+#: 2026-08-22 when the committed-contract blocker was discharged, and a comment that said "blocker
+#: 4" went on pointing at whatever had moved into that slot. :data:`GATE_QUALIFICATION_DISCHARGED`
+#: now carries four conditions closed by measurement rather than by deletion, and one of the three
+#: that remain is inverted — which is progress and is not permission. ``measure_est_drift`` reads this flag with a default of
+#: False and stamps ``estimator_not_gate_qualified``; the artifact is still written, and exits 3.
 GATE_QUALIFIED = False
 
 
@@ -443,6 +640,12 @@ SEGMENT_CALLS = 0
 NO_DETECTION_FRAMES = 0
 EMPTY_MASK_FRAMES = 0
 
+#: Frames where the first pass found nothing and upstream's single (0.10, 0.10) retry fired, and of
+#: those, the ones where it produced a box. The gap between them and ``NO_DETECTION_FRAMES`` is the
+#: only visible trace of how much of this run's ``coverage`` was bought at the lower threshold.
+RETRY_FRAMES = 0
+RETRY_RECOVERED_FRAMES = 0
+
 
 def stats() -> dict[str, Any]:
     """What this pair did, in a shape a caller can drop into an artifact verbatim."""
@@ -451,6 +654,8 @@ def stats() -> dict[str, Any]:
         "estimator_version": ESTIMATOR_VERSION,
         "gate_qualified": GATE_QUALIFIED,
         "gate_qualification_blockers": list(GATE_QUALIFICATION_BLOCKERS),
+        "gate_qualification_discharged": list(GATE_QUALIFICATION_DISCHARGED),
+        "segmenter_contract": dict(SEGMENTER_CONTRACT),
         "detector_checkpoint": GROUNDING_DINO_MODEL_CHECKPOINT,
         "detector_revision": GROUNDING_DINO_MODEL_REVISION,
         "segmenter_checkpoint": SAM2_MODEL_CHECKPOINT,
@@ -460,11 +665,24 @@ def stats() -> dict[str, Any]:
         "object_text_prompt": OBJECT_TEXT_PROMPT,
         "object_text_prompt_raw": OBJECT_TEXT_PROMPT_RAW,
         "object_text_prompt_note": (
-            "compare this against measure_est_drift's --object-class: they are set separately and "
-            "a mismatch scores this mask against a different object's ground truth."
+            "measure_est_drift's --object-class now defaults to this string and refuses an explicit "
+            "value that names a different object, so the two knobs can no longer disagree "
+            "silently; measure_geom_tol has no such flag and takes the prompt from here. Recorded "
+            "anyway, because a reader of the artifact checks the claim rather than trusting it."
         ),
         "box_threshold": BOX_THRESHOLD,
         "text_threshold": TEXT_THRESHOLD,
+        "retry_box_threshold": RETRY_BOX_THRESHOLD,
+        "retry_text_threshold": RETRY_TEXT_THRESHOLD,
+        "box_selection": BOX_SELECTION,
+        "propagation": PROPAGATION,
+        "upstream_propagation": UPSTREAM_PROPAGATION,
+        "detection_params_source": (
+            "cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py — the generator's own "
+            "segmenter, read on the cluster 2026-08-22. These are NOT tuned for this corpus and "
+            "must not be: PR-08 §4 step 2 asks for the generator's operating point, not a better "
+            "one."
+        ),
         "depth_estimation_type": DEPTH_ESTIMATION_TYPE,
         "depth_is_metric": DEPTH_IS_METRIC,
         "depth_max_depth_m": DEPTH_MAX_DEPTH_M,
@@ -472,6 +690,15 @@ def stats() -> dict[str, Any]:
         "n_segment_calls": SEGMENT_CALLS,
         "n_frames_without_detection": NO_DETECTION_FRAMES,
         "n_frames_with_empty_mask": EMPTY_MASK_FRAMES,
+        "n_frames_retry_fired": RETRY_FRAMES,
+        "n_frames_retry_recovered": RETRY_RECOVERED_FRAMES,
+        "retry_meaning": (
+            "frames where the first pass at (box_threshold, text_threshold) found no box and "
+            "upstream's single (retry_box_threshold, retry_text_threshold) pass ran; 'recovered' is "
+            "the subset where it produced one. Those recovered frames are the part of `coverage` "
+            "bought at the lower threshold, and nothing checks that their box is the apple — see "
+            "gate_qualification_blockers."
+        ),
         "no_detection_meaning": (
             "an all-False mask, which measure_geom_tol/measure_est_drift drop and count. It is the "
             "hand occluding the apple or the apple leaving frame, not an estimator error, and it is "
@@ -950,12 +1177,32 @@ def _depth_pipeline() -> Any:
 def _best_box(rgb: np.ndarray) -> np.ndarray | None:
     """Highest-scoring GroundingDINO box for the prompt, as ``[x0, y0, x1, y1]``, or None.
 
-    Highest score and not largest area: on a tabletop scene the largest box a text prompt returns is
+    Upstream's rule, step for step. ``cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py``
+    post-processes at ``threshold=0.15, text_threshold=0.25``, and **only when that returns no box
+    at all** repeats the post-processing once at ``(0.10, 0.10)``. It then takes
+    ``np.argsort(scores)[::-1]`` and uses index 0.
+
+    Highest score and not largest area — which is also our own reason, arrived at independently and
+    now confirmed against upstream: on a tabletop scene the largest box a text prompt returns is
     routinely the table or the whole plate-plus-apple region, and a box that contains the apple is
     not the same prompt for SAM 2 as a box that IS the apple — it hands SAM 2 an ambiguous prompt
     and the mask lands on whichever object dominates it. The centroid then tracks the plate and the
     number still looks like a number.
+
+    The retry runs the DETECTOR once and post-processes twice, rather than running the whole
+    forward pass again: ``post_process_grounded_object_detection`` is a pure function of ``outputs``
+    and the two thresholds, so a second forward pass would cost a second inference to produce
+    identical logits. Upstream re-post-processes for the same reason.
+
+    Two counters exist because the retry is the part of upstream's rule most likely to be doing
+    something we would not want if we could see it: it buys a detection by accepting a weak one, and
+    on a frame where the apple is genuinely occluded a weak box lands on something else. That turns
+    an honest all-False mask into a confident wrong one — which RAISES coverage while LOWERING mask
+    quality, i.e. it hides in exactly the number the harness gates on. It is upstream's behaviour so
+    it stays; making it countable is the least this module can do about it.
     """
+    global RETRY_FRAMES, RETRY_RECOVERED_FRAMES
+
     import torch
     from PIL import Image
 
@@ -966,21 +1213,33 @@ def _best_box(rgb: np.ndarray) -> np.ndarray | None:
     ).to(_device())
     with torch.inference_mode():
         outputs = model(**inputs)
-    # `threshold=` is transformers >= 4.51's spelling; it was `box_threshold=` before, and the
-    # pinned env is 4.51.3. If that pin moves backwards this raises TypeError, which is the right
-    # outcome — the alternative is the old kwarg silently keeping its 0.25 default while ours is
-    # ignored, i.e. a different detection threshold than the one recorded in ESTIMATOR_VERSION.
-    results = processor.post_process_grounded_object_detection(
-        outputs,
-        inputs["input_ids"],
-        threshold=BOX_THRESHOLD,
-        text_threshold=TEXT_THRESHOLD,
-        target_sizes=[(h, w)],
-    )[0]
-    scores = np.asarray(results["scores"].detach().cpu(), dtype=np.float64).reshape(-1)
+
+    def post_process(box_thr: float, text_thr: float) -> tuple[np.ndarray, np.ndarray]:
+        # `threshold=` is transformers >= 4.51's spelling; it was `box_threshold=` before, and the
+        # pinned env is 4.51.3. If that pin moves backwards this raises TypeError, which is the
+        # right outcome — the alternative is the old kwarg silently keeping its 0.25 default while
+        # ours is ignored, i.e. a different detection threshold than the one recorded in
+        # ESTIMATOR_VERSION and in the committed contract.
+        results = processor.post_process_grounded_object_detection(
+            outputs,
+            inputs["input_ids"],
+            threshold=box_thr,
+            text_threshold=text_thr,
+            target_sizes=[(h, w)],
+        )[0]
+        got = np.asarray(results["scores"].detach().cpu(), dtype=np.float64).reshape(-1)
+        return got, np.asarray(results["boxes"].detach().cpu(), dtype=np.float64).reshape(-1, 4)
+
+    scores, boxes = post_process(BOX_THRESHOLD, TEXT_THRESHOLD)
     if scores.size == 0:
-        return None
-    boxes = np.asarray(results["boxes"].detach().cpu(), dtype=np.float64).reshape(-1, 4)
+        # EXACTLY ONE retry, and only on "no box at all". Retrying on a low score, or looping the
+        # thresholds down until something appears, would be a detector of our own design — see the
+        # comment on BOX_THRESHOLD for why that is not an improvement but a different measurement.
+        RETRY_FRAMES += 1
+        scores, boxes = post_process(RETRY_BOX_THRESHOLD, RETRY_TEXT_THRESHOLD)
+        if scores.size == 0:
+            return None
+        RETRY_RECOVERED_FRAMES += 1
     return boxes[int(np.argmax(scores))]
 
 

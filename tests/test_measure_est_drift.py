@@ -270,10 +270,41 @@ def test_an_estimator_that_returns_a_differently_shaped_mask_is_fatal(capture, t
     assert not out.exists()
 
 
-def test_the_geom_tol_cross_check_records_that_it_is_not_committed_yet(capture, tmp_path):
+def test_the_geom_tol_cross_check_refuses_a_stub_against_the_really_committed_contract(
+    capture, tmp_path
+):
     """§6 computes GEOM_TOL - EST_DRIFT_P95. Nothing else in the pipeline checks that the two were
     measured on the same grid with the same segmenter, and a mismatch subtracts cleanly to a
-    plausible wrong number."""
+    plausible wrong number.
+
+    This runs against the REAL ``configs/transfer25/pr08_geom_tol.json`` — the segmenter contract
+    committed 2026-08-22, before either number was measured — rather than a fixture, which is the
+    only way to catch the contract and the reader drifting apart. Its earlier form asserted
+    ``geom_tol_not_committed``; that file now exists, so the assertion that means the same thing is
+    that a 64x64 fake capture segmented by a red-channel stub is refused for every reason it should
+    be: wrong grid, wrong (unnamed) segmenter, and a GEOM_TOL that is not measured yet.
+    """
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(capture), "--estimators", _naive_estimator(tmp_path),
+         "--min-coverage", "0.0", "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    reasons = doc["gate_disqualified_reasons"]
+    assert "resolution_disagrees_with_geom_tol" in reasons
+    assert "mask_method_disagrees_with_estimator" in reasons
+    assert "geom_tol_is_not_gate_qualified" in reasons
+    assert "estimator_does_not_declare_segmenter_contract" in reasons
+    assert doc["geom_tol_cross_check"]["this_resolution_hw"] == [64, 64]
+    # The committed grid is the corpus's 640x480, read out of the contract's pixel_grid_hw because
+    # the pre-measurement shape has no resolution_hw of its own to read.
+    assert doc["geom_tol_cross_check"]["geom_tol_resolution_hw"] == [480, 640]
+
+
+def test_an_absent_geom_tol_artifact_is_still_reported_as_absent(capture, tmp_path, monkeypatch):
+    """The committed contract exists today; it did not always, and a reader that only handles the
+    file being there would report a clean cross-check on a machine where it is missing."""
+    monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", tmp_path / "nothing_here.json")
     out = tmp_path / "d.json"
     ed.main(
         ["measure", "--capture", str(capture), "--estimators", _naive_estimator(tmp_path),
@@ -350,3 +381,167 @@ def test_the_join_key_is_named_in_the_artifact_not_only_in_a_docstring(committed
     _, cmp = ed.cross_check_geom_tol([64, 64], "grounding-dino+sam2+depth-anything-v2")
     assert "estimators.name" in cmp["join_key"]
     assert "mask_method.name" in cmp["join_key"]
+
+
+# -- capture's command line, which is what makes a capture a gate input at all ---------------------
+#
+# Until 2026-08-22 `capture` declared --out/--camera/--frames/--steps-per-frame/--fake and nothing
+# else, and each of the three gaps cost something different: the render grid could not be set and
+# took a constructor default that disagreed with the committed contract (so EVERY Isaac capture was
+# disqualified, at any resolution), no flag named a stage (so only the bare g1.usd — which has no
+# apple in it — could be captured), and --camera DEFAULTED to a name no Isaac stage carries, which
+# raises after a full Isaac boot. These pin the fixes, one refusal at a time.
+
+
+@pytest.fixture()
+def contract(tmp_path, monkeypatch):
+    """A committed GEOM_TOL contract at a grid that is deliberately NOT the real [480, 640].
+
+    The point of the default is that it is READ from the committed document. A test written against
+    480x640 would pass just as well if the number had been hard-coded into measure_est_drift.py
+    beside the one in the contract, which is the second copy this arrangement exists to prevent.
+    """
+
+    def _write(grid=(12, 20), **over):
+        doc = {"segmenter": {"method_name": "stub", "pixel_grid_hw": list(grid)}, **over}
+        p = tmp_path / "pr08_geom_tol.json"
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", p)
+        return p
+
+    return _write
+
+
+def _capture_argv(tmp_path, *extra):
+    return ["capture", "--fake", "--out", str(tmp_path / "cap"), "--frames", "1", *extra]
+
+
+def test_the_render_grid_defaults_to_the_committed_contract_and_not_to_a_literal(
+    contract, tmp_path
+):
+    contract(grid=(12, 20))
+    assert ed.main(_capture_argv(tmp_path)) == 0
+    header = json.loads((tmp_path / "cap" / "capture.json").read_text())
+    assert header["resolution_hw"] == [12, 20], "the frames themselves are on the committed grid"
+    assert header["render_hw_requested"] == [12, 20]
+    assert "pixel_grid_hw" in header["render_hw_source"]
+
+
+def test_a_render_grid_that_disagrees_with_the_contract_refuses_before_anything_renders(
+    contract, tmp_path, capsys
+):
+    """§6 subtracts GEOM_TOL and EST_DRIFT_P95, which is arithmetic on one grid only. The capture
+    this would produce could never be a gate input, and finding that out from `measure` — after the
+    render, on another machine — is the shape this refusal exists to end."""
+    contract(grid=(12, 20))
+    assert ed.main(_capture_argv(tmp_path, "--render-hw", "256", "256")) == 2
+    err = capsys.readouterr().err
+    assert "resolution_disagrees_with_geom_tol" in err
+    assert "12x20" in err
+    assert not (tmp_path / "cap").exists(), "nothing may be rendered when the grid is wrong"
+
+
+def test_a_render_grid_equal_to_the_contract_is_accepted_and_says_where_it_came_from(
+    contract, tmp_path
+):
+    contract(grid=(12, 20))
+    assert ed.main(_capture_argv(tmp_path, "--render-hw", "12", "20")) == 0
+    header = json.loads((tmp_path / "cap" / "capture.json").read_text())
+    assert header["render_hw_source"].startswith("--render-hw")
+
+
+def test_no_committed_contract_means_no_default_grid_rather_than_a_guessed_one(
+    tmp_path, monkeypatch, capsys
+):
+    """The contract is the pre-commitment 'the same segmenter' is checked against. A capture
+    rendered at a grid nobody committed to is not a gate input at any resolution, so the missing
+    document is a refusal that names git rather than a number picked here."""
+    monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", tmp_path / "nothing_here.json")
+    assert ed.main(_capture_argv(tmp_path)) == 2
+    assert "states no pixel grid" in capsys.readouterr().err
+    assert not (tmp_path / "cap").exists()
+
+
+def test_the_default_camera_is_one_the_binding_actually_has(contract, tmp_path):
+    """It defaulted to 'ego' while DEFAULT_CAMERA_PRIMS is {'persp': ...}, so the DEFAULT VALUE
+    raised `unknown camera 'ego'` — after SimulationApp had started, the stage had loaded and 43
+    DOFs had resolved. The default now comes out of that dict rather than being typed twice."""
+    contract()
+    assert ed.main(_capture_argv(tmp_path)) == 0
+    header = json.loads((tmp_path / "cap" / "capture.json").read_text())
+    assert header["camera"] in ed.DEFAULT_CAMERA_PRIMS
+    assert header["camera_prim"] == ed.DEFAULT_CAMERA_PRIMS[header["camera"]]
+
+
+def test_an_unknown_camera_is_refused_before_the_binding_is_constructed(contract, tmp_path, capsys):
+    """WITHOUT --fake, so the next statement after this check is the Isaac boot. The refusal must
+    be the camera's and not `Isaac Sim is not importable`: a typo may not cost a GPU boot."""
+    contract()
+    argv = ["capture", "--out", str(tmp_path / "cap"), "--frames", "1", "--camera", "ego"]
+    assert ed.main(argv) == 2
+    assert "unknown camera 'ego'" in capsys.readouterr().err
+    assert not (tmp_path / "cap").exists()
+
+
+def test_a_stage_camera_can_be_named_and_is_recorded_with_its_prim(contract, tmp_path):
+    """A scene authored for §4 step 1 carries an ego-like camera prim. Validating --camera against
+    a fixed dict would otherwise make that scene unusable, so the dict is extended by the operator
+    and the check stays exact."""
+    contract()
+    assert ed.main(_capture_argv(
+        tmp_path, "--camera", "ego", "--camera-prim", "ego=/World/Scene/EgoCam")) == 0
+    header = json.loads((tmp_path / "cap" / "capture.json").read_text())
+    assert header["camera"] == "ego"
+    assert header["camera_prim"] == "/World/Scene/EgoCam"
+    assert header["camera_prims_declared"] == {"ego": "/World/Scene/EgoCam"}
+
+
+@pytest.mark.parametrize("bad", ["ego", "ego=World/EgoCam", "=/World/EgoCam"])
+def test_a_malformed_camera_prim_is_refused(contract, tmp_path, capsys, bad):
+    contract()
+    assert ed.main(_capture_argv(tmp_path, "--camera-prim", bad)) == 2
+    assert "not NAME=/Prim/Path" in capsys.readouterr().err
+
+
+def test_the_stage_is_named_once_and_recorded(contract, tmp_path):
+    """--asset and --scene are one knob, spelled two ways because configs/robot/isaac_g1.yaml and
+    IsaacG1Robot already spell it both ways. What matters downstream is that the capture says which
+    stage it was the ground truth OF: a p95 over the bare g1.usd and one over an apple-to-plate
+    scene are otherwise indistinguishable in the artifact."""
+    contract()
+    assert ed.main(_capture_argv(tmp_path, "--scene", "/abs/apple_to_plate.usd")) == 0
+    header = json.loads((tmp_path / "cap" / "capture.json").read_text())
+    assert header["asset"] == "/abs/apple_to_plate.usd"
+    assert header["asset_source"] == "--scene"
+
+
+def test_naming_the_stage_twice_is_refused(contract, tmp_path, capsys):
+    contract()
+    assert ed.main(_capture_argv(tmp_path, "--scene", "/a.usd", "--asset", "/b.usd")) == 2
+    assert "same knob" in capsys.readouterr().err
+
+
+def test_a_capture_with_no_stage_says_so_rather_than_saying_nothing(contract, tmp_path):
+    """`asset: null` is the honest record of "Isaac's own default asset root", which is the bare
+    G1 — no table, no plate, no apple. A reader of the p95 needs to be able to tell that case from
+    a scene that was there."""
+    contract()
+    assert ed.main(_capture_argv(tmp_path)) == 0
+    header = json.loads((tmp_path / "cap" / "capture.json").read_text())
+    assert header["asset"] is None
+    assert "get_assets_root_path" in header["asset_source"]
+
+
+def test_the_measured_artifact_carries_the_scene_the_capture_named(contract, tmp_path):
+    """The provenance has to reach the file the gate reads. §4 step 1 renders "N Isaac episodes";
+    an EST_DRIFT_P95 that does not say what was in the scene cannot be audited afterwards."""
+    contract()
+    assert ed.main(_capture_argv(tmp_path, "--asset", "/abs/apple_to_plate.usd")) == 0
+    out = tmp_path / "d.json"
+    ed.main(["measure", "--capture", str(tmp_path / "cap"), "--estimators",
+             _naive_estimator(tmp_path), "--min-coverage", "0.0", "--out", str(out)])
+    block = json.loads(out.read_text())["capture"]
+    assert block["asset"] == "/abs/apple_to_plate.usd"
+    assert block["asset_source"] == "--asset"
+    assert block["camera_prim"] == ed.DEFAULT_CAMERA_PRIMS["persp"]
+    assert block["render_hw_requested"] == [12, 20]
