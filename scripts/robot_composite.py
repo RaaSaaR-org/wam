@@ -189,6 +189,37 @@ The IoU diagnostic cannot be cached — its second mask is of the generated fram
 on a stride. A stride is a coined number, and it is admissible here for exactly one reason: this
 number gates nothing, so a sampling rate cannot become a finding. The COMPOSITE has no stride and
 never will.
+
+MEASURING THE DISTRIBUTION TAKES LONGER THAN THE WALL, SO IT IS SHARDED AND MERGED
+------------------------------------------------------------------------------------
+``measure`` is one GroundingDINO forward plus one SAM 2 forward per frame over 171 625 source
+frames, one frame at a time. Every Discoverer+ QoS caps at a four-hour MaxWall, and the measurement
+does not fit inside it with any margin, so ``--shard I --num-shards N`` measures the episodes that
+hash to one shard and ``--merge`` pools the shards. ``cluster/discoverer/106_measure_robot_mask_area
+.sbatch`` drives both, and ``scripts/measure_geom_tol.py`` solved the same arithmetic first — the
+partition rule, the refusals and the shape of the merge are deliberately the same, because two
+different sharding designs in one repository is two things to get right instead of one.
+
+**THREE OF THE FIVE NUMBERS DO NOT DECOMPOSE, WHICH IS THE WHOLE REASON --merge EXISTS.** The
+artifact reports min, median, p95, p99 and max. Only the first and the last recombine from per-shard
+summaries; the median of the shard medians is a different statistic with the same units and a
+plausible magnitude, and the same is true of a p95 and a p99. A bound will sit above these numbers
+and its written rationale will quote them, and nothing downstream re-derives either — so that error
+would be permanent and invisible. Shards therefore emit the RAW per-frame area fractions and the
+merge takes the five numbers ONCE over the pooled population, rebuilt in the manifest's own
+enumeration order, so the merged artifact is identical to what a single un-sharded run would have
+written. That is asserted rather than claimed, in ``tests/test_robot_composite_shards.py``.
+
+**A MERGE CANNOT LAUNDER ``measurement_qualified``.** The six conditions in
+:data:`MERGE_CONDITIONS` are evaluated and written into the artifact per condition: the shards tile
+the corpus exactly once, every shard ran at stride 1 with no limit, every shard calls itself
+qualified, and the shards agree on the estimator, the source manifest and the prompt. Any false one
+stamps ``measurement_qualified: false`` with the reasons, :func:`load_area_bound` refuses the file
+by name, and the exit code is non-zero. Inputs that cannot be pooled AT ALL — a duplicated shard, an
+episode in a shard it does not hash to, a shard that kept only its own summary — are refused with
+nothing written, because there the pool itself would be wrong rather than incomplete.
+
+Neither mode coins the bound. ``max_frame_fraction`` is null on every path here, merge included.
 """
 
 from __future__ import annotations
@@ -200,6 +231,7 @@ import os
 import pathlib
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 import numpy as np
@@ -1360,14 +1392,211 @@ def composite_clip(
 # --------------------------------------------------------------------------------------------
 
 
+#: Schema of the artifact a bound may sit above — written by a whole-corpus ``measure`` run and by
+#: ``--merge``. Added so the merge can tell a shard from a finished measurement without guessing at
+#: the shape; ``load_area_bound`` does not read it, and a pre-existing artifact without it is still
+#: a valid bound.
+AREA_SCHEMA = "wam.robot_mask_area/1"
+
+#: Schema of ONE shard's artifact. A different string from :data:`AREA_SCHEMA` on purpose: a shard
+#: is not a small measurement, it is a piece of one, and the two must not be interchangeable in a
+#: directory scan, on a command line, or under a reader's eye.
+AREA_SHARD_SCHEMA = "wam.robot_mask_area_shard/1"
+
+#: The partition rule, recorded in every shard and RE-DERIVED by the merge rather than trusted.
+#: Identical to ``measure_geom_tol.SHARD_ASSIGNMENT`` — deliberately the same rule, so that an
+#: operator who has read one of these two jobs has read both, and a test asserts the two functions
+#: agree key for key.
+SHARD_ASSIGNMENT = (
+    "int.from_bytes(blake2b(episode_key.utf8, digest_size=8).digest(), 'big') % num_shards"
+)
+
+#: Verbatim the sentence a whole-corpus run has always written. Hoisted into a constant only so the
+#: merge writes the SAME words; changing it changes what a non-sharded run produces.
+BOUND_NOTE = (
+    "max_frame_fraction is null ON PURPOSE. This file measures the distribution; it does "
+    "not choose the bound. The observed maximum below cannot fire on the frames it was "
+    "measured over, and any bound above it carries a margin nothing in the corpus derives "
+    "— so choosing one is a decision with a written rationale, not a computation. Fill in "
+    "max_frame_fraction and bound_rationale, then commit this file."
+)
+
+#: The six conditions a MERGE must satisfy before its pooled distribution is one a bound may sit
+#: above. Named as data rather than as prose because the merge writes the verdict per condition
+#: into the artifact and the sbatch reads it: "which of these failed" has to survive JSON.
+#:
+#: They are not the whole of what the merge checks. The refusals in :func:`merge_shard_records`
+#: come FIRST and are fatal with nothing written, because they are the cases where the pool itself
+#: would be wrong — an episode counted twice, a per_episode entry a shard was never assigned, a
+#: shard that kept only its own summary. These six are the cases where the pool is honest
+#: arithmetic over something that is not the corpus, which is exactly what
+#: ``measurement_qualified: false`` means everywhere else in this file.
+MERGE_CONDITIONS: tuple[str, ...] = (
+    "shards_tile_the_corpus_exactly_once",
+    "every_shard_at_stride_1_with_no_limit",
+    "every_shard_measurement_qualified",
+    "shards_agree_on_estimator",
+    "shards_agree_on_source_manifest_sha256",
+    "shards_agree_on_prompt",
+)
+
+#: Everything the merge checks, named. The first ten are fatal and write nothing; the last six are
+#: :data:`MERGE_CONDITIONS` and stamp ``measurement_qualified: false``.
+MERGE_REFUSALS_CHECKED: tuple[str, ...] = (
+    "a path named to --merge is unreadable, is not JSON, or is not a shard artifact",
+    "a finished measurement was handed to --merge as if it were a shard",
+    "--merge was given no shard artifacts at all",
+    "two artifacts claim the same shard index",
+    "the shards disagree on num_shards, so they are pieces of two different partitions",
+    "the shards enumerated different corpora (corpus_episode_keys_sha256)",
+    "a shard carries no usable 'shard' block or no corpus_episode_keys",
+    "a shard holds an episode that does not hash to it under the recorded assignment rule",
+    "a shard reports a per_episode entry for an episode it was not assigned",
+    "a shard does not account for every episode it was assigned",
+    "a shard kept only its own summary and no raw per-frame area fractions",
+    "the shards do not tile the corpus exactly once (a shard is missing)",
+    "a shard was measured with --limit, or at --stride > 1",
+    "a shard is itself measurement_qualified: false",
+    "the shards disagree on the estimator that made the masks",
+    "the shards disagree on the source manifest they measured",
+    "the shards disagree on the robot prompt",
+)
+
+
+def shard_of(episode_key: str, num_shards: int) -> int:
+    """Which shard owns this episode. Deterministic across processes, machines and Python builds.
+
+    ``hash(episode_key) % num_shards`` is the obvious spelling and it is a trap: ``PYTHONHASHSEED``
+    is randomised per interpreter, so every task of the same Slurm array would compute a DIFFERENT
+    partition of the same corpus. The failure is not a crash — it is a set of shard artifacts that
+    together cover some episodes twice and others never, each internally consistent.
+
+    Byte-for-byte ``measure_geom_tol.shard_of``. Copied rather than imported because that module
+    reaches numpy and a large argument parser and this one is imported by
+    ``restyle_transfer25`` inside the Transfer2.5 venv on a GPU node; a test asserts the two agree
+    over a corpus of keys, so the copy cannot drift silently.
+    """
+    if num_shards < 1:
+        raise ValueError("num_shards must be >= 1")
+    digest = hashlib.blake2b(episode_key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % num_shards
+
+
+def corpus_keys_digest(keys: list[str]) -> str:
+    """A stable digest of one corpus enumeration. Newline-joined so no key can absorb another."""
+    return hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
+
+
+def _select_episodes(
+    keys: list[str],
+    episodes: list[dict],
+    *,
+    shard: int | None,
+    num_shards: int | None,
+) -> list[tuple[int, dict]]:
+    """The episodes this run measures, each paired with its position in the FULL enumeration."""
+    if shard is None and num_shards is None:
+        return list(enumerate(episodes))
+    if shard is None or num_shards is None:
+        raise CompositeError(
+            "--shard and --num-shards go together. One without the other is a partition with an "
+            "unknown denominator,\n"
+            "       and an artifact from it could not be merged: the merge needs to know how many "
+            "shards to insist on\n"
+            "       before it can say one is missing."
+        )
+    num_shards = int(num_shards)
+    shard = int(shard)
+    if num_shards < 1:
+        raise CompositeError(f"--num-shards {num_shards} is not a positive integer.")
+    if not 0 <= shard < num_shards:
+        raise CompositeError(
+            f"--shard {shard} is out of range for --num-shards {num_shards}: the shards are "
+            f"0..{num_shards - 1}.\n"
+            "       A shard index nobody will merge produces an artifact that looks finished and "
+            "is unreachable; an\n"
+            "       out-of-range one measures the empty set and reports it as a clean run."
+        )
+    return [(i, ep) for i, (k, ep) in enumerate(zip(keys, episodes)) if shard_of(k, num_shards) == shard]
+
+
+def _shard_block(
+    shard: int, num_shards: int, selected: list[tuple[int, dict]], all_keys: list[str]
+) -> dict:
+    """The provenance a shard carries so the merge can check it rather than trust it."""
+    return {
+        "index": int(shard),
+        "num_shards": int(num_shards),
+        "assignment": SHARD_ASSIGNMENT,
+        "assignment_note": (
+            "Assignment is a digest of the episode ID, not a slice of the episode LIST. Adding or "
+            "removing a clip therefore moves that clip only; a range would renumber every episode "
+            "after it and silently re-partition a corpus whose shards are computed by different "
+            "jobs at different times. The merge re-derives this rule and refuses a shard holding "
+            "an episode that does not hash to it."
+        ),
+        # WHICH EPISODES, not how many. A count cannot prove coverage: eight shards reporting 50
+        # episodes each sum to 400 whether they covered 400 distinct episodes or 380 with 20
+        # counted twice. The merge takes the union of these and compares it to the enumeration.
+        "episode_keys": [str(ep.get("id")) for _, ep in selected],
+        "episode_indices": [int(i) for i, _ in selected],
+        "n_episodes_in_shard": len(selected),
+        "corpus_episode_keys_sha256": corpus_keys_digest(all_keys),
+    }
+
+
+def _measured_block(
+    fractions: list[float],
+    empty: int,
+    *,
+    episode_ids: list[str],
+    total_episodes: int,
+    limit: int | None,
+    stride: int,
+) -> dict:
+    """The distribution block, computed ONCE over whatever population it is handed.
+
+    The merge hands it the pooled population and the measurement hands it its own, which is the
+    whole of why the merged artifact equals an un-sharded one: there is one implementation of
+    min/median/p95/p99/max and neither path recombines a percentile from summaries.
+    """
+    arr = np.asarray(fractions, dtype=np.float64)
+    return {
+        "frames": int(arr.size),
+        "episodes": len(episode_ids),
+        "episodes_in_manifest": int(total_episodes),
+        "episode_ids": list(episode_ids),
+        # Recorded even when None, because "no --limit was given" and "the field predates the
+        # flag" are different facts and an absent key cannot tell them apart.
+        "limit": None if limit is None else int(limit),
+        "stride": int(stride),
+        "empty_frames": int(empty),
+        "empty_frame_fraction": float(empty) / float(arr.size),
+        "min": float(np.min(arr)),
+        "median": float(np.median(arr)),
+        "p95": float(np.percentile(arr, 95)),
+        "p99": float(np.percentile(arr, 99)),
+        "max": float(np.max(arr)),
+    }
+
+
 def measure_source_mask_area(
     manifest: pathlib.Path,
     *,
     masker: Any,
     limit: int | None = None,
     stride: int = 1,
+    shard: int | None = None,
+    num_shards: int | None = None,
 ) -> dict:
     """Robot-mask area fraction over the SOURCE corpus — the distribution the bound sits above.
+
+    With ``shard``/``num_shards`` this measures only the episodes that hash to that shard and
+    writes a :data:`AREA_SHARD_SCHEMA` artifact carrying the RAW per-frame fractions;
+    :func:`merge_shard_records` pools those into the artifact a bound may sit above. The corpus is
+    171 625 frames and the wall is four hours, which is the same arithmetic
+    ``scripts/measure_geom_tol.py`` already answers this way — see the module docstring's sharding
+    section and ``cluster/discoverer/106_measure_robot_mask_area.sbatch``.
 
     Writes no bound. See :func:`load_area_bound`'s refusal for why: the only bound this could derive
     honestly (the observed maximum) can never fire on the frames it was derived from, and any bound
@@ -1395,6 +1624,13 @@ def measure_source_mask_area(
     if not episodes:
         raise CompositeError(f"{manifest} lists no episodes.")
     total_episodes = len(episodes)
+    # THE ENUMERATION IS THE MANIFEST'S, TAKEN BEFORE --limit TRUNCATES IT. What a shard recorded as
+    # "the corpus it saw" has to be the same list whether or not that run was truncated: the merge
+    # digests it to prove the shards measured ONE corpus, and a truncated run whose digest differed
+    # would be refused as a different corpus instead of being stamped as the truncated measurement
+    # it is. The truncation is recorded where it belongs — measured.limit, and the disqualification
+    # reasons — and shows up in the merge as episodes nobody covered.
+    all_keys = [str(entry.get("id")) for entry in episodes]
     stride = int(stride)
     if stride < 1:
         raise CompositeError(f"--stride must be >= 1; got {stride}.")
@@ -1411,59 +1647,633 @@ def measure_source_mask_area(
             "maximum over a subsample and can only understate the corpus's"
         )
 
+    keys = [str(entry.get("id")) for entry in episodes]
+    # THE PARTITION IS KEYED ON THE EPISODE ID, so two episodes carrying one id is not a cosmetic
+    # defect: both would hash to the same shard, the merge's coverage arithmetic would count one
+    # episode where two were measured, and the pooled distribution would be over a corpus nobody
+    # can name. Refused whether or not this run is sharded — an un-sharded artifact from such a
+    # manifest is what a later sharded run would be compared against.
+    duplicates = sorted({k for k in all_keys if all_keys.count(k) > 1})
+    if duplicates:
+        raise CompositeError(
+            f"{manifest} lists {len(duplicates)} episode id(s) more than once: "
+            + ", ".join(duplicates[:8]) + ("..." if len(duplicates) > 8 else "") + "\n"
+            "       Episode ids are what the shard partition is keyed on and what the merge proves "
+            "coverage with, so\n"
+            "       they have to identify an episode. Fix the manifest; nothing here guesses which "
+            "clip was meant."
+        )
+
+    selected = _select_episodes(keys, episodes, shard=shard, num_shards=num_shards)
+    sharding = shard is not None or num_shards is not None
+
+    per_episode: list[dict] = []
     fractions: list[float] = []
     empty = 0
     measured_episodes: list[str] = []
-    for entry in episodes:
+    for position, entry in selected:
         video = manifest.parent / str(entry["video"])
         frames = decode_clip(video)
+        episode_fractions: list[float] = []
+        episode_empty = 0
         for index in range(0, frames.shape[0], max(1, int(stride))):
             mask = np.asarray(masker.mask(frames[index]), dtype=bool)
             covered = int(np.count_nonzero(mask))
             if covered == 0:
-                empty += 1
-            fractions.append(covered / float(mask.size))
+                episode_empty += 1
+            episode_fractions.append(covered / float(mask.size))
+        fractions.extend(episode_fractions)
+        empty += episode_empty
         measured_episodes.append(str(entry.get("id")))
+        per_episode.append({
+            # The episode's position in the manifest's OWN enumeration, not a serial number within
+            # the shard. It is what lets the merge rebuild the pooled array in the order an
+            # un-sharded run built it, which is what makes the merged artifact identical rather
+            # than merely close.
+            "episode_index": int(position),
+            "episode": str(entry.get("id")),
+            "n_frames": len(episode_fractions),
+            "empty_frames": int(episode_empty),
+            # RAW, one float per measured frame. A median and two percentiles do not decompose
+            # across shards — the median of the shard medians is a different statistic — so a shard
+            # that reported only its own summary could be averaged and never merged. See
+            # merge_shard_records.
+            "area_fractions": episode_fractions,
+        })
 
     if not fractions:
+        if sharding:
+            raise CompositeError(
+                f"shard {shard} of {num_shards} was assigned no frames at all "
+                f"({len(selected)} of the {len(episodes)} episode(s) enumerated hash to it).\n"
+                "       That is a statement about the PARTITION, not about the corpus: --num-shards "
+                "is larger than the\n"
+                "       number of episodes, or the episodes it was assigned decoded nothing. An "
+                "artifact here would be a\n"
+                "       well-formed shard contributing no frames, and the merge would pool it and "
+                "prove a coverage it\n"
+                "       never had. Lower --num-shards, or fix the clips this shard was assigned."
+            )
         raise CompositeError(f"{manifest}: nothing was measured.")
-    arr = np.asarray(fractions, dtype=np.float64)
+
+    measured = _measured_block(
+        fractions,
+        empty,
+        episode_ids=measured_episodes,
+        total_episodes=total_episodes,
+        limit=limit,
+        stride=stride,
+    )
+    estimator = masker.provenance()
+    source_manifest_sha256 = _file_sha256(manifest)
+
+    if not sharding:
+        return {
+            "schema": AREA_SCHEMA,
+            "max_frame_fraction": None,
+            "bound_rationale": "",
+            "bound_note": BOUND_NOTE,
+            # A bound may only sit above a distribution that IS the corpus's. False here is not a
+            # warning to weigh: load_area_bound refuses the artifact.
+            "measurement_qualified": not disqualified,
+            "measurement_disqualified_reasons": disqualified,
+            "measured": measured,
+            "estimator": estimator,
+            "prompt": ROBOT_TEXT_PROMPT,
+            "source_manifest": str(manifest),
+            "source_manifest_sha256": source_manifest_sha256,
+        }
+
     return {
+        "schema": AREA_SHARD_SCHEMA,
+        "shard": _shard_block(int(shard), int(num_shards), selected, all_keys),
+        # The whole enumeration this shard saw, so the merge can NAME the episodes nobody covered
+        # instead of only counting them. Shard-only: it never reaches the merged artifact.
+        "corpus_episode_keys": list(all_keys),
+        "per_episode": per_episode,
+        # A SHARD IS NOT A DISTRIBUTION AND MUST NEVER BE READABLE AS ONE. It carries no
+        # bound_rationale at all, so load_area_bound refuses it on AREA_BOUND_FIELDS_REQUIRED
+        # before it ever reads a number — a shard artifact copied to the committed path is a
+        # refusal, not a bound over a twelfth of the corpus.
         "max_frame_fraction": None,
-        "bound_rationale": "",
-        "bound_note": (
-            "max_frame_fraction is null ON PURPOSE. This file measures the distribution; it does "
-            "not choose the bound. The observed maximum below cannot fire on the frames it was "
-            "measured over, and any bound above it carries a margin nothing in the corpus derives "
-            "— so choosing one is a decision with a written rationale, not a computation. Fill in "
-            "max_frame_fraction and bound_rationale, then commit this file."
+        "max_frame_fraction_is_null_because": (
+            "this is one shard of a partition, not the corpus. The five numbers under 'measured' "
+            "are this shard's own and are printed as a sanity check; the artifact a bound may sit "
+            "above is written by --merge, which pools the raw per-frame fractions below and takes "
+            "min/median/p95/p99/max ONCE over the pooled population. Percentiles do not decompose."
         ),
-        # A bound may only sit above a distribution that IS the corpus's. False here is not a
-        # warning to weigh: load_area_bound refuses the artifact.
         "measurement_qualified": not disqualified,
         "measurement_disqualified_reasons": disqualified,
-        "measured": {
-            "frames": int(arr.size),
-            "episodes": len(measured_episodes),
-            "episodes_in_manifest": total_episodes,
-            "episode_ids": measured_episodes,
-            # Recorded even when None, because "no --limit was given" and "the field predates the
-            # flag" are different facts and an absent key cannot tell them apart.
-            "limit": None if limit is None else int(limit),
-            "stride": int(stride),
-            "empty_frames": int(empty),
-            "empty_frame_fraction": float(empty) / float(arr.size),
-            "min": float(np.min(arr)),
-            "median": float(np.median(arr)),
-            "p95": float(np.percentile(arr, 95)),
-            "p99": float(np.percentile(arr, 99)),
-            "max": float(np.max(arr)),
-        },
-        "estimator": masker.provenance(),
+        "measured": measured,
+        "estimator": estimator,
         "prompt": ROBOT_TEXT_PROMPT,
         "source_manifest": str(manifest),
-        "source_manifest_sha256": _file_sha256(manifest),
+        "source_manifest_sha256": source_manifest_sha256,
     }
+
+
+def _read_shard_json(path: pathlib.Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise CompositeError(f"FATAL: --merge could not read {path}: {exc}") from exc
+    except ValueError as exc:
+        raise CompositeError(
+            f"FATAL: --merge could not parse {path} as JSON: {exc}\n"
+            "       A truncated shard artifact is what a job killed at the wall leaves behind. "
+            "Re-run that shard;\n"
+            "       merging around it would drop its frames and the merge would then be a "
+            "distribution over part of\n"
+            "       the corpus wearing the name of the whole."
+        ) from exc
+
+
+def collect_shard_records(paths: list[pathlib.Path]) -> list[tuple[pathlib.Path, dict]]:
+    """Read the shard artifacts named on the command line. Directories are expanded, files are not.
+
+    A directory is scanned for ``*.json`` and anything that is not a shard artifact is SKIPPED with
+    a line on stderr — the merge job's own output directory holds the pilot artifact and, after the
+    first successful merge, the merged one, and a scan that refused on those would be unusable. A
+    path named EXPLICITLY is never skipped: the operator said that file, and quietly ignoring it is
+    how a merge comes to be missing a shard that was right there on the command line.
+    """
+    found: list[tuple[pathlib.Path, dict]] = []
+    for path in paths:
+        path = pathlib.Path(path)
+        if path.is_dir():
+            for candidate in sorted(path.glob("*.json")):
+                rec = _read_shard_json(candidate)
+                if rec.get("schema") != AREA_SHARD_SCHEMA:
+                    print(
+                        f"--merge: skipping {candidate} (schema {rec.get('schema')!r}, not "
+                        f"{AREA_SHARD_SCHEMA!r})",
+                        file=sys.stderr,
+                    )
+                    continue
+                found.append((candidate, rec))
+            continue
+        if not path.exists():
+            raise CompositeError(
+                f"FATAL: --merge {path} does not exist.\n"
+                "       Named explicitly, so it is not skipped: a shard the operator asked for and "
+                "that is not there\n"
+                "       is a missing shard, not a filter."
+            )
+        rec = _read_shard_json(path)
+        if rec.get("schema") != AREA_SHARD_SCHEMA:
+            raise CompositeError(
+                f"FATAL: --merge {path} carries schema {rec.get('schema')!r}, not "
+                f"{AREA_SHARD_SCHEMA!r}.\n"
+                f"       A {AREA_SCHEMA!r} artifact is a finished distribution, not an input to a "
+                "merge, and merging one\n"
+                "       in would pool a corpus with itself. Nothing here guesses which you meant."
+            )
+        found.append((path, rec))
+    if not found:
+        raise CompositeError(
+            "FATAL: --merge found no shard artifacts at all in "
+            + ", ".join(str(p) for p in paths) + ".\n"
+            "       A merge over zero shards is not an empty result, it is a missing input. Shard "
+            "artifacts carry\n"
+            f"       schema {AREA_SHARD_SCHEMA!r} and are written by --shard I --num-shards N."
+        )
+    return found
+
+
+def _by_shard_lines(items: list[tuple[int, Any]]) -> str:
+    return "".join(f"         shard {i}: {v}\n" for i, v in sorted(items, key=lambda t: t[0]))
+
+
+def _agreement(values: list[tuple[int, Any]]) -> tuple[bool, Any]:
+    """Do the shards agree on this field, and if so on what. Comparison is on canonical JSON."""
+    distinct = {json.dumps(v, sort_keys=True, default=str) for _, v in values}
+    if len(distinct) == 1:
+        return True, values[0][1]
+    return False, None
+
+
+def merge_shard_records(
+    loaded: list[tuple[pathlib.Path, dict]],
+) -> tuple[dict, list[str], dict]:
+    """Pool the shards into the artifact a bound may sit above, or refuse.
+
+    Returns ``(record, reasons, conditions)``. The record is always the honest arithmetic over
+    whatever landed; ``conditions`` says, per name in :data:`MERGE_CONDITIONS`, whether this pool
+    is the corpus's; ``reasons`` says why not. Any false condition stamps
+    ``measurement_qualified: false`` into the record, which :func:`load_area_bound` refuses by
+    name, and the caller exits :data:`EXIT_MEASUREMENT_NOT_QUALIFIED`.
+
+    WHAT REFUSES INSTEAD OF STAMPING, AND WHY THE LINE IS WHERE IT IS. Everything raised below is a
+    case where the POOL would be wrong rather than incomplete: an episode weighted twice, a
+    per_episode entry from an episode the shard was never assigned, a shard that kept only its own
+    median. There is no honest distribution to write in those cases, not even a disqualified one,
+    so nothing is written. A MISSING shard is different in kind — the arithmetic over the shards
+    that landed is exactly right about the frames it saw and merely is not the corpus — and that is
+    what ``measurement_qualified: false`` has always meant in this file. It is written, stamped,
+    and refused by the loader, exactly as a ``--limit`` run is.
+
+    THE FIVE NUMBERS ARE TAKEN ONCE, OVER THE POOLED POPULATION. A median and a p95 do not
+    decompose: the median of the shard medians is a different statistic, and on a corpus where the
+    robot parks out of frame for part of every episode the two differ substantially while both look
+    entirely reasonable. Shards therefore emit RAW per-frame fractions — exact through JSON, whose
+    float repr is the shortest round-tripping string since Python 3.1 — and the pool is rebuilt in
+    the manifest's own enumeration order, so this artifact is identical to what a single un-sharded
+    run would have written.
+    """
+    records = [rec for _, rec in loaded]
+
+    # -- shape --------------------------------------------------------------------------------
+    for path, rec in loaded:
+        block = rec.get("shard")
+        if not isinstance(block, dict) or "index" not in block or "num_shards" not in block:
+            raise CompositeError(
+                f"FATAL: {path} declares schema {AREA_SHARD_SCHEMA!r} but carries no usable "
+                "'shard' block.\n"
+                "       The merge reads index, num_shards, episode_keys and episode_indices out of "
+                "it; without them\n"
+                "       there is nothing to check coverage against and the artifact is not a shard, "
+                "whatever its schema says."
+            )
+
+    # -- REFUSAL: the shards belong to two different partitions ---------------------------------
+    counts = {int(rec["shard"]["num_shards"]) for rec in records}
+    if len(counts) != 1:
+        raise CompositeError(
+            "FATAL: the shard artifacts disagree on num_shards: "
+            + ", ".join(str(c) for c in sorted(counts)) + ".\n"
+            + "".join(
+                f"         {p}: shard {rec['shard']['index']} of {rec['shard']['num_shards']}\n"
+                for p, rec in loaded
+            )
+            + "       These are pieces of two DIFFERENT partitions of the corpus. Pooling them "
+            "would count the episodes\n"
+            "       the two partitions happen to share twice and drop the rest. Re-run one "
+            "partition whole."
+        )
+    num_shards = counts.pop()
+
+    # -- REFUSAL: two artifacts claim the same shard --------------------------------------------
+    seen: dict[int, pathlib.Path] = {}
+    for path, rec in loaded:
+        idx = int(rec["shard"]["index"])
+        if idx in seen:
+            raise CompositeError(
+                f"FATAL: two shard artifacts both claim shard index {idx} of {num_shards}:\n"
+                f"         {seen[idx]}\n"
+                f"         {path}\n"
+                "       One of them is stale — a re-run that wrote to a new path, or a directory "
+                "scan that picked up an\n"
+                "       old copy. Merging both pools that shard's frames twice, which moves the "
+                "median and the two\n"
+                "       percentiles toward whatever those episodes did. Name the shard artifacts "
+                "explicitly, or clear\n"
+                "       the stale one."
+            )
+        seen[idx] = path
+
+    # -- REFUSAL: the shards did not enumerate the same corpus -----------------------------------
+    # ``expected`` below is taken from ONE shard's record and the tiling arithmetic is done against
+    # it, so if the shards saw different enumerations that arithmetic is about a corpus that never
+    # existed. Each shard digests the enumeration it saw independently, so agreement across N of
+    # these is evidence that they all measured one corpus.
+    digests = [(int(rec["shard"]["index"]), rec["shard"].get("corpus_episode_keys_sha256"))
+               for rec in records]
+    if not _agreement(digests)[0]:
+        raise CompositeError(
+            "FATAL: the shards enumerated different corpora (corpus_episode_keys_sha256):\n"
+            + _by_shard_lines(digests)
+            + "       Each shard digests the episode list it saw. Different digests mean the "
+            "corpus changed between\n"
+            "       shards, or they were pointed at different trees — either way the partition "
+            "they belong to no\n"
+            "       longer exists and its coverage cannot be proved. Re-run one partition against "
+            "one corpus."
+        )
+
+    # -- REFUSAL: an episode is in a shard it does not hash to ----------------------------------
+    # The merge does not take a shard's word for which episodes belong to it. Re-deriving the rule
+    # catches an artifact written by an older assignment, a hand-edited file, and the
+    # PYTHONHASHSEED class of bug that the rule exists to make impossible.
+    for path, rec in loaded:
+        idx = int(rec["shard"]["index"])
+        wrong = [k for k in rec["shard"].get("episode_keys", []) if shard_of(k, num_shards) != idx]
+        if wrong:
+            raise CompositeError(
+                f"FATAL: {path} claims shard {idx} of {num_shards} but holds {len(wrong)} "
+                "episode(s) that do not hash to it: "
+                + ", ".join(wrong[:8]) + ("..." if len(wrong) > 8 else "") + "\n"
+                f"       The rule is {SHARD_ASSIGNMENT}, and the merge re-derives it rather than "
+                "trusting the artifact.\n"
+                "       A shard whose membership does not follow it was produced by a different "
+                "partition rule, and the\n"
+                "       other shards' coverage cannot be reasoned about alongside it."
+            )
+
+    # -- REFUSAL: a shard measured somebody else's episode, or did not account for its own -------
+    for path, rec in loaded:
+        block = rec["shard"]
+        assigned = [str(k) for k in block.get("episode_keys", [])]
+        measured = [str(ep.get("episode")) for ep in rec.get("per_episode", [])]
+        stray = [k for k in measured if k not in set(assigned)]
+        if stray:
+            raise CompositeError(
+                f"FATAL: {path} claims shard {block.get('index')} of {num_shards} but reports "
+                f"per_episode entries for {len(stray)} episode(s) it was not assigned: "
+                + ", ".join(stray[:8]) + ("..." if len(stray) > 8 else "") + "\n"
+                "       Those frames are in this shard's pool and in whichever shard the keys hash "
+                "to, so the merged\n"
+                "       percentiles weight them twice while the coverage arithmetic still adds up. "
+                "Re-run that shard."
+            )
+        if len(measured) != len(assigned):
+            unaccounted = [k for k in assigned if k not in set(measured)]
+            raise CompositeError(
+                f"FATAL: {path} was assigned {len(assigned)} episode(s) and reports "
+                f"{len(measured)} measured.\n"
+                + (
+                    "       UNACCOUNTED FOR (" + str(len(unaccounted)) + "): "
+                    + ", ".join(unaccounted[:12]) + ("..." if len(unaccounted) > 12 else "") + "\n"
+                    if unaccounted else ""
+                )
+                + "       The merge proves coverage from what the shards MEASURED, not from what "
+                "they were assigned — a\n"
+                "       shard that silently measured nothing would otherwise satisfy the coverage "
+                "check while contributing\n"
+                "       no frames, and the artifact would state a coverage it never had. Unlike "
+                "the object masks in\n"
+                "       measure_geom_tol, EVERY frame of every assigned episode yields an area "
+                "fraction here — an empty\n"
+                "       mask is 0.0 and is counted, never skipped — so there is no legitimate way "
+                "for these two to differ.\n"
+                "       Re-run that shard."
+            )
+
+    # -- REFUSAL: a shard kept only its summary --------------------------------------------------
+    entries: list[tuple[int, dict]] = []
+    for path, rec in loaded:
+        for ep in rec.get("per_episode", []):
+            if "episode_index" not in ep or "area_fractions" not in ep:
+                raise CompositeError(
+                    f"FATAL: {path} has a per_episode entry for {ep.get('episode')!r} with no "
+                    "episode_index or no\n"
+                    "       area_fractions. The merge pools the RAW per-frame area fractions — a "
+                    "median and a p95 do not\n"
+                    "       decompose, so a shard that reports only its own summary cannot be "
+                    "merged, only averaged, and\n"
+                    "       averaging percentiles is the wrong number. Re-run that shard with this "
+                    "version of the script."
+                )
+            entries.append((int(ep["episode_index"]), ep))
+    entries.sort(key=lambda t: t[0])
+
+    # -- REFUSAL: no shard records the enumeration -----------------------------------------------
+    expected: list[str] = [str(k) for k in (records[0].get("corpus_episode_keys") or [])]
+    if not expected:
+        raise CompositeError(
+            f"FATAL: {loaded[0][0]} does not record corpus_episode_keys, so the merge cannot prove "
+            "it saw every\n"
+            "       episode — only that the shard indices 0..N-1 are present, which is a statement "
+            "about files and not\n"
+            "       about the corpus. A merge that cannot prove coverage is not a merge."
+        )
+
+    # -- the six conditions ----------------------------------------------------------------------
+    conditions = {name: True for name in MERGE_CONDITIONS}
+    reasons: list[str] = []
+
+    covered: dict[str, list[int]] = {}
+    for rec in records:
+        for key in rec["shard"].get("episode_keys", []):
+            covered.setdefault(str(key), []).append(int(rec["shard"]["index"]))
+    missing_shards = sorted(set(range(num_shards)) - set(seen))
+    uncovered = [k for k in expected if k not in covered]
+    unexpected = [k for k in covered if k not in set(expected)]
+    if missing_shards or uncovered or unexpected:
+        conditions["shards_tile_the_corpus_exactly_once"] = False
+        if missing_shards:
+            reasons.append(
+                "shard(s) " + ", ".join(str(i) for i in missing_shards) + f" of {num_shards} are "
+                "missing, so this distribution is over part of the corpus"
+            )
+        if uncovered:
+            reasons.append(
+                f"{len(uncovered)} episode(s) were never measured: "
+                + ", ".join(uncovered[:12]) + ("..." if len(uncovered) > 12 else "")
+            )
+        if unexpected:
+            reasons.append(
+                f"{len(unexpected)} measured episode(s) are not in the enumeration: "
+                + ", ".join(unexpected[:12]) + ("..." if len(unexpected) > 12 else "")
+            )
+
+    for rec in sorted(records, key=lambda r: int(r["shard"]["index"])):
+        idx = rec["shard"]["index"]
+        block = rec.get("measured") or {}
+        if block.get("limit") is not None or int(block.get("stride") or 1) > 1:
+            conditions["every_shard_at_stride_1_with_no_limit"] = False
+            reasons.append(
+                f"shard {idx} was measured with limit={block.get('limit')!r} and "
+                f"stride={block.get('stride')!r}; a truncated shard understates the maximum, and "
+                "the pool inherits that"
+            )
+        if rec.get("measurement_qualified") is not True:
+            conditions["every_shard_measurement_qualified"] = False
+            why = "; ".join(str(r) for r in (rec.get("measurement_disqualified_reasons") or []))
+            reasons.append(
+                f"shard {idx} is measurement_qualified: {rec.get('measurement_qualified')!r}"
+                + (f" ({why})" if why else "")
+            )
+
+    field_checks = (
+        ("shards_agree_on_estimator", "estimator",
+         lambda r: segmenter_identity(r.get("estimator") or {}),
+         "The estimator identity is the tuple the mask cache is keyed on. Two segmenters pooled "
+         "into one distribution is not a distribution, it is a mixture, and a bound above it is "
+         "above neither."),
+        ("shards_agree_on_source_manifest_sha256", "source_manifest_sha256",
+         lambda r: r.get("source_manifest_sha256"),
+         "A bound is a claim about ONE corpus. Two manifests pooled into one distribution is the "
+         "same drift load_area_bound's corpus cross-check exists to catch, arriving from inside."),
+        ("shards_agree_on_prompt", "prompt", lambda r: r.get("prompt"),
+         "The prompt decides which pixels are protected from the generator, so it decides the area "
+         "distribution. A narrower prompt yields a smaller mask and a smaller distribution."),
+    )
+    disagreements: dict[str, list] = {}
+    agreed: dict[str, Any] = {}
+    for condition, field, get, why in field_checks:
+        values = [(int(rec["shard"]["index"]), get(rec)) for rec in records]
+        ok, value = _agreement(values)
+        if ok:
+            agreed[field] = value
+            continue
+        conditions[condition] = False
+        disagreements[field] = [{"shard": i, "value": v} for i, v in sorted(values, key=lambda t: t[0])]
+        reasons.append(
+            f"the shards disagree on {field}, so they did not measure one quantity:\n"
+            + _by_shard_lines(values)
+            + f"       {why}"
+        )
+
+    # -- pooling. Nothing above this line has looked at an area fraction. -------------------------
+    fractions: list[float] = []
+    empty = 0
+    episode_ids: list[str] = []
+    for _, ep in entries:
+        fractions.extend(float(v) for v in ep["area_fractions"])
+        empty += int(ep.get("empty_frames") or 0)
+        episode_ids.append(str(ep.get("episode")))
+    if not fractions:
+        raise CompositeError(
+            "FATAL: the shards named to --merge carry no area fractions between them, so there is "
+            "nothing to pool.\n"
+            "       That is a missing input, not an empty distribution."
+        )
+
+    total_episodes = int(
+        (records[0].get("measured") or {}).get("episodes_in_manifest") or len(expected)
+    )
+    limits = [(rec.get("measured") or {}).get("limit") for rec in records]
+    strides = [int((rec.get("measured") or {}).get("stride") or 1) for rec in records]
+    measured = _measured_block(
+        fractions,
+        empty,
+        episode_ids=episode_ids,
+        total_episodes=total_episodes,
+        # The pooled run's own truncation, taken from the shards rather than from this command
+        # line: a merge has no --limit and no --stride and must not be able to launder one away.
+        limit=next((v for v in limits if v is not None), None),
+        stride=max(strides) if strides else 1,
+    )
+
+    qualified = all(conditions.values())
+    record = {
+        "schema": AREA_SCHEMA,
+        "max_frame_fraction": None,
+        "bound_rationale": "",
+        "bound_note": BOUND_NOTE,
+        "measurement_qualified": qualified,
+        "measurement_disqualified_reasons": reasons,
+        "measured": measured,
+        # None when the shards disagreed. The artifact is stamped false in that case and
+        # load_area_bound refuses it on the qualification check BEFORE it reads either field, so a
+        # null here can never be mistaken for a segmenter or a prompt; merged_from.disagreements
+        # carries what each shard actually said.
+        "estimator": _agreed_estimator(records, conditions),
+        "prompt": agreed.get("prompt"),
+        "source_manifest": _agreed_source_manifest(records, conditions),
+        "source_manifest_sha256": agreed.get("source_manifest_sha256"),
+        "merged_from": {
+            "num_shards": num_shards,
+            "assignment": SHARD_ASSIGNMENT,
+            "merged_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "shards": [
+                {
+                    "index": int(rec["shard"]["index"]),
+                    "path": str(path),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "n_episodes": int(rec["shard"]["n_episodes_in_shard"]),
+                    "n_frames": int((rec.get("measured") or {}).get("frames") or 0),
+                    "shard_max": (rec.get("measured") or {}).get("max"),
+                    "shard_median": (rec.get("measured") or {}).get("median"),
+                }
+                for path, rec in sorted(loaded, key=lambda t: int(t[1]["shard"]["index"]))
+            ],
+            "pooling": (
+                "min/median/p95/p99/max taken ONCE over the pooled per-frame area fractions. Shard "
+                "percentiles are never recombined: a median does not decompose, and neither does a "
+                "p95 — the median of the shard medians is a different statistic with the same "
+                "units and a plausible magnitude. Shards emit raw float64 fractions (exact through "
+                "JSON: float repr is the shortest round-tripping string since Python 3.1) and the "
+                "pool is rebuilt in the manifest's own enumeration order, so this artifact is "
+                "identical to what a single un-sharded run would have written."
+            ),
+            "qualification": conditions,
+            "qualification_note": (
+                "measurement_qualified is the AND of these. Every false one is a reason in "
+                "measurement_disqualified_reasons and load_area_bound refuses this artifact by "
+                "name. The refusals that write nothing at all are listed under refusals_checked "
+                "and are the cases where the pool itself would be wrong rather than incomplete."
+            ),
+            "refusals_checked": list(MERGE_REFUSALS_CHECKED),
+            "disagreements": disagreements,
+            "coverage_proof": {
+                "corpus_episodes": len(expected),
+                "assigned_episodes": len(covered),
+                "measured_episodes": len(episode_ids),
+                "how": (
+                    "Per shard: every measured episode is one the shard was assigned, and measured "
+                    "== assigned (every frame of every assigned episode yields a fraction, an "
+                    "empty mask included). Across shards: the assigned sets tile the enumeration "
+                    "exactly once. Together those give measured == the corpus, which is the claim "
+                    "a bound over the whole source corpus needs."
+                ),
+            },
+        },
+    }
+    return record, reasons, conditions
+
+
+def _agreed_estimator(records: list[dict], conditions: dict) -> Any:
+    """Shard 0's estimator when the shards agreed on their identity, else None.
+
+    The comparison that decides agreement is :func:`segmenter_identity` — the same tuple the mask
+    cache is keyed on and the same one ``load_area_bound`` cross-checks — but what is WRITTEN is
+    the full provenance block, so the merged artifact carries everything an un-sharded run would.
+    """
+    if not conditions.get("shards_agree_on_estimator"):
+        return None
+    by_index = {int(rec["shard"]["index"]): rec for rec in records}
+    return by_index[min(by_index)].get("estimator")
+
+
+def _agreed_source_manifest(records: list[dict], conditions: dict) -> Any:
+    if not conditions.get("shards_agree_on_source_manifest_sha256"):
+        return None
+    by_index = {int(rec["shard"]["index"]): rec for rec in records}
+    return by_index[min(by_index)].get("source_manifest")
+
+
+def merge_main(merge: list[pathlib.Path], out: pathlib.Path) -> int:
+    """``--merge``: pool the shard artifacts into the artifact a bound may sit above."""
+    loaded = collect_shard_records(list(merge))
+    record, reasons, conditions = merge_shard_records(loaded)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(record["measured"], indent=2, sort_keys=True))
+
+    merged = record["merged_from"]
+    print(
+        f"\nmerged {merged['num_shards']} shard(s), {record['measured']['episodes']} of "
+        f"{record['measured']['episodes_in_manifest']} episodes, "
+        f"{record['measured']['frames']} frames",
+        file=sys.stderr,
+    )
+    for s in merged["shards"]:
+        print(
+            f"  shard {s['index']:>3}  {s['n_episodes']:>4} ep  {s['n_frames']:>7} frames  "
+            f"max {s['shard_max']}  {s['path']}",
+            file=sys.stderr,
+        )
+    # The shard maxima are printed and are NOT the distribution. Their spread beside the pooled
+    # numbers is the cheapest possible reminder that the two are different statistics.
+    print(
+        "pooled min/median/p95/p99/max — taken ONCE over every frame, never recombined from the "
+        "shard summaries above",
+        file=sys.stderr,
+    )
+    print(f"\nwrote {out} with max_frame_fraction: null — read the distribution and decide.")
+    if not record["measurement_qualified"]:
+        failed = [k for k, v in conditions.items() if not v]
+        print(
+            "\nTHIS IS NOT THE MEASUREMENT A BOUND MAY SIT ABOVE. Conditions that failed: "
+            + ", ".join(failed) + "\n  - " + "\n  - ".join(reasons)
+            + f"\nmeasurement_qualified: false is stamped into {out} and load_area_bound refuses "
+            "it.",
+            file=sys.stderr,
+        )
+        return EXIT_MEASUREMENT_NOT_QUALIFIED
+    return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1475,7 +2285,11 @@ def build_parser() -> argparse.ArgumentParser:
         "measure",
         help="measure the robot-mask area distribution over the SOURCE corpus (sets no bound)",
     )
-    measure.add_argument("--manifest", required=True, type=pathlib.Path)
+    # NOT required=True any more, and checked in _check_measure_flags() instead: --merge reads
+    # shard artifacts and never opens a clip, never imports the segmenter and never touches a GPU,
+    # which is exactly why the merge job runs on the free CPU QoS with no data mounted. Every other
+    # invocation still refuses without it, with a reason attached.
+    measure.add_argument("--manifest", type=pathlib.Path, default=None)
     measure.add_argument("--out", type=pathlib.Path, default=AREA_BOUND_ARTIFACT)
     measure.add_argument(
         "--limit",
@@ -1497,21 +2311,148 @@ def build_parser() -> argparse.ArgumentParser:
             f"{EXIT_MEASUREMENT_NOT_QUALIFIED} exactly as --limit does."
         ),
     )
+    measure.add_argument(
+        "--shard",
+        type=int,
+        default=None,
+        metavar="I",
+        help=(
+            "measure only the episodes that hash to shard I of --num-shards, and write a "
+            f"{AREA_SHARD_SCHEMA} artifact carrying the RAW per-frame area fractions. The corpus "
+            "is 171 625 frames against a 4 h MaxWall, so the distribution is produced by an array "
+            "and merged. Assignment is a blake2b digest of the EPISODE ID, never a slice of the "
+            "episode list, so adding or removing a clip moves that clip only. Refuses to write "
+            "the tracked default --out."
+        ),
+    )
+    measure.add_argument(
+        "--num-shards",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "how many shards the corpus is partitioned into. Goes together with --shard: the "
+            "merge needs the denominator before it can say a shard is missing."
+        ),
+    )
+    measure.add_argument(
+        "--merge",
+        type=pathlib.Path,
+        nargs="+",
+        default=None,
+        metavar="SHARD_JSON",
+        help=(
+            "pool shard artifacts into the distribution at --out. Paths may be files or "
+            f"directories (a directory is scanned for {AREA_SHARD_SCHEMA} artifacts; anything else "
+            "in it is skipped with a note, while a file named explicitly is never skipped). "
+            "min/median/p95/p99/max are taken ONCE over the pooled per-frame fractions — shard "
+            "percentiles are never recombined — and the merge refuses outright, writing nothing, "
+            "on inputs that cannot be pooled (a duplicated shard, an episode in the wrong shard, a "
+            "shard that kept only its summary). A pool that is honest but is not the corpus's — a "
+            "missing shard, a truncated shard, shards that disagree about the segmenter, the "
+            "manifest or the prompt — is written with measurement_qualified: false, the failing "
+            f"conditions named, and exit {EXIT_MEASUREMENT_NOT_QUALIFIED}. --manifest is not "
+            "needed and no GPU is used."
+        ),
+    )
     return ap
+
+
+def _check_measure_flags(args: argparse.Namespace) -> None:
+    """Refuse the flag combinations that would silently measure the wrong thing.
+
+    ``parser.error`` would exit 2 with a usage block and no argument about WHY, and every one of
+    these has a why that is worth more than the usage block.
+    """
+    merging = args.merge is not None
+    sharding = args.shard is not None or args.num_shards is not None
+
+    if merging and sharding:
+        raise CompositeError(
+            "FATAL: --merge and --shard/--num-shards name two different jobs on one command line.\n"
+            "       --shard MEASURES one piece of the corpus; --merge POOLS the pieces into the "
+            "distribution a bound\n"
+            "       may sit above. Nothing here picks one and drops the other."
+        )
+    if merging:
+        if args.manifest is not None:
+            raise CompositeError(
+                "FATAL: --merge does not read the corpus, so --manifest names something it will "
+                "not open.\n"
+                "       The shards each recorded the manifest they measured and its sha256, and "
+                "the merge checks them\n"
+                "       against each other — which is a stronger claim than re-reading a manifest "
+                "this job was handed.\n"
+                "       Drop --manifest."
+            )
+        if args.limit is not None or args.stride != 1:
+            raise CompositeError(
+                "FATAL: --merge takes no --limit and no --stride. Those truncate a MEASUREMENT, "
+                "and a merge measures\n"
+                "       nothing: it pools what the shards measured. Accepting them here would let "
+                "a merge widen or narrow\n"
+                "       a distribution after the fact, which is the one thing "
+                "measurement_qualified exists to make\n"
+                "       impossible. The shards' own limit and stride are read out of their "
+                "artifacts and carried into the\n"
+                "       merged record."
+            )
+        return
+    if args.manifest is None:
+        raise CompositeError(
+            "FATAL: --manifest is required. (It is optional only under --merge, which reads shard "
+            "artifacts and not\n"
+            "       the corpus.)"
+        )
+    if sharding and args.out == AREA_BOUND_ARTIFACT:
+        raise CompositeError(
+            f"FATAL: --shard refuses to write the tracked default {AREA_BOUND_ARTIFACT}.\n"
+            "       N array tasks writing one path is a race whose winner is whichever task "
+            "finished last, and what it\n"
+            "       leaves behind is one shard of the corpus sitting at the path load_area_bound "
+            "reads. Give each shard\n"
+            "       its own --out (the sbatch uses shard-<index>.json), and let --merge write the "
+            "artifact."
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        _check_measure_flags(args)
+        if args.merge is not None:
+            # Before the masker: a merge opens no clip and imports no segmenter, which is why the
+            # merge job runs on the free CPU QoS. Building the masker here would tie the cheapest
+            # step in the chain to the most expensive precondition for no reason.
+            return merge_main(list(args.merge), args.out)
         masker = build_masker()
         masker.preflight()
         record = measure_source_mask_area(
-            args.manifest, masker=masker, limit=args.limit, stride=args.stride
+            args.manifest,
+            masker=masker,
+            limit=args.limit,
+            stride=args.stride,
+            shard=args.shard,
+            num_shards=args.num_shards,
         )
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(record["measured"], indent=2, sort_keys=True))
-        print(f"\nwrote {args.out} with max_frame_fraction: null — read the distribution and decide.")
+        if record["schema"] == AREA_SHARD_SCHEMA:
+            block = record["shard"]
+            print(
+                f"\nwrote {args.out}: SHARD {block['index']} of {block['num_shards']}, "
+                f"{block['n_episodes_in_shard']} episode(s). The five numbers above are this "
+                "shard's own and are NOT the corpus's — a percentile does not decompose. Merge "
+                "every shard of the partition:\n"
+                f"  python {pathlib.Path(__file__).name} measure --merge <dir> --out "
+                f"{AREA_BOUND_ARTIFACT}"
+            )
+        else:
+            print(
+                f"\nwrote {args.out} with max_frame_fraction: null — read the distribution and "
+                "decide."
+            )
         if not record["measurement_qualified"]:
             # The artifact is still written — a shakedown's numbers are worth reading — but the
             # shell must be able to tell it apart from the real thing without parsing JSON, and a
