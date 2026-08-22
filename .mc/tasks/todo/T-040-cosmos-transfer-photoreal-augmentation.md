@@ -698,6 +698,72 @@ GPU-h — about 18 GPU-hours before a single clip is generated**, against the ~4
 pilot implied for GEOM_TOL alone.
 
 
+**2026-08-22, later — CORRECTION. The robot masker does not fail on a third of frames. The robot is
+not there. And the real defect is the opposite one: it masks the APPLE.**
+
+The entry above, and commit `7fdd466`'s subject line, said "the robot masker fails on a third of
+frames". **That is wrong and is withdrawn.** `scripts/diagnose_robot_mask_empty.py` measured it.
+
+*The robot is genuinely absent, and the pattern is unmistakable.* A non-learned reference predicate
+— dark against the frame's own modal luminance, near-neutral, and different from the episode's
+per-pixel temporal median, **with no GroundingDINO anywhere in it** — over 101 episodes / 21 639
+frames: **56.5 % robot-present, 36.2 % robot-absent**. Absent fraction **by corpus decile**:
+
+    d0 65.6 %  d1 23.1 %  d2 1.3 %  d3 0.23 %  d4 0.19 %
+    d5  2.1 %  d6 20.5 %  d7 64.3 %  d8 90.3 %  d9 94.8 %
+
+That is approach and retreat, not a detector misfiring at random. 98/101 episodes end inside an
+absent run, 76/101 begin inside one, and on the pilot's three episodes deciles 2–6 contain **zero**
+absent frames and every episode has exactly two runs — one from frame 0, one to the last frame.
+
+*Detection is not failing.* Contingency on the pilot's episodes: **present_empty = 0, present_nonempty
+= 917.** Zero failures on 917 robot-present frames. The corpus sample showed 19 apparent failures;
+**all 19 were rendered and looked at, and none contains a robot** — the reference predicate had
+scored the arm's off-frame shadow, the plate rim or the top-band edge. **Measured detector failures
+on robot-present frames: 0.** Every empty mask is `no_boxes_above_threshold`; SAM 2 never segmented
+a box to nothing.
+
+*A decision this vindicates.* **91.7 % of empty frames still score above 0.10**, so upstream's
+`(0.10, 0.10)` retry — which `robot_composite` deliberately does **not** run — would have
+manufactured a box on nearly all of them. That refusal was argued from principle and is now measured.
+
+*So `check_mask`'s "zero is zero" is refusing CORRECT masks.* Its error text offers a dichotomy —
+"if the robot is genuinely absent the SOURCE corpus is not what PR-08 §3 describes" — but §3 says
+only "the 402 real demos" and never claims per-frame robot visibility. The corpus is what §3
+describes. With ~152 robot-absent frames per episode, **every clip refuses and G0c as written cannot
+produce one composited clip.**
+
+**THE FINDING NOBODY WENT LOOKING FOR, AND IT IS THE SERIOUS ONE.** On robot-absent frames the
+masker returns a **non-empty** mask 14 % of the time on the pilot's episodes and **41 % corpus-wide**
+— and the mask is **the apple** (~6–7 k px), the plate (~40 k), or the whole tablecloth (> 0.9 of
+frame). `sheets_corpus/nonempty_but_reference_absent.png` shows it plainly: twelve panels, no robot
+in any, and the green "robot mask" sitting on the apple in ten of them at detector scores 0.15–0.28.
+
+**Under G0c that composites the SOURCE APPLE back over the generated frame.** The object the entire
+task is about silently stops being restyled — and **no gate can see it**: G0b measures geometry and
+a pixel-identical apple has moved zero, G0a measures labels, and robot-mask IoU is recorded as
+"diagnostic, never a gate" by §6 itself. Arms B, C and D would quietly become arm A **for the
+apple**. Scores 0.150–0.414 on these overlap true robot detections 0.165–0.623, so **no score
+threshold separates them**, and an apple-sized mask is 0.02 of frame — far below any plausible area
+bound. This is exactly `GATE_QUALIFICATION_BLOCKERS[0]`'s "a plausible mask on the wrong object",
+now measured on the **robot** prompt rather than the apple one.
+
+*And the bound's own premise is broken.* 106's header says a bound must sit above the observed
+maximum. Re-measuring the pilot's own 1 603 frames with the same pins and tree reproduced min,
+median, p95 and p99 to three decimals — but **max came back 0.9722 against the pilot's 0.3618**,
+because 11 frames ground the whole tablecloth and **10 of the 11 contain no robot**. On this corpus
+**the observed maximum IS the defect the bound exists to catch**, so "above the maximum" cannot
+define it.
+
+**Three decisions, none of them a script's.** (1) What an empty mask means on a robot-free frame —
+there is a threshold-free option that stays inside G0c's own logic: run the committed masker on the
+**generated** frame too, and accept when both are empty, refuse when the generated frame grounds a
+robot the source never had. (2) Whether Cosmos-Transfer2.5 can hallucinate a manipulator into a
+robot-free frame at all — the unmeasured premise under `check_mask`'s error text, and cheap to
+settle. (3) The false positives, which the area bound cannot see and which only a person may address,
+since the prompt and thresholds are committed constants.
+
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above
