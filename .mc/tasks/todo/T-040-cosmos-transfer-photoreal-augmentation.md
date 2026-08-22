@@ -355,6 +355,57 @@ No session can do this and no retry will clear it.
 not written.** Under the old code this run would have completed `0:0` and recorded a second
 fabricated GPU-h figure. The gate now fails closed.
 
+**2026-08-22, evening — the licence opened, the segmenter staged, and GEOM_TOL turned out to be
+blocked on a codec rather than on GPU-hours.**
+
+- **The `Cosmos-Predict2.5-2B` licence is accepted.** Re-probed with the same token and method that
+  produced the 403s above: **206 at `f176dc95…`, `85f8ae7b…` and `main`**. The cluster's token is
+  byte-identical to the workstation's (compared by sha256, never echoed), so the acceptance applies
+  there too. The timing job **189584** is queued at `--time=01:30:00`.
+- **The estimator weights are staged and verified.** Job **189583** exited `0:0` after the two
+  defects in `102` were fixed. `PR08_ESTIMATORS_STAGED.json`: 5.0 GB, `facebook/sam2-hiera-large`,
+  `IDEA-Research/grounding-dino-base` and `depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf`,
+  every id **and revision** agreeing with `scripts/estimators/apple_sam2.py`. The six `unverified`
+  rows are the honest ones: they compare against `pr08_geom_tol.json` and `pr08_est_drift.json`,
+  which do not exist yet, so **102 must be re-run once they do**.
+- **`103_measure_geom_tol.sbatch` exists, with a PILOT mode that sizes the full run before buying
+  it.** Two passes at two frame budgets over the same episodes, so the slope separates per-frame
+  cost from the ~3.7 GB of weights loaded first; denominators read out of each pass's own
+  `n_frames`. Both passes exit 3 by construction and the pilot path treats that as success.
+- **THE PILOT'S FIRST RUN FOUND THE CODEC, NOT THE COST.** Job **189585** died in **7 seconds**:
+
+      [av1 @ ...] Missing Sequence Header.
+      FATAL: .../episode_000000.mp4 opened but decoded no frames — the container parses and the
+             codec does not.
+
+  **This is the second time this project has hit this exact failure.** Job 186357 captioned 372
+  clips and wrote zero captions on a sibling corpus — nothing crashed, `ffprobe` was happy, and
+  vLLM's OpenCV backend read every container header and failed every `grab()`.
+  `scripts/verify_clip_decode.py` was built *because of that job* and states the lesson in one line:
+  **a corpus is only readable by the decoder that will actually read it.** The PR-08 corpus is a
+  **copy** of the AV1 source (`manifest.json`: `codecs: ["av1"]`, `materialized: "copy"`), so the
+  trap was still armed and nothing ran the gate that exists for it.
+- **Job 189586 measured which decoders work here**, in the generator's own venv rather than in the
+  abstract (`runs/pr08-geom-tol/CLIP_DECODE_PROBE.json`): **cv2 4.11.0 cannot** (FFMPEG YES, avcodec
+  59.37.100, no AV1); **pyav 16.0.1 can, via `libdav1d`**; imageio and torchvision can; **decord
+  fails**; and there is **no `ffmpeg` on PATH** to transcode with. Upstream itself is mixed — 13
+  files reach for decord, 11 for imageio, and `auxiliary/sam2/sam2_utils.py` uses `VideoCapture`,
+  which means **upstream's own SAM2 helper would fail on this corpus too**.
+- **The fix is a reader, not a re-encode, and that is a decision about evidence.** Transfer2.5 is
+  handed the *path* and decodes it itself (`restyle_transfer25.py:290`), so transcoding would put a
+  lossy re-encode between the tolerance and the pixels the generator sees — at a scale of a fraction
+  of a pixel, which is the unit `GEOM_TOL` is denominated in. `measure_geom_tol.py` now carries a
+  decoder seam: `--decoder auto` **probes** each decoder against a clip of the corpus and takes the
+  first that actually returns a frame, every decoder yields **BGR** (`sam2_mask_via` flips once to
+  the adapter's `segment(rgb)`; a reader returning RGB would ground "apple" in a world where red is
+  blue), and the choice plus the whole probe trail is written into the artifact beside `mask_method`.
+  It is deliberately **not** in the `est_drift` cross-check — that side's frames come from a
+  renderer, so a decoder field there would be a field about nothing.
+
+**Still blocked on a human:** Isaac Sim is **not on the cluster** and `EST_DRIFT_P95` has nowhere
+else to run. Installing it on the workstation's RTX 5090 (32 GB, driver 595.84) is ~10–20 GB and is
+the project owner's call. PR-08 §1's generation gate is untouched and remains the owner's call.
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above
