@@ -11,6 +11,18 @@ The recorded teleop trajectory is carried over unchanged and is never regenerate
 an input perturbation and the label stays correct. That is PR-08 §2's whole argument, and it is why
 this file only ever reads the action side.
 
+PR-08 §6's G0c RUNS HERE, AND THAT IS THE POINT OF IT. G0a and G0b are checkers over a finished
+corpus. G0c is not: its sentence is "the defect cannot enter", because the only instrument that
+could detect the generic-manipulator defect after the fact — ``video_fidelity`` — has been measured
+against it and cannot see it, and §6 refuses an IoU threshold on the robot mask in the same breath
+("would be a coined number"). A gate solved by construction has to live in the construction. So
+every clip this driver calls a success has had the real robot's pixels composited back over it from
+the SOURCE frame, on every frame, through :mod:`robot_composite`; a clip that has not been
+composited never reaches that status and its ``vision.mp4`` is renamed to ``vision.uncomposited.mp4``
+so the harvest cannot file it either. There is no flag, no environment variable and no backend that
+skips it — ``--backend null`` composites too, because it is a placeholder GENERATOR, not a
+placeholder pipeline.
+
 NOTHING HERE IS LICENSED TO RUN. PR-08 §1 gates generation, and staging Transfer2.5's weights is a
 download at scale — the project owner's call under the sub-project rule. This script exists so that
 the decision is about generating, not about whether a driver could be written.
@@ -43,10 +55,29 @@ look fine and are not evidence:
 
 BACKENDS. `--backend transfer25` imports the real framework. `--backend null` writes a deterministic
 placeholder instead of calling a model — it exercises the manifest reading, the seed channel, the
-work-list contract, the per-unit isolation and the output layout without a GPU, a checkout or a
-weight. That is what the tests run, and it is the only backend that will work on this workstation.
-A null-backend clip is stamped `"backend": "null"` in its own status file and `screen_corpus.py`
-would reject it; nothing downstream can mistake one for a restyle.
+work-list contract, the per-unit isolation, the G0c composite and the output layout without a GPU, a
+checkout or a weight. That is what the tests run, and it is the only backend that will work on this
+workstation.
+
+The placeholder is a REAL, decodable mp4 of flat colour fields whose bytes are a function of the
+sample — it used to be an undecodable text blob, and that had to change when G0c landed: a composite
+needs a clip it can decode, and exempting the null backend from compositing would have created the
+one thing G0c must not have, a reachable code path that skips it. The seed determinism the arm-C
+control depends on is unchanged: same sample, same bytes; different seed, different bytes.
+
+**WHAT KEEPS A PLACEHOLDER OUT OF A CORPUS IS NOT ITS FILE FORMAT.** It used to be, in the weak
+sense that the blob would not decode, and this docstring used to claim `screen_corpus.py` would
+reject one — which was never true: `screen_corpus.py` scores ACTION columns, episode by episode, and
+contains no reference to a backend, to this status file or to pixels at all. Now that the
+placeholder is a valid mp4 the claim has to be enforced somewhere real, and it is enforced in two
+places that do not depend on anyone reading prose:
+
+1. `97_transfer25_restyle.sbatch` never passes `--backend`, so the cluster path always runs
+   `transfer25`. A test walks the sbatch's actual command lines and asserts it.
+2. Every unit stamps `"backend"` into its own `sample_outputs.json`, and 97's harvest REFUSES to
+   file a clip whose record does not say `transfer25` — loudly, as a fatal, because a placeholder
+   in a chunk directory means the generation path was edited and the chunk is not what its record
+   says it is.
 """
 
 from __future__ import annotations
@@ -58,6 +89,16 @@ import pathlib
 import sys
 import traceback
 from dataclasses import dataclass, field
+
+import numpy as np
+
+# A sibling in scripts/, imported by name. Anchoring sys.path on this file's own directory rather
+# than trusting the caller's: the sbatch invokes this with an absolute path from ${FRAMEWORK} as
+# the working directory, so sys.path[0] is not scripts/ there, and an ImportError at that point
+# would be a chunk of the run lost to a path.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import robot_composite  # noqa: E402  — PR-08 §6 G0c; see the module docstring above
 
 #: Upstream's resolution field is a key into ``VIDEO_RES_SIZE_INFO`` keyed by (bucket, aspect), NOT
 #: a WxH string (api §2). PR-08 §3 fixes 640x480, so this is the one entry that matters and the map
@@ -321,17 +362,37 @@ def build_sample(
 
 
 def _null_backend(sample: dict, out_dir: pathlib.Path) -> dict:
-    """Write a deterministic placeholder. No model, no GPU, no checkout.
+    """Write a deterministic placeholder clip. No model, no GPU, no checkout.
 
     Exercises everything around the model call. The bytes are a function of the sample only, so a
     rerun with the same seed produces the same file and the seed channel is testable end to end —
     which is the property arm C actually depends on.
+
+    IT IS A REAL MP4, at the source's exact frame count and geometry, and that is a requirement
+    rather than a nicety. PR-08 §6's G0c composites the real robot back over every generated frame,
+    unconditionally, and a composite needs a clip it can decode and a clip that pairs frame-for-frame
+    with its source. Writing a text blob here and exempting it from the composite would have created
+    exactly what G0c must not have: a reachable code path that skips compositing. So the placeholder
+    decodes, and the composite runs on it like everything else.
+
+    The content is flat colour fields taken from the digest — visibly not a restyle, so nothing
+    downstream can mistake a placeholder for one even though it is now a valid video. libx264 is
+    byte-deterministic for identical input and parameters, which is what keeps the seed assertion
+    above true.
     """
     import hashlib
 
     payload = json.dumps(sample, sort_keys=True).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()
-    (out_dir / "vision.mp4").write_bytes(b"NULLBACKEND\n" + digest.encode("ascii") + b"\n")
+
+    source = robot_composite.decode_clip(pathlib.Path(sample["video_path"]))
+    seed_bytes = np.frombuffer(bytes.fromhex(digest), dtype=np.uint8)
+    frames = np.empty_like(source)
+    for index in range(source.shape[0]):
+        for channel in range(3):
+            frames[index, :, :, channel] = seed_bytes[(index * 3 + channel) % seed_bytes.size]
+    fps = robot_composite.container_fps(pathlib.Path(sample["video_path"])) or 30.0
+    robot_composite.encode_clip(frames, out_dir / "vision.mp4", fps)
     return {"backend": "null", "digest": f"sha256:{digest}"}
 
 
@@ -394,13 +455,51 @@ def _transfer25_backend(sample: dict, out_dir: pathlib.Path, setup: dict) -> dic
 # --------------------------------------------------------------------------------------------
 
 
-def run_unit(unit: WorkUnit, sample: dict, out_root: pathlib.Path, backend: str, setup: dict) -> Outcome:
-    """One unit, isolated. Writes ``sample_outputs.json`` LAST and only after asserting the mp4.
+#: Where an uncomposited model output is put when the G0c composite refuses it. Named rather than
+#: deleted so the failure is inspectable, and renamed rather than left in place because the harvest
+#: in 97_transfer25_restyle.sbatch keys on a file called ``vision.mp4`` existing.
+UNCOMPOSITED_QUARANTINE = "vision.uncomposited.mp4"
+
+
+def _quarantine_uncomposited(out_dir: pathlib.Path) -> str | None:
+    """Make sure no file called ``vision.mp4`` survives a unit that did not finish compositing.
+
+    The harvest files a clip when ``vision.mp4`` exists AND the status is ``success``. Those are two
+    independent conditions and this breaks the first as well, on purpose: PR-08 §6 G0c's claim is
+    that the generic-manipulator defect *cannot enter*, and a claim that rests on one status field
+    being read correctly by every future consumer is weaker than one that rests on the file not
+    being there. The bytes are kept under a name nothing looks for, because "the composite refused
+    this clip" is a fact about the generator worth being able to look at.
+    """
+    video = out_dir / "vision.mp4"
+    if not video.exists():
+        return None
+    quarantined = out_dir / UNCOMPOSITED_QUARANTINE
+    video.replace(quarantined)
+    return str(quarantined)
+
+
+def run_unit(
+    unit: WorkUnit,
+    sample: dict,
+    out_root: pathlib.Path,
+    backend: str,
+    setup: dict,
+    composite: "robot_composite.CompositeContext",
+) -> Outcome:
+    """One unit, isolated. Composites, then writes ``sample_outputs.json`` LAST.
 
     The ordering is `97`'s requirement and it is load-bearing for the harvest: upstream writes its
     own args sidecar BEFORE generation and before the guardrail check (api §5), so file presence
     proves the job was attempted, not that a video exists. 96 reads a status this driver wrote
     after looking at the mp4, which is a different claim.
+
+    G0c SITS BETWEEN THE BACKEND AND THE STATUS, AND ``composite`` IS A REQUIRED ARGUMENT. Not
+    optional with a ``None`` default, not read from a flag, not skipped for one backend: a caller
+    that has no context cannot call this function at all, and the only thing that builds a context is
+    ``robot_composite.build_context``, which has no way to build one that does not composite. The
+    three lines are therefore the whole of the guarantee — success implies composited, an exception
+    implies quarantined, and there is no fourth outcome.
     """
     out_dir = out_root / unit.unit
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -408,6 +507,9 @@ def run_unit(unit: WorkUnit, sample: dict, out_root: pathlib.Path, backend: str,
     # A stale success from an earlier attempt would be harvested as finished work before this run
     # had a chance to overwrite it, so the claim is withdrawn before the work starts.
     record.unlink(missing_ok=True)
+    # Likewise a quarantined clip from an earlier attempt: it says "this unit's composite refused"
+    # and it is about to stop being true one way or the other.
+    (out_dir / UNCOMPOSITED_QUARANTINE).unlink(missing_ok=True)
 
     try:
         extra = (
@@ -418,15 +520,32 @@ def run_unit(unit: WorkUnit, sample: dict, out_root: pathlib.Path, backend: str,
         video = out_dir / "vision.mp4"
         if not video.is_file() or video.stat().st_size == 0:
             raise DriverError(f"unit {unit.unit}: vision.mp4 missing or empty after the backend ran.")
+        extra["g0c"] = composite.composite(
+            source_video=pathlib.Path(sample["video_path"]),
+            generated_video=video,
+            expected_frames=unit.frames,
+        )
         outcome = Outcome(unit=unit.unit, status="success", extra=extra)
     except Exception as exc:  # noqa: BLE001 — per-unit isolation is the point; see the module docstring
         # Deliberately broad. Upstream's generate() has no try/except and `keep_going` covers only
         # guardrail blocks (api §6), so one unreadable video would otherwise take the chunk with it.
+        quarantined = _quarantine_uncomposited(out_dir)
         outcome = Outcome(
             unit=unit.unit,
             status="error",
             detail=f"{type(exc).__name__}: {exc}",
-            extra={"traceback": traceback.format_exc(limit=8)},
+            extra={
+                "traceback": traceback.format_exc(limit=8),
+                "g0c": {
+                    "composited": False,
+                    "uncomposited_output_quarantined_to": quarantined,
+                    "note": (
+                        "PR-08 §6 G0c: this unit produced no composited clip, so it produced no "
+                        "clip. Anything the backend wrote has been renamed out of the harvest's "
+                        "way."
+                    ),
+                },
+            },
         )
 
     record.write_text(
@@ -475,7 +594,16 @@ def shard(units: list[WorkUnit], nproc: int) -> list[WorkUnit]:
     return [u for i, u in enumerate(units) if i % world == rank]
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The driver's whole command-line surface, in one place a test can enumerate.
+
+    Factored out of ``main`` for exactly one reason: PR-08 §6 G0c says the composite is
+    *unconditional*, and the cheapest way for that to stop being true is for somebody to add an
+    ``--skip-composite`` in six months for a debugging session and leave it in. A test walks these
+    actions and asserts that no option controls whether compositing happens — the three G0c options
+    below choose where its inputs come from and how often the DIAGNOSTIC is sampled, and none of
+    them can turn it off.
+    """
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint-path", required=True)
     ap.add_argument("--manifest", required=True, type=pathlib.Path)
@@ -508,7 +636,46 @@ def main(argv: list[str] | None = None) -> int:
         "those are the frames that reach disk (docs/transfer25-api.md §3).",
     )
     ap.add_argument("--backend", choices=("transfer25", "null"), default="transfer25")
-    args = ap.parse_args(argv)
+    ap.add_argument(
+        "--robot-mask-area-bound",
+        type=pathlib.Path,
+        default=robot_composite.AREA_BOUND_ARTIFACT,
+        help=(
+            "The COMMITTED artifact carrying the largest fraction of a frame a robot mask may cover "
+            "(PR-08 §6 G0c). Defaults to the tracked configs/transfer25/pr08_robot_mask_area.json. "
+            "It is a path and never a number: this driver will not take a bound on the command "
+            "line, because a bound typed at submit time is a threshold nobody committed. The file's "
+            "sha256 lands in every unit's record."
+        ),
+    )
+    ap.add_argument(
+        "--mask-cache",
+        type=pathlib.Path,
+        default=None,
+        help=(
+            "Where the per-source-episode robot masks are cached. The mask is a property of the "
+            "SOURCE frame, so it is identical across all 25 restyles of an episode and computing it "
+            "once instead of 25 times is the difference between ~172k segmentations and ~4.3M. "
+            "Defaults to a 'robot_masks' directory beside --out; point it above the chunk "
+            "directories to share across style sets. Entries are keyed on the source bytes, the "
+            "prompt and the estimator version, so nothing stale can be reused."
+        ),
+    )
+    ap.add_argument(
+        "--iou-stride",
+        type=int,
+        default=10,
+        help=(
+            "Sample the robot-mask IoU diagnostic every Nth frame. This is a sampling rate for a "
+            "number PR-08 §6 says twice is a DIAGNOSTIC ON THE GENERATOR AND NEVER A GATE, so it "
+            "cannot become a finding. THE COMPOSITE HAS NO STRIDE and this flag does not touch it."
+        ),
+    )
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     try:
         if not args.no_guardrails:
@@ -533,11 +700,41 @@ def main(argv: list[str] | None = None) -> int:
             "checkpoint_path": args.checkpoint_path,
         }
 
+        # PR-08 §6 G0c, resolved BEFORE the first unit and not negotiable afterwards. Two things
+        # are decided here and both are run-level facts rather than per-unit ones: whether the
+        # committed area bound exists (it is a refusal if not, and the message says what to measure)
+        # and whether the pinned GroundingDINO + SAM 2 checkpoints are staged. Discovering a missing
+        # checkpoint inside the per-unit guard would turn one honest refusal into N identical
+        # per-unit errors that read like a flaky generator, spend a pass of the chunk's rail, and
+        # send the operator to look at the wrong thing.
+        try:
+            composite = robot_composite.build_context(
+                # Not an input to the composite: the corpus the committed area bound is checked
+                # AGAINST. A bound is a claim about a distribution over these episodes, and the
+                # loader refuses one measured over any other manifest.
+                source_manifest=args.manifest,
+                area_bound_path=args.robot_mask_area_bound,
+                iou_stride=args.iou_stride,
+                cache_dir=args.mask_cache or (args.out.parent / "robot_masks"),
+            )
+        except robot_composite.CompositeError as exc:
+            # Translated rather than propagated: `main`'s contract with 97 is "FATAL: <reason>",
+            # exit 1, and a CompositeError escaping here would be a traceback the sbatch reads as a
+            # crash of the driver rather than as a refusal it can act on.
+            raise DriverError(str(exc)) from exc
+
         print(
             f"=== restyle: {len(units)} units | set={args.style_set} | "
             f"controls={','.join(f'{c.key}:{c.weight}' for c in controls)} | "
             f"resolution {args.resolution} -> bucket {bucket!r} aspect {aspect!r} | "
             f"backend={args.backend}",
+            flush=True,
+        )
+        print(
+            "=== G0c: robot pixels composited back on EVERY frame of EVERY clip | "
+            f"mask={composite.masker.provenance()['name']} prompt={robot_composite.ROBOT_TEXT_PROMPT!r} | "
+            f"area bound {composite.bound.max_frame_fraction} from {composite.bound.artifact} | "
+            "IoU recorded as a DIAGNOSTIC, never a gate",
             flush=True,
         )
 
@@ -563,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
                 controls=controls,
                 bucket=bucket,
             )
-            outcome = run_unit(unit, sample, args.out, args.backend, setup)
+            outcome = run_unit(unit, sample, args.out, args.backend, setup, composite)
             failures += outcome.status != "success"
             print(f"[{i}/{len(units)}] {unit.unit} {outcome.status} {outcome.detail}", flush=True)
 

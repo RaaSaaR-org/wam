@@ -47,8 +47,13 @@
 #   sees nothing to add up.
 #
 # READ docs/preregistration/PR-08-photoreal-augmentation.md FIRST. This job decides nothing. It
-# produces restyled clips and the record that makes them gateable; the gates are G0a/G0b/G0c in
-# PR-08 §6 and none of them runs here.
+# produces restyled clips and the record that makes them gateable. G0a and G0b are checkers over a
+# finished corpus and neither runs here. G0c is different in kind and DOES run here, because §6
+# solves it by construction rather than by a threshold: video_fidelity cannot see the
+# generic-manipulator defect and any IoU threshold on the robot mask "would be a coined number", so
+# the real robot's pixels are composited back over every generated frame inside
+# scripts/restyle_transfer25.py and the defect cannot enter. A gate solved by construction has to
+# live in the construction; there is nothing for a later checker to check.
 #
 # WHAT THIS IS. Cosmos-Transfer2.5, FROZEN, restyling frames of episodes that already have actions.
 # The labels are the recorded teleop trajectory, carried over unchanged — the generator only
@@ -106,11 +111,27 @@
 #       adds to make an error go away; a sentence that has to be typed out is a claim they made.
 #
 #   (b) TRAINING DATA. Nothing this job writes may enter any training corpus until G0a (label
-#       identity under screen_corpus --expect), G0b (geometry invariance within
-#       GEOM_TOL - EST_DRIFT_P95) and G0c (unconditional robot-pixel composite) have all passed.
-#       They are VOID gates, not reports. This job drops a NOT_TRAINING_DATA marker beside every
-#       clip directory it writes so anything downstream can refuse the tree by `ls`, and the
-#       marker is removed by whatever runs the gates, never by this file.
+#       identity under screen_corpus --expect) and G0b (geometry invariance within
+#       GEOM_TOL - EST_DRIFT_P95) have passed. They are VOID gates, not reports. This job drops a
+#       NOT_TRAINING_DATA marker beside every clip directory it writes so anything downstream can
+#       refuse the tree by `ls`, and the marker is removed by whatever runs those two gates, never
+#       by this file.
+#
+#       G0c IS NOT ON THAT WAITING LIST BECAUSE IT HAS ALREADY HAPPENED, and that is §6's design
+#       rather than a relaxation of it. "The real robot's pixels are unconditionally composited
+#       back over every generated frame ... The defect cannot enter, and no threshold is needed."
+#       The driver does it per clip, between the model writing the mp4 and the unit being called a
+#       success; a unit whose composite refused never gets that status and its output is renamed to
+#       vision.uncomposited.mp4, so the harvest cannot file it either.
+#
+#       AND THIS JOB VERIFIES IT RATHER THAN ASSERTING IT. The harvest reads each unit's own
+#       sample_outputs.json and refuses to file a clip that cannot prove the composite ran on all
+#       of ITS frames — see the long comment on harvest() for the five checks — then writes the
+#       proof beside the clip as <unit>.g0c.json. A clip in the directory with no proof beside it
+#       is fatal, which is also what covers clips filed by any earlier driver. The claim this
+#       record makes about G0c is therefore a count, not a sentence. The robot-mask IoU inside the
+#       proof is a DIAGNOSTIC ON THE GENERATOR AND NEVER A GATE, which §6 states twice; nothing
+#       here compares it to anything.
 #
 #   (c) A BUDGET IT INVENTED. PR-08 §8 item 3: "No budget line exists until that measurement
 #       does." CEILING_GPU_H and PARTITION_CEILING_GPU_H are therefore REQUIRED WITH NO DEFAULT.
@@ -749,10 +770,43 @@ this tree:
        A restyle changes no action, so a deviation is not a finding about the corpus — it is proof
        the pipeline corrupted or reordered the action labels.
   G0b  object and plate centroids agree with the source within GEOM_TOL - EST_DRIFT_P95.
-  G0c  the real robot's pixels composited back over every generated frame, unconditionally.
 
-Delete this file only from the job that runs those gates.
+G0c IS NOT ON THAT LIST, AND THAT IS NOT AN OMISSION. PR-08 §6 solves it BY CONSTRUCTION rather
+than by a threshold: the real robot's pixels are unconditionally composited back over every
+generated frame, so the generic-manipulator defect cannot enter and no gate has to detect it. That
+composite runs inside scripts/restyle_transfer25.py, between the model writing a clip and the
+driver calling the unit a success. A unit whose composite refused never reached `status: success`,
+and its output was renamed to vision.uncomposited.mp4, so the harvest cannot file it either.
+
+AND THAT IS CHECKED HERE RATHER THAN TAKEN ON TRUST. Beside every `<unit>.mp4` in this directory
+there is a `<unit>.g0c.json`, written by the harvest out of that unit's own sample_outputs.json
+BEFORE the clip was moved in, and only after all of these held: status success; backend transfer25
+(a placeholder clip is a valid mp4, so it is refused by content and not by habit); g0c.composited
+true; frames_composited == frames_total == the frame count that unit's work-list row declares; and
+an area bound cross-checked against the segmenter that actually made the masks. A clip in here with
+no `.g0c.json` beside it makes the harvest and the chunk record refuse — so if you can `ls` the
+pair, the composite ran on that clip, and if you cannot, no part of this tree claims it did. The
+robot-mask IoU inside that file is a DIAGNOSTIC ON THE GENERATOR AND NEVER A GATE — §6 says so
+twice — and nothing compares it to anything.
+
+Delete this file only from the job that runs G0a and G0b.
 MARKER
+
+# THE ROBOT SEGMENTER'S OPERATING POINT IS NOT A SUBMIT-TIME DECISION. scripts/estimators/apple_sam2
+# reads BOX_THRESHOLD / TEXT_THRESHOLD and its retry pair from these four variables, deliberately,
+# because a measurement sweep needs to move them. PR-08 §6 G0c's robot mask is made through that
+# same adapter, and there a threshold decides WHICH PIXELS THE GENERATOR IS ALLOWED TO TOUCH: a
+# lower one grows the mask, a higher one shrinks it, and a smaller mask is generated manipulator
+# left in the frame — the exact defect G0c exists to exclude, arriving through an inherited
+# environment variable that nobody typed into this file. robot_composite refuses a per-run prompt
+# for that reason and cannot refuse these, because the adapter owns them. So they are cleared here,
+# in the one place both driver invocations below inherit from, and the values that end up in every
+# clip's record are the committed ones.
+unset WAM_PR08_BOX_THRESHOLD WAM_PR08_TEXT_THRESHOLD || true
+unset WAM_PR08_RETRY_BOX_THRESHOLD WAM_PR08_RETRY_TEXT_THRESHOLD || true
+# Same argument, one level up: the robot prompt is a committed constant with no override, and the
+# APPLE prompt's override must not reach a job whose records quote a prompt.
+unset WAM_PR08_OBJECT_PROMPT || true
 
 # shellcheck source=/dev/null
 source "${FRAMEWORK}/.venv/bin/activate"
@@ -1111,6 +1165,26 @@ if (( TIMING_MODE )); then
   # below turned the 118 s it took to reach the crash into "9.56 GPU-h per variant" and wrote it to
   # THROUGHPUT.json as the input to the PR-08 §8 item 3 budget. The clock measures the crash unless
   # something asserts the clip exists, so the driver asserts it and this exits here if it does not.
+  #
+  # AND THE NUMBER THIS MEASURES NOW INCLUDES PR-08 §6 G0c. The composite is inside the driver, so a
+  # timed episode pays for decoding the source, segmenting the robot in every source frame, the
+  # composite itself and the re-encode — exactly what the generation run pays. That is the point of
+  # measuring here rather than around the model call: a throughput number that excluded the gate
+  # would under-derive the GPU-h ceiling the generation path is then held to. The source mask is
+  # cached per episode and reused across the 25 restyles of it, so the marginal cost of a SECOND
+  # variant of the same episode is lower than this first one — the ceiling derived from here is
+  # therefore conservative, which is the correct direction for a budget.
+  #
+  # THIS MAKES THE TIMING PATH DEPEND ON G0c's OWN PREREQUISITES, and that is deliberate. The driver
+  # refuses to start without staged GroundingDINO + SAM 2 checkpoints (102_stage_sam2_weights.sbatch)
+  # and a committed configs/transfer25/pr08_robot_mask_area.json, so the order is: stage the
+  # weights, run `scripts/robot_composite.py measure` over the SOURCE corpus, decide and commit the
+  # area bound, then time. PR-08 §1 licenses this measurement unconditionally and nothing here
+  # withdraws that licence — it withdraws the option of measuring a DIFFERENT pipeline. Timing the
+  # generator without the composite would be the same defect as timing it with the guardrail on, in
+  # the opposite direction: a wall clock around a pipeline we do not run, feeding a GPU-h ceiling
+  # the pipeline we DO run is then held to. Sub-section (c) above refuses budgets nobody measured;
+  # this refuses budgets measured on something else.
   python "${RESTYLE_DRIVER}" \
       --checkpoint-path "${TRANSFER_CHECKPOINT_PATH}" \
       --no-guardrails \
@@ -1695,31 +1769,213 @@ PY
   # ONLY thing handed to the driver — so a requeue regenerates exactly what is absent and nothing
   # else. sample_outputs.json's status is READ rather than the file merely counted, because the
   # error path writes that file too.
+  #
+  # AND IT READS THE COMPOSITOR'S OWN EVIDENCE, PER CLIP, BECAUSE THIS FILE MAKES A CLAIM ABOUT IT.
+  # chunk_metadata.json and the NOT_TRAINING_DATA marker below both say "the composite ran on every
+  # clip filed here". Until 2026-08-22 that was a sentence about a sibling script's behaviour, filed
+  # on two conditions that could both be true without it: vision.mp4 exists and status == "success".
+  # PR-08 §6 calls G0c "solved by construction", and a construction that is asserted rather than
+  # verified is not a construction — it is the same shape of claim as PR-07's -359.41, a number
+  # whose instrument nobody checked. So the record is now READ and every field the claim rests on is
+  # compared to something independent:
+  #
+  #   * status == success and backend == transfer25. The second keeps the null placeholder — which
+  #     since G0c landed writes a REAL decodable mp4 — out of a corpus by file content rather than
+  #     by the sbatch's habit of not passing --backend.
+  #   * g0c.composited is true, and g0c.frames_composited == g0c.frames_total == the frame count
+  #     THIS WORK-LIST ROW declares. That is the per-clip, specific half: a record copied from
+  #     another unit, or a composite that stopped early, disagrees with the row.
+  #   * the area bound that refused over-large masks was cross-checked against the segmenter that
+  #     made them (g0c.area_bound.cross_checked), and its sha256 is recorded.
+  #
+  # A clip that fails any of these is NOT filed and is NOT quietly left for the next pass: it is a
+  # fatal, because "success without a composite" means the generation path is not the one this job
+  # describes and every further pass would produce more of it.
+  #
+  # THE EVIDENCE THEN TRAVELS WITH THE CLIP. Filing writes <unit>.g0c.json beside <unit>.mp4 holding
+  # that unit's own compositor record, and a later pass that finds an mp4 with no sidecar refuses
+  # the chunk. That is what covers clips filed by an EARLIER driver: the old harvest skipped any
+  # unit already in clips/, so a pre-G0c clip would have survived a requeue untouched and inherited
+  # the new claim. It cannot now — it has no sidecar, and the raw record it came from may be long
+  # gone, so the sidecar is the only durable per-clip proof and its absence is the refusal.
   harvest() {  # work-list  raw-dir  dest-dir  missing-list-to-write
   python - "$1" "$2" "$3" "$4" <<'PY'
 import json, pathlib, shutil, sys
 work, raw, dest, out = (pathlib.Path(a) for a in sys.argv[1:5])
+
+def sidecar(unit):
+    return dest / f"{unit}.g0c.json"
+
+def read_proof(path):
+    """The sidecar's CONTENT, or a reason. Presence is not proof, and this file already knows why.
+
+    The correction of 2026-08-16 above states the rule for the raw record — "a harvest keyed on file
+    presence counts failures as finished work" — and a sidecar checked only with is_file() is that
+    same check by another name: an empty ``{}`` beside a clip would satisfy the count in
+    chunk_metadata.json while proving nothing about whether the composite ran. So every evidence
+    file is read, on every pass, including the ones this pass did not write.
+    """
+    try:
+        proof = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"it is unreadable ({exc})"
+    if not isinstance(proof, dict):
+        return None, "it is not an object"
+    g0c = proof.get("g0c")
+    if not isinstance(g0c, dict) or g0c.get("composited") is not True:
+        return None, "it carries no g0c.composited: true, so it proves nothing about that clip"
+    return proof, None
+
+def whole_frames(container, field):
+    """``container[field]`` when it is a plain integer, else None. Never raises.
+
+    ``int(None)`` is a TypeError, and a traceback is not a refusal — the operator reads it as a
+    crash of this job rather than as a diagnosis of the record. A frame count that is absent, null
+    or a string proves nothing about how many frames were composited, which is the same failure as
+    a count that disagrees, so it takes the same path.
+    """
+    value = container.get(field)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+def refuse(unit, why, remedy):
+    sys.exit(
+        f"FATAL: unit {unit} cannot be filed into {dest} — {why}\n"
+        f"       PR-08 §6 G0c is solved BY CONSTRUCTION, which means this job may only file a clip\n"
+        f"       whose own record PROVES the real robot's pixels were composited back over every\n"
+        f"       frame of it. chunk_metadata.json and the NOT_TRAINING_DATA marker state that as a\n"
+        f"       fact about this directory; filing this clip would make both of them false.\n"
+        f"       {remedy}"
+    )
+
+def evidence(unit, row):
+    """This unit's compositor record, or a fatal. Never a bool: the caller files what it returns."""
+    rec = raw / unit / "sample_outputs.json"
+    try:
+        payload = json.loads(rec.read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"its record {rec} is unreadable ({exc})"
+    if payload.get("status") != "success":
+        return None, f"status is {payload.get('status')!r}"
+    if payload.get("backend") != "transfer25":
+        refuse(unit, f"its record says backend={payload.get('backend')!r}, not 'transfer25'.",
+               "A --backend other than transfer25 is a PLACEHOLDER generator. Since G0c landed it "
+               "writes a valid mp4, so nothing about the file itself keeps it out of a corpus — "
+               "this does. 97 never passes --backend; find out who did.")
+    g0c = payload.get("g0c")
+    if not isinstance(g0c, dict) or g0c.get("composited") is not True:
+        refuse(unit, "its record carries no g0c.composited: true.",
+               "A driver that reports success without compositor evidence is not the driver this "
+               "job describes (scripts/restyle_transfer25.py). Do not file its output.")
+    want = int(row["frames"])
+    if whole_frames(g0c, "frames_composited") != want or whole_frames(g0c, "frames_total") != want:
+        refuse(unit,
+               # repr, because "5" and 5 print the same and only one of them is a frame count.
+               f"it composited {g0c.get('frames_composited')!r} of {g0c.get('frames_total')!r} "
+               f"frames and this work-list row declares {want}.",
+               "Every frame or none: a clip composited on part of its frames carries the generated "
+               "manipulator on the rest, and nothing downstream reads a corpus frame by frame.")
+    bound = g0c.get("area_bound") or {}
+    if bound.get("cross_checked") is not True or not bound.get("artifact_sha256"):
+        refuse(unit, "its area bound was not cross-checked against the segmenter that made the masks.",
+               "The bound is what refuses an over-large mask, and a bound measured under other "
+               "weights or over another corpus is a number with no distribution behind it — see "
+               "robot_composite.load_area_bound.")
+    return {"unit": unit, "frames": want, "g0c": g0c,
+            "seed": payload.get("seed"), "episode": payload.get("episode"),
+            "style": payload.get("style"), "backend": payload.get("backend"),
+            "verified_by": "97_transfer25_restyle.sbatch harvest()",
+            "verified": ["status==success", "backend==transfer25", "g0c.composited",
+                         "frames_composited==frames_total==work_list.frames",
+                         "area_bound.cross_checked"]}, None
+
 missing = []
 for line in work.read_text().splitlines():
     if not line.strip():
         continue
     row = json.loads(line)
     unit = row["unit"]
+    want_frames = int(row["frames"])
     if (dest / f"{unit}.mp4").is_file():
+        # Already filed — by THIS harvest, which means the sidecar is there. If it is not, the clip
+        # was filed by something that did not check, and no later pass can go back and prove it.
+        if not sidecar(unit).is_file():
+            refuse(unit, f"{dest / (unit + '.mp4')} is already filed with no {sidecar(unit).name} "
+                         "beside it, so nothing here can show it was ever composited.",
+                   "It was filed by a driver or a harvest that predates PR-08 §6 G0c's evidence "
+                   "check. Delete that clip and let this chunk regenerate it; do not delete the "
+                   "sidecar requirement.")
+        # And the sidecar is READ, not merely counted. This row knows how many frames the unit has,
+        # which the directory-wide sweep below cannot know, so the one check that can only happen
+        # here happens here: an evidence file that says nothing, or that says a different clip's
+        # frame count, is not evidence about this clip.
+        proof, why = read_proof(sidecar(unit))
+        if proof is None:
+            refuse(unit, f"{sidecar(unit).name} is beside it but {why}.",
+                   "A sidecar is the only durable proof that the composite ran on that clip. One "
+                   "that cannot be read, or that does not say so, leaves the clip in exactly the "
+                   "state the sidecar exists to exclude. Delete the clip and its sidecar and let "
+                   "this chunk regenerate them.")
+        if whole_frames(proof, "frames") != want_frames:
+            refuse(unit,
+                   f"{sidecar(unit).name} records {proof.get('frames')!r} frames and this "
+                   f"work-list row declares {want_frames}.",
+                   "The evidence beside that clip is about a different clip — copied, or written "
+                   "for another unit. Delete both and let this chunk regenerate them.")
         continue
-    src, rec = raw / unit / "vision.mp4", raw / unit / "sample_outputs.json"
-    ok = False
-    if src.is_file() and rec.is_file():
-        try:
-            ok = json.loads(rec.read_text()).get("status") == "success"
-        except ValueError:
-            ok = False
-    if ok:
-        shutil.move(str(src), str(dest / f"{unit}.mp4"))
-    else:
+    src = raw / unit / "vision.mp4"
+    if not src.is_file():
+        # No output at all, or the driver quarantined an uncomposited one as vision.uncomposited.mp4.
         missing.append(line)
+        continue
+    proof, why = evidence(unit, row)
+    if proof is None:
+        print(f"harvest: {unit} not filed — {why}")
+        missing.append(line)
+        continue
+    # The sidecar lands BEFORE the mp4 moves. A crash between the two leaves a sidecar with no clip,
+    # which the next pass overwrites harmlessly; the other order would leave a clip with no proof,
+    # which is the state this whole check exists to make impossible.
+    sidecar(unit).write_text(json.dumps(proof, indent=2, sort_keys=True) + "\n")
+    shutil.move(str(src), str(dest / f"{unit}.mp4"))
+
 out.write_text("".join(f"{u}\n" for u in missing))
-print(f"harvest: {len(list(dest.glob('*.mp4')))} clips filed, {len(missing)} to generate")
+# The invariant this function maintains, re-checked over the WHOLE directory rather than over the
+# units this pass touched: every clip in it has its own evidence file. A unit absent from this
+# chunk's work list cannot be checked above, and it is exactly the case a wrong claim would hide in.
+filed = {p.stem for p in dest.glob("*.mp4")}
+proofs = set()
+unreadable = []
+for p in sorted(dest.glob("*.g0c.json")):
+    # Read, not counted — same rule as the per-row check above, applied to the sidecars this pass
+    # never looked at. What the frame count means cannot be checked here (a unit outside this
+    # chunk's work list has no row to compare against), but "this file claims the composite ran"
+    # can, and a sidecar that does not claim it must not stand in for one that does.
+    seen, why = read_proof(p)
+    if seen is None:
+        unreadable.append(f"{p.name}: {why}")
+        continue
+    proofs.add(p.name[: -len(".g0c.json")])
+if unreadable:
+    sys.exit(
+        f"FATAL: {dest} holds {len(unreadable)} G0c evidence file(s) that are not evidence:\n       "
+        + "\n       ".join(unreadable[:5])
+        + (f"\n       … and {len(unreadable) - 5} more" if len(unreadable) > 5 else "")
+        + "\n       chunk_metadata.json counts these files as proof that the composite ran on the "
+        "clips beside them. A file that says nothing is the file-presence check this harvest "
+        "refuses everywhere else. Remove those clips and their sidecars and let the chunk "
+        "regenerate them."
+    )
+orphans = sorted(filed - proofs)
+if orphans:
+    sys.exit(
+        f"FATAL: {dest} holds {len(orphans)} clip(s) with no G0c evidence file beside them: "
+        f"{orphans[:5]}{' …' if len(orphans) > 5 else ''}\n"
+        "       chunk_metadata.json is about to claim the composite ran on every clip in this "
+        "directory. It did not run on those, or nothing here can show that it did. Remove them "
+        "and let the chunk regenerate them."
+    )
+print(f"harvest: {len(filed)} clips filed, each with its own G0c evidence file; "
+      f"{len(missing)} to generate")
 PY
   }
 
@@ -1758,7 +2014,15 @@ PY
         --out "${RAW}" \
         --resolution 640x480 \
         --control "${CONTROL}" \
+        --mask-cache "${OUT}/robot_masks" \
         --nproc "${NPROC}" &
+    # --mask-cache is ONE directory for the whole RUN_ID, not one per chunk, and that is the point
+    # of passing it at all: PR-08 §6 G0c's robot mask is a property of the SOURCE frame, so it is
+    # identical across every restyle of an episode, and the committed partition asks for 25 of them.
+    # Left to the driver's default it would land beside ${RAW} and be recomputed once per style set;
+    # here the train, eval and identity submissions of one RUN_ID share it. Entries are keyed on the
+    # source bytes, the prompt and the estimator version, so nothing stale can be served across a
+    # rebuilt corpus or a re-pinned segmenter.
     # The trap at the top of the file reads this. It was assigned "" there, so the handler knows
     # there is no driver to terminate before this line and knows there is one after it; there is no
     # second `trap` call here, and there must not be — see FIX 8's note at the top.
@@ -1857,6 +2121,17 @@ geom = json.loads(pathlib.Path(geom_p).read_text())
 tp = json.loads(pathlib.Path(tp_p).read_text())
 facts = json.loads(pathlib.Path(facts_p).read_text())
 n_clips = len(list(pathlib.Path(clips).glob("*.mp4")))
+# The G0c claim below is COUNTED, not asserted. harvest() writes <unit>.g0c.json beside each clip it
+# files, only after reading that unit's own compositor record, and refuses to file one without it.
+# Recomputing the two counts here means the record cannot claim what the directory does not show —
+# and if something removed evidence between the harvest and now, this record refuses to be written
+# rather than stating a number it cannot support.
+g0c_proofs = sorted(pathlib.Path(clips).glob("*.g0c.json"))
+if len(g0c_proofs) != n_clips:
+    sys.exit(f"FATAL: {clips} holds {n_clips} clips and {len(g0c_proofs)} G0c evidence files. This "
+             "record was about to state that the composite ran on every clip filed here. Do not "
+             "write a claim this directory cannot support — find the clips without evidence "
+             "(harvest() names them) and remove them.")
 ledger = sorted(pathlib.Path(ledger_dir).glob("*.json"))
 ledger_entries = [json.loads(p.read_text()) for p in ledger]
 rec = {
@@ -1947,8 +2222,35 @@ rec = {
                   "rewrites returned frames and blurs the hand — it edits the evidence G0b and "
                   "G0c are about",
     "gates_passed": None,
-    "gates_note": "G0a/G0b/G0c have NOT run. Nothing in this tree may be trained on until they "
-                  "do; see the NOT_TRAINING_DATA marker beside the clips.",
+    "gates_note": "G0a and G0b have NOT run. Nothing in this tree may be trained on until they do; "
+                  "see the NOT_TRAINING_DATA marker beside the clips. G0c is not among them: "
+                  "PR-08 §6 solves it BY CONSTRUCTION, the composite runs inside "
+                  "restyle_transfer25.py before a unit may be called a success, and this job's "
+                  "harvest VERIFIED that per clip before filing it — see g0c_evidence below.",
+    "g0c": "enforced at generation time, per clip, in scripts/restyle_transfer25.py, and CHECKED "
+           "here before filing. The robot-mask IoU recorded beside each clip is a DIAGNOSTIC ON "
+           "THE GENERATOR AND NEVER A GATE (PR-08 §6, repeated in T40_RULE_V2 §0 and "
+           "T40_RULE_V3 §1).",
+    # The evidence, counted rather than claimed. One file per clip, written by harvest() out of that
+    # unit's own sample_outputs.json and only after the checks listed inside it passed. The two
+    # counts are recomputed above and disagreeing them refuses to write this record at all.
+    "g0c_evidence": {
+        "evidence_files": len(g0c_proofs),
+        "clips": n_clips,
+        "every_clip_has_evidence": len(g0c_proofs) == n_clips,
+        "file": "<clips dir>/<unit>.g0c.json",
+        "checked_before_filing": [
+            "sample_outputs.json status == success",
+            "backend == transfer25 (a placeholder clip is a valid mp4 and is refused by content)",
+            "g0c.composited is true",
+            "g0c.frames_composited == g0c.frames_total == the frames the work-list row declares",
+            "g0c.area_bound.cross_checked (the bound belongs to the segmenter that made the masks)",
+        ],
+        "note": "harvest() refuses to file a clip failing any of these, and refuses the chunk if "
+                "any clip in the directory has no evidence file — including one filed by an "
+                "earlier driver, which is why absence of the sidecar is fatal rather than "
+                "backfilled. A claim asserted rather than verified is not a construction.",
+    },
 }
 (cd / "chunk_metadata.json").write_text(json.dumps(rec, indent=2) + "\n")
 print(json.dumps(rec, indent=2))
@@ -1958,6 +2260,11 @@ echo
 echo "=== chunk ${CHUNK_TAG} complete:  ${CLIPS}"
 echo "    record: ${CHUNK_DIR}/chunk_metadata.json"
 echo
-echo "This is generated data and it is NOT training data. PR-08 §6's three VOID gates —"
-echo "G0a label identity, G0b geometry invariance, G0c robot-pixel composite — have not run."
+echo "This is generated data and it is NOT training data. Two of PR-08 §6's three VOID gates —"
+echo "G0a label identity and G0b geometry invariance — have not run."
 echo "The NOT_TRAINING_DATA marker beside the clips stays until they do."
+echo "G0c is the third and it is solved BY CONSTRUCTION, so it does not wait for a checker: the"
+echo "real robot's pixels were composited back over every frame of every clip filed above, inside"
+echo "the driver — and the harvest verified that from each unit's own record before filing it, so"
+echo "every <unit>.mp4 there has a <unit>.g0c.json beside it and a clip without one is refused."
+echo "The robot-mask IoU inside that file is a DIAGNOSTIC ON THE GENERATOR AND NEVER A GATE."
