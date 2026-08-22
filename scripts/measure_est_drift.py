@@ -74,6 +74,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -395,7 +396,22 @@ def resolve_estimators(spec: str) -> Estimators:
     return Estimators(module, spec)
 
 
-def cross_check_geom_tol(resolution_hw: list[int]) -> tuple[list[str], dict]:
+def _artifact_label(path: Path) -> str:
+    """Repo-relative when it is under the repo, absolute otherwise. Never raises.
+
+    ``relative_to`` throws for any path outside the tree, which a test fixture or an operator
+    passing ``--out`` elsewhere legitimately is. Losing the whole cross-check block to a
+    ValueError while formatting a label for it would be an absurd way to lose a gate record.
+    """
+    try:
+        return str(path.relative_to(_REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def cross_check_geom_tol(
+    resolution_hw: list[int], estimator_name: str | None = None
+) -> tuple[list[str], dict]:
     """Disqualifying reasons from GEOM_TOL's committed artifact, plus what was compared.
 
     §6 computes ``GEOM_TOL - EST_DRIFT_P95``. That subtraction is arithmetic only if both were
@@ -413,21 +429,51 @@ def cross_check_geom_tol(resolution_hw: list[int]) -> tuple[list[str], dict]:
                 # needs to know which grid this number is in, and re-deriving it from the capture
                 # is a step they should not have to take.
                 "this_resolution_hw": list(resolution_hw),
+                "this_estimator_name": estimator_name,
             },
         )
     doc = json.loads(GEOM_TOL_ARTIFACT.read_text(encoding="utf-8"))
     reasons: list[str] = []
     theirs_hw = doc.get("resolution_hw") or doc.get("frame_hw")
+    method = doc.get("mask_method") or {}
+    theirs_method = method.get("name") if isinstance(method, Mapping) else None
+
+    # ABSENCE IS NOT AGREEMENT. The first version of this function read
+    # `if theirs_hw is not None and ... != ...`, so a GEOM_TOL artifact that simply did not
+    # record its grid passed the grid check BY SAYING NOTHING -- the default-permissive pattern
+    # this repo rejects everywhere else, and the one place it is least affordable, because the
+    # whole purpose here is to make `GEOM_TOL - EST_DRIFT_P95` arithmetic. A missing field means
+    # the check could not be made, which is a reason to disqualify and not a reason to proceed.
+    for field, value in (
+        ("resolution_hw", theirs_hw),
+        ("gate_qualified", doc.get("gate_qualified")),
+        ("mask_method", theirs_method),
+    ):
+        if value is None:
+            reasons.append(f"geom_tol_does_not_record_{field}")
+
     if theirs_hw is not None and list(theirs_hw) != list(resolution_hw):
         reasons.append("resolution_disagrees_with_geom_tol")
     if not doc.get("gate_qualified", False):
         reasons.append("geom_tol_is_not_gate_qualified")
+
+    # THE JOIN KEY, finally enforced rather than merely copied. PR-08 §4 step 2 says "the same
+    # segmenter", and measure_geom_tol.py's module docstring names `mask_method.name` ==
+    # `pr08_est_drift.json estimators.name` as the pair that has to match. Until this line existed
+    # both artifacts recorded the two names and nothing compared them, so two different segmenters
+    # produced two plausible pixel numbers that subtracted cleanly to a plausible wrong tolerance.
+    if theirs_method is not None and estimator_name is not None and theirs_method != estimator_name:
+        reasons.append("mask_method_disagrees_with_estimator")
+
     return reasons, {
-        "geom_tol_artifact": str(GEOM_TOL_ARTIFACT.relative_to(_REPO_ROOT)),
+        "geom_tol_artifact": _artifact_label(GEOM_TOL_ARTIFACT),
         "geom_tol_resolution_hw": theirs_hw,
         "geom_tol_gate_qualified": doc.get("gate_qualified"),
         "geom_tol_mask_method": doc.get("mask_method"),
+        "geom_tol_mask_method_name": theirs_method,
         "this_resolution_hw": list(resolution_hw),
+        "this_estimator_name": estimator_name,
+        "join_key": "measure_geom_tol mask_method.name == this artifact's estimators.name",
     }
 
 
@@ -522,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
         disqualified.append("estimator_not_gate_qualified")
 
     resolution_hw = list(header.get("resolution_hw") or [])
-    geom_reasons, geom_compare = cross_check_geom_tol(resolution_hw)
+    geom_reasons, geom_compare = cross_check_geom_tol(resolution_hw, est.name)
     disqualified += geom_reasons
 
     pairs: list[tuple[tuple[float, float] | None, tuple[float, float] | None]] = []

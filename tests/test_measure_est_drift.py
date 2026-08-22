@@ -282,3 +282,71 @@ def test_the_geom_tol_cross_check_records_that_it_is_not_committed_yet(capture, 
     doc = json.loads(out.read_text())
     assert "geom_tol_not_committed" in doc["gate_disqualified_reasons"]
     assert doc["geom_tol_cross_check"]["this_resolution_hw"] == [64, 64]
+
+
+# -- the consumer half of the cross-check ---------------------------------------------------------
+#
+# measure_geom_tol.py names the join key in its module docstring: its `mask_method.name` must equal
+# this artifact's `estimators.name`. Until these tests existed both artifacts RECORDED the two names
+# and nothing compared them, so two different segmenters produced two plausible pixel numbers that
+# subtracted cleanly to a plausible wrong tolerance. Found by the adversarial pass, twice, from both
+# sides of the join.
+
+
+@pytest.fixture()
+def committed_geom_tol(tmp_path, monkeypatch):
+    """Point the cross-check at a synthetic committed GEOM_TOL artifact."""
+
+    def _write(**over):
+        doc = {
+            "resolution_hw": [64, 64],
+            "gate_qualified": True,
+            "mask_method": {"name": "grounding-dino+sam2+depth-anything-v2"},
+        }
+        doc.update(over)
+        p = tmp_path / "pr08_geom_tol.json"
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        monkeypatch.setattr(ed, "GEOM_TOL_ARTIFACT", p)
+        return p
+
+    return _write
+
+
+def test_a_matching_artifact_raises_no_cross_check_reason(committed_geom_tol):
+    committed_geom_tol()
+    reasons, _ = ed.cross_check_geom_tol([64, 64], "grounding-dino+sam2+depth-anything-v2")
+    assert reasons == []
+
+
+def test_a_different_segmenter_disqualifies_rather_than_being_noted(committed_geom_tol):
+    """§4 step 2 says 'the SAME segmenter'. Two segmenters is two different quantities and §6
+    subtracts them."""
+    committed_geom_tol()
+    reasons, cmp = ed.cross_check_geom_tol([64, 64], "hsv-red-diagnostic")
+    assert "mask_method_disagrees_with_estimator" in reasons
+    assert cmp["geom_tol_mask_method_name"] == "grounding-dino+sam2+depth-anything-v2"
+    assert cmp["this_estimator_name"] == "hsv-red-diagnostic"
+
+
+@pytest.mark.parametrize("missing", ["resolution_hw", "gate_qualified", "mask_method"])
+def test_absence_is_not_agreement(committed_geom_tol, missing):
+    """The first version read `if theirs is not None and theirs != ours`, so an artifact that
+    simply did not record its grid passed the grid check BY SAYING NOTHING. A missing field means
+    the check could not be made, which is a reason to disqualify and not a reason to proceed."""
+    committed_geom_tol(**{missing: None})
+    reasons, _ = ed.cross_check_geom_tol([64, 64], "grounding-dino+sam2+depth-anything-v2")
+    assert f"geom_tol_does_not_record_{missing}" in reasons
+
+
+def test_a_disagreeing_grid_still_disqualifies(committed_geom_tol):
+    committed_geom_tol(resolution_hw=[480, 640])
+    reasons, _ = ed.cross_check_geom_tol([64, 64], "grounding-dino+sam2+depth-anything-v2")
+    assert "resolution_disagrees_with_geom_tol" in reasons
+
+
+def test_the_join_key_is_named_in_the_artifact_not_only_in_a_docstring(committed_geom_tol):
+    """A reader acting on these artifacts reads the JSON, not the module docstring."""
+    committed_geom_tol()
+    _, cmp = ed.cross_check_geom_tol([64, 64], "grounding-dino+sam2+depth-anything-v2")
+    assert "estimators.name" in cmp["join_key"]
+    assert "mask_method.name" in cmp["join_key"]

@@ -260,6 +260,32 @@ usr1_handler() {
 }
 trap usr1_handler USR1
 
+# -- the token ------------------------------------------------------------------------------------
+# THIS JOB DOWNLOADS AT RUNTIME WHETHER OR NOT WE WANT IT TO, AND UNTIL 2026-08-22 IT DID SO
+# ANONYMOUSLY. 99 and 99b both read a token; this file had no reference to one at all. That looked
+# harmless while the only weights in play were the pre-staged Transfer2.5 branches. It is not:
+# Control2WorldInference instantiates the BASE model's tokenizer, which lives in
+# `nvidia/Cosmos-Predict2.5-2B` -- a DIFFERENT repo from Transfer2.5, not staged by 99 or 99b, and
+# `gated: auto`. Job 189402 died there on a bare `uvx hf download ... tokenizer.pth`.
+#
+# Measured 2026-08-22 rather than assumed: with a VALID token that repo returns 403 on
+# tokenizer.pth at the framework's pinned f176dc95, at the current 85f8ae7b and at main, while
+# nvidia/Cosmos-Transfer2.5-2B (accepted by the account holder 2026-08-19) returns 206 for the same
+# token. So the licence is the blocker and the token is the OTHER half: once accepted, an anonymous
+# fetch is still a 401. Both are needed. Never echoed.
+if [[ -z "${HF_TOKEN:-}" ]]; then
+  for f in "${HF_HOME:-${HOME}/.cache/huggingface}/token" "${HOME}/.huggingface/token"; do
+    [[ -f "${f}" ]] && { HF_TOKEN=$(<"${f}"); break; }
+  done
+fi
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  export HF_TOKEN
+  echo "=== hf token  present"
+else
+  echo "=== hf token  ABSENT — the tokenizer fetch below is gated and will 401. Write a token to"
+  echo "===           \${HOME}/.huggingface/token or export HF_TOKEN for this submission."
+fi
+
 source /valhalla/projects/ehpc-aif-2026pg01-905/caches.sh
 
 # ------------------------------------------------------------------------------------------------

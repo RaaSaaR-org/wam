@@ -324,6 +324,37 @@ fetch plus an adapter, and it closes `GEOM_TOL` and `EST_DRIFT_P95` together. Wh
 commit to is a registered choice (it sets both gate numbers), so it is recorded here rather than
 taken.
 
+**2026-08-22, later — the `model` fix worked, and the timing run reached a FOURTH checkpoint nobody
+had counted.** Job **189402** ran (after `scontrol update TimeLimit=01:30:00`; at 4 h it sat
+`PENDING (Priority)` behind 50 jobs on a 2-node partition at FairShare 0.048). It got past
+`SetupArguments` — the defect that killed 189142 — and three layers deeper, into
+`text2world_model_rectified_flow.__init__` instantiating the tokenizer. There it died:
+
+    CalledProcessError: uvx hf download nvidia/Cosmos-Predict2.5-2B --revision f176dc95… tokenizer.pth
+
+**`Cosmos-Predict2.5-2B` is a DIFFERENT REPO from Transfer2.5.** `99b` staged the four control
+branches Transfer2.5's multi-branch loader resolves; the base model's tokenizer is not among them
+and is not in that repo at all. Two things were then measured rather than assumed, using the
+workstation's own token and never echoing it:
+- `nvidia/Cosmos-Predict2.5-2B` is **`gated: auto`**, and with a VALID token returns **403 on
+  `tokenizer.pth` at every revision tried** — the framework's pinned `f176dc95…`, the current
+  `85f8ae7b…`, and `main`.
+- The control, `nvidia/Cosmos-Transfer2.5-2B` (accepted by the account holder 2026-08-19), returns
+  **206** for the same token and method. So the token works and the probe is sound: **this is a
+  licence gate, not a revision problem, not a rate limit.**
+- `97_transfer25_restyle.sbatch` also carries **no HF token at all** — zero references, where `99`
+  and `99b` both read one. Anonymous against a gated repo is a 401 even once the licence is
+  accepted, so both halves have to be fixed.
+
+**BLOCKED ON A HUMAN ACTION:** the account holder must accept the licence at
+`https://huggingface.co/nvidia/Cosmos-Predict2.5-2B`, exactly as on 2026-08-19 for Transfer2.5.
+No session can do this and no retry will clear it.
+
+**What this run DID prove, and it is the point of the previous commit:** `--require-success` fired.
+`=== done: 0 success, 1 error` → the driver exited 1 → the sbatch refused → **`THROUGHPUT.json` was
+not written.** Under the old code this run would have completed `0:0` and recorded a second
+fabricated GPU-h figure. The gate now fails closed.
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above

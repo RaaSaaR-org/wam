@@ -1,0 +1,1067 @@
+#!/usr/bin/env python3
+"""PR-08 §4's estimator pair: GroundingDINO -> SAM 2 for the mask, Depth-Anything-V2 for the metres.
+
+    segment(rgb)        -> (H, W) bool     the apple in THIS frame; ALL-FALSE when it is not there
+    estimate_depth(rgb) -> (H, W) float32  METRES from the camera
+
+This is the one thing PR-08 §8 item 4 was waiting on. Both halves of that item need an object
+segmenter and §4 step 2 requires it to be **the same one**, so a single adapter closes ``GEOM_TOL``
+(``scripts/measure_geom_tol.py``, which reaches this module directly and also accepts masks dumped
+from it through ``--masks`` + a ``masks.meta.json``) and ``EST_DRIFT_P95``
+(``scripts/measure_est_drift.py measure --estimators estimators.apple_sam2``) together. Wiring two segmenters would have been the cheaper-looking option and it would make §6's
+``GEOM_TOL - EST_DRIFT_P95`` a subtraction of two different quantities — two plausible pixel numbers
+that subtract to a plausible pixel number, with nothing in the pipeline able to notice.
+
+WHICH NUMBER IS THE GATE
+------------------------
+``EST_DRIFT_P95`` is the **p95 of the CENTROID displacement**, in pixels, between the mask
+:func:`segment` returns and Isaac's ground-truth mask of the same frame. It is the only number here
+that enters a gate: §6 G0b holds the restyled corpus to ``GEOM_TOL - EST_DRIFT_P95``. So the gate
+rides entirely on :func:`segment`.
+
+:func:`estimate_depth` exists because §4 **step 3** asks for the absolute depth error in metres
+alongside the centroid displacement, and because Transfer2.5 consumes an estimated depth map as a
+conditioning signal (§4). It is **recorded, not gated**. Saying which is which matters: a reader who
+assumes the depth error is the budget will tune the wrong half of this file.
+
+WHY THE GENERATOR'S OWN SEGMENTER, DOWN TO THE CHECKPOINT ID
+------------------------------------------------------------
+§4 step 2's "the same segmenter" has a weak reading (the same one on both sides of *our*
+measurement) and a strong one (the same one the *generator* will use, so that the drift we budget
+for is the drift the generator actually commits). This module takes the strong reading, and the
+checkpoint ids below are not chosen — they are read off Cosmos-Transfer2.5's own auxiliary
+segmenter, ``cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py``, which names
+``SAM2_MODEL_CHECKPOINT = "facebook/sam2-hiera-large"`` and
+``GROUNDING_DINO_MODEL_CHECKPOINT = "IDEA-Research/grounding-dino-base"`` and drives them as
+*text prompt -> GroundingDINO box -> SAM 2 mask*. ``sam2`` 1.1.0 is already installed in the
+Transfer2.5 venv on Discoverer+ with its hiera configs (T-040 notes, verified 2026-08-21), so this
+adapter is the missing piece and not a new dependency.
+
+Anything that would make our estimate differ from the generator's — a different SAM 2 size, a
+different detector, a hand-placed point prompt — makes ``EST_DRIFT_P95`` a budget for an error the
+generator does not commit and leaves the one it does commit unbudgeted.
+
+A REPO ID IS NOT A CHECKPOINT ID: EVERY LOAD IS PINNED TO A COMMIT
+------------------------------------------------------------------
+``facebook/sam2-hiera-large`` names a repository, not weights. The repository can move, and a gate
+number traceable only to "whatever ``main`` was that day" is not traceable at all (AC-04). So each
+of the three checkpoints carries a 40-hex commit beside it — ``*_REVISION_DEFAULT`` below, read off
+the HF API on 2026-08-22 — and that revision is threaded through **every** hub call this module
+makes: the availability probe, the pre-load cache check, and all three loaders. It is also stamped
+into :data:`ESTIMATOR_VERSION`, which is what the artifact records, so the committed gate number
+identifies the exact weights.
+
+This matters in a second, sharper way. ``cluster/discoverer/102_stage_sam2_weights.sbatch`` stages
+these repos **at those commits**, and ``huggingface_hub`` writes no ``refs/main`` entry when the
+requested revision is a commit hash. A cache probe with no revision therefore cannot see a
+correctly staged cache: it reports "not cached" on the one machine where the weights actually are,
+and the documented escape hatch (``WAM_PR08_ALLOW_DOWNLOAD=1``) would then fetch ``main`` — a
+DIFFERENT revision from the staged, checksum-verified one, with nothing recording that it differed.
+Pinning the probe is what makes the staged cache visible and the fallback unnecessary.
+
+**Single source of truth.** The ids and revisions live here and nowhere else; the staging job takes
+them from this file — extracting them, or restating them behind a check that FAILS the job when the
+restated value and the value here disagree — so that the two cannot drift silently. The extraction
+contract is: every pin is a module-level assignment of a bare string literal, one per line, named
+``<THING>_MODEL_ID_DEFAULT`` / ``<THING>_MODEL_REVISION_DEFAULT``, e.g.
+
+    sed -n 's/^SAM2_MODEL_REVISION_DEFAULT = "\\([0-9a-f]\\{40\\}\\)"$/\\1/p' scripts/estimators/apple_sam2.py
+
+Nothing but the six ``*_DEFAULT`` lines may be reformatted without updating that job.
+
+THE DEPTH CHECKPOINT IS METRIC ON PURPOSE, AND THE RELATIVE ONE IS REFUSED
+--------------------------------------------------------------------------
+:data:`DEPTH_MODEL_CHECKPOINT` defaults to ``depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf``.
+The flagship Depth-Anything-V2 checkpoints (``...-V2-Large-hf`` and friends) are **relative**: they
+emit an affine-free *inverse* depth, arbitrarily scaled per image, where a LARGER value means
+NEARER. Subtracting that from Isaac's ``distance_to_camera`` metres yields a number with the units
+of nothing, ordered backwards, and — this is the part that costs — it looks exactly like a depth
+error in metres in the artifact, under a key called ``mean_m``. That is the failure this repository
+keeps naming: it does not crash, it sets a number, and every reader downstream inherits it.
+``depth-anything/Video-Depth-Anything-Large`` is relative in exactly this sense and is NOT the
+checkpoint this pair uses, whatever a staging job may have fetched first.
+
+So the metric variant is the default, ``metric`` vs ``relative`` is **read off the loaded model's
+config** rather than inferred from the id (an id can be overridden; a config cannot lie), it is
+recorded in :data:`DEPTH_ESTIMATION_TYPE` / :data:`DEPTH_IS_METRIC`, and a relative checkpoint makes
+:func:`estimate_depth` **refuse at load time** — before frame 0, not on frame 37 — naming the
+checkpoint, the config value, the env var and the metric alternatives. ``Indoor`` rather than
+``Outdoor`` because the metric heads are domain-fine-tuned and carry a ``max_depth`` (20 m vs 80 m):
+AppleToPlate is a tabletop at well under 2 m and the Isaac calibration renders are the same scene,
+so the outdoor head would spend its output range on distances that never occur. ``Large`` because
+this runs once over a few dozen calibration frames, not inside the generation loop, so accuracy
+costs nothing that matters here.
+
+WHAT IT REFUSES TO DO
+---------------------
+**It will not return a stale mask.** A frame where GroundingDINO finds nothing is a REAL EVENT in
+this corpus — the Dex3 hand occludes the apple, or the apple leaves frame — and it returns an
+all-False mask. ``measure_est_drift`` turns that into ``centroid_of_mask(...) is None``, which is
+DROPPED and COUNTED into ``coverage``. Returning the previous frame's mask, or raising, would each
+destroy that: one invents a displacement that was never observed, the other kills a run over a
+frame that is not an error.
+
+**It will not rescale a float image.** ``rgb`` must be ``uint8``. A float array in [0, 1] and a
+float array in [0, 255] are indistinguishable from the array alone and rescale to different
+pictures, which is a different detection, which is a different centroid.
+
+**It will not fetch 3 GB because someone ran a script, and it enforces that rather than intending
+it.** ``from_pretrained`` downloads by default, and this project's rule is that nothing is fetched
+at scale without asking (T-040; and the provider forbids agents on the login node at all). Unless
+``WAM_PR08_ALLOW_DOWNLOAD=1`` says the decision has been taken, every load runs inside
+:func:`_offline_hub`, which sets ``huggingface_hub.constants.HF_HUB_OFFLINE = True`` for the
+duration — ``constants.is_offline_mode()`` is read at request time by the hub's own HTTP hook
+(verified against the installed ``huggingface_hub`` 1.25.1), so a request cannot leave the machine —
+*and* passes ``local_files_only=True`` to each loader, because ``transformers`` keeps its own copy
+of that flag from its import. Belt and braces on purpose: the pre-check alone was a check a load
+could walk past. The refusal names every checkpoint, its pinned revision and every cache directory
+it looked in, and :func:`available` answers "are they here, at those revisions?" without loading
+anything — which is what ``measure_geom_tol``'s ``--method auto`` probes before it will select this
+adapter, because a segmenter running without its checkpoints does not crash. It returns empty
+masks, every step drops, and ``coverage: 0.0`` reads as a fact about the corpus.
+
+**It will not load SAM 2 through ``SAM2ImagePredictor.from_pretrained``.** That path reaches
+``sam2.build_sam.build_sam2_hf`` -> ``_hf_download(model_id)``, which calls ``hf_hub_download``
+with no ``revision`` and forwards none of its caller's kwargs (read off ``sam2`` 1.1.0's
+``build_sam.py``, 2026-08-22), so it resolves ``refs/main`` and cannot be pinned. This module
+performs the same two steps itself — resolve the checkpoint file at :data:`SAM2_MODEL_REVISION`,
+then ``build_sam2(config_file=..., ckpt_path=...)`` with the id's own config name from
+``HF_MODEL_ID_TO_FILENAMES`` — so the weights SAM 2 loads are the weights the artifact names. If
+those two names are absent from the installed ``sam2``, this refuses; it does not fall back to the
+unpinned loader.
+
+**It will not check the weights only where the happy path happens to look.** Both models are loaded
+at the START of :func:`segment`, before detection, so a machine missing SAM 2's checkpoint refuses
+on frame 0 rather than on the first frame that happens to contain a detectable apple. A capture in
+which nothing is detected would otherwise run to completion with no segmenter at all and report
+``coverage: 0.0`` as a fact about the corpus — the exact outcome :func:`available` exists to
+prevent.
+
+**It will not paper over a shape change in transformers.** The depth pipeline's post-processing
+moved between transformers versions (the image processor's ``post_process_depth_estimation`` now
+resizes to the source grid; it did not always). If the returned map is not the input's ``(H, W)``,
+this refuses — a depth error averaged across two grids is not a depth error.
+
+**It will not import its dependencies lazily enough to hide them.** Package *availability* is
+checked at import time and raises an :class:`ImportError` subclass, so
+``measure_est_drift.resolve_estimators`` catches it and prints the whole message instead of a
+traceback. Model *loading* stays lazy and module-level-cached, one load per process. Missing
+*weights* are discovered at first load and are deliberately NOT catchable that way: by then a run is
+underway, and an artifact written from a model that never loaded is the thing gate qualification
+exists to prevent.
+
+WHAT IT CANNOT REFUSE, AND SO ONLY RECORDS
+-------------------------------------------
+The object this module looks for and the object the harness scores it against are set by two
+independent knobs: :data:`OBJECT_TEXT_PROMPT` (``$WAM_PR08_OBJECT_PROMPT``) here, and
+``measure_est_drift --object-class`` there. Change one and not the other and an apple mask is
+compared against a plate's ground truth: a large but entirely plausible p95, no crash, no drop in
+coverage. This module cannot see the harness's flag, so it cannot refuse the mismatch; it puts the
+prompt into :data:`ESTIMATOR_VERSION` and :func:`stats` so the artifact carries both values side by
+side, and it names the coupling in :data:`GATE_QUALIFICATION_BLOCKERS`.
+
+GATE QUALIFICATION
+------------------
+:data:`GATE_QUALIFIED` is ``False``. See :data:`GATE_QUALIFICATION_BLOCKERS` for the specific,
+checkable conditions and the reasoning; flipping it is a reviewable edit to that tuple, not a
+judgement someone re-makes from scratch. ``measure_est_drift`` reads the flag with a default of
+``False`` and stamps ``estimator_not_gate_qualified`` into the artifact, which still gets written —
+"we tried and this is what came out" is a record.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import os
+import re
+import sys
+from typing import Any, Iterator, NamedTuple
+
+import numpy as np
+
+
+# -- the loud failures -----------------------------------------------------------------------------
+#
+# Defined before the constants because the pin checks below raise them.
+
+
+class EstimatorDependencyMissing(ImportError):
+    """Something this pair needs is absent or unusable. Fatal, never fallen back from.
+
+    Subclasses :class:`ImportError` on purpose: ``measure_est_drift.resolve_estimators`` wraps
+    ``importlib.import_module`` in ``except ImportError`` and re-raises as ``EstimatorUnavailable``
+    with the text attached, so a missing package prints the whole diagnosis and exits 2 instead of
+    dumping a traceback out of ``main``.
+
+    Not every refusal raised here IS an import failure — missing weights and an unusable checkpoint
+    are not — so those two have their own subclasses below. A caller that only wants "the module
+    would not import" must catch :class:`EstimatorDependencyMissing` and re-raise anything whose
+    type says otherwise, rather than reading every one of these as "not importable".
+    """
+
+
+class EstimatorWeightsMissing(EstimatorDependencyMissing):
+    """A checkpoint is not in the local hub cache at its pinned revision, and fetching is refused."""
+
+
+class EstimatorCheckpointUnusable(EstimatorDependencyMissing):
+    """A checkpoint (or its pin) is present but cannot produce the quantity this module promises."""
+
+
+# -- what this pair is, in the words the artifact will carry ---------------------------------------
+#
+# ``measure_est_drift`` records only ``name`` and ``version`` for the estimator pair, so the version
+# string carries the three checkpoints, their revisions and the two detection thresholds. Anything
+# not in here is invisible to whoever reads the artifact in six months, and "which SAM 2 was that?"
+# is exactly the question that makes a committed gate number unusable.
+#
+# THE SIX LINES BELOW ARE THE SINGLE SOURCE OF TRUTH for the pins, and
+# cluster/discoverer/102_stage_sam2_weights.sbatch reads them out of this file rather than deciding
+# for itself what to stage (see the module docstring for the format that makes that possible).
+# Keep each one a bare string literal on one line.
+
+#: Cosmos-Transfer2.5's own segmenter checkpoints, copied from its ``sam2_model.py``, with the
+#: commits they resolved to on the HF API on 2026-08-22.
+SAM2_MODEL_ID_DEFAULT = "facebook/sam2-hiera-large"
+SAM2_MODEL_REVISION_DEFAULT = "e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251"
+GROUNDING_DINO_MODEL_ID_DEFAULT = "IDEA-Research/grounding-dino-base"
+GROUNDING_DINO_MODEL_REVISION_DEFAULT = "12bdfa3120f3e7ec7b434d90674b3396eccf88eb"
+
+#: METRIC, not relative — see the module docstring. depth-estimation, ungated, 2026-08-22.
+DEPTH_MODEL_ID_DEFAULT = "depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf"
+DEPTH_MODEL_REVISION_DEFAULT = "d2fc6a93601aabb1139a3bf0ebfcb4e89c67817f"
+
+#: Overridable so a different tier can be measured, never so a local path can be hardcoded: an id
+#: plus a commit is resolvable on any machine and reproducible in an artifact, a path under
+#: someone's ``$HOME`` is neither. An id and its revision are ONE setting — overriding half of a
+#: pair is refused below, because a new id at the old commit resolves to nothing and an old id at a
+#: new commit is a silently different checkpoint.
+SAM2_MODEL_CHECKPOINT = os.environ.get("WAM_PR08_SAM2_CHECKPOINT", SAM2_MODEL_ID_DEFAULT)
+SAM2_MODEL_REVISION = os.environ.get("WAM_PR08_SAM2_REVISION", SAM2_MODEL_REVISION_DEFAULT)
+GROUNDING_DINO_MODEL_CHECKPOINT = os.environ.get(
+    "WAM_PR08_GROUNDING_DINO_CHECKPOINT", GROUNDING_DINO_MODEL_ID_DEFAULT
+)
+GROUNDING_DINO_MODEL_REVISION = os.environ.get(
+    "WAM_PR08_GROUNDING_DINO_REVISION", GROUNDING_DINO_MODEL_REVISION_DEFAULT
+)
+
+#: Overriding this to a relative checkpoint is allowed and then :func:`estimate_depth` refuses,
+#: loudly, rather than returning inverse disparity under a key called ``mean_m``.
+DEPTH_MODEL_CHECKPOINT = os.environ.get("WAM_PR08_DEPTH_CHECKPOINT", DEPTH_MODEL_ID_DEFAULT)
+DEPTH_MODEL_REVISION = os.environ.get("WAM_PR08_DEPTH_REVISION", DEPTH_MODEL_REVISION_DEFAULT)
+
+#: The metric Depth-Anything-V2 heads, named so the refusal can point at one instead of saying "a
+#: metric checkpoint". Not used to DECIDE whether the loaded model is metric — that is read off its
+#: config — only to make the failure actionable.
+METRIC_DEPTH_CHECKPOINT_SUGGESTIONS: tuple[str, ...] = (
+    "depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf",
+    "depth-anything/Depth-Anything-V2-Metric-Indoor-Base-hf",
+    "depth-anything/Depth-Anything-V2-Metric-Outdoor-Large-hf",
+)
+
+#: GroundingDINO wants a lowercase, period-terminated phrase; that is its documented input format,
+#: not a preference. "Apple" or "apple" (no period) parse differently in its text encoder and yield
+#: fewer detections, which shows up as lower ``coverage`` and a p95 over the frames that happened to
+#: survive — a quiet, plausible, wrong number. The normalisation is therefore applied and RECORDED
+#: rather than assumed, and the raw value is kept beside it.
+OBJECT_TEXT_PROMPT_RAW = os.environ.get("WAM_PR08_OBJECT_PROMPT", "apple.")
+
+
+def normalize_prompt(prompt: str) -> str:
+    """Lowercase and period-terminate, GroundingDINO's documented phrase format."""
+    text = prompt.strip().lower()
+    if not text:
+        raise ValueError("WAM_PR08_OBJECT_PROMPT is empty — there is no object to segment.")
+    return text if text.endswith(".") else text + "."
+
+
+OBJECT_TEXT_PROMPT = normalize_prompt(OBJECT_TEXT_PROMPT_RAW)
+
+#: GroundingDINO's own demo defaults. They are NOT measured on this corpus, and they directly set
+#: how many frames come back empty, which sets ``coverage``, which is a gate condition. That is one
+#: of the blockers below.
+BOX_THRESHOLD = float(os.environ.get("WAM_PR08_BOX_THRESHOLD", "0.35"))
+TEXT_THRESHOLD = float(os.environ.get("WAM_PR08_TEXT_THRESHOLD", "0.25"))
+
+#: ``cuda`` when torch says so, resolved at first load rather than at import so that importing this
+#: module never touches a GPU. The device changes nothing about the numbers and everything about
+#: whether the run finishes this week.
+DEVICE_OVERRIDE = os.environ.get("WAM_PR08_DEVICE") or None
+
+#: Downloads are the project owner's call (T-040: staging these is a ~3 GB fetch). Unset means the
+#: weights must already be cached — and, since this is also what switches offline enforcement on,
+#: means no hub request may leave the machine at all.
+ALLOW_DOWNLOAD = os.environ.get("WAM_PR08_ALLOW_DOWNLOAD", "") == "1"
+
+ESTIMATOR_NAME = "grounding-dino+sam2+depth-anything-v2"
+ESTIMATOR_VERSION = (
+    f"det={GROUNDING_DINO_MODEL_CHECKPOINT}@{GROUNDING_DINO_MODEL_REVISION};"
+    f"seg={SAM2_MODEL_CHECKPOINT}@{SAM2_MODEL_REVISION};"
+    f"depth={DEPTH_MODEL_CHECKPOINT}@{DEPTH_MODEL_REVISION};"
+    f"prompt={OBJECT_TEXT_PROMPT!r};"
+    f"box_thr={BOX_THRESHOLD};text_thr={TEXT_THRESHOLD}"
+)
+
+#: Every condition that has to be true before this pair may set ``EST_DRIFT_P95`` or ``GEOM_TOL``.
+#: Written out rather than summarised because :data:`GATE_QUALIFIED` is a claim, and a claim whose
+#: grounds are not written down gets flipped by whoever is in a hurry.
+GATE_QUALIFICATION_BLOCKERS: tuple[str, ...] = (
+    "Never executed. No SAM 2, GroundingDINO or Depth-Anything checkpoint is staged anywhere in "
+    "this project (T-040 notes, 2026-08-21: nothing under checkpoints/ or the hub cache matches), "
+    "so no mask this module produces has ever been looked at. Code written against an unstaged "
+    "checkpoint is a plan, not an instrument, and an instrument that has produced no output cannot "
+    "be asserted to produce correct output.",
+    "BOX_THRESHOLD / TEXT_THRESHOLD are upstream demo defaults, unmeasured on AppleToPlate. They "
+    "set the no-detection rate, which sets `coverage`, which measure_est_drift gates on. A "
+    "threshold chosen after looking at the resulting p95 is the failure the style partition exists "
+    "to prevent, so it has to be chosen before, on a labelled sample, and recorded.",
+    "PR-08 §4 step 2's 'the same segmenter' is not yet establishable: "
+    "configs/transfer25/pr08_geom_tol.json is not committed, so there is no recorded mask method "
+    "for this one to equal. measure_est_drift.cross_check_geom_tol compares the pixel grid and the "
+    "gate flag but NOT the method name, so nothing in the pipeline would catch the mismatch.",
+    "Cosmos-Transfer2.5's sam2_model.py was read for the checkpoint ids and the "
+    "prompt -> box -> mask topology, which is what §4 step 2 needs. Its prompt text, thresholds and "
+    "mask-selection rule were NOT read, so 'the same segmenter' currently means the same weights "
+    "driven our way, not the generator's way.",
+    "The object segmented and the object scored against are set independently: "
+    "$WAM_PR08_OBJECT_PROMPT here, `measure_est_drift --object-class` there. This module cannot see "
+    "that flag, so a mismatch produces a large, plausible p95 rather than a refusal. Both values "
+    "reach the artifact (estimators.version, object_class), so before this pair may set a gate "
+    "someone has to check they name the same object — and preferably the harness should stop "
+    "taking them separately.",
+)
+
+#: Opt-IN, and this module does not opt in. See the blockers above. ``measure_est_drift`` reads this
+#: with a default of False and stamps ``estimator_not_gate_qualified``; the artifact is still
+#: written, and exits 3.
+GATE_QUALIFIED = False
+
+
+# -- the pins are checked at import, not at first load ----------------------------------------------
+
+
+class Checkpoint(NamedTuple):
+    """One repo, pinned. ``what`` and ``approx_size`` exist to make the refusals actionable."""
+
+    repo_id: str
+    revision: str
+    what: str
+    approx_size: str
+
+
+#: Every checkpoint this pair loads. One list so that :func:`available`, :func:`_require_cached` and
+#: the refusals cannot disagree about what "the weights" means.
+CHECKPOINTS: tuple[Checkpoint, ...] = (
+    Checkpoint(
+        GROUNDING_DINO_MODEL_CHECKPOINT,
+        GROUNDING_DINO_MODEL_REVISION,
+        "GroundingDINO detector",
+        "~700 MB",
+    ),
+    Checkpoint(SAM2_MODEL_CHECKPOINT, SAM2_MODEL_REVISION, "SAM 2 segmenter", "~900 MB"),
+    Checkpoint(
+        DEPTH_MODEL_CHECKPOINT,
+        DEPTH_MODEL_REVISION,
+        "Depth-Anything-V2 depth estimator",
+        "~1.3 GB",
+    ),
+)
+
+#: The same three, in the shape ``measure_geom_tol._adapter_checkpoints`` reads: it records what an
+#: adapter DECLARES it loads, and "an estimator is its weights as much as its code". ``id@commit``
+#: rather than the bare id, so GEOM_TOL's provenance and EST_DRIFT_P95's ``estimator.version`` name
+#: the same weights and can be joined to the staging manifest.
+ESTIMATOR_CHECKPOINTS: dict[str, str] = {
+    "detector": f"{CHECKPOINTS[0].repo_id}@{CHECKPOINTS[0].revision}",
+    "segmenter": f"{CHECKPOINTS[1].repo_id}@{CHECKPOINTS[1].revision}",
+    "depth": f"{CHECKPOINTS[2].repo_id}@{CHECKPOINTS[2].revision}",
+}
+
+#: ``(id env var, revision env var, checkpoint)`` — the pairs that have to be overridden together.
+_PIN_ENV_PAIRS: tuple[tuple[str, str, Checkpoint], ...] = (
+    ("WAM_PR08_GROUNDING_DINO_CHECKPOINT", "WAM_PR08_GROUNDING_DINO_REVISION", CHECKPOINTS[0]),
+    ("WAM_PR08_SAM2_CHECKPOINT", "WAM_PR08_SAM2_REVISION", CHECKPOINTS[1]),
+    ("WAM_PR08_DEPTH_CHECKPOINT", "WAM_PR08_DEPTH_REVISION", CHECKPOINTS[2]),
+)
+
+_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _check_pins() -> None:
+    """Refuse a moving pointer, and refuse half an override. Same rule as the staging job's.
+
+    ``main``/``HEAD``/a tag names whatever upstream pushed last, which is a different answer on a
+    different day: recording it in ``ESTIMATOR_VERSION`` records nothing. And an id overridden
+    without its revision (or the reverse) is worse than either alone — the id and the commit stop
+    describing the same weights, and the artifact would name a pair that never existed.
+    """
+    for id_var, rev_var, ckpt in _PIN_ENV_PAIRS:
+        id_set, rev_set = id_var in os.environ, rev_var in os.environ
+        if id_set != rev_set:
+            given, missing = (id_var, rev_var) if id_set else (rev_var, id_var)
+            raise EstimatorCheckpointUnusable(
+                "\n".join([
+                    f"FATAL: {given} is set but {missing} is not, so the {ckpt.what}'s id and its",
+                    "       commit no longer describe the same weights. A new repo at the old",
+                    "       commit resolves to nothing; the old repo at a new commit is a silently",
+                    "       different checkpoint. Set both, or neither. Nothing was written.",
+                    "",
+                    f"       {id_var}  = {ckpt.repo_id}",
+                    f"       {rev_var} = {ckpt.revision}",
+                ])
+            )
+        if not _COMMIT_SHA.match(ckpt.revision):
+            raise EstimatorCheckpointUnusable(
+                "\n".join([
+                    f"FATAL: {rev_var}={ckpt.revision!r} is not a 40-hex commit sha. A branch, a tag",
+                    "       or an empty string names whatever upstream pushed last, which is a",
+                    "       different answer on a different day, and ESTIMATOR_VERSION would then",
+                    "       identify no particular weights. AC-04 asks the opposite. Read a commit",
+                    "       off the HF API and pin it:",
+                    "",
+                    f"         curl -s https://huggingface.co/api/models/{ckpt.repo_id} \\",
+                    "           | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"sha\"])'",
+                ])
+            )
+
+
+# -- observed state, for the caller that wants to record it ----------------------------------------
+#
+# Filled in at load and during use. ``measure_est_drift`` does not read any of it today — it records
+# name, version and the gate flag — but the no-detection count is the one number that explains a low
+# ``coverage``, and a run that has to be re-done to find out why is a run that was not recorded.
+
+#: ``"metric"``, ``"relative"``, or None before the depth model has been loaded. Read off the loaded
+#: config; absent from the config is treated as ``"relative"``, because that is what transformers'
+#: ``DepthAnythingConfig`` defaults to and because an unstated claim is not a claim.
+DEPTH_ESTIMATION_TYPE: str | None = None
+DEPTH_IS_METRIC: bool | None = None
+DEPTH_MAX_DEPTH_M: float | None = None
+
+SEGMENT_CALLS = 0
+NO_DETECTION_FRAMES = 0
+EMPTY_MASK_FRAMES = 0
+
+
+def stats() -> dict[str, Any]:
+    """What this pair did, in a shape a caller can drop into an artifact verbatim."""
+    return {
+        "estimator_name": ESTIMATOR_NAME,
+        "estimator_version": ESTIMATOR_VERSION,
+        "gate_qualified": GATE_QUALIFIED,
+        "gate_qualification_blockers": list(GATE_QUALIFICATION_BLOCKERS),
+        "detector_checkpoint": GROUNDING_DINO_MODEL_CHECKPOINT,
+        "detector_revision": GROUNDING_DINO_MODEL_REVISION,
+        "segmenter_checkpoint": SAM2_MODEL_CHECKPOINT,
+        "segmenter_revision": SAM2_MODEL_REVISION,
+        "depth_checkpoint": DEPTH_MODEL_CHECKPOINT,
+        "depth_revision": DEPTH_MODEL_REVISION,
+        "object_text_prompt": OBJECT_TEXT_PROMPT,
+        "object_text_prompt_raw": OBJECT_TEXT_PROMPT_RAW,
+        "object_text_prompt_note": (
+            "compare this against measure_est_drift's --object-class: they are set separately and "
+            "a mismatch scores this mask against a different object's ground truth."
+        ),
+        "box_threshold": BOX_THRESHOLD,
+        "text_threshold": TEXT_THRESHOLD,
+        "depth_estimation_type": DEPTH_ESTIMATION_TYPE,
+        "depth_is_metric": DEPTH_IS_METRIC,
+        "depth_max_depth_m": DEPTH_MAX_DEPTH_M,
+        "downloads_permitted": ALLOW_DOWNLOAD,
+        "n_segment_calls": SEGMENT_CALLS,
+        "n_frames_without_detection": NO_DETECTION_FRAMES,
+        "n_frames_with_empty_mask": EMPTY_MASK_FRAMES,
+        "no_detection_meaning": (
+            "an all-False mask, which measure_geom_tol/measure_est_drift drop and count. It is the "
+            "hand occluding the apple or the apple leaving frame, not an estimator error, and it is "
+            "never folded in as a zero displacement."
+        ),
+        "empty_mask_meaning": (
+            "the detector found a box and SAM 2 returned nothing inside it. That drops the step "
+            "exactly like a no-detection frame, but it is NOT the same event — it is the segmenter "
+            "failing on a frame where the object was found — so it is counted separately. "
+            "n_frames_without_detection + n_frames_with_empty_mask is the whole of the coverage "
+            "shortfall this module is responsible for."
+        ),
+    }
+
+
+#: Package -> what it provides here. Probed at run time so the failure names what is actually absent
+#: on THIS interpreter rather than a list someone wrote down once.
+REQUIRED_PACKAGES: tuple[tuple[str, str], ...] = (
+    ("torch", "runs all three models; also decides cuda vs cpu"),
+    ("transformers", "GroundingDINO (AutoModelForZeroShotObjectDetection + AutoProcessor) and "
+                     "pipeline('depth-estimation') for Depth-Anything-V2"),
+    ("sam2", "SAM 2 image predictor — `sam2` 1.1.0, as shipped in the Cosmos-Transfer2.5 venv"),
+    ("huggingface_hub", "resolves each checkpoint at its pinned revision, and is what offline mode "
+                        "is enforced through"),
+    ("PIL", "Pillow — the depth pipeline takes a PIL image, not an ndarray, on the pinned version"),
+)
+
+
+def _hub_cache_dirs() -> list[str]:
+    """Every place a hub cache could be, reported in the failures.
+
+    So that "the weights are downloaded, honest" is checkable against a directory listing rather
+    than against someone's memory of a job that ran last week on a different filesystem.
+    """
+    from pathlib import Path
+
+    named = [
+        ("HF_HOME", os.environ.get("HF_HOME")),
+        ("HF_HUB_CACHE", os.environ.get("HF_HUB_CACHE")),
+        ("HUGGINGFACE_HUB_CACHE", os.environ.get("HUGGINGFACE_HUB_CACHE")),
+        ("TRANSFORMERS_CACHE", os.environ.get("TRANSFORMERS_CACHE")),
+    ]
+    out = [f"{k}={v}" for k, v in named if v]
+    default = Path.home() / ".cache" / "huggingface" / "hub"
+    out.append(f"{default} ({'exists' if default.is_dir() else 'ABSENT'})")
+    return out
+
+
+def _importable(module: str) -> bool:
+    """Is ``module`` importable by this interpreter?
+
+    ``sys.modules`` is consulted first and a ``None`` entry counts as NOT importable — that is
+    Python's own documented sentinel for a blocked import, and it is what lets a test prove the
+    refusal without uninstalling anything.
+    """
+    if module in sys.modules:
+        return sys.modules[module] is not None
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def missing_package_message(absent: list[tuple[str, str]]) -> str:
+    """The loud failure. Names every place that was looked in and what would have to change.
+
+    Deliberately shaped like ``measure_geom_tol.no_segmenter_message()``: whoever hits this is
+    holding the same problem from the other end, and the two messages have to be recognisably the
+    same refusal or the second one reads as a different, smaller obstacle.
+    """
+    present = [(m, why) for m, why in REQUIRED_PACKAGES if _importable(m)]
+    lines = [
+        "FATAL: estimators.apple_sam2 cannot run here, so neither GEOM_TOL nor EST_DRIFT_P95 can be",
+        "       measured with it. Nothing was written.",
+        "",
+        f"       interpreter: {sys.executable}",
+        "",
+        "       required packages NOT importable by this interpreter:",
+    ]
+    lines += [f"         - {m:<16} {why}" for m, why in absent] or ["         (none)"]
+    if present:
+        lines += ["", "       importable:"]
+        lines += [f"         - {m:<16} {why}" for m, why in present]
+    lines += [
+        "",
+        "       checkpoints this module would load (id@commit, never local paths):",
+    ]
+    lines += [
+        f"         - {c.what:<34} {c.repo_id}@{c.revision}" for c in CHECKPOINTS
+    ]
+    lines += [
+        "",
+        "       hub cache locations looked at:",
+    ]
+    lines += [f"         - {d}" for d in _hub_cache_dirs()]
+    lines += [
+        "",
+        "       What would have to change:",
+        "",
+        "       1. Run this inside the Cosmos-Transfer2.5 venv, which already has sam2 1.1.0,",
+        "          transformers, torch and timm — cluster/discoverer/98_build_transfer25_env.sbatch",
+        "          builds it. This workstation's .venv has no sam2 and is not the place.",
+        "       2. Stage the three checkpoints into the hub cache AT THE COMMITS ABOVE —",
+        "          cluster/discoverer/102_stage_sam2_weights.sbatch does exactly that and takes its",
+        "          ids and revisions from this file. That is a ~3 GB download and the repo rule is",
+        "          that nothing is fetched at scale without asking first. ASK. Once the decision is",
+        "          taken, WAM_PR08_ALLOW_DOWNLOAD=1 permits this module to fetch them itself.",
+        "",
+        "       There is no fallback and there will not be one. PR-08 §4 step 2 requires the SAME",
+        "       segmenter on both sides of the subtraction in §6, so a stand-in here does not",
+        "       produce a worse EST_DRIFT_P95 — it produces a number that is not subtractable from",
+        "       GEOM_TOL at all. See scripts/measure_geom_tol.py's no_segmenter_message().",
+    ]
+    return "\n".join(lines)
+
+
+def _check_packages() -> None:
+    absent = [(m, why) for m, why in REQUIRED_PACKAGES if not _importable(m)]
+    if absent:
+        raise EstimatorDependencyMissing(missing_package_message(absent))
+
+
+# Import time, not first-call time. A run that is going to fail for want of `sam2`, or because
+# someone pinned a branch, should fail while `resolve_estimators` is still holding the exception and
+# can print it, not two subcommands later inside a frame loop. Loading the MODELS stays lazy; this
+# only asks whether the packages exist and whether the pins are pins.
+_check_packages()
+_check_pins()
+
+
+def missing_weights_message(ckpt: Checkpoint, exc: Exception) -> str:
+    """Refusal for a checkpoint that is not in the cache at its pin and may not be fetched."""
+    return "\n".join([
+        f"FATAL: the {ckpt.what} checkpoint {ckpt.repo_id!r} is not in the local hub cache at the",
+        "       revision this module is pinned to, and downloading is not permitted for this run.",
+        "       Nothing was written.",
+        "",
+        f"       pinned revision:  {ckpt.revision}",
+        f"       approximate download size: {ckpt.approx_size}",
+        f"       hub error: {type(exc).__name__}: {exc}",
+        "",
+        "       hub cache locations looked at:",
+        *[f"         - {d}" for d in _hub_cache_dirs()],
+        "",
+        "       A cache staged at a DIFFERENT commit fails this check too, and that is the point:",
+        "       the artifact names the revision above, so loading any other one would make the",
+        "       recorded gate number identify weights it was not measured with.",
+        "",
+        "       Staging these weights is a download at scale and therefore the project owner's",
+        "       call (T-040), and this cluster's login node forbids it outright. Either stage the",
+        "       checkpoint from a compute node (cluster/discoverer/102_stage_sam2_weights.sbatch,",
+        "       which reads its pins out of this file) and re-run, or set WAM_PR08_ALLOW_DOWNLOAD=1",
+        "       to say that the decision has been taken and this process may fetch it.",
+    ])
+
+
+def _cache_probe(repo_id: str, revision: str) -> Exception | None:
+    """None when the hub reports ``repo_id`` at ``revision`` resolvable from the local cache alone.
+
+    That is a weaker claim than "every file is present and intact": ``snapshot_download`` with
+    ``local_files_only=True`` returns the snapshot folder subject to the hub's own completeness
+    check, which depends on what tree listing was cached. It is the strongest claim available
+    without a network, and it is exactly the claim :func:`available` needs to make.
+
+    ``revision`` is load-bearing, not decoration. ``huggingface_hub`` writes no ``refs/main`` entry
+    for a cache staged at a commit sha, so an unpinned probe reports "not cached" on precisely the
+    machines where the weights ARE staged — and the escape hatch would then fetch a different
+    revision. ``local_files_only=True`` is the other load-bearing argument: this is the check that
+    decides whether a fetch is about to happen, so it must never be able to cause one.
+
+    A broken or absent ``huggingface_hub`` is NOT swallowed into "no cache" — that would be a
+    misdiagnosis of a package problem as a weights problem — so the import sits outside the guard.
+    """
+    from huggingface_hub import snapshot_download
+
+    try:
+        snapshot_download(repo_id=repo_id, revision=revision, local_files_only=True)
+    except Exception as exc:  # noqa: BLE001 - the hub raises several unrelated types for "no cache"
+        return exc
+    return None
+
+
+def available() -> bool:
+    """Can this adapter run right now, without fetching anything?
+
+    ``measure_geom_tol``'s ``--method auto`` probes this before it will select the sam2 method, and
+    the reason it has to is that a segmenter running without its checkpoints does not crash: it
+    returns empty masks, every step drops, and ``coverage: 0.0`` reads as a statement about the
+    corpus rather than about the missing weights.
+
+    Every probe carries its checkpoint's pinned revision, so this answers "are the weights this
+    module would actually load here?" rather than "is something by that name here?".
+
+    :data:`ALLOW_DOWNLOAD` deliberately does NOT make this true. Permission to fetch is not the same
+    claim as "the weights are here", and ``auto`` picking a method must never be the thing that
+    starts a 3 GB download on a node that may not be allowed to make one. An explicit
+    ``--method sam2`` with ``WAM_PR08_ALLOW_DOWNLOAD=1`` is the way to say that on purpose.
+
+    A broken ``huggingface_hub`` RAISES here rather than returning False: "the hub library is not
+    working" is not "the weights are absent", and ``measure_geom_tol`` already treats a probe that
+    raises as unavailable while keeping the exception text.
+    """
+    return all(_cache_probe(c.repo_id, c.revision) is None for c in CHECKPOINTS)
+
+
+def _require_cached(ckpt: Checkpoint) -> None:
+    """Refuse to fetch unless someone said so. No-op when :data:`ALLOW_DOWNLOAD`.
+
+    The three loaders reach the hub by three different code paths (transformers' ``from_pretrained``,
+    the pipeline factory, and ``huggingface_hub.hf_hub_download`` for SAM 2), so asking the cache
+    directly, at the pin, before any of them runs is the one check that reaches all three and can
+    name the checkpoint in its refusal.
+
+    It is a pre-check and it is not the enforcement: :func:`_offline_hub` is, and every loader is
+    additionally passed ``local_files_only``. A pre-check on its own is a guard a load can walk
+    past — a moved ref, a file missing from a partial snapshot, an etag revalidation.
+    """
+    if ALLOW_DOWNLOAD:
+        return
+    exc = _cache_probe(ckpt.repo_id, ckpt.revision)
+    if exc is not None:
+        raise EstimatorWeightsMissing(missing_weights_message(ckpt, exc)) from exc
+
+
+@contextlib.contextmanager
+def _offline_hub() -> Iterator[None]:
+    """Make a hub request IMPOSSIBLE for the duration, unless downloading was permitted.
+
+    ``huggingface_hub.constants.is_offline_mode()`` reads the module global at CALL time and the
+    hub's request hook raises ``OfflineModeIsEnabled`` when it is set (checked against the installed
+    huggingface_hub 1.25.1), so assigning it here does block requests — the older comment in this
+    file claiming it was read once at import and could not be set at runtime was simply wrong.
+
+    ``transformers`` copies the flag at ITS import, which is why this is belt and braces: every
+    loader is also passed ``local_files_only``. The previous value is restored, because this module
+    is a library and a process-wide switch it never turns back off is a bug for its caller.
+    """
+    if ALLOW_DOWNLOAD:
+        yield
+        return
+    try:
+        from huggingface_hub import constants as hub_constants
+    except ImportError as exc:  # pragma: no cover - REQUIRED_PACKAGES makes this unreachable
+        raise EstimatorDependencyMissing(
+            "FATAL: huggingface_hub.constants is not importable, so offline mode cannot be "
+            "enforced and a load could fetch weights this run is not permitted to fetch. "
+            f"Nothing was written. ({type(exc).__name__}: {exc})"
+        ) from exc
+    previous = getattr(hub_constants, "HF_HUB_OFFLINE", False)
+    hub_constants.HF_HUB_OFFLINE = True
+    try:
+        yield
+    finally:
+        hub_constants.HF_HUB_OFFLINE = previous
+
+
+def _local_files_only() -> bool:
+    """What every loader passes so that transformers' own import-time copy of the offline flag
+    cannot let a fetch through. :data:`ALLOW_DOWNLOAD` inverts it, which is the whole of the
+    escape hatch."""
+    return not ALLOW_DOWNLOAD
+
+
+# -- input validation ------------------------------------------------------------------------------
+
+
+def _as_uint8_rgb(rgb: np.ndarray) -> np.ndarray:
+    """``(H, W, 3)`` uint8, or a loud refusal.
+
+    A float array is refused rather than rescaled: [0, 1] and [0, 255] floats are indistinguishable
+    from the array alone and rescale to different pictures, which is a different detection, which is
+    a different centroid — and the centroid is the gate. RGBA is accepted with the alpha dropped
+    because Replicator's ``rgb`` annotator hands back four channels (``isaac_binding.render_frame``
+    already drops it, but a capture written by anything else may not have).
+    """
+    arr = np.asarray(rgb)
+    if arr.ndim != 3 or arr.shape[2] not in (3, 4):
+        raise ValueError(
+            f"segment/estimate_depth expect (H, W, 3|4) RGB, got shape {arr.shape}. "
+            "A single-channel or batched array is not a frame."
+        )
+    if arr.dtype != np.uint8:
+        raise ValueError(
+            f"segment/estimate_depth expect a uint8 frame, got {arr.dtype}. This is not rescaled "
+            "here on purpose: a float frame in [0, 1] and one in [0, 255] look identical to numpy "
+            "and produce different detections, and the resulting centroid error would be silent. "
+            "Convert at the source, where the range is known."
+        )
+    return np.ascontiguousarray(arr[:, :, :3])
+
+
+def _device() -> str:
+    if DEVICE_OVERRIDE:
+        return DEVICE_OVERRIDE
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+# -- the models, loaded once per process ------------------------------------------------------------
+#
+# Module-level caches, not lru_cache, so that reset_models() can drop them and so that a reader can
+# see there is exactly one of each. Loading SAM 2 hiera-large per frame would turn a few-minute
+# calibration into an overnight one and would change no number, which is the kind of cost that gets
+# discovered after the run.
+
+_DETECTOR: tuple[Any, Any] | None = None
+_PREDICTOR: Any | None = None
+_DEPTH_PIPE: Any | None = None
+
+
+def reset_models() -> None:
+    """Drop the cached models.
+
+    Exists so a test can prove the cache is a cache, and so a long-lived process can give the VRAM
+    back between stages. It does not reset the counters: those describe the run, not the models.
+    """
+    global _DETECTOR, _PREDICTOR, _DEPTH_PIPE
+    _DETECTOR = _PREDICTOR = _DEPTH_PIPE = None
+
+
+def _detector() -> tuple[Any, Any]:
+    """GroundingDINO ``(processor, model)``, cached, at :data:`GROUNDING_DINO_MODEL_REVISION`."""
+    global _DETECTOR
+    if _DETECTOR is None:
+        ckpt = CHECKPOINTS[0]
+        _require_cached(ckpt)
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+
+        with _offline_hub():
+            processor = AutoProcessor.from_pretrained(
+                ckpt.repo_id, revision=ckpt.revision, local_files_only=_local_files_only()
+            )
+            model = AutoModelForZeroShotObjectDetection.from_pretrained(
+                ckpt.repo_id, revision=ckpt.revision, local_files_only=_local_files_only()
+            ).to(_device())
+        model.eval()
+        _DETECTOR = (processor, model)
+    return _DETECTOR
+
+
+def _sam2_api_message(missing: str) -> str:
+    return "\n".join([
+        f"FATAL: the installed `sam2` does not expose {missing}, so the SAM 2 checkpoint cannot be",
+        "       loaded at a pinned revision. Nothing was written.",
+        "",
+        "       Why this module does not simply call SAM2ImagePredictor.from_pretrained: that path",
+        "       reaches sam2.build_sam.build_sam2_hf -> _hf_download(model_id), which calls",
+        "       hf_hub_download WITHOUT a revision and forwards none of its caller's kwargs, so it",
+        "       resolves refs/main. On a cache staged at a commit there is no such ref, and where",
+        "       there is one it may be a different commit from the one this run records. So the",
+        "       two steps are performed here instead, with the pin.",
+        "",
+        f"       pinned segmenter: {SAM2_MODEL_CHECKPOINT}@{SAM2_MODEL_REVISION}",
+        "",
+        "       Check the sam2 version in the Cosmos-Transfer2.5 venv (this was written against",
+        "       sam2 1.1.0's build_sam.py). There is no fallback to the unpinned loader: it would",
+        "       load weights the artifact does not name.",
+    ])
+
+
+def _predictor() -> Any:
+    """SAM 2 image predictor, cached, at :data:`SAM2_MODEL_REVISION`.
+
+    Reproduces ``build_sam2_hf``'s two steps — resolve the repo's checkpoint file, then
+    ``build_sam2`` on the config name that repo maps to — because only the first of them can carry
+    a revision, and ``build_sam2_hf`` does not. Same checkpoint Cosmos-Transfer2.5 drives, same
+    config, at a commit this run can name.
+    """
+    global _PREDICTOR
+    if _PREDICTOR is None:
+        ckpt = CHECKPOINTS[1]
+        _require_cached(ckpt)
+        import sam2.build_sam as build_sam_mod
+        from huggingface_hub import hf_hub_download
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+        filenames = getattr(build_sam_mod, "HF_MODEL_ID_TO_FILENAMES", None)
+        build_sam2 = getattr(build_sam_mod, "build_sam2", None)
+        if filenames is None or build_sam2 is None:
+            raise EstimatorCheckpointUnusable(
+                _sam2_api_message("HF_MODEL_ID_TO_FILENAMES and build_sam2")
+            )
+        if ckpt.repo_id not in filenames:
+            raise EstimatorCheckpointUnusable(
+                "\n".join([
+                    f"FATAL: `sam2` does not know the checkpoint {ckpt.repo_id!r}: it is not in",
+                    "       sam2.build_sam.HF_MODEL_ID_TO_FILENAMES, so there is no config file to",
+                    "       build it with. Nothing was written.",
+                    "",
+                    "       ids this sam2 knows:",
+                    *[f"         - {k}" for k in sorted(filenames)],
+                    "",
+                    "       Set WAM_PR08_SAM2_CHECKPOINT and WAM_PR08_SAM2_REVISION together to one",
+                    "       of those, or install the sam2 that ships the one you want.",
+                ])
+            )
+        config_name, checkpoint_name = filenames[ckpt.repo_id]
+        with _offline_hub():
+            ckpt_path = hf_hub_download(
+                repo_id=ckpt.repo_id,
+                filename=checkpoint_name,
+                revision=ckpt.revision,
+                local_files_only=_local_files_only(),
+            )
+            model = build_sam2(
+                config_file=config_name, ckpt_path=ckpt_path, device=_device()
+            )
+        _PREDICTOR = SAM2ImagePredictor(model)
+    return _PREDICTOR
+
+
+def _depth_pipeline() -> Any:
+    """Depth-Anything-V2 depth-estimation pipeline, cached, and METRIC or it does not return.
+
+    The metric check happens here rather than in :func:`estimate_depth` so that a relative
+    checkpoint stops the run before frame 0. Discovering it on frame 37 means 37 frames of a
+    finished-looking artifact already exist.
+    """
+    global _DEPTH_PIPE, DEPTH_ESTIMATION_TYPE, DEPTH_IS_METRIC, DEPTH_MAX_DEPTH_M
+    if _DEPTH_PIPE is None:
+        ckpt = CHECKPOINTS[2]
+        _require_cached(ckpt)
+        from transformers import pipeline
+
+        with _offline_hub():
+            pipe = pipeline(
+                "depth-estimation",
+                model=ckpt.repo_id,
+                revision=ckpt.revision,
+                local_files_only=_local_files_only(),
+                device=_device(),
+            )
+        config = getattr(getattr(pipe, "model", None), "config", None)
+        # Absent means relative: that is transformers' own DepthAnythingConfig default, and an
+        # unstated claim is not a claim — the same rule measure_geom_tol applies to gate_qualified.
+        DEPTH_ESTIMATION_TYPE = str(getattr(config, "depth_estimation_type", "relative"))
+        DEPTH_IS_METRIC = DEPTH_ESTIMATION_TYPE == "metric"
+        max_depth = getattr(config, "max_depth", None)
+        DEPTH_MAX_DEPTH_M = float(max_depth) if max_depth is not None else None
+        if not DEPTH_IS_METRIC:
+            raise EstimatorCheckpointUnusable(
+                "\n".join([
+                    f"FATAL: {DEPTH_MODEL_CHECKPOINT!r} is a {DEPTH_ESTIMATION_TYPE.upper()} depth",
+                    "       checkpoint. PR-08 §4 step 3 asks for the ABSOLUTE depth error in metres",
+                    "       against Isaac's distance_to_camera, and a relative Depth-Anything map is",
+                    "       affine-free INVERSE depth: arbitrary per-image scale, and larger means",
+                    "       NEARER. Subtracting it from metres produces a number with no units,",
+                    "       ordered backwards, that lands in the artifact under a key called",
+                    "       'mean_m' and looks entirely reasonable. That is the expensive failure in",
+                    "       this project, so nothing is returned.",
+                    "",
+                    "       read from the loaded model config, not from the id:",
+                    f"         depth_estimation_type = {DEPTH_ESTIMATION_TYPE!r}",
+                    f"         max_depth             = {DEPTH_MAX_DEPTH_M!r}",
+                    f"         revision              = {DEPTH_MODEL_REVISION!r}",
+                    "",
+                    "       Set WAM_PR08_DEPTH_CHECKPOINT (and WAM_PR08_DEPTH_REVISION with it) to a",
+                    "       metric head, e.g.:",
+                    *[f"         - {c}" for c in METRIC_DEPTH_CHECKPOINT_SUGGESTIONS],
+                    "",
+                    "       Note which number is the gate: EST_DRIFT_P95 is the p95 of the CENTROID",
+                    "       displacement and does not depend on depth at all. This refusal protects",
+                    "       §4 step 3's recorded depth error, not the budget — and it is still a",
+                    "       refusal, because a recorded number that is wrong is read as a measured",
+                    "       one.",
+                ])
+            )
+        _DEPTH_PIPE = pipe
+    return _DEPTH_PIPE
+
+
+# -- the contract ------------------------------------------------------------------------------------
+
+
+def _best_box(rgb: np.ndarray) -> np.ndarray | None:
+    """Highest-scoring GroundingDINO box for the prompt, as ``[x0, y0, x1, y1]``, or None.
+
+    Highest score and not largest area: on a tabletop scene the largest box a text prompt returns is
+    routinely the table or the whole plate-plus-apple region, and a box that contains the apple is
+    not the same prompt for SAM 2 as a box that IS the apple — it hands SAM 2 an ambiguous prompt
+    and the mask lands on whichever object dominates it. The centroid then tracks the plate and the
+    number still looks like a number.
+    """
+    import torch
+    from PIL import Image
+
+    processor, model = _detector()
+    h, w = rgb.shape[:2]
+    inputs = processor(
+        images=Image.fromarray(rgb), text=OBJECT_TEXT_PROMPT, return_tensors="pt"
+    ).to(_device())
+    with torch.inference_mode():
+        outputs = model(**inputs)
+    # `threshold=` is transformers >= 4.51's spelling; it was `box_threshold=` before, and the
+    # pinned env is 4.51.3. If that pin moves backwards this raises TypeError, which is the right
+    # outcome — the alternative is the old kwarg silently keeping its 0.25 default while ours is
+    # ignored, i.e. a different detection threshold than the one recorded in ESTIMATOR_VERSION.
+    results = processor.post_process_grounded_object_detection(
+        outputs,
+        inputs["input_ids"],
+        threshold=BOX_THRESHOLD,
+        text_threshold=TEXT_THRESHOLD,
+        target_sizes=[(h, w)],
+    )[0]
+    scores = np.asarray(results["scores"].detach().cpu(), dtype=np.float64).reshape(-1)
+    if scores.size == 0:
+        return None
+    boxes = np.asarray(results["boxes"].detach().cpu(), dtype=np.float64).reshape(-1, 4)
+    return boxes[int(np.argmax(scores))]
+
+
+def segment(rgb: np.ndarray) -> np.ndarray:
+    """``(H, W)`` bool mask of the object in THIS frame. All-False when it is not found.
+
+    text prompt -> GroundingDINO box -> SAM 2 mask, which is the topology
+    Cosmos-Transfer2.5's own ``sam2_model.py`` uses, with its own checkpoints. This is the function
+    the gate rides on: ``EST_DRIFT_P95`` is the p95 of the displacement between this mask's centroid
+    and the ground-truth mask's, and ``GEOM_TOL`` is measured from masks this same function produced.
+
+    **Both models are loaded before the first detection**, not on demand, so that a missing or
+    unpinned SAM 2 checkpoint refuses on frame 0. Reaching the segmenter only through the detected
+    branch means a capture where nothing is detected finishes with no segmenter present at all and
+    reports ``coverage: 0.0`` as a fact about the corpus.
+
+    **No detection is not an error.** The Dex3 hand occludes the apple and the apple leaves frame,
+    repeatedly, in this corpus. Those frames come back all-False, ``centroid_of_mask`` turns that
+    into ``None``, and the callers DROP AND COUNT them into ``coverage``. Raising would kill a run
+    over a normal event; returning the previous mask would invent a displacement that was never
+    observed and would pull the p95 down, which WIDENS G0b — conservative-looking and backwards.
+    An empty mask from a box that WAS detected drops identically but is a different event, so it is
+    counted separately in :data:`EMPTY_MASK_FRAMES`; a coverage shortfall with no recorded
+    explanation is a run someone has to do again to find out why.
+    """
+    global SEGMENT_CALLS, NO_DETECTION_FRAMES, EMPTY_MASK_FRAMES
+
+    frame = _as_uint8_rgb(rgb)
+    SEGMENT_CALLS += 1
+    h, w = frame.shape[:2]
+
+    _detector()
+    predictor = _predictor()
+
+    box = _best_box(frame)
+    if box is None:
+        NO_DETECTION_FRAMES += 1
+        return np.zeros((h, w), dtype=bool)
+
+    import torch
+
+    with torch.inference_mode():
+        predictor.set_image(frame)
+        masks, _scores, _logits = predictor.predict(
+            box=box[None, :], multimask_output=False
+        )
+    mask = np.asarray(masks).reshape(-1, h, w)[0] > 0
+    mask = mask.astype(bool)
+    if not mask.any():
+        EMPTY_MASK_FRAMES += 1
+    return mask
+
+
+def estimate_depth(rgb: np.ndarray) -> np.ndarray:
+    """``(H, W)`` float32 depth in METRES from the camera.
+
+    Recorded for PR-08 §4 step 3's absolute depth error; it is NOT ``EST_DRIFT_P95``, which is the
+    centroid displacement :func:`segment` produces. Metres are guaranteed by the load-time refusal in
+    :func:`_depth_pipeline`: a relative checkpoint never gets this far.
+
+    The returned map is checked against the input grid rather than trusted. transformers moved depth
+    post-processing into the image processor's ``post_process_depth_estimation`` partway through the
+    4.x line, and before that the pipeline handed back the raw patch-grid tensor. A depth error
+    averaged over two different grids is not a depth error, and it does not look wrong.
+    """
+    frame = _as_uint8_rgb(rgb)
+    from PIL import Image
+
+    out = _depth_pipeline()(Image.fromarray(frame))
+    predicted = out["predicted_depth"]
+    depth = np.asarray(
+        predicted.detach().cpu().numpy() if hasattr(predicted, "detach") else predicted,
+        dtype=np.float32,
+    )
+    depth = np.squeeze(depth)
+    if depth.shape != frame.shape[:2]:
+        raise RuntimeError(
+            f"the depth pipeline returned a {depth.shape} map for a {frame.shape[:2]} frame. "
+            "It is not resized here: the pipeline's own post-processing is what resizes to the "
+            "source grid, and a shape mismatch means that post-processing did not run — which "
+            "means the values are not what this module claims they are either. Check the "
+            "transformers version against the pin in the Cosmos-Transfer2.5 venv."
+        )
+    return depth

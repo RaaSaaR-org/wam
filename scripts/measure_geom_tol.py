@@ -33,9 +33,11 @@ it under the repository and reported it missing.
 
 WHAT IT REFUSES TO DO
 ---------------------
-**It will not invent a centroid.** An object centroid needs a segmenter that can find the apple.
-Nothing in this repo, this virtualenv or this machine's local weights can (checked at run time, and
-the failure names every package and weight directory it looked for). The obvious stand-in — threshold
+**It will not invent a centroid.** An object centroid needs a segmenter that can find the apple. One
+is wired — ``--method sam2``, the shared PR-08 §4 adapter, see the next paragraph — and it can only
+run where its checkpoints are staged. On a machine without them there is no segmenter here at all,
+which is checked at run time rather than assumed, and the failure names every package and weight
+directory it looked in before refusing. The obvious stand-in — threshold
 the red pixels — produces a *plausible* number on a red apple photographed on a table, and a
 plausible-but-wrong GEOM_TOL is the single most expensive failure this measurement has, because it
 is invisible: it does not crash, it does not look odd, it just sets the gate to the wrong place and
@@ -43,6 +45,70 @@ every downstream verdict inherits it. So the heuristic exists here, but it is ca
 ``hsv-red-diagnostic``, it can only be reached by typing that name, it stamps
 ``gate_qualified: false`` into the artifact, and it exits non-zero. ``--method auto`` never selects
 it; with no segmenter wired, ``auto`` fails loudly and measures nothing.
+
+**It will not select a segmenter that has not said it can run.** One real segmenter is wired:
+``--method sam2`` drives ``scripts/estimators/apple_sam2.py`` — the SAME adapter
+``scripts/measure_est_drift.py`` measures ``EST_DRIFT_P95`` with, because PR-08 §4 step 2 says "the
+*same* segmenter" and §6 subtracts the two numbers, so two adapters would be two quantities and the
+subtraction would not be arithmetic. The adapter is imported LAZILY, inside the call, never at module
+import time: this module is imported by ``measure_est_drift`` and by tests that must run with no GPU,
+no network and no weights, and an adapter that touches ``transformers`` at import time would drag all
+three into every one of them. ``--method auto`` selects it only when the adapter itself declares its
+weights are present (``available() -> bool`` or ``WEIGHTS_AVAILABLE: bool``). An adapter that is
+silent about its weights is NOT selected and ``auto`` refuses exactly as it did before, because a
+segmenter selected without its checkpoints does not crash: it returns empty masks, every step drops,
+and ``coverage: 0.0`` reads as a fact about the corpus rather than about the missing weights.
+
+**It will not decode a frame after the adapter has already said no.** ``--method sam2`` is the
+explicit spelling, and explicit is not a licence to ignore an answer that was already given: when the
+adapter's ``available()`` returns False, the weights are absent, and the first ``segment()`` call
+will raise. Refusing there — before a single frame is decoded, exit 2, no artifact — is the same
+refusal one frame earlier, and it keeps the failure inside the EXIT STATUS table below instead of a
+traceback out of ``main``. The one way past it is the adapter declaring ``ALLOW_DOWNLOAD = True``
+(``WAM_PR08_ALLOW_DOWNLOAD=1``), which is a human saying "fetch them, on purpose". Whatever the
+adapter raises later — a missing checkpoint found mid-run, a CUDA failure — is caught at the call
+site and re-raised as this module's own fatal refusal, with the adapter's message verbatim. No
+partial artifact, no plausible number.
+
+**It will not take two segmenters on one command line.** ``--method sam2 --masks DIR`` names two,
+and the old order of tests silently used one and dropped the other's provenance. It is refused: the
+artifact can only record which estimator produced GEOM_TOL if the command line only had one.
+
+THE JOIN KEY: THE FIELD THAT MAKES §4 STEP 2 CHECKABLE
+------------------------------------------------------
+``measure_est_drift.cross_check_geom_tol()`` reads this artifact and copies ``mask_method`` into its
+own ``geom_tol_cross_check`` block. **The two rigs join on ``mask_method.name``**, which for the
+sam2 method is the adapter's own ``ESTIMATOR_NAME`` — the identical string, read off the identical
+module, that ``measure_est_drift`` records as ``estimators.name`` (``Estimators.__init__``). Equality
+is therefore by construction and not by convention: there is no second place where a segmenter is
+named. The pixel grid joins on ``resolution_hw`` (``[height, width]``), which is the key that
+function looks for and which is written here for that reason; ``frame_width``/``frame_height`` stay
+as they were.
+
+**Both consumer-side limits this section used to record are now CLOSED**, on 2026-08-22, by the
+change to ``scripts/measure_est_drift.py`` that this module deliberately did not make when the join
+key was introduced. Recorded rather than deleted, because the artifact fields that exist to make
+them survivable — ``cross_check_limits``, ``consumer_asserts`` — were built for them and are still
+written:
+
+1.  ``cross_check_geom_tol()`` now ASSERTS that the two names are equal, rather than only recording
+    ``mask_method``. A disagreement is the disqualifying reason ``mask_method_disagrees_with_estimator``.
+    Until that landed, ``mask_method.name != estimators.name`` was visible in both artifacts and
+    caught by nobody, and a consumer of ``GEOM_TOL - EST_DRIFT_P95`` had to check it by hand — which
+    is why it is still the FIRST line of ``consumer_asserts``: a reader holding two OLD artifacts
+    gets no benefit from a check that only runs at measurement time.
+2.  That comparison is no longer ABSENCE-PERMISSIVE. ``if theirs_hw is not None and ... != ...``
+    meant an artifact with no ``resolution_hw`` at all passed the grid check by saying nothing —
+    exactly what a hand-written or a stale artifact looks like. Each field the reader needs now
+    disqualifies by its own name (``geom_tol_does_not_record_<field>``) when it is absent.
+
+This side keeps the belt regardless: every field that function reads is checked present and non-null
+BEFORE the artifact is written (``CROSS_CHECK_FIELDS_REQUIRED``, ``missing_cross_check_fields()``),
+and a record missing one is a fatal refusal with nothing written rather than an artifact that reads
+clean downstream. A test asserts that the set of fields ``cross_check_geom_tol`` actually reads —
+parsed out of its source, not copied from it — is the set this module guarantees, so the day the
+reader grows a field, this module is told. That test is what caught the join key being added to the
+reader without being declared here.
 
 **It will not average away a missing object.** When the Dex3 hand occludes the apple, or the apple
 leaves frame, that step has no displacement. It is DROPPED and COUNTED — never folded in as a zero.
@@ -94,7 +160,10 @@ generation, and neither does anything else here.
 EXIT STATUS
 -----------
 0   measured with a gate-qualified mask method, coverage above ``--min-coverage``.
-2   fatal: nothing was measured (no segmenter, no clips, no mask provenance, mixed geometry).
+2   fatal: nothing was measured and NOTHING was written — no segmenter, no clips, no mask
+    provenance, mixed geometry, two segmenters named on one command line, an adapter that says its
+    checkpoints are absent, or an estimator that raised while segmenting. Every way this script can
+    fail lands here; a traceback out of ``main`` would be a bug in the script, not a fourth status.
 3   measured, but the number MUST NOT be used as G0b's tolerance — an ungated mask method, coverage
     below the floor, or a partial run (``--limit`` / ``--max-frames``). The artifact is still
     written: PR-08 §6 requires GEOM_TOL to be recorded regardless of verdict, and "we tried and this
@@ -112,7 +181,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -159,6 +228,59 @@ WEIGHT_SEARCH_GLOBS: tuple[tuple[Path, str], ...] = (
 )
 WEIGHT_NAME_HINTS = ("sam", "seg", "dino", "owl")
 
+#: The ONE estimator adapter both halves of PR-08 §4 go through. ``measure_est_drift.py`` imports it
+#: as ``--estimators estimators.apple_sam2``; this script reaches the identical module through
+#: ``--method sam2``. Spelled once, here, because §4 step 2's "the same segmenter" is only checkable
+#: if there is exactly one place that says which one it is.
+SAM2_ADAPTER_SPEC = "estimators.apple_sam2"
+SAM2_ADAPTER_FILE = _REPO_ROOT / "scripts" / "estimators" / "apple_sam2.py"
+
+#: The module attribute an adapter uses to say a fetch has been authorised. ``available()`` is
+#: deliberately False while the checkpoints are absent even when a download IS permitted (see the
+#: adapter's own docstring), so this is the ONE thing that distinguishes "the weights are missing
+#: and nobody said to get them" from "the weights are missing and a human said fetch them". Read off
+#: the adapter, never inferred from an environment variable read here.
+ADAPTER_DOWNLOAD_ATTR = "ALLOW_DOWNLOAD"
+
+#: Every field ``measure_est_drift.cross_check_geom_tol()`` reads out of this artifact. Listed here
+#: so the two ends can be shown to agree by a test that PARSES that function rather than by two
+#: prose paragraphs that drift. ``frame_hw`` is its legacy fallback for ``resolution_hw`` and is not
+#: written by this module.
+CROSS_CHECK_FIELDS_READ_BY_EST_DRIFT: tuple[str, ...] = (
+    "resolution_hw", "frame_hw", "gate_qualified", "mask_method", "name",
+)
+
+#: The subset this module GUARANTEES to write, present and non-null, in every artifact it produces.
+#: It used to matter more than it does: the reader's grid comparison was absence-permissive
+#: (``if theirs_hw is not None and ...``), so an artifact missing ``resolution_hw`` passed its grid
+#: check by saying nothing, and a check that says nothing reads downstream as a check that passed.
+#: **Repaired on the reader's side 2026-08-22** — ``cross_check_geom_tol`` now disqualifies on
+#: ``geom_tol_does_not_record_<field>`` for each of these. Guaranteeing them here is still the
+#: right thing: it means this module never hands the reader an artifact that trips that refusal.
+CROSS_CHECK_FIELDS_REQUIRED: tuple[str, ...] = ("resolution_hw", "gate_qualified", "mask_method")
+
+#: The CLI spelling. Distinct from the method NAME that lands in the artifact, which is the adapter's
+#: ESTIMATOR_NAME — see the join key in the module docstring.
+SAM2_METHOD_CLI = "sam2"
+
+#: Checkpoints Cosmos-Transfer2.5 itself names for this pipeline
+#: (``cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py``), so the generator's own
+#: segmenter is the one the tolerance is measured with. Used ONLY to make the failure message
+#: concrete: the artifact quotes checkpoints the ADAPTER declares and never these, because what
+#: Cosmos names upstream is not evidence about what this adapter loaded.
+COSMOS_SAM2_CHECKPOINT_HINTS: tuple[tuple[str, str], ...] = (
+    ("SAM2_MODEL_CHECKPOINT", "facebook/sam2-hiera-large"),
+    ("GROUNDING_DINO_MODEL_CHECKPOINT", "IDEA-Research/grounding-dino-base"),
+)
+
+#: Module attributes the adapter may use to name the weights it loaded. Anything found here goes
+#: verbatim into ``mask_method.params.checkpoints`` and into the provenance string.
+CHECKPOINT_ATTRS: tuple[str, ...] = (
+    "SAM2_MODEL_CHECKPOINT",
+    "GROUNDING_DINO_MODEL_CHECKPOINT",
+    "DEPTH_MODEL_CHECKPOINT",
+)
+
 
 # -- mask methods --------------------------------------------------------------------------------
 #
@@ -181,6 +303,13 @@ class MaskMethod:
     frames_from: str
     params: dict[str, Any] = field(default_factory=dict)
     provenance: str = ""
+    #: frame -> object mask, for methods whose ``frames_from`` is "video". Held ON the method rather
+    #: than looked up by name in the decode loop: the sam2 method's ``name`` is the ADAPTER's
+    #: ESTIMATOR_NAME (that is the join key §4 step 2 needs), so a name-keyed branch would stop
+    #: matching the day the adapter renames itself — and would then quietly segment with something
+    #: else while still stamping the adapter's name into the artifact. Never serialized; the
+    #: ``mask_method`` block is built field by field.
+    mask_fn: "Callable[[np.ndarray, MaskMethod], np.ndarray] | None" = None
 
 
 def _importable(module: str) -> bool:
@@ -247,9 +376,13 @@ def no_segmenter_message() -> str:
         "          a segmenter, its output is stamped gate_qualified: false, and it exits 3. It",
         "          exists to exercise this pipeline end to end, never to set G0b's tolerance.",
         "",
-        "       Related, and separately blocking: PR-08 §4 step 0 (EST_DRIFT_P95) needs the",
-        "       distance_to_camera and semantic_segmentation annotators in",
-        "       src/wam/robot/isaac_binding.py, which today wires only \"rgb\".",
+        # Re-derived from src/wam/robot/isaac_binding.py at run time, exactly as the artifact's
+        # est_drift_p95_blocked_by is, and for the same reason: that file is under active change
+        # (commit 5ef3535 wired two annotators this message used to say were absent), and a refusal
+        # that prints a hardcoded fact next to a computed one teaches the reader to trust neither.
+        "       Related, and separately blocking — EST_DRIFT_P95, checked against the source just",
+        "       now rather than asserted here:",
+        f"         {_est_drift_blocker()}",
     ]
     return "\n".join(lines)
 
@@ -312,6 +445,10 @@ def hsv_red_method(min_area: int) -> MaskMethod:
             "open_kernel": 3, "min_area_px": min_area,
             "component": "largest connected component by area",
         },
+        # Behaviourally identical to calling hsv_red_mask directly, which is what the decode loop
+        # used to do. It is attached here so that the loop has ONE way to reach a segmenter and no
+        # default to fall back to — see the refusal in episode_centroids_from_video.
+        mask_fn=hsv_red_mask,
     )
 
 
@@ -329,6 +466,397 @@ def hsv_red_mask(frame: np.ndarray, method: MaskMethod) -> np.ndarray:
     k = int(p["open_kernel"])
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
     return mask > 0
+
+
+# -- the shared PR-08 §4 adapter -------------------------------------------------------------------
+#
+# Everything below reaches ``scripts/estimators/apple_sam2.py``, the module ``measure_est_drift.py``
+# also drives. Nothing here imports it at module scope: see the docstring's lazy-import paragraph.
+
+
+def _try_import_sam2_adapter() -> tuple[Any | None, str]:
+    """``(module, why)``. ``module`` is None when the adapter cannot be reached from here.
+
+    Broad ``except Exception`` on purpose. An adapter that raises ``OSError`` reaching for a
+    checkpoint, or ``RuntimeError`` on a CUDA probe, is exactly as unusable as one that is not on
+    ``sys.path``, and the difference matters only to the message — which names the type. Letting an
+    unexpected type escape here would turn "no segmenter is staged" into a traceback that reads like
+    a bug in the measurement.
+    """
+    import importlib
+
+    try:
+        return importlib.import_module(SAM2_ADAPTER_SPEC), "imported"
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _import_sam2_adapter() -> Any:
+    """Import the shared estimator adapter, or fail loudly. Never falls back."""
+    module, why = _try_import_sam2_adapter()
+    if module is None:
+        raise MethodUnavailable(sam2_unavailable_message(why))
+    return module
+
+
+def _adapter_checkpoints(module: Any) -> dict[str, str]:
+    """The weight identifiers the adapter DECLARES. Never inferred, never defaulted.
+
+    A tolerance is re-run against the restyled clips at gate time with "the same estimator", and an
+    estimator is its weights as much as its code: ``sam2-hiera-large`` and ``sam2-hiera-tiny`` are
+    the same package and two different segmenters. So the checkpoints come from the adapter or they
+    do not appear, and an adapter that names none cannot be gate-qualified here whatever it claims
+    about itself.
+    """
+    found: dict[str, str] = {}
+    declared = getattr(module, "ESTIMATOR_CHECKPOINTS", None)
+    if isinstance(declared, dict):
+        found.update({str(k): str(v) for k, v in declared.items() if v})
+    elif isinstance(declared, (list, tuple)):
+        found.update({f"checkpoint_{i}": str(v) for i, v in enumerate(declared) if v})
+    for attr in CHECKPOINT_ATTRS:
+        value = getattr(module, attr, None)
+        if isinstance(value, str) and value:
+            found[attr] = value
+    return found
+
+
+def _adapter_weights_status(module: Any) -> tuple[bool | None, str]:
+    """Does the adapter say its weights are on this machine? ``None`` means it did not say.
+
+    ``None`` is not "probably fine". ``--method auto`` treats it as a refusal, because the only
+    alternative would be for this script to go looking for a checkpoint directory on the adapter's
+    behalf, and "a path called sam2-hiera-large exists" is a different claim from "this adapter can
+    segment". Guessing wrong there does not crash: an unloaded segmenter returns empty masks, every
+    step is dropped as "object not visible", and the artifact reports a coverage floor breach that
+    looks like a property of the corpus.
+    """
+    probe = getattr(module, "available", None)
+    if callable(probe):
+        try:
+            ok = bool(probe())
+        except Exception as exc:  # noqa: BLE001 - a probe that raises is not an available segmenter
+            return False, f"{SAM2_ADAPTER_SPEC}.available() raised {type(exc).__name__}: {exc}"
+        return ok, f"{SAM2_ADAPTER_SPEC}.available() returned {ok}"
+    flag = getattr(module, "WEIGHTS_AVAILABLE", None)
+    if isinstance(flag, bool):
+        return flag, f"{SAM2_ADAPTER_SPEC}.WEIGHTS_AVAILABLE is {flag}"
+    return None, (
+        f"{SAM2_ADAPTER_SPEC} declares neither available() nor WEIGHTS_AVAILABLE, so it has made "
+        "no statement about whether its checkpoints are on this machine"
+    )
+
+
+def _adapter_may_fetch(module: Any) -> bool:
+    """Has the adapter been told, by a human, that it may download its checkpoints?
+
+    ``available()`` stays False while the weights are absent even when a fetch is authorised — the
+    adapter says so itself — so without this the explicit ``--method sam2 WAM_PR08_ALLOW_DOWNLOAD=1``
+    route, which is the whole point of having an explicit route, would be unreachable. Read off the
+    adapter; this module never reads the environment variable itself, because the permission belongs
+    to the thing that would do the fetching.
+    """
+    return getattr(module, ADAPTER_DOWNLOAD_ATTR, False) is True
+
+
+def sam2_weights_absent_message(weights_note: str) -> str:
+    """``--method sam2`` when the adapter has ALREADY said its checkpoints are not here.
+
+    Typing the method explicitly says which segmenter to use. It does not overrule an answer the
+    adapter has already given: the first ``segment()`` call raises ``EstimatorDependencyMissing``,
+    which is an ``ImportError`` and not this module's ``MethodUnavailable``, so before this refusal
+    existed it escaped ``main`` as a traceback, exit 1 — outside the documented EXIT STATUS table —
+    after the decode loop had already been entered. Refusing here is that same refusal one frame
+    earlier, with an exit code the caller can act on and nothing written.
+    """
+    return "\n".join([
+        f"FATAL: --method {SAM2_METHOD_CLI} was requested and {SAM2_ADAPTER_SPEC} says its "
+        "checkpoints are NOT on this machine.",
+        "       Nothing was written and no frame was decoded.",
+        "",
+        f"       declaration  {weights_note}",
+        f"       interpreter  {sys.executable}",
+        f"       module       {SAM2_ADAPTER_SPEC} ({SAM2_ADAPTER_FILE.relative_to(_REPO_ROOT)})",
+        "",
+        "       Naming the method explicitly chooses WHICH segmenter. It does not overrule the",
+        "       adapter's own statement that it cannot run: segment() would raise on the first",
+        "       frame, and a run that dies mid-decode has already spent the decode and still has",
+        "       no number. This is that refusal, before the first frame.",
+        "",
+        "       Two ways forward:",
+        "",
+        "       1. Stage the checkpoints on this machine and re-run. The adapter's own refusal",
+        "          names each one and every cache directory it looked in.",
+        f"       2. Authorise the fetch on purpose: WAM_PR08_ALLOW_DOWNLOAD=1 sets "
+        f"{SAM2_ADAPTER_SPEC}.{ADAPTER_DOWNLOAD_ATTR},",
+        "          and this refusal steps aside for it. That is a multi-GB download; the repo rule",
+        "          is that nothing is downloaded at scale without asking first. ASK.",
+    ])
+
+
+def sam2_call_failed_message(method_name: str, exc: BaseException) -> str:
+    """The adapter raised while segmenting a frame. Fatal here, never fallen back from.
+
+    ``EstimatorDependencyMissing`` subclasses ``ImportError`` and every other thing a segmenter can
+    raise mid-run (an OSError reaching for a checkpoint, a CUDA RuntimeError) is likewise not this
+    module's ``MethodUnavailable``, so all of them used to leave ``main`` as a traceback and exit 1.
+    Translating them here puts the failure inside the EXIT STATUS table and keeps the adapter's own
+    message, which is the one that names its checkpoints and its venv, verbatim in the output.
+    """
+    return "\n".join([
+        f"FATAL: {method_name!r} raised while segmenting a frame — {type(exc).__name__}.",
+        "       The measurement is abandoned and nothing was written. A partial or resumed run is",
+        "       not this corpus's GEOM_TOL, and dropping the frame would move the median.",
+        "",
+        "       ---- the estimator's own message, verbatim " + "-" * 36,
+        "",
+        str(exc).rstrip() or f"({type(exc).__name__} carried no message)",
+    ])
+
+
+def _first_line(text: str) -> str:
+    """A one-line summary of a multi-line failure, for a one-line field.
+
+    Nothing is lost by it: the adapter's own message is reproduced verbatim below the summary,
+    because that message is the one that names its checkpoints, its venv and its download switch,
+    and paraphrasing someone else's refusal is how a reader ends up debugging the wrong machine.
+    """
+    stripped = text.strip()
+    return stripped.splitlines()[0] if stripped else text
+
+
+def sam2_unavailable_message(reason: str) -> str:
+    """The loud failure for ``--method sam2``. Names every place looked in and what must change."""
+    hits = _local_weight_hits()
+    lines = [
+        f"FATAL: --method {SAM2_METHOD_CLI} needs the shared PR-08 §4 estimator adapter and cannot "
+        "use it here.",
+        "       Nothing was written.",
+        "",
+        f"       reason       {_first_line(reason)}",
+        f"       interpreter  {sys.executable}",
+        f"       module       {SAM2_ADAPTER_SPEC}",
+        f"       file         {SAM2_ADAPTER_FILE} "
+        f"({'present' if SAM2_ADAPTER_FILE.is_file() else 'ABSENT'})",
+        f"       package init {SAM2_ADAPTER_FILE.parent / '__init__.py'} "
+        f"({'present' if (SAM2_ADAPTER_FILE.parent / '__init__.py').is_file() else 'ABSENT'})",
+        "",
+        "       the checkpoints this pipeline is built on — Cosmos-Transfer2.5 names them itself in",
+        "       cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py, which is why it is the",
+        "       generator's OWN segmenter and the strongest reading of §4 step 2:",
+    ]
+    lines += [f"         - {a:<32} {v}" for a, v in COSMOS_SAM2_CHECKPOINT_HINTS]
+    lines += ["", "       local segmentation weights found:"]
+    lines += [f"         - {w}" for w in hits] or [
+        "         (none — nothing matching *sam*/*seg*/*dino*/*owl* under "
+        + ", ".join(str(r) for r, _ in WEIGHT_SEARCH_GLOBS) + ")"
+    ]
+    lines += [
+        "",
+        "       What would have to change, in order of how little it costs:",
+        "",
+        f"       1. Write/repair {SAM2_ADAPTER_FILE.relative_to(_REPO_ROOT)} against the estimator",
+        "          contract in scripts/measure_est_drift.py (Estimators):",
+        "            segment(rgb) -> (H, W) bool mask     estimate_depth(rgb) -> (H, W) float32 m",
+        "          plus ESTIMATOR_NAME / ESTIMATOR_VERSION / GATE_QUALIFIED, and a declaration of",
+        "          the checkpoints it loads (ESTIMATOR_CHECKPOINTS, or "
+        + "/".join(CHECKPOINT_ATTRS) + ").",
+        "",
+        "       2. Stage the checkpoints. That is a download, and the repo rule is that nothing is",
+        "          downloaded at scale without asking first. ASK.",
+        "",
+        "       This is ONE fix for BOTH halves of PR-08 §8 item 4: the identical module is what",
+        f"       scripts/measure_est_drift.py measure --estimators {SAM2_ADAPTER_SPEC} runs, and §4",
+        "       step 2 requires GEOM_TOL and EST_DRIFT_P95 to come from the SAME segmenter.",
+    ]
+    if reason.strip().count("\n"):
+        lines += [
+            "",
+            "       ---- the adapter's own message, verbatim "
+            + "-" * 40,
+            "",
+            reason.rstrip(),
+        ]
+    return "\n".join(lines)
+
+
+def sam2_auto_declined(reason: str) -> str:
+    """Why ``--method auto`` did not take the adapter. Appended to the standing refusal, never instead."""
+    return "\n".join([
+        "       The shared PR-08 §4 estimator adapter was checked too, and NOT selected:",
+        "",
+        f"         module      {SAM2_ADAPTER_SPEC}",
+        f"         file        {SAM2_ADAPTER_FILE} "
+        f"({'present' if SAM2_ADAPTER_FILE.is_file() else 'ABSENT'})",
+        f"         why not     {_first_line(reason)}",
+        "",
+        "       --method auto selects the adapter only when the ADAPTER declares its weights are",
+        "       present, via available() -> bool or WEIGHTS_AVAILABLE: bool. Nothing here probes a",
+        "       checkpoint directory on its behalf: a segmenter auto-selected without its weights",
+        "       does not crash, it returns empty masks, and the run reports a coverage floor breach",
+        "       that reads as a property of the corpus rather than as a missing download.",
+        f"       --method {SAM2_METHOD_CLI} types it explicitly, and when the adapter has said its",
+        "       checkpoints are absent it refuses with that declaration quoted rather than this",
+        "       message — the same answer at a different door, not a way past it. The way past it",
+        "       is staging the weights, or authorising the fetch on purpose "
+        "(WAM_PR08_ALLOW_DOWNLOAD=1).",
+    ])
+
+
+def sam2_mask_via(module: Any) -> Callable[[np.ndarray, MaskMethod], np.ndarray]:
+    """Bind the adapter into a frame -> mask callable. The closure holds the module, not a name."""
+
+    def mask(frame: np.ndarray, method: MaskMethod) -> np.ndarray:
+        """One decoded frame -> the adapter's object mask, handed over in the adapter's colour order.
+
+        cv2 decodes BGR and the estimator contract says ``segment(rgb)``. A GroundingDINO prompt of
+        "apple" evaluated on channel-swapped pixels neither crashes nor returns nothing: it grounds
+        on whatever, in a world where red is blue, most looks like an apple, and GEOM_TOL becomes
+        the median displacement of that. The swap happens here, once, rather than being left to
+        whichever estimator is wired next.
+        """
+        arr = np.asarray(frame)
+        if arr.ndim != 3 or arr.shape[2] != 3:
+            raise MethodUnavailable(
+                f"FATAL: {method.name!r} was handed a frame of shape {arr.shape}; this path decodes "
+                "3-channel BGR video and the adapter's contract is segment(rgb). Nothing here "
+                "guesses a channel order."
+            )
+        try:
+            raw = module.segment(np.ascontiguousarray(arr[:, :, ::-1]))
+        except MethodUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 - see sam2_call_failed_message
+            raise MethodUnavailable(sam2_call_failed_message(method.name, exc)) from exc
+        out = np.asarray(raw)
+        if out.shape[:2] != arr.shape[:2]:
+            raise MethodUnavailable(
+                f"FATAL: {method.name!r} returned a {out.shape[:2]} mask for a {arr.shape[:2]} "
+                "frame. A centroid taken on one grid and a displacement reported in another is not "
+                "a displacement — the same refusal measure_est_drift.py makes."
+            )
+        return out
+
+    return mask
+
+
+def sam2_method(min_area: int) -> MaskMethod:
+    """The gate-qualifiable method: the generator's own segmenter, reached through the shared adapter.
+
+    Gate qualification is OPT-IN twice over, and both halves are the adapter's to assert. The module
+    must say ``GATE_QUALIFIED = True`` — absent means false, exactly as ``measure_est_drift`` reads
+    it, so a stub cannot become a gate input by being importable. And it must NAME ITS WEIGHTS, or
+    qualification is withheld here regardless of what it claims: the artifact's only job is to make
+    the identical estimator re-runnable on the restyled clips, and "sam2" without a checkpoint is a
+    family of segmenters, not one.
+    """
+    module = _import_sam2_adapter()
+
+    # The same contract measure_est_drift.Estimators enforces, enforced identically. estimate_depth
+    # is required even though GEOM_TOL never calls it: §4 step 2 wants ONE estimator behind both
+    # numbers, and a module that cannot measure the budget cannot be that one — GEOM_TOL would be
+    # left with no subtractable partner and nothing downstream would notice until §6.
+    for fn in ("segment", "estimate_depth"):
+        if not callable(getattr(module, fn, None)):
+            raise MethodUnavailable(
+                f"FATAL: {SAM2_ADAPTER_SPEC} does not define {fn}(rgb).\n"
+                "       The estimator contract is scripts/measure_est_drift.py (Estimators): "
+                "segment(rgb) -> (H, W)\n"
+                "       bool mask, estimate_depth(rgb) -> (H, W) float32 metres. PR-08 §4 step 2 "
+                "requires GEOM_TOL\n"
+                "       and EST_DRIFT_P95 to come from the SAME module, so a module that only half "
+                "satisfies the\n"
+                "       contract cannot produce either."
+            )
+
+    checkpoints = _adapter_checkpoints(module)
+    declared_gate = bool(getattr(module, "GATE_QUALIFIED", False))
+    withheld: str | None = None
+    if declared_gate and not checkpoints:
+        withheld = (
+            f"{SAM2_ADAPTER_SPEC} sets GATE_QUALIFIED=True but names no checkpoints (looked for "
+            f"ESTIMATOR_CHECKPOINTS and {', '.join(CHECKPOINT_ATTRS)}). A tolerance that cannot say "
+            "which weights produced it cannot be re-run with the same estimator at gate time, which "
+            "is the only thing GEOM_TOL is for."
+        )
+    available, weights_note = _adapter_weights_status(module)
+    may_fetch = _adapter_may_fetch(module)
+    # The adapter has already answered, and "I typed the method out in full" is not a rebuttal. The
+    # decode loop would raise EstimatorDependencyMissing on frame 0 — an ImportError, not a
+    # MethodUnavailable — and leave main as a traceback with no artifact and an undocumented exit 1.
+    # Silence (available is None) is NOT refused here: that is auto's rule, and an adapter that
+    # simply never wrote a probe has stated nothing to overrule. Anything it raises later is caught
+    # at the call site instead.
+    if available is False and not may_fetch:
+        raise MethodUnavailable(sam2_weights_absent_message(weights_note))
+
+    name = str(getattr(module, "ESTIMATOR_NAME", SAM2_ADAPTER_SPEC))
+    version = str(getattr(module, "ESTIMATOR_VERSION", "unversioned"))
+    provenance = "; ".join([
+        f"{SAM2_ADAPTER_SPEC} ({SAM2_ADAPTER_FILE.relative_to(_REPO_ROOT)})",
+        f"the SAME module scripts/measure_est_drift.py measure --estimators {SAM2_ADAPTER_SPEC} "
+        "uses, per PR-08 §4 step 2",
+        ("checkpoints: " + ", ".join(f"{k}={v}" for k, v in sorted(checkpoints.items())))
+        if checkpoints else "checkpoints: NONE DECLARED BY THE ADAPTER",
+        weights_note,
+    ])
+
+    return MaskMethod(
+        name=name,
+        version=version,
+        gate_qualified=declared_gate and bool(checkpoints),
+        frames_from="video",
+        params={
+            "cli_method": SAM2_METHOD_CLI,
+            "estimator_spec": SAM2_ADAPTER_SPEC,
+            "estimator_module_file": str(SAM2_ADAPTER_FILE.relative_to(_REPO_ROOT)),
+            "estimator_contract": (
+                "segment(rgb) -> (H, W) bool mask; estimate_depth(rgb) -> (H, W) float32 metres "
+                "(scripts/measure_est_drift.py Estimators)"
+            ),
+            "checkpoints": checkpoints or None,
+            "checkpoints_declared_by_adapter": bool(checkpoints),
+            "adapter_declares_gate_qualified": declared_gate,
+            "gate_qualification_withheld_reason": withheld,
+            "weights_declaration": weights_note,
+            "weights_available": available,
+            # False here can only mean a human authorised the fetch (WAM_PR08_ALLOW_DOWNLOAD=1);
+            # unauthorised-and-absent is refused before any frame is decoded, so it cannot reach an
+            # artifact at all. Recorded because "the weights were downloaded during the measurement"
+            # is provenance a reader of the committed number is entitled to.
+            "adapter_download_authorised": may_fetch,
+            "color_order_in": "RGB — cv2 decodes BGR and the adapter is handed frame[:, :, ::-1]",
+            "component": "largest connected component by area",
+            "min_area_px": min_area,
+            # Stated in the artifact as well as in the code, because the consumer that has to check
+            # §4 step 2 reads the JSON and not this file.
+            "cross_check_join_key": (
+                "mask_method.name == pr08_est_drift.json estimators.name; both are this adapter's "
+                "ESTIMATOR_NAME, read off the same module"
+            ),
+        },
+        provenance=provenance,
+        mask_fn=sam2_mask_via(module),
+    )
+
+
+def auto_sam2_method(min_area: int) -> tuple[MaskMethod | None, str]:
+    """``--method auto``'s one chance to find a segmenter, and the reason it did not take it.
+
+    Returns ``(None, why)`` rather than raising: ``auto``'s refusal is ``no_segmenter_message()``,
+    unchanged, and this text is APPENDED to it. Replacing that message would narrow a refusal that
+    names every package and weight directory looked in down to one about a single adapter.
+    """
+    module, why = _try_import_sam2_adapter()
+    if module is None:
+        return None, sam2_auto_declined(f"not importable — {_first_line(why)}")
+    available, weights_note = _adapter_weights_status(module)
+    if available is not True:
+        return None, sam2_auto_declined(weights_note)
+    try:
+        return sam2_method(min_area), ""
+    except MethodUnavailable as exc:
+        return None, sam2_auto_declined(str(exc).splitlines()[0])
 
 
 # -- centroids -----------------------------------------------------------------------------------
@@ -485,6 +1013,15 @@ def episode_centroids_from_masks(mask_dir: Path, min_area: int) -> tuple[list[tu
 
 
 def episode_centroids_from_video(clip: Path, method: MaskMethod, min_area: int, max_frames: int) -> tuple[list[tuple[float, float] | None], tuple[int, int], float]:
+    # No default and no name lookup, and checked before a single frame is decoded. A video method
+    # with no segmenter attached is a bug in resolve_method; the one thing that must not happen is
+    # for it to be papered over with the red-pixel heuristic while the artifact still carries the
+    # other method's name.
+    if method.mask_fn is None:
+        raise MethodUnavailable(
+            f"FATAL: mask method {method.name!r} decodes video but carries no segmenter "
+            "(mask_fn is None). resolve_method must attach one; nothing here guesses which."
+        )
     import cv2
 
     cap = cv2.VideoCapture(str(clip))
@@ -504,7 +1041,7 @@ def episode_centroids_from_video(clip: Path, method: MaskMethod, min_area: int, 
             elif size != (int(w), int(h)):
                 raise MethodUnavailable(f"FATAL: {clip} changes frame geometry mid-clip.")
             cents.append(
-                centroid_of_mask(hsv_red_mask(frame, method), largest_component=True,
+                centroid_of_mask(method.mask_fn(frame, method), largest_component=True,
                                  min_area=min_area)
             )
         if size is None:
@@ -539,6 +1076,22 @@ def _est_drift_blocker() -> str:
                 f"calibrate a monocular estimator against")
     return ("PR-08 §4 step 0 annotators are named in src/wam/robot/isaac_binding.py; steps 1-4 "
             "(render, estimate, compare, p95) have still not been run here")
+
+
+def missing_cross_check_fields(record: dict[str, Any]) -> list[str]:
+    """Fields ``measure_est_drift.cross_check_geom_tol()`` needs that this record does not carry.
+
+    Its grid comparison is ``if theirs_hw is not None and list(theirs_hw) != list(resolution_hw)``:
+    absence is silence, and silence there is indistinguishable downstream from a comparison that
+    ran and agreed. The same shape as the ``gate_qualified`` default-permissiveness this repo has
+    already removed once (``97_transfer25_restyle.sbatch``: "saying nothing is exactly what a
+    fabricated artifact does"). The reader is not this module's to fix — this is the half that is:
+    an artifact that would be read permissively is never written at all.
+
+    ``None`` counts as missing. A null ``resolution_hw`` is exactly the value that makes the
+    consumer's check say nothing.
+    """
+    return [k for k in CROSS_CHECK_FIELDS_REQUIRED if record.get(k) is None]
 
 
 def sidecar_path(out: Path) -> Path:
@@ -584,10 +1137,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--camera-key", default=None,
                     help="video feature to measure when the root declares more than one; never "
                          "guessed")
-    ap.add_argument("--method", choices=("auto", "precomputed", "hsv-red-diagnostic"),
+    ap.add_argument("--method",
+                    choices=("auto", "precomputed", SAM2_METHOD_CLI, "hsv-red-diagnostic"),
                     default="auto",
-                    help="'auto' (default) uses --masks if given and otherwise FAILS, naming the "
-                         "missing segmenter. 'hsv-red-diagnostic' is not a segmenter and exits 3")
+                    help=f"'auto' (default) uses --masks if given, else the shared "
+                         f"{SAM2_ADAPTER_SPEC} adapter IF it declares its weights are present, and "
+                         "otherwise FAILS naming the missing segmenter. "
+                         f"'{SAM2_METHOD_CLI}' drives that adapter explicitly — the same module "
+                         "scripts/measure_est_drift.py measures EST_DRIFT_P95 with, which is what "
+                         "PR-08 §4 step 2's 'the same segmenter' means; it still refuses, before "
+                         "decoding anything, if the adapter says its checkpoints are absent and no "
+                         "download was authorised. Naming a method AND --masks names two "
+                         "segmenters and is refused. 'hsv-red-diagnostic' is not a segmenter and "
+                         "exits 3")
     ap.add_argument("--masks", type=Path, default=None,
                     help="directory of per-frame object masks, one subdirectory per clip stem, "
                          "plus a masks.meta.json naming and versioning the segmenter that made them")
@@ -621,13 +1183,44 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def resolve_method(args: argparse.Namespace) -> MaskMethod:
+    """Pick the mask method, or refuse. The order below is the whole of the selection policy.
+
+    ``--masks`` still wins under ``auto``: masks on disk were produced deliberately and carry their
+    own named, versioned provenance, and silently preferring a locally importable adapter over the
+    thing the operator pointed at would change which estimator produced GEOM_TOL without saying so.
+    """
+    # Two segmenters named on one command line, and only one of them can produce the number. The
+    # old order of tests picked the typed method and dropped --masks along with its masks.meta.json
+    # provenance, without a word in the artifact — which is the exact failure the rest of this
+    # function argues against, committed by this function.
+    if args.masks is not None and args.method in (SAM2_METHOD_CLI, "hsv-red-diagnostic"):
+        raise MethodUnavailable(
+            f"FATAL: --method {args.method} and --masks {args.masks} name two different segmenters "
+            "and only one\n"
+            "       can have produced GEOM_TOL. Nothing here picks for you: the artifact's only "
+            "job is to say\n"
+            "       which estimator measured this number so the identical one can be re-run on the "
+            "restyled\n"
+            "       clips at gate time, and a silently discarded --masks makes that record a "
+            "guess.\n"
+            f"       Drop --masks to use {args.method}, or drop --method to measure the masks "
+            "(--method precomputed)."
+        )
     if args.method == "hsv-red-diagnostic":
         return hsv_red_method(args.min_area_px)
+    if args.method == SAM2_METHOD_CLI:
+        return sam2_method(args.min_area_px)
     if args.method == "precomputed" or (args.method == "auto" and args.masks is not None):
         if args.masks is None:
             raise MethodUnavailable("FATAL: --method precomputed needs --masks.")
         return load_precomputed_method(args.masks)
-    raise MethodUnavailable(no_segmenter_message())
+    method, declined = auto_sam2_method(args.min_area_px)
+    if method is not None:
+        return method
+    # The standing refusal, unchanged and first: it names every segmenter package and every weight
+    # directory this machine was checked for. The adapter paragraph is appended to it, never
+    # substituted for it.
+    raise MethodUnavailable(no_segmenter_message() + "\n\n" + declined)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -772,6 +1365,17 @@ def main(argv: list[str] | None = None) -> int:
         # quoting GEOM_TOL_px as G0b's tolerance. Written into the artifact rather than only into
         # the consumer so the two cannot drift apart silently.
         "consumer_asserts": [
+            # First, because it is the one nothing checks automatically: cross_check_geom_tol()
+            # RECORDS mask_method and does not compare it. Two segmenters subtract to a plausible
+            # pixel number, which is the invisible failure this whole artifact exists against.
+            "mask_method.name == pr08_est_drift.json estimators.name — PR-08 §4 step 2's 'the SAME "
+            "segmenter'. Both are the estimator module's ESTIMATOR_NAME. NOTHING ENFORCES THIS: "
+            "measure_est_drift.cross_check_geom_tol() copies mask_method into geom_tol_cross_check "
+            "without comparing it, so the consumer must",
+            "resolution_hw == the [height, width] EST_DRIFT_P95 was measured at. GEOM_TOL - "
+            "EST_DRIFT_P95 is arithmetic only on one grid. cross_check_geom_tol() does compare "
+            "this — but only when the key is present, so a consumer reading an artifact from "
+            "anywhere else must assert it EXISTS before trusting a clean grid check",
             "gate_qualified == true",
             "partial_measurement == false",
             "n_episodes == n_episodes_found",
@@ -780,6 +1384,27 @@ def main(argv: list[str] | None = None) -> int:
             "coverage >= min_coverage",
             "sha256sum <artifact> matches <artifact>.sha256",
         ],
+        # The two places the CONSUMER of these two artifacts is weaker than it reads, stated in the
+        # machine-readable artifact and not only in prose. Neither is repairable from this side:
+        # both live in scripts/measure_est_drift.py.
+        "cross_check_limits": {
+            "checked_by": "scripts/measure_est_drift.py cross_check_geom_tol()",
+            "fields_it_reads": list(CROSS_CHECK_FIELDS_READ_BY_EST_DRIFT),
+            "fields_this_artifact_guarantees": list(CROSS_CHECK_FIELDS_REQUIRED),
+            "estimator_name_is_recorded_not_compared": (
+                "cross_check_geom_tol() copies mask_method into geom_tol_cross_check and never "
+                "asserts mask_method.name == estimators.name. PR-08 §4 step 2 requires the SAME "
+                "segmenter; a mismatch is caught by nobody automatically. See consumer_asserts[0]."
+            ),
+            "grid_comparison_is_absence_permissive": (
+                "cross_check_geom_tol() compares resolution_hw only when the key is present "
+                "('if theirs_hw is not None and ...'), so an artifact WITHOUT it passes the grid "
+                "check by saying nothing. This module refuses to write such an artifact at all "
+                "(missing_cross_check_fields), which closes the case it controls and not the "
+                "reader; an artifact from any other producer must be checked for the key's "
+                "PRESENCE before its clean grid check means anything."
+            ),
+        },
 
         "corpus": str(args.corpus),
         "corpus_layout": layout,
@@ -793,6 +1418,14 @@ def main(argv: list[str] | None = None) -> int:
         "units": (f"pixels at {geometry[0]}x{geometry[1]}" if geometry else "pixels"),
         "frame_width": geometry[0] if geometry else None,
         "frame_height": geometry[1] if geometry else None,
+        # THE GRID JOIN KEY, and it is [height, width] in that order because that is the order the
+        # other end writes. measure_est_drift.cross_check_geom_tol() looks for "resolution_hw"
+        # (falling back to "frame_hw") and compares it element for element against the Isaac
+        # capture's [H, W]. Until this key existed that comparison read None and appended no reason:
+        # the one check standing between §6 and a subtraction of pixels measured on two different
+        # grids was a no-op, which is worse than absent because it reports a clean cross-check.
+        # frame_width/frame_height stay exactly as they were; this duplicates them for the consumer.
+        "resolution_hw": [geometry[1], geometry[0]] if geometry else None,
         "fps": fps,
         "step_frames": args.step_frames,
         "step_seconds": (args.step_frames / fps) if fps else None,
@@ -864,11 +1497,37 @@ def main(argv: list[str] | None = None) -> int:
             f"the committed artifact is the tracked {DEFAULT_OUT_REL} with a .sha256 sidecar. An "
             "artifact under gitignored runs/ cannot be a pre-commitment; runs/ is for scratch and "
             "for --dump-displacements.",
+            "PR-08 §4 step 2 requires EST_DRIFT_P95 to be measured with the SAME segmenter as "
+            "this number, and the two artifacts join on mask_method.name: scripts/measure_est_drift"
+            ".py records that same string as estimators.name (both are the estimator module's "
+            "ESTIMATOR_NAME) and its cross_check_geom_tol() copies this whole block into "
+            "geom_tol_cross_check. Two different names is two different quantities and "
+            "GEOM_TOL - EST_DRIFT_P95 is then not arithmetic. The pixel grid joins on "
+            "resolution_hw, [height, width].",
             "coverage is measured over the steps that were DECODED. --limit and --max-frames "
             "therefore cannot lower it, and both force gate_qualified=false on their own; see "
             "partial_measurement and gate_disqualified_reasons.",
         ],
     }
+
+    # Checked against the record that is about to be written, not against the code that built it.
+    # A field that is absent or null here is a field the consumer's cross-check reads as silence,
+    # and its grid comparison treats silence as agreement — so an artifact missing one would report
+    # a clean cross-check of two grids nobody compared. Nothing is written when it fires.
+    absent = missing_cross_check_fields(record)
+    if absent:
+        print(
+            "FATAL: this record is missing " + ", ".join(absent) + ", which "
+            "scripts/measure_est_drift.py\n"
+            "       cross_check_geom_tol() reads. Its grid comparison is absence-permissive, so an "
+            "artifact\n"
+            "       without those fields does not fail the cross-check — it passes it silently, "
+            "having compared\n"
+            "       nothing. Nothing was written. This is a bug in measure_geom_tol.py, not in the "
+            "corpus.",
+            file=sys.stderr,
+        )
+        return EXIT_FATAL
 
     side, digest = write_artifact(args.out, record)
     if args.dump_displacements:
