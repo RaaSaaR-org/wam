@@ -733,3 +733,47 @@ def test_the_reason_is_recorded_at_the_code_that_carries_it() -> None:
     window = text[max(0, i - 1200) : i]
     assert "100_fetch_pr08_source" in window
     assert "189452" in window
+
+
+# -- the exit code has to carry information -------------------------------------------------------
+#
+# Job 189453 staged 4.8 GB, wrote the manifest, agreed on every id and revision it could check, and
+# Slurm recorded FAILED. The measurement artifacts it wanted to check against are produced BY
+# measurements that need these weights, so a first run could not exit 0 by construction. An exit
+# code that is always the same carries nothing, and a job that reports failure for doing the right
+# thing teaches the operator to stop reading it.
+
+
+def test_a_not_yet_written_measurement_artifact_is_not_a_failure() -> None:
+    text = _text()
+    assert "EXPECTED_ABSENT" in text and "GENUINE_GAPS" in text, (
+        "the two kinds of 'unverified' must be distinguished, or a correct first run cannot exit 0"
+    )
+    i = text.find("if [[ ${#GENUINE_GAPS[@]} -eq 0 ]]; then")
+    assert i != -1, "no branch exits 0 on lifecycle-only gaps"
+    assert "exit 0" in text[i : i + 900]
+
+
+def test_a_real_verification_gap_still_exits_three() -> None:
+    """Loosening the lifecycle case must not loosen the case it was carved out of."""
+    text = _text()
+    i = text.find("STAGED, NOT VERIFIED")
+    assert i != -1
+    assert "exit 3" in text[i:], "the genuine-gap branch must still exit 3"
+
+
+def test_staged_qualified_is_false_in_both_cases() -> None:
+    """Exiting 0 says the job did its work. It must not start claiming the ids were verified."""
+    text = _text()
+    assert "qualified = bool(checks) and all(" in text
+    assert "and not unverified" in text, (
+        "staged_qualified must stay keyed to ALL unverified reasons, lifecycle ones included"
+    )
+    i = text.find("if [[ ${#GENUINE_GAPS[@]} -eq 0 ]]; then")
+    assert "staged_qualified is FALSE" in text[i : i + 900]
+
+
+def test_the_exit_status_block_documents_the_carve_out() -> None:
+    i = _text().find("# EXIT STATUS")
+    block = _text()[i : i + 1400]
+    assert "NOT WRITTEN YET is exit 0" in block

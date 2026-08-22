@@ -110,9 +110,13 @@
 #   1  fatal: no token, no uv, no adapter, a moving-pointer revision, a download that did not land,
 #      a snapshot missing files the hub says exist, or an id that DISAGREES with the adapter, the
 #      generator's own constant or a committed measurement artifact. Nothing is guessed past.
-#   3  staged and hashed, but at least one id could not be VERIFIED against the thing that has to
-#      agree with it (no framework checkout, no revision constant in the adapter yet, or no
-#      committed measurement artifact). The bytes are on disk and usable; what is not established is
+#   3  staged and hashed, but at least one id could not be VERIFIED against something that DOES
+#      exist and should have agreed (no framework checkout, no revision constant in the adapter, an
+#      artifact that did not parse, an artifact recording no id in the shape this reads). A
+#      measurement artifact that is simply NOT WRITTEN YET is exit 0 instead: it is this job's own
+#      precondition, since the measurements that write it need the weights staged here, so treating
+#      it as a fault made a correct first run unable to exit 0 at all.
+#      The bytes are on disk and usable; what is not established is
 #      that they are the right bytes. The manifest is still written with `staged_qualified: false`
 #      and the reasons, because "we tried and this is what came out" is a record. READ A 3 AS
 #      "STAGED, NOT VERIFIED" -- not as a failed download, and not as permission to skip the
@@ -904,10 +908,47 @@ print(f"\n    {sum(len(r['files']) for r in records)} files, {grand_total/1e9:.2
 PY_MANIFEST
 
 echo
+# EXPECTED-ABSENT vs GENUINELY-UNVERIFIABLE, and why the difference is worth code.
+#
+# The measurement artifacts this job wants to check its ids against are PRODUCED BY MEASUREMENTS
+# THAT NEED THESE WEIGHTS. On a first staging run they cannot exist, so the original rule -- any
+# unverified reason means exit 3 -- made a correct first run unable to exit 0 BY CONSTRUCTION.
+# Job 189453 is the proof: 4.8 GB staged, manifest written, every id and revision agreed against
+# the adapter, and Slurm recorded FAILED.
+#
+# That is worse than untidy. An exit code that is always the same carries no information, and a
+# job that reports failure for doing exactly the right thing is how an operator learns to stop
+# reading its exit code -- the same reasoning that made the id-vs-artifact comparison FATAL rather
+# than advisory a few hundred lines up.
+#
+# So absence of a not-yet-written artifact is a LIFECYCLE STATE and exits 0 with the reason
+# recorded; anything else -- an artifact that exists and did not parse, that records no id in the
+# shape this reads, a missing framework checkout, an adapter with no revision constant -- is a real
+# gap in the verification and still exits 3. `staged_qualified` stays FALSE in both cases, because
+# it says the ids were verified and in neither case were they.
+EXPECTED_ABSENT=0
+GENUINE_GAPS=()
+for reason in ${UNVERIFIED[@]+"${UNVERIFIED[@]}"}; do
+  if [[ "${reason}" == *"is not committed yet"* ]]; then
+    EXPECTED_ABSENT=$((EXPECTED_ABSENT + 1))
+  else
+    GENUINE_GAPS+=("${reason}")
+  fi
+done
+
 if [[ ${#UNVERIFIED[@]} -eq 0 ]]; then
   echo "=== all three checkpoints staged, and every id this job can check agreed."
   echo "===   GEOM_TOL and EST_DRIFT_P95 can now be measured with the SAME segmenter, which is"
   echo "===   what PR-08 §4 step 2 requires and what §6 subtracts."
+  exit 0
+fi
+if [[ ${#GENUINE_GAPS[@]} -eq 0 ]]; then
+  echo "=== STAGED — exit 0. The bytes are on disk and the manifest describes them."
+  echo "===   ${EXPECTED_ABSENT} id check(s) could not run because the measurement artifact does not"
+  echo "===   exist yet. That is this job's own precondition, not a fault: the measurements that"
+  echo "===   write those artifacts need the weights this job just staged. Rerun AFTER they land"
+  echo "===   and the same checks become real."
+  echo "===   staged_qualified is FALSE in the manifest regardless — the ids are not yet verified."
   exit 0
 fi
 echo "=== STAGED, NOT VERIFIED — exit 3. The bytes are on disk and the manifest describes them."
