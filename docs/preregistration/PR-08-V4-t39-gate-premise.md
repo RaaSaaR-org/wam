@@ -3,12 +3,13 @@
 **Rule `T40_RULE_V4`. Drafted 2026-08-22, before any clip is generated, before any weight is
 trained, and before any job is submitted. Nothing has been generated; no clip exists.**
 
-> ## THIS DOCUMENT IS NOT IN FORCE.
-> It is a **proposal for the project owner's signature**. The determination in §7 is **unsigned**,
-> and until it is signed by a named person on a dated line, nothing in this document decides
-> anything, licenses anything, or closes anything. No agent may treat an unsigned V4 as a rule, and
-> no agent may sign it. Where this document says "registers", read "proposes to register, on
-> signature."
+> ## THIS DOCUMENT IS IN FORCE AS OF 2026-08-22.
+> The determination in §7 was **signed by the project owner on 2026-08-22** — see the note in that
+> section on how it was recorded. Before that date it was a proposal, and the rule it carried
+> decided nothing. **What it determines is narrow: that `§8` item 7 is closed on `VERDICT N`. It
+> opens nothing** — `T40_RULE_V1` §1 binds in full, and §8 items 2, 3 and 4 were open when it was
+> signed. No agent may read a signed V4 as licensing generation, training, or any statement of a
+> result.
 
 This document sits **alongside**
 [`PR-08-photoreal-augmentation.md`](PR-08-photoreal-augmentation.md) (`T40_RULE_V1`),
@@ -342,7 +343,7 @@ script hashes what it is given and cannot tell them apart.
 
 ---
 
-## 7. Determination — **UNSIGNED**
+## 7. Determination — **SIGNED 2026-08-22**
 
 **Proposed determination.**
 
@@ -361,19 +362,30 @@ script hashes what it is given and cannot tell them apart.
 > L4 gate.
 
 **Signature.** This document takes effect only when the line below is completed by the project
-owner. **It is not signed. No agent may sign it, and no agent may act as though it were signed.**
+owner. **No agent may sign it, and no agent may act as though it were signed.**
 
 ```
-Project owner: ______________________________   Date: ____________
+Project owner: huhn.dev@gmail.com               Date: 2026-08-22
 
-Determination:   [ ] signed as proposed
+Determination:   [x] signed as proposed
                  [ ] signed with the amendments noted below
                  [ ] declined — item 7 reverts to OPEN and PR-08 stays shut
 
 Amendments / notes:
 
+  The determination was made by the project owner in a Claude Code session on
+  2026-08-22, in answer to the question §4 puts, after being shown §4's
+  recommendation and the alternative. The line above was TRANSCRIBED by the
+  session, not signed by it: the deciding act was the owner's, the keystrokes
+  were not. The account identity is the one this repository has for the owner;
+  if the owner wants their own name on this line, replacing it is a one-word
+  edit and does not reopen the determination.
 
-
+  Nothing about the scope in §5 was varied. In particular the owner did not
+  license generation, did not license any training run, and made no
+  determination about docs/benchmark.md's L4 gate — §8 items 2, 3 and 4 were
+  open when this was signed and item 2 was still under discussion in the same
+  session.
 ```
 
 ---
