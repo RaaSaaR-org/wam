@@ -174,11 +174,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import importlib.util
 import json
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -1012,7 +1013,188 @@ def episode_centroids_from_masks(mask_dir: Path, min_area: int) -> tuple[list[tu
     return cents, (int(w), int(h))
 
 
-def episode_centroids_from_video(clip: Path, method: MaskMethod, min_area: int, max_frames: int) -> tuple[list[tuple[float, float] | None], tuple[int, int], float]:
+# -- decoders ------------------------------------------------------------------------------------
+#
+# A CORPUS IS ONLY READABLE BY THE DECODER THAT WILL ACTUALLY READ IT, and until 2026-08-22 this
+# module had exactly one and never said so. cv2 was not a choice here, it was an assumption.
+#
+# Job 189585 -- the first cluster run of this script -- decoded ZERO frames of the PR-08 corpus:
+#
+#     [av1 @ ...] Missing Sequence Header.
+#     FATAL: episode_000000.mp4 opened but decoded no frames
+#
+# The corpus is AV1 (its manifest says so: codecs ["av1"], materialized "copy") and the cv2 4.11.0
+# in the generator's own venv is built against an avcodec with no AV1 decoder. cv2.VideoCapture
+# does not raise on that. It opens the file, reports 590 frames, 30 fps and 640x480 off the
+# container header, and then fails every read -- which is a corpus that looks measured and is not.
+# scripts/verify_clip_decode.py exists because job 186357 lost a GPU hour and 372 captions to the
+# identical shape on a sibling corpus, and the same trap was still armed here.
+#
+# Measured on the cluster (job 189586, runs/pr08-geom-tol/CLIP_DECODE_PROBE.json), in the venv that
+# matters: pyav decodes it via libdav1d, imageio and torchvision decode it, decord fails, and there
+# is no ffmpeg on PATH to transcode with even if transcoding were the right answer. It is not
+# obviously the right answer: Cosmos-Transfer2.5 is handed the PATH and decodes it itself, so a
+# re-encoded copy would put a lossy transcode between the tolerance and the pixels the generator
+# sees -- at a scale of a fraction of a pixel, which is the unit GEOM_TOL is denominated in.
+# Reading the same bytes with a working decoder leaves the evidence alone.
+#
+# BGR, NOT RGB, AND NOT BY ACCIDENT. cv2 yields BGR and sam2_mask_via() flips it once with
+# frame[:, :, ::-1] because the adapter contract is segment(rgb). Every decoder here therefore
+# yields BGR too. A decoder that handed back RGB would not crash -- GroundingDINO would ground
+# "apple" on channel-swapped pixels in a world where red is blue, and GEOM_TOL would become the
+# median displacement of whatever that found.
+#
+# WHICH DECODER RAN IS PROVENANCE and goes into the artifact beside mask_method, for the same
+# reason: two numbers produced by two different readers of the same file are not obviously the same
+# quantity, and the artifact is the only place that can say which one produced this one.
+
+
+@dataclass(frozen=True)
+class Decoder:
+    """One way of turning a clip into BGR frames, named and versioned for the artifact."""
+
+    name: str
+    version: str
+    #: clip -> (iterator of BGR uint8 frames, fps). The iterator is lazy on purpose: a 749-frame
+    #: episode held whole is 690 MB, and this module only ever needs one frame at a time.
+    open_fn: Callable[[Path], tuple[Any, float]]
+    note: str = ""
+
+
+def _module_version(module: str) -> str:
+    """Version string, or a marker saying it is not installed. Never raises: an absent decoder is a
+    fact the artifact should be able to state, not a reason this module fails to import."""
+    try:
+        mod = importlib.import_module(module)
+    except Exception:  # noqa: BLE001 - absent, or broken on import; both are "not usable"
+        return "<not importable>"
+    return str(getattr(mod, "__version__", "<no __version__>"))
+
+
+def _cv2_open(clip: Path) -> tuple[Any, float]:
+    import cv2
+
+    cap = cv2.VideoCapture(str(clip))
+    if not cap.isOpened():
+        raise MethodUnavailable(f"FATAL: cv2 could not open {clip}.")
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+
+    def frames():
+        try:
+            while True:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    return
+                yield frame
+        finally:
+            cap.release()
+
+    return frames(), fps
+
+
+def _pyav_open(clip: Path) -> tuple[Any, float]:
+    import av
+
+    container = av.open(str(clip))
+    try:
+        stream = container.streams.video[0]
+    except IndexError as exc:
+        container.close()
+        raise MethodUnavailable(f"FATAL: {clip} carries no video stream.") from exc
+    rate = stream.average_rate or stream.guessed_rate
+    fps = float(rate) if rate else 0.0
+
+    def frames():
+        try:
+            for frame in container.decode(video=0):
+                # bgr24 is cv2's order, deliberately -- see the seam header. to_ndarray does the
+                # conversion in libswscale rather than by a numpy view, so the array is contiguous
+                # and uint8 exactly as VideoCapture would have returned it.
+                yield frame.to_ndarray(format="bgr24")
+        finally:
+            container.close()
+
+    return frames(), fps
+
+
+DECODERS: dict[str, Decoder] = {
+    "cv2": Decoder(
+        name="cv2",
+        version=_module_version("cv2"),
+        open_fn=_cv2_open,
+        note="cv2.VideoCapture. Cannot decode AV1 in the Cosmos-Transfer2.5 venv (job 189586).",
+    ),
+    "pyav": Decoder(
+        name="pyav",
+        version=_module_version("av"),
+        open_fn=_pyav_open,
+        note="av.open + libswscale to bgr24. Decodes the PR-08 AV1 corpus via libdav1d.",
+    ),
+}
+
+
+def decoder_probe(decoder: Decoder, clip: Path) -> tuple[bool, str]:
+    """Can this decoder pull ONE frame out of this clip? Returns (ok, detail).
+
+    One frame is the whole question. The failure this exists for is not a corrupt file -- it is a
+    decoder that opens the container, believes the header, and returns nothing, so the distinction
+    that matters is between zero frames and one.
+    """
+    try:
+        frames, _ = decoder.open_fn(clip)
+        for frame in frames:
+            arr = np.asarray(frame)
+            return True, f"decoded a {arr.shape} frame"
+        return False, "opened the container and decoded no frames"
+    except MethodUnavailable as exc:
+        return False, _first_line(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def resolve_decoder(name: str, probe_clip: Path) -> Decoder:
+    """Pick the decoder, and never pick one that cannot read this corpus.
+
+    ``auto`` is not "whatever imports". It PROBES, in order, and takes the first that actually
+    returns a frame from the corpus being measured -- because the failure mode is silent and a
+    decoder that imports cleanly is not evidence of anything. The choice and the reason both go
+    into the artifact.
+    """
+    if name != "auto":
+        decoder = DECODERS[name]
+        ok, detail = decoder_probe(decoder, probe_clip)
+        if not ok:
+            raise MethodUnavailable(
+                f"FATAL: --decoder {name} {detail} on {probe_clip.name}.\n"
+                f"       {decoder.note}\n"
+                "       This is the failure that reports 590 frames off the container header and "
+                "measures none of\n"
+                "       them. Try --decoder auto, which probes every decoder against this corpus "
+                "before choosing."
+            )
+        return replace(decoder, note=f"{decoder.note} Probed on {probe_clip.name}: {detail}.")
+
+    tried: list[str] = []
+    for candidate in DECODERS.values():
+        ok, detail = decoder_probe(candidate, probe_clip)
+        tried.append(f"{candidate.name} ({candidate.version}): {detail}")
+        if ok:
+            return replace(
+                candidate,
+                note=(f"{candidate.note} Selected by --decoder auto after probing "
+                      f"{probe_clip.name}; tried in order: " + "; ".join(tried) + "."),
+            )
+    raise MethodUnavailable(
+        f"FATAL: no decoder known to this script could read {probe_clip}.\n"
+        + "".join(f"       {line}\n" for line in tried)
+        + "       The container parses and no codec here decodes it. Nothing was measured, which "
+        "is not a pass.\n"
+        "       scripts/verify_clip_decode.py reports the same thing per clip over a whole corpus."
+    )
+
+
+def episode_centroids_from_video(clip: Path, method: MaskMethod, min_area: int, max_frames: int,
+                                decoder: Decoder) -> tuple[list[tuple[float, float] | None], tuple[int, int], float]:
     # No default and no name lookup, and checked before a single frame is decoded. A video method
     # with no segmenter attached is a bug in resolve_method; the one thing that must not happen is
     # for it to be papered over with the red-pixel heuristic while the artifact still carries the
@@ -1022,36 +1204,30 @@ def episode_centroids_from_video(clip: Path, method: MaskMethod, min_area: int, 
             f"FATAL: mask method {method.name!r} decodes video but carries no segmenter "
             "(mask_fn is None). resolve_method must attach one; nothing here guesses which."
         )
-    import cv2
-
-    cap = cv2.VideoCapture(str(clip))
-    try:
-        if not cap.isOpened():
-            raise MethodUnavailable(f"FATAL: cv2 could not open {clip}.")
-        fps = float(cap.get(cv2.CAP_PROP_FPS))
-        cents: list[tuple[float, float] | None] = []
-        size: tuple[int, int] | None = None
-        while max_frames <= 0 or len(cents) < max_frames:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                break
-            h, w = frame.shape[:2]
-            if size is None:
-                size = (int(w), int(h))
-            elif size != (int(w), int(h)):
-                raise MethodUnavailable(f"FATAL: {clip} changes frame geometry mid-clip.")
-            cents.append(
-                centroid_of_mask(method.mask_fn(frame, method), largest_component=True,
-                                 min_area=min_area)
-            )
+    frames, fps = decoder.open_fn(clip)
+    cents: list[tuple[float, float] | None] = []
+    size: tuple[int, int] | None = None
+    for frame in frames:
+        if 0 < max_frames <= len(cents):
+            # The generator holds an open container; abandoning it mid-iteration is what its
+            # `finally` is for. Closing here explicitly would be closing it twice.
+            break
+        h, w = frame.shape[:2]
         if size is None:
-            raise MethodUnavailable(
-                f"FATAL: {clip} opened but decoded no frames — the container parses and the codec "
-                "does not. See scripts/verify_clip_decode.py."
-            )
-        return cents, size, fps
-    finally:
-        cap.release()
+            size = (int(w), int(h))
+        elif size != (int(w), int(h)):
+            raise MethodUnavailable(f"FATAL: {clip} changes frame geometry mid-clip.")
+        cents.append(
+            centroid_of_mask(method.mask_fn(frame, method), largest_component=True,
+                             min_area=min_area)
+        )
+    if size is None:
+        raise MethodUnavailable(
+            f"FATAL: {clip} opened but decoded no frames with {decoder.name} "
+            f"{decoder.version} — the container parses and the codec does not. "
+            "See scripts/verify_clip_decode.py, and --decoder auto, which probes before choosing."
+        )
+    return cents, size, fps
 
 
 # -- CLI -----------------------------------------------------------------------------------------
@@ -1163,6 +1339,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--max-frames", type=int, default=0,
                     help="decode at most N frames per clip (0 = all). Partial in the same way as "
                          "--limit, and disqualifies the run from the gate for the same reason")
+    ap.add_argument("--decoder", choices=("auto", *DECODERS), default="auto",
+                    help="which decoder turns clips into frames (default: %(default)s). 'auto' "
+                         "PROBES each one against this corpus and takes the first that actually "
+                         "returns a frame — a decoder that imports is not evidence that it can "
+                         "read AV1, and the failure is silent (job 189585 read 590 frames off a "
+                         "container header and decoded none of them). The choice and the probe "
+                         "results are recorded in the artifact")
     ap.add_argument("--min-area-px", type=int, default=40,
                     help="masks smaller than this count as 'object not visible' (default: "
                          "%(default)s)")
@@ -1248,7 +1431,19 @@ def main(argv: list[str] | None = None) -> int:
     n_frames = 0
     n_dropped = 0
 
+    # Resolved ONCE, against a clip of the corpus actually being measured, and before any frame is
+    # decoded — so a corpus this machine cannot read fails in a second rather than after the first
+    # episode of four hundred. The masks path has no decoder and asks for none.
+    decoder: Decoder | None = None
     try:
+        if method.frames_from != "masks":
+            probe_clip = next((ep.clip for ep in episodes if ep.clip is not None), None)
+            if probe_clip is None:
+                raise MethodUnavailable(
+                    "FATAL: this method decodes video and not one episode carries a clip path."
+                )
+            decoder = resolve_decoder(args.decoder, probe_clip)
+            print(f"decoder     {decoder.name} {decoder.version}", file=sys.stderr)
         for ep in episodes:
             if method.frames_from == "masks":
                 mask_dir = args.masks / ep.key
@@ -1258,8 +1453,9 @@ def main(argv: list[str] | None = None) -> int:
                 cents, size = episode_centroids_from_masks(mask_dir, args.min_area_px)
                 fps = 0.0
             else:
+                assert decoder is not None  # resolved above whenever frames_from != "masks"
                 cents, size, fps = episode_centroids_from_video(
-                    ep.clip, method, args.min_area_px, args.max_frames
+                    ep.clip, method, args.min_area_px, args.max_frames, decoder
                 )
             if geometry is None:
                 geometry = size
@@ -1434,6 +1630,17 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.step_frames}. PR-08 §6 does not define 'step'; this is the choice made here "
             "and GEOM_TOL scales with it."
         ),
+
+        # PROVENANCE, beside mask_method and for the identical reason. Two numbers produced by two
+        # different readers of the same bytes are not obviously the same quantity. It is NOT part of
+        # the cross-check measure_est_drift.py runs: that side's frames come out of a renderer, so a
+        # decoder field there would be a field about nothing.
+        "decoder": ({
+            "name": decoder.name,
+            "version": decoder.version,
+            "selected": args.decoder,
+            "note": decoder.note,
+        } if decoder is not None else None),
 
         "mask_method": {
             "name": method.name,

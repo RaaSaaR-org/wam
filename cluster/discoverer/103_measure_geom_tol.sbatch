@@ -43,6 +43,17 @@
 # estimators.apple_sam2 on this cluster, so a crash in it is a finding worth 20 minutes rather than
 # a discovery made four hours into the full run.
 #
+# THE DECODER IS LEFT ON auto, AND THAT IS NOT THE SAME KIND OF auto AS --method's.
+# 189585, the first run of this job, decoded zero frames: the corpus is AV1 and the cv2 in 98's venv
+# has no AV1 decoder, and VideoCapture does not raise about it -- it reports 590 frames off the
+# container header and reads none of them (job 189586 measured which decoders here can: pyav via
+# libdav1d, imageio, torchvision; not cv2, not decord). `--decoder auto` PROBES each decoder against
+# a clip of this corpus before choosing one and writes the choice and the whole probe trail into the
+# artifact. That is stronger than a flag typed at submission time, which records what the operator
+# believed rather than what read the pixels -- and it is why the decoder is left to auto while the
+# segmenter is typed: the segmenter is a pre-registered commitment, the decoder is a fact about the
+# machine that the artifact has to report.
+#
 # WHY --method sam2 IS TYPED OUT RATHER THAN LEFT TO auto.
 # `auto` would also accept a --masks directory or fall through to whatever adapter happens to be
 # importable. PR-08 §4 step 2 requires GEOM_TOL and EST_DRIFT_P95 to come from THE SAME segmenter,

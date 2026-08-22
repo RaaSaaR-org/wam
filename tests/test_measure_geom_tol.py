@@ -623,14 +623,19 @@ def bgr_frames(corners: list[tuple[int, int] | None], canvas: int = CANVAS) -> l
 
 
 def install_video_frames(monkeypatch, frames: dict[str, list[np.ndarray]]) -> None:
-    """Replace cv2 decoding, and ONLY cv2 decoding.
+    """Replace decoding, and ONLY decoding.
 
     The method's own segmenter, the centroid arithmetic, the largest-component rule and the
     drop-and-count of invisible objects all stay real. The single thing a machine with no codecs and
     no corpus cannot do is turn an .mp4 into pixels, so that is the single thing stubbed.
+
+    ``resolve_decoder`` is stubbed alongside it because it is now part of decoding: it PROBES the
+    real file before choosing, and these fixtures are empty .mp4 stubs by design. Leaving it real
+    here would mean every test in this file asserts, first and mostly, that the machine running it
+    has a codec — which is a fact about the machine and not about this script.
     """
 
-    def fake(clip, method, min_area, max_frames):
+    def fake(clip, method, min_area, max_frames, decoder=None):
         stack = frames[clip.stem]
         if max_frames > 0:
             stack = stack[:max_frames]
@@ -643,6 +648,11 @@ def install_video_frames(monkeypatch, frames: dict[str, list[np.ndarray]]) -> No
         return cents, (int(w), int(h)), 30.0
 
     monkeypatch.setattr(mgt, "episode_centroids_from_video", fake)
+    monkeypatch.setattr(mgt, "resolve_decoder", lambda name, probe_clip: mgt.Decoder(
+        name="stub", version="0",
+        open_fn=lambda clip: (iter(frames[clip.stem]), 30.0),
+        note=f"test stub; --decoder was {name!r}",
+    ))
 
 
 def test_the_adapter_is_never_imported_at_module_scope() -> None:
@@ -884,7 +894,8 @@ def test_a_video_method_with_no_segmenter_attached_never_falls_back(tmp_path) ->
     clip = tmp_path / "ep0.mp4"
     clip.write_bytes(b"")
     with pytest.raises(mgt.MethodUnavailable, match="carries no segmenter"):
-        mgt.episode_centroids_from_video(clip, method, min_area=40, max_frames=0)
+        mgt.episode_centroids_from_video(clip, method, min_area=40, max_frames=0,
+                                         decoder=mgt.DECODERS["cv2"])
 
 
 def test_the_heuristic_still_carries_its_own_segmenter(tmp_path) -> None:
@@ -1315,3 +1326,106 @@ def test_the_adapter_still_declares_the_two_things_the_sam2_gate_reads() -> None
         f"{mgt.SAM2_ADAPTER_SPEC} no longer declares {mgt.ADAPTER_DOWNLOAD_ATTR}; "
         "--method sam2 would refuse the authorised-download path it is meant to allow through")
     assert "available" in functions
+
+
+# -- the decoder is a choice, and it is now made against the corpus rather than assumed -----------
+#
+# Job 189585, the first cluster run of this script, decoded ZERO frames of the PR-08 corpus: it is
+# AV1, and the cv2 in the generator's own venv has no AV1 decoder. VideoCapture did not raise. It
+# opened the file, reported 590 frames off the container header, and failed every read. That is the
+# shape that already cost this project job 186357 (372 clips captioned, 0 captions written), and
+# these tests exist so the third time is caught here instead of on a GPU.
+
+
+def _dead_decoder(name: str = "dead") -> "mgt.Decoder":
+    """Opens fine, decodes nothing. cv2-on-AV1, reduced to its essentials."""
+    return mgt.Decoder(name=name, version="0", open_fn=lambda clip: (iter(()), 30.0),
+                       note="decodes nothing")
+
+
+def _live_decoder(name: str = "live", frames: int = 3) -> "mgt.Decoder":
+    stack = [np.zeros((4, 6, 3), dtype=np.uint8) for _ in range(frames)]
+    return mgt.Decoder(name=name, version="1", open_fn=lambda clip: (iter(stack), 30.0),
+                       note="decodes")
+
+
+def test_a_named_decoder_that_decodes_nothing_is_refused_rather_than_used(tmp_path, monkeypatch) -> None:
+    """The failure is silent at the decoder, so it has to be loud here.
+
+    An empty iterator is indistinguishable from a short clip unless something asks for one frame and
+    checks. Nothing downstream can tell them apart afterwards: zero frames yields zero steps yields
+    coverage 0.0, which reads as a fact about the corpus rather than about the reader.
+    """
+    monkeypatch.setitem(mgt.DECODERS, "cv2", _dead_decoder("cv2"))
+    clip = tmp_path / "ep0.mp4"
+    clip.write_bytes(b"")
+    with pytest.raises(mgt.MethodUnavailable) as exc:
+        mgt.resolve_decoder("cv2", clip)
+    assert "decoded no frames" in str(exc.value)
+    assert "ep0.mp4" in str(exc.value)
+
+
+def test_auto_probes_and_takes_the_first_decoder_that_returns_a_frame(tmp_path, monkeypatch) -> None:
+    """'auto' is not 'whatever imports'. An importable decoder is not evidence it can read AV1."""
+    monkeypatch.setattr(mgt, "DECODERS", {"cv2": _dead_decoder("cv2"), "pyav": _live_decoder("pyav")})
+    clip = tmp_path / "ep0.mp4"
+    clip.write_bytes(b"")
+    chosen = mgt.resolve_decoder("auto", clip)
+    assert chosen.name == "pyav"
+    # The one that failed is named in the note, not quietly dropped: the artifact has to be able to
+    # say the corpus was unreadable by the decoder a reader would assume was used.
+    assert "cv2" in chosen.note and "decoded no frames" in chosen.note
+
+
+def test_auto_refuses_when_nothing_can_read_the_corpus(tmp_path, monkeypatch) -> None:
+    """No decoder is not "use the first one anyway"; it is nothing was measured."""
+    monkeypatch.setattr(mgt, "DECODERS", {"cv2": _dead_decoder("cv2"), "pyav": _dead_decoder("pyav")})
+    clip = tmp_path / "ep0.mp4"
+    clip.write_bytes(b"")
+    with pytest.raises(mgt.MethodUnavailable) as exc:
+        mgt.resolve_decoder("auto", clip)
+    assert "not a pass" in str(exc.value)
+    assert "cv2" in str(exc.value) and "pyav" in str(exc.value)
+
+
+def test_the_artifact_records_which_decoder_read_the_pixels(tmp_path, monkeypatch) -> None:
+    """Provenance, beside mask_method and for the same reason: two readers of the same bytes are not
+    obviously producing the same quantity, and the artifact is the only place that can say which."""
+    install_adapter(monkeypatch)
+    corpus, _ = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 6)})
+    install_video_frames(monkeypatch, {"ep0": bgr_frames(walk((10, 10), (2, 0), 6))})
+    out = tmp_path / "geom_tol.json"
+    assert run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out)]) == mgt.EXIT_OK
+    rec = json.loads(out.read_text())
+    assert rec["decoder"]["name"] == "stub"
+    assert rec["decoder"]["selected"] == "auto"
+
+
+def test_the_pyav_reader_yields_bgr_because_everything_downstream_assumes_cv2s_order(tmp_path) -> None:
+    """A real clip, encoded and read back, checked on a colour that BGR and RGB disagree about.
+
+    sam2_mask_via flips once with frame[:, :, ::-1] on the way to the adapter's segment(rgb). A
+    decoder handing back RGB would not crash — GroundingDINO would ground "apple" on a frame where
+    red is blue, and GEOM_TOL would become the median displacement of whatever that found. The
+    channel order is therefore a property each decoder owes, not a detail.
+    """
+    av = pytest.importorskip("av")
+    clip = tmp_path / "red.mp4"
+    # Pure red in RGB. In BGR that is (0, 0, 255); in RGB it is (255, 0, 0) — the two orders cannot
+    # both be right and a grey fixture could not tell.
+    rgb = np.zeros((16, 16, 3), dtype=np.uint8)
+    rgb[:, :, 0] = 255
+    with av.open(str(clip), mode="w") as container:
+        stream = container.add_stream("libx264", rate=30)
+        stream.width, stream.height, stream.pix_fmt = 16, 16, "yuv420p"
+        for _ in range(3):
+            container.mux(stream.encode(av.VideoFrame.from_ndarray(rgb, format="rgb24")))
+        container.mux(stream.encode())
+
+    frames, fps = mgt.DECODERS["pyav"].open_fn(clip)
+    first = np.asarray(next(iter(frames)))
+    assert first.dtype == np.uint8 and first.shape == (16, 16, 3)
+    b, g, r = (int(v) for v in first[8, 8])
+    # Lossy codec: assert the ordering, not the exact values.
+    assert r > 200 and b < 60 and g < 60, f"expected BGR of pure red, got (b,g,r)=({b},{g},{r})"
+    assert fps == pytest.approx(30.0)
