@@ -606,6 +606,50 @@ measurement rather than from 103's inherited request: `--mem=24G --cpus-per-task
 **7.3 billing-min/min against 103's 49.9**, and still 5x job 189588's measured 4.75 GiB peak.
 
 
+**2026-08-22, night — the cluster audit reproduced the plate masks, and the sheets were looked at.**
+
+Job **189637** ran `audit_apple_masks.py` on the cluster over a different sample from the local CPU
+run: **382 frames, 24 episodes, 36 contact sheets, 16 flagged** (`plate_overlap` 12, `low_score` 8,
+`centroid_jump` 3, `mask_area_below_band` 3). It cost 6 minutes at `--mem=24G --cpus-per-task=8`,
+**7.3 billing-min/min against 103's 49.9**. Summary numbers:
+
+    n_frames_retry_fired  0   n_frames_retry_recovered  0
+    no-detection          0
+    detection score       min 0.167  p05 0.362  median 0.829  max 0.917  (n=382)
+    mask area px          min 471  median 6185  p95 8194  max 31151
+
+**The retry fired zero times on a sample four times larger than the local one.** That closes the
+question blocker 2 opened: the wrong-object masks are bought by the **primary** `BOX_THRESHOLD`
+= 0.15, not by the `(0.10, 0.10)` retry the blocker names. The blocker's hazard is real and its
+attribution is wrong, and both runs agree.
+
+**The contact sheets were pulled back and read** (`runs/pr08-mask-audit/sheets/`, 22 MB, gitignored;
+`sync.sh --pull` takes only `.json/.jsonl/.md/.txt`, so the overlays need `scp`). Two things the
+JSON did not show:
+
+* **The segmenter oscillates within one episode.** `episode_000094`: f00149 plate → f00150 apple
+  (471 px) → f00151 apple (670 px) → f00152 plate, and the panel records the consequence — a
+  **245.9 px step**. So the corruption is not only near-zero displacements from a stationary plate
+  pulling a median down; it is **large spurious jumps at every switch**, which land in a p95.
+* **f00152 shows the apple plainly visible** — 877 warm px, outlined by the colour heuristic — with
+  the mask on the plate at score 0.257. **This was never only an occlusion problem.**
+
+The healthy frames are not marginal: the grasp sheets are tight masks on the fruit, IoU 0.97–0.98,
+scores 0.77–0.85, plate overlap 0.00, adjacent steps 0.1–2.3 px. This is a good estimator with one
+specific failure, which is why the fix is a validity filter and not a different segmenter.
+
+**WHO LOOKED, AND WHAT THAT IS WORTH.** These observations are a model's. `human_review.looked_at`
+in `MASK_AUDIT.json` is **`false` and stays false** — a model checking masks produced by a pipeline
+a model wired up is a correlated observer, capable of reproducing the same misreading on both sides.
+The sheets exist precisely so a person can spend five minutes and settle it; `flagged-00.png` and
+`flagged-01.png` are the two to read first.
+
+**Blocker 3 gained evidence against its own premise.** It argues that propagation's characteristic
+failure — drifting off the object and staying off for a run of frames — is invisible to a per-frame
+estimator "that recovers on the next frame". The plate lock is a run of **~35 consecutive frames**
+in a **per-frame** estimator. The failure mode it attributes to propagation occurs without it.
+
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above
