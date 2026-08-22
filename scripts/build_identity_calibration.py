@@ -185,11 +185,17 @@ AXIS_SLOTS: dict[str, tuple[str, ...]] = {
 
 COMMITTED_SLOTS: dict[str, str] = {
     "apple_long": "red and yellow apple with a glossy surface and a visible stem",
-    "table_long": "a black cloth covering a flat surface",
+    # 2026-08-22: "a black cloth" -> "a dark grey cloth", and "the black background" -> "the dark
+    # grey background", following the corrected [identity_style].prompt. These slots are not an
+    # independent description of the corpus — check_template proves them equal to the committed
+    # string byte for byte, precisely so a calibration item can never be a substitution into a
+    # paraphrase. See docs/t040-identity-prompt-correction.md for why the committed string moved:
+    # the cloth measures L* 28.0-36.7 across all 402 episodes and black sits near L* 5.
+    "table_long": "a dark grey cloth covering a flat surface",
     "plate_long": "A white, round plate",
     "lighting_long": ("Even, bright, top-down lighting with minimal shadows; the lighting "
                       "highlights the objects without creating harsh contrasts"),
-    "background_short": "the black background",
+    "background_short": "the dark grey background",
     "plate_short": "the white plate",
     "apple_short": "red/yellow apple",
     "plate_short_cap": "The white plate",

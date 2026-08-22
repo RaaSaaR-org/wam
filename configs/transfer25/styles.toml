@@ -350,7 +350,7 @@ eval = [7011, 7012, 7013, 7014, 7015]
 # =============================================================================================
 [[blocking_todos]]
 id = "T40-TODO-01-identity-prompt-provenance"
-status = "OPEN"
+status = "CLOSED"
 blocks = "STYLE_SET=identity  (arm C, the generator-fingerprint control)"
 rule_ref = "PR-08 §5 — arm C's style prompt *is* the source's own appearance"
 claim = """[identity_style].prompt is assembled from a T-041 machine caption of ONE clip,
@@ -369,6 +369,136 @@ one against a random sample of episodes spanning the corpus and record the sampl
 and the disagreements. If the appearance is not constant across the 402, that is the finding and
 arm C needs a per-episode identity prompt rather than one shared string."""
 evidence_required = "the sampled episode ids, the sample size, and the per-episode verdicts"
+resolution = """CLOSED 2026-08-22. The suspicion was right and the diagnosis was wrong: the
+caption is not a bad generalisation from episode_000135, it is wrong about episode_000135. A census
+of ALL 402 episodes measured per-episode mean cloth RGB spanning (66.1, 65.9, 65.0) to
+(86.4, 86.5, 85.8) -- L* 28.0-36.7, largest in-episode R/G/B spread 3.07 counts, i.e. neutral grey.
+Black cloth sits near L* 5. Not one of the 402 is close, and episode_000135 itself is
+(88.2, 87.9, 89.0).
+
+The `action` field's either/or was answered both ways. Sample-check: judged blind by a calibrated
+instrument, the committed wording drew match 0 / mismatch 40, every row naming the cloth. Re-derive:
+the census then fixed the two words, and the corrected wording drew match 40 / mismatch 0 on the
+SAME forty frames with DISJOINT judges in the same session, so this is not judges getting friendlier.
+
+`action` also asked what to do if the appearance is not constant across the 402 -- arm C would need a
+per-episode prompt rather than one shared string. It is constant on every axis the prompt names:
+cloth in a narrow neutral band, warm apple mask present 402/402 with zero green pixels in any
+episode, bright plate region present 402/402, frame median luminance 79.6-95.0 corpus-wide. ONE
+SHARED STRING IS THEREFORE CORRECT, and no per-episode prompt is needed.
+
+The one genuinely inconstant feature was measured and deliberately EXCLUDED: a pale strip of the
+surface behind the cloth is a full-width band in 370/402 episodes and ABSENT IN 32 (contiguous
+recording runs where the camera sat lower), 3.7% of frame height at the median. Naming it would tell
+an image-conditioned generator to synthesise a surface that is not there in 8% of the corpus -- the
+same class of error being corrected here, in the other direction.
+
+KNOWN AND NOT CLOSED BY THIS. (1) `and a visible stem` is a fourth false specific: the apple is
+rotated so no stalk faces the camera in roughly a quarter of frames. The calibrated protocol did NOT
+reproduce it as a mismatch -- all 40 rows matched, one judge noting "stem turned away from the
+camera" and matching anyway -- so it was left alone rather than edited on an uncalibrated pass.
+(2) Passing the instrument's calibration is necessary and never sufficient: its items are
+manufactured and these forty are natural frames. (3) Every observer in the chain is a model, which
+is a correlated observer to the instrument it judges. Full argument and the raw numbers:
+docs/t040-identity-prompt-correction.md."""
+
+evidence_produced = "2026-08-22"
+evidence_sheet_id = "631a508f337ffbd89ad9ba093cd687f2a87dfed41324aed7359141d372b8537d"
+evidence_gate_qualified = true
+evidence_sample_seed = 40011
+evidence_sample_size = 40
+evidence_sample_scheme = "stratified-systematic/1 \u2014 episode ids sorted, split into sample_size contiguous strata of near-equal size (bounds k*M//N), one episode drawn uniformly at random inside each under sample_seed. Spans the recording order by construction; a fixed stride was rejected because it aliases with any periodicity in that order."
+evidence_frame_rule = "one frame per episode at index round(0.1 * (n_frames - 1)), decoded forward (select=eq(n,IDX)), never seeked. Early rather than middle or late because the apple, the cloth, the background, the lighting and the plate are all unoccluded only before the transfer."
+evidence_sampled_episodes = [
+  "episode_000000",
+  "episode_000015",
+  "episode_000026",
+  "episode_000031",
+  "episode_000047",
+  "episode_000055",
+  "episode_000068",
+  "episode_000079",
+  "episode_000089",
+  "episode_000095",
+  "episode_000109",
+  "episode_000119",
+  "episode_000126",
+  "episode_000133",
+  "episode_000140",
+  "episode_000153",
+  "episode_000165",
+  "episode_000178",
+  "episode_000187",
+  "episode_000192",
+  "episode_000204",
+  "episode_000211",
+  "episode_000228",
+  "episode_000232",
+  "episode_000244",
+  "episode_000256",
+  "episode_000269",
+  "episode_000280",
+  "episode_000289",
+  "episode_000293",
+  "episode_000309",
+  "episode_000312",
+  "episode_000326",
+  "episode_000334",
+  "episode_000349",
+  "episode_000358",
+  "episode_000361",
+  "episode_000373",
+  "episode_000389",
+  "episode_000398",
+]
+evidence_verdict_counts = { match = 40, mismatch = 0, unsure = 0 }
+evidence_verdicts = [
+  "episode_000000 = match",
+  "episode_000015 = match",
+  "episode_000026 = match",
+  "episode_000031 = match",
+  "episode_000047 = match",
+  "episode_000055 = match",
+  "episode_000068 = match",
+  "episode_000079 = match",
+  "episode_000089 = match",
+  "episode_000095 = match",
+  "episode_000109 = match",
+  "episode_000119 = match",
+  "episode_000126 = match",
+  "episode_000133 = match",
+  "episode_000140 = match",
+  "episode_000153 = match",
+  "episode_000165 = match",
+  "episode_000178 = match",
+  "episode_000187 = match",
+  "episode_000192 = match",
+  "episode_000204 = match",
+  "episode_000211 = match",
+  "episode_000228 = match",
+  "episode_000232 = match",
+  "episode_000244 = match",
+  "episode_000256 = match",
+  "episode_000269 = match",
+  "episode_000280 = match",
+  "episode_000289 = match",
+  "episode_000293 = match",
+  "episode_000309 = match",
+  "episode_000312 = match",
+  "episode_000326 = match",
+  "episode_000334 = match",
+  "episode_000349 = match",
+  "episode_000358 = match",
+  "episode_000361 = match",
+  "episode_000373 = match",
+  "episode_000389 = match",
+  "episode_000398 = match",
+]
+evidence_disagreements = [
+]
+evidence_coverage = 1.0000
+# No overall pass is emitted: an inconstant appearance IS the finding (see the TODO's
+# `action`), so whether these counts close this item is the reader's decision.
 closes_by = "editing this file (status = CLOSED, plus the evidence) before the first identity clip"
 
 [hash]
@@ -482,13 +612,32 @@ repeats = 10
 # is the point: with the seeds held identical, the ONLY thing left differing between arm B and arm
 # C is prompt diversity, which is what B − C is supposed to measure.
 apple = "source-red-yellow-glossy"
-table = "source-black-cloth"
-background = "source-black-flat"
+table = "source-dark-grey-cloth"
+background = "source-dark-grey-flat"
 lighting = "source-even-bright-top-down"
-prompt = "A red and yellow apple with a glossy surface and a visible stem, on a black cloth covering a flat surface. A white, round plate. Even, bright, top-down lighting with minimal shadows; the lighting highlights the objects without creating harsh contrasts. Contrast between the black background and the white plate and red/yellow apple. Live-action video, realistic. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
+prompt = "A red and yellow apple with a glossy surface and a visible stem, on a dark grey cloth covering a flat surface. A white, round plate. Even, bright, top-down lighting with minimal shadows; the lighting highlights the objects without creating harsh contrasts. Contrast between the dark grey background and the white plate and red/yellow apple. Live-action video, realistic. The white plate keeps its own appearance. Scene geometry, camera framing and the robot are unchanged."
 
-# The caption fields the prompt above is assembled from, quoted so the assembly is checkable and
-# so the structured-caption path (see `prompt_form`) has the override set already written out.
+# The caption fields the prompt above WAS assembled from, quoted as the PROVENANCE RECORD of what
+# T-041's captioner produced for episode_000135_clip000 — and, since 2026-08-22, no longer an
+# assembly the prompt can be checked against.
+#
+# THE CAPTION IS WRONG ABOUT ITS OWN CLIP, AND THE PROMPT HAS BEEN CORRECTED AWAY FROM IT.
+# A census of all 402 episodes (docs/t040-identity-prompt-correction.md) measured per-episode mean
+# cloth RGB spanning (66.1, 65.9, 65.0) to (86.4, 86.5, 85.8) — L* 28.0-36.7, largest in-episode
+# R/G/B spread 3.07 counts, i.e. neutral grey. Black cloth would sit near L* 5. Not one of the 402
+# is close, and episode_000135 ITSELF is (88.2, 87.9, 89.0). Judged blind by the calibrated
+# instrument, the old wording drew match 0 / mismatch 40 and the corrected wording drew
+# match 40 / mismatch 0 on the SAME forty frames with disjoint judges.
+#
+# LEAVE THESE QUOTES AS THEY ARE. They record what the captioner said, which is what
+# [source].caption_provenance points at; editing them would destroy the evidence that the caption
+# and the corpus disagree. What is no longer true is that `prompt` is their concatenation.
+#
+# NOTE FOR check_style_partition.py's FORBIDDEN_TERMS: its comment excludes the stem "between"
+# solely because this prompt was a verbatim caption quote. It is not one any more — but "between"
+# is still not added, because the corrected prompt carries "Contrast between" and adding the term
+# would reject it. The exemption now rests on a different argument: the clause is pinned by
+# check_structure, and the demonstrated bypass it guarded against is caught twice over.
 [identity_style.source_caption]
 "subjects[0].description" = "A red and yellow apple with a glossy surface and a visible stem."
 "subjects[2].description" = "A white, round plate."

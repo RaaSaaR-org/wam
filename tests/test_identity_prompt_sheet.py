@@ -824,11 +824,21 @@ def test_reads_the_committed_identity_prompt_and_its_provenance():
     assert identity["style_id"] == "identity-source"
     assert identity["repeats"] == 10
     assert "episode_000135_clip000" in identity["caption_provenance"]
-    assert identity["todo_status"] == "OPEN", (
-        "this harness exists to produce evidence for an OPEN TODO; if it has closed, the "
-        "evidence it closed with is what should be read, not regenerated"
-    )
+    # CLOSED 2026-08-22. The original assertion here read `== "OPEN"` with the note that "if it
+    # has closed, the evidence it closed with is what should be read, not regenerated". That note
+    # is still the rule and it is now the thing being enforced: the harness may still be RUN — it
+    # is how the item was closed, and how a future re-check would be done — but a reader wanting
+    # the answer takes it off the committed record, not off a fresh run whose sample seed, judges
+    # and frames would all differ.
+    assert identity["todo_status"] == "CLOSED"
     assert len(identity["partition_content_sha256"]) == 64
+
+    # The committed prompt is the corrected one. Pinned here as well as in
+    # tests/test_style_partition.py because this harness READS it to build a sheet: if the prompt
+    # regressed to the caption's wording, every row of a regenerated sheet would be judged against
+    # a string the corpus contradicts, and the sheet would look exactly as valid as a correct one.
+    assert "dark grey cloth" in identity["prompt"]
+    assert "black" not in identity["prompt"]
 
 
 # ------------------------------------------------------------------------------------------------

@@ -327,13 +327,38 @@ def test_open_blocking_todos_are_reported_but_do_not_fail(doc: dict) -> None:
 
     So an open TODO must not turn the check red: a red check on a file that is correct as
     committed only teaches people to stop running the check. It must still be visible.
+
+    CHANGED 2026-08-22, and the change matters. This used to read the property off the real
+    document, which worked only for as long as the real document happened to have an open item —
+    and the moment T40-TODO-01 closed, the test failed while the behaviour it guards was still
+    correct. A test that goes red because the project made progress is a test that will be deleted
+    rather than read. The property is now exercised against a synthetic OPEN item, so it holds
+    whatever the committed file happens to contain, and the committed file's own state is asserted
+    separately below.
     """
-    lines = csp.check_blocking_todos(doc)
-    open_ids = [t["id"] for t in doc["blocking_todos"] if t["status"] == "OPEN"]
-    assert open_ids, "the identity-prompt provenance item is still open"
-    for todo_id in open_ids:
-        assert any(todo_id in line for line in lines)
+    injected = dict(doc)
+    injected["blocking_todos"] = list(doc["blocking_todos"]) + [{
+        "id": "T40-TODO-99-synthetic",
+        "status": "OPEN",
+        "blocks": "STYLE_SET=synthetic",
+    }]
+    lines = csp.check_blocking_todos(injected)
+    assert any("T40-TODO-99-synthetic" in line for line in lines)
+    assert any("block GENERATION, not this check" in line for line in lines)
     assert csp.main([]) == 0  # reported, not enforced
+
+
+def test_the_committed_document_has_no_open_blocking_todos(doc: dict) -> None:
+    """The committed state, asserted on purpose rather than as a side effect of the test above.
+
+    Every blocking todo blocks a STYLE_SET. This going red means something re-opened an item and
+    a generation submission for that style set will refuse — which is the intended behaviour, but
+    it should be a deliberate edit and not a surprise.
+    """
+    open_ = [t["id"] for t in doc["blocking_todos"] if t["status"] == "OPEN"]
+    assert open_ == [], f"open blocking todos: {open_}"
+    lines = csp.check_blocking_todos(doc)
+    assert any("0 open" in line for line in lines)
 
 
 def test_identity_prompt_provenance_is_a_record_not_prose(doc: dict) -> None:
@@ -346,9 +371,39 @@ def test_identity_prompt_provenance_is_a_record_not_prose(doc: dict) -> None:
     """
     todos = {t["id"]: t for t in doc["blocking_todos"]}
     todo = todos["T40-TODO-01-identity-prompt-provenance"]
-    assert todo["status"] == "OPEN"
     assert "identity" in todo["blocks"]
     assert "episode_000135_clip000" in doc["source"]["caption_provenance"]
+
+    # CLOSED 2026-08-22. A record does not stop being a record when it closes — it stops being one
+    # if it closes without the evidence it named, which is exactly how a blocking item becomes the
+    # comment it was promoted out of being. So closure is checked against the item's OWN
+    # evidence_required field rather than against a list repeated here.
+    assert todo["status"] == "CLOSED"
+    assert todo["evidence_required"] == (
+        "the sampled episode ids, the sample size, and the per-episode verdicts"
+    )
+    assert len(todo["evidence_sampled_episodes"]) == todo["evidence_sample_size"]
+    assert len(todo["evidence_verdicts"]) == todo["evidence_sample_size"]
+    assert set(todo["evidence_verdict_counts"]) == {"match", "mismatch", "unsure"}
+    assert sum(todo["evidence_verdict_counts"].values()) == todo["evidence_sample_size"]
+    assert todo["evidence_gate_qualified"] is True
+    assert todo["evidence_coverage"] == pytest.approx(1.0)
+
+    # The verdict list and the counts are two spellings of one measurement, so they are compared
+    # rather than both trusted.
+    tallied: dict[str, int] = {"match": 0, "mismatch": 0, "unsure": 0}
+    for row in todo["evidence_verdicts"]:
+        episode, _, verdict = row.partition(" = ")
+        assert episode in todo["evidence_sampled_episodes"]
+        tallied[verdict.strip()] += 1
+    assert tallied == todo["evidence_verdict_counts"]
+
+    # The corpus disagreed with the caption about the caption's OWN clip, so the prompt is no
+    # longer the concatenation of [identity_style.source_caption]. The quotes stay as provenance;
+    # this pins the disagreement so a later edit cannot quietly re-align them and lose the finding.
+    assert "dark grey cloth" in doc["identity_style"]["prompt"]
+    assert "black" not in doc["identity_style"]["prompt"]
+    assert "black" in doc["identity_style"]["source_caption"]["background_setting"]
 
 
 def test_id_overlap_rejected(doc: dict) -> None:
