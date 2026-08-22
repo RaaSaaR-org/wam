@@ -81,6 +81,21 @@ margin that only clears under a lower bound is not a pass."*
 measurement against Humanoid Everyday's real depth is off the critical path because HE is unlicensed
 (§4), and if that licence resolves this run is repeated rather than adjusted.
 
+WHAT THE ESTIMATOR SAW, RECORDED BESIDE THE BUDGET
+--------------------------------------------------
+The artifact carries an ``estimator_stats`` block, in the same shape and built by the same code as
+``measure_geom_tol``'s (``EstimatorStatsProbe``, imported from it): what this run did to the
+adapter's counters -- frames with no detection, empty masks, retries fired and recovered -- and the
+distribution of the winning detection scores, with the raw values beside it because a capture is a
+few hundred frames rather than a corpus. The adapter's counters are cumulative over its import, so
+they are snapshotted before the first frame and differenced after the last; an estimator that
+exports no ``stats()`` records an ABSENCE WITH A REASON rather than zeros, since the contract this
+harness enforces is ``segment(rgb)`` / ``estimate_depth(rgb)`` and nothing more.
+
+It is additive: nothing reads it back, no disqualification reason depends on it, and recording the
+evidence the adapter's second gate-qualification blocker asks for is not the same act as accepting
+it. That one is a human's.
+
 EXIT STATUS
 -----------
 0   measured with a gate-qualified estimator pair, coverage above ``--min-coverage``.
@@ -109,6 +124,12 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from measure_geom_tol import (  # noqa: E402
     CANDIDATE_SEGMENTERS,
+    # WHAT THE ESTIMATOR SAW, recorded beside what this measured, in the same shape and by the same
+    # code as the GEOM_TOL half — the two artifacts are read side by side by whoever has to judge
+    # the adapter's second gate-qualification blocker, and two spellings of the same evidence is
+    # how one of them comes to be read as the other. Snapshot-and-difference, because the adapter's
+    # counters are lifetime totals; see EstimatorStatsProbe.
+    EstimatorStatsProbe,
     _importable,
     _local_weight_hits,
     centroid_of_mask,
@@ -1011,6 +1032,12 @@ def main(argv: list[str] | None = None) -> int:
     except EstimatorUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    # Opened before the first frame is read, so the counters it differences bracket exactly the
+    # frames this run segments. An estimator that exports no stats() records an absence with a
+    # reason and nothing else changes: the contract this harness enforces is segment/estimate_depth.
+    stats_probe = EstimatorStatsProbe.open(est.module)
+    scores_at_run_start = stats_probe.mark()
+
     if not est.gate_qualified:
         disqualified.append("estimator_not_gate_qualified")
     if est.segmenter_contract is None:
@@ -1133,6 +1160,15 @@ def main(argv: list[str] | None = None) -> int:
             "version": est.version,
             "gate_qualified": est.gate_qualified,
         },
+        # ADDITIVE AND READ-ONLY. Nothing here is in `gate_disqualified_reasons`, nothing here is
+        # subtracted from anything, and recording it discharges no blocker — the adapter's second
+        # one asks for these numbers AND for somebody to read them, and the second half is a human's
+        # to do. `include_raw` is true because this capture is a few hundred frames, not the 171 600
+        # of a GEOM_TOL pass: the raw values are what make the distribution re-derivable, and they
+        # are small enough here to keep beside it.
+        "estimator_stats": stats_probe.block(
+            stats_probe.since(scores_at_run_start), include_raw=True
+        ),
         "geom_tol_cross_check": geom_compare,
         "centroid_displacement": distribution(values, args.hist_bin_px),
         "depth_absolute_error_over_object": depth_stats,

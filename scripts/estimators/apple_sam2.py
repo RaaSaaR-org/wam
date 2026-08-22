@@ -625,9 +625,18 @@ def _check_pins() -> None:
 
 # -- observed state, for the caller that wants to record it ----------------------------------------
 #
-# Filled in at load and during use. ``measure_est_drift`` does not read any of it today — it records
-# name, version and the gate flag — but the no-detection count is the one number that explains a low
-# ``coverage``, and a run that has to be re-done to find out why is a run that was not recorded.
+# Filled in at load and during use. Every counter here is CUMULATIVE OVER THE LIFETIME OF THE
+# IMPORT, not per run: nothing resets them, and two measurements driven from one interpreter share
+# them. That is deliberate — a module that reset its own counters would give a caller no way to
+# distinguish "this run detected nothing" from "somebody reset them mid-run" — and it is the reason
+# ``measure_geom_tol.EstimatorStatsProbe`` snapshots them before the pass and DIFFERENCES afterwards
+# rather than reading them straight into an artifact. A caller that wants per-run numbers must do
+# the same; a caller that copies these values verbatim is recording a total, and should say so.
+#
+# Since 2026-08-22 both harnesses do record them (``estimator_stats`` in
+# ``configs/transfer25/pr08_geom_tol.json`` and in ``pr08_est_drift.json``), which is where the
+# full-pass half of ``GATE_QUALIFICATION_BLOCKERS``'s second entry lands. Recording it is not
+# discharging it: the blocker asks for the numbers AND for somebody to read them.
 
 #: ``"metric"``, ``"relative"``, or None before the depth model has been loaded. Read off the loaded
 #: config; absent from the config is treated as ``"relative"``, because that is what transformers'
@@ -645,6 +654,29 @@ EMPTY_MASK_FRAMES = 0
 #: only visible trace of how much of this run's ``coverage`` was bought at the lower threshold.
 RETRY_FRAMES = 0
 RETRY_RECOVERED_FRAMES = 0
+
+#: The detection score of the box that WON, one entry per frame where a box was found at all, in
+#: call order. Appended by :func:`_best_box`; frames with no detection append NOTHING, so this list
+#: is shorter than ``SEGMENT_CALLS`` by exactly ``NO_DETECTION_FRAMES`` and is not index-aligned to
+#: the frames — ``n_frames_without_detection`` is where those live.
+#:
+#: WHY THE RAW VALUES AND NOT A HISTOGRAM. Two reasons, both about the merge.
+#: ``measure_geom_tol`` runs as an 8-way array and pools its shards; raw values pool exactly through
+#: JSON (``float`` -> ``repr`` -> ``float`` is the identity) while two histograms only pool if they
+#: were binned identically, which is the same argument that makes the shards emit raw
+#: displacements. And a distribution recorded as a digest cannot answer a question nobody asked
+#: yet, which for this list is the whole point: it is the evidence
+#: ``GATE_QUALIFICATION_BLOCKERS``'s second entry asks for, and the question it is meant to answer
+#: — how much of ``coverage`` was bought at the retry's lower threshold — is READ OFF THE VALUES.
+#: A score below :data:`BOX_THRESHOLD` can only have come from the ``(0.10, 0.10)`` retry, because
+#: the first pass discards everything under it; so ``[s for s in DETECTION_SCORES if s <
+#: BOX_THRESHOLD]`` is exactly the retry's contribution, and it is a measurement rather than the
+#: assumption the blocker objects to. Cumulative like the counters above, and snapshotted the same
+#: way.
+#:
+#: Cheap: a full GEOM_TOL pass is ~171 600 frames, i.e. ~1.4 MB of float in memory and ~215 kB of
+#: JSON per shard, beside the ~430 kB of displacements a shard already carries.
+DETECTION_SCORES: list[float] = []
 
 
 def stats() -> dict[str, Any]:
@@ -692,6 +724,26 @@ def stats() -> dict[str, Any]:
         "n_frames_with_empty_mask": EMPTY_MASK_FRAMES,
         "n_frames_retry_fired": RETRY_FRAMES,
         "n_frames_retry_recovered": RETRY_RECOVERED_FRAMES,
+        "n_detection_scores": len(DETECTION_SCORES),
+        "detection_scores_attr": "DETECTION_SCORES",
+        "detection_scores_meaning": (
+            "the module attribute named by detection_scores_attr holds the winning box's score "
+            "for every frame where a box was found, in call order; frames with no detection are "
+            "absent from it, so len(DETECTION_SCORES) == n_segment_calls - "
+            "n_frames_without_detection. The VALUES are not recorded here — a full pass is ~171 600 "
+            "of them and stats() is embedded verbatim in several artifacts — they are read off the "
+            "attribute by measure_geom_tol/measure_est_drift, which pool and bin them. A score "
+            "below box_threshold can only have come from the (retry_box_threshold, "
+            "retry_text_threshold) pass, so the part of the distribution under box_threshold IS "
+            "the retry's contribution, measured rather than assumed."
+        ),
+        "counters_are_cumulative": (
+            "every n_* count above, and n_detection_scores, is a total since this module was "
+            "imported. Nothing resets them, so two measurements driven from one interpreter share "
+            "them. A caller wanting THIS RUN's numbers snapshots them before the pass and "
+            "differences afterwards, as measure_geom_tol.EstimatorStatsProbe does; a caller that "
+            "copies them verbatim is recording a lifetime total and should say so in its artifact."
+        ),
         "retry_meaning": (
             "frames where the first pass at (box_threshold, text_threshold) found no box and "
             "upstream's single (retry_box_threshold, retry_text_threshold) pass ran; 'recovered' is "
@@ -1199,7 +1251,9 @@ def _best_box(rgb: np.ndarray) -> np.ndarray | None:
     on a frame where the apple is genuinely occluded a weak box lands on something else. That turns
     an honest all-False mask into a confident wrong one — which RAISES coverage while LOWERING mask
     quality, i.e. it hides in exactly the number the harness gates on. It is upstream's behaviour so
-    it stays; making it countable is the least this module can do about it.
+    it stays; making it countable is the least this module can do about it. The WINNING SCORE is
+    kept too, in :data:`DETECTION_SCORES` — a count says how often the retry fired, and only the
+    scores say how weak the detections it bought were.
     """
     global RETRY_FRAMES, RETRY_RECOVERED_FRAMES
 
@@ -1240,7 +1294,12 @@ def _best_box(rgb: np.ndarray) -> np.ndarray | None:
         if scores.size == 0:
             return None
         RETRY_RECOVERED_FRAMES += 1
-    return boxes[int(np.argmax(scores))]
+    best = int(np.argmax(scores))
+    # AFTER the retry branch and before the return, so it records the score of the box that is
+    # actually handed to SAM 2 — including a retry's, which is the one this list exists for. A
+    # frame that reached neither return appends nothing; see DETECTION_SCORES on the alignment.
+    DETECTION_SCORES.append(float(scores[best]))
+    return boxes[best]
 
 
 def segment(rgb: np.ndarray) -> np.ndarray:

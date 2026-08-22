@@ -241,6 +241,33 @@ the decoder, on the pixel grid, or on ``step_frames``; one reports ``gate_qualif
 another reports true; a shard holds an episode that does not hash to it; or the union of covered
 episodes is not the full corpus. None of these is a warning and none has a permissive branch.
 
+WHAT THE ESTIMATOR SAW, RECORDED BESIDE WHAT WAS MEASURED
+---------------------------------------------------------
+The artifact carries an ``estimator_stats`` block: what ``estimators.apple_sam2.stats()`` said after
+the pass, and what THIS RUN did to its counters — frames with no detection, frames whose mask came
+back empty, frames where upstream's ``(0.10, 0.10)`` retry fired and the ones it recovered, plus the
+distribution of the winning detection scores. It exists because the adapter's own second
+gate-qualification blocker asks for exactly those numbers *from a full pass*, and until 2026-08-22
+this script read none of them: the 402-episode, ~171 600-frame run that would produce the evidence
+threw it away. The scores matter as much as the counts — the part of the distribution below the
+adapter's ``box_threshold`` can only have come from the retry, so "how much of ``coverage`` did the
+retry buy" is read off the values instead of assumed.
+
+Three properties, none of them free. The counters are SNAPSHOTTED AND DIFFERENCED, because the
+adapter's are lifetime totals of the import and two runs in one interpreter would otherwise each
+record the other's frames. The scores are carried RAW, per episode, in the shard artifacts, and the
+merge concatenates them in the corpus's own enumeration order before binning — the same rule the
+displacements follow, and for the same reason: a distribution decomposes no better than a median
+does. And an adapter that exports no ``stats()`` is recorded as ABSENT WITH A REASON, never as
+zeros, because "nobody looked" and "it never happened" are different claims that a later reader has
+to be able to tell apart.
+
+**It is additive and it discharges nothing.** No refusal reads it, no exit code depends on it, and
+it is not an input to ``gate_qualified``; a test runs the previous version of this script over the
+same fixture and asserts every field it already wrote is unchanged. Recording evidence is not
+accepting it — ``GATE_QUALIFIED`` in the adapter, and the blocker this serves, are a human's to
+retire.
+
 EXIT STATUS
 -----------
 0   measured with a gate-qualified mask method, coverage above ``--min-coverage``.
@@ -266,7 +293,7 @@ import importlib.util
 import json
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -495,6 +522,13 @@ class MaskMethod:
     #: else while still stamping the adapter's name into the artifact. Never serialized; the
     #: ``mask_method`` block is built field by field.
     mask_fn: "Callable[[np.ndarray, MaskMethod], np.ndarray] | None" = None
+    #: The estimator ADAPTER MODULE behind this method, when there is one, so the run can record
+    #: what it saw (:class:`EstimatorStatsProbe`). Held for the same reason ``mask_fn`` is: it is
+    #: the object the frames actually went through, not a name that might resolve to a second
+    #: import of the same file. None for every method that is not an adapter — the hsv diagnostic
+    #: and the precomputed-mask reader have no estimator to ask, and that is recorded as absent
+    #: rather than as zeros. Never serialized.
+    stats_module: Any = None
 
 
 def _importable(module: str) -> bool:
@@ -1046,6 +1080,10 @@ def sam2_method(min_area: int) -> MaskMethod:
         },
         provenance=provenance,
         mask_fn=sam2_mask_via(module),
+        # The module itself, so main() can record what this adapter saw beside what the harness
+        # measured — the retry counts and the detection-score distribution the adapter's own second
+        # gate-qualification blocker asks for "from a full pass". See EstimatorStatsProbe.
+        stats_module=module,
     )
 
 
@@ -1150,6 +1188,333 @@ def distribution(values: np.ndarray, bin_px: float) -> dict[str, Any]:
         },
     }
 
+
+# -- what the estimator adapter saw, recorded beside what the harness measured --------------------
+#
+# WHY THIS EXISTS AND WHAT IT IS NOT. ``scripts/estimators/apple_sam2.py`` counts the frames on
+# which it found no box, the frames on which the segmenter came back empty, the frames on which
+# upstream's single ``(0.10, 0.10)`` retry fired and the ones it recovered, and it keeps the winning
+# detection score for every frame it did find a box on. Until 2026-08-22 NEITHER harness read any of
+# it, so the 4-GPU-h, 402-episode, ~171 600-frame GEOM_TOL pass produced none of those numbers and
+# threw the evidence away — while the adapter's own second gate-qualification blocker asks for
+# exactly "the recorded detection-score distribution and retry counts (n_frames_retry_fired /
+# n_frames_retry_recovered) from a full pass, so the retry's contribution is visible rather than
+# assumed". This is the place that evidence lands. It is NOT a discharge of that blocker and nothing
+# here touches ``GATE_QUALIFIED``: producing evidence and accepting it are two different acts, and
+# the second one is a human's.
+#
+# THREE PROPERTIES IT HAS TO HAVE, none of which is free:
+#
+# 1. IT DESCRIBES THIS RUN. The adapter's counters are cumulative over the lifetime of the import
+#    and nothing resets them, so two measurements driven from one interpreter (a test session, a
+#    sweep, a future in-process merge) would each record the other's frames. They are snapshotted
+#    before the pass and DIFFERENCED afterwards; the adapter's own counters are never written to
+#    from here, because a harness that resets somebody else's module state breaks the next caller.
+# 2. THE SCORES SURVIVE SHARDING, EXACTLY. ``--shard`` runs the corpus in 8 pieces and ``--merge``
+#    pools them, and a distribution does not decompose any more than a median does. So a shard
+#    records the RAW scores per episode, exactly as it records raw per-step displacements, and the
+#    merge concatenates them in the corpus's own enumeration order before binning — which is what
+#    makes the merged artifact's score distribution identical, float for float, to the one an
+#    un-sharded run would have written, rather than approximately equal to it.
+# 3. AN ADAPTER WITHOUT ``stats()`` MUST NOT BREAK EITHER HARNESS. The contract both of them call is
+#    ``segment(rgb)`` / ``estimate_depth(rgb)``; ``stats()`` is an extra this one happens to offer.
+#    A module that does not offer it, or one whose ``stats()`` raises, is recorded as ABSENT WITH A
+#    REASON. Never as zeros: "the retry fired 0 times" and "nobody asked" are different claims, and
+#    a reader of the artifact must be able to tell them apart.
+
+#: The keys of ``stats()`` that count THIS RUN's frames once differenced. Anything else the adapter
+#: reports is descriptive (its name, its pins, its thresholds, its blockers) and is recorded as-is.
+#: A key listed here and absent from ``stats()`` records ``null``, not 0.
+ADAPTER_RUN_COUNTERS: tuple[str, ...] = (
+    "n_segment_calls",
+    "n_frames_without_detection",
+    "n_frames_with_empty_mask",
+    "n_frames_retry_fired",
+    "n_frames_retry_recovered",
+    "n_detection_scores",
+)
+
+#: The module attribute holding the per-frame winning detection scores, in call order. Read off the
+#: adapter the same way ``ADAPTER_DOWNLOAD_ATTR`` and ``SEGMENTER_CONTRACT`` are — an optional
+#: declaration, not part of the estimator contract, absent without consequence beyond being recorded
+#: as absent.
+ADAPTER_SCORES_ATTR = "DETECTION_SCORES"
+
+#: Bin width of the recorded score histogram. Scores live in [0, 1] and the interesting boundaries
+#: are the adapter's own ``box_threshold`` (0.15) and ``retry_box_threshold`` (0.10), so the bins
+#: are fine enough to separate them. The exact counts either side of ``box_threshold`` do not depend
+#: on this: they are counted from the raw values, against the threshold the adapter reports.
+SCORE_HIST_BIN = 0.05
+
+#: One string, written into every ``estimator_stats`` block on every path, because it is true on
+#: all of them and a note that differs between the merged artifact and the un-sharded one would be
+#: a difference a reader has to account for before believing the two are the same measurement.
+ADAPTER_STATS_SCOPE = (
+    "THIS RUN ONLY. The adapter's counters are cumulative over the lifetime of the import and "
+    "nothing resets them, so they are snapshotted before the first frame and differenced after the "
+    "last; a non-zero counters_at_start_of_run means this interpreter had already driven the "
+    "adapter and this_run is still this run's. On a MERGED artifact this_run is the sum of the "
+    "shards' differences, which is the same set of frames an un-sharded run would have segmented."
+)
+
+#: Why the two counter snapshots are null in a merged artifact. Also one string on every path: the
+#: merged and un-sharded blocks then differ only in the fields that are genuinely about the process
+#: rather than about the corpus.
+PROCESS_LOCAL_COUNTERS_NOTE = (
+    "counters_at_start_of_run and counters_at_end_of_run are lifetime totals of the PROCESS that "
+    "ran the pass, not of this corpus. A merged artifact leaves them null — its shards ran in eight "
+    "processes and there is no such total for the merge — and lists each shard's under per_shard; "
+    "the shards' own artifacts carry them in full. this_run and detection_scores are about the "
+    "frames and are the same numbers either way."
+)
+
+
+def score_distribution(values: np.ndarray, box_threshold: float | None) -> dict[str, Any]:
+    """The detection-score distribution, plus the retry's share of it.
+
+    Deliberately NOT :func:`distribution`: that one names every key ``*_px`` because it describes
+    pixels, and a confidence score reported in pixels is a unit error waiting to be quoted. The
+    shape is otherwise the same, for the same reason — a median alone hides bimodality, and on the
+    169-frame local audit the scores were sharply bimodal (p25 0.758 for the masks that were right,
+    0.155-0.264 for every flagged one), which is the entire finding.
+
+    ``n_below_box_threshold`` is the number that answers the blocker: the first pass discards
+    everything under ``box_threshold``, so a recorded score below it can only have come from the
+    retry pass. ``null`` when the adapter did not say what its threshold was — inferring one from
+    the data would be this function deciding what the retry did.
+    """
+    if values.size == 0:
+        return {"n": 0, "box_threshold": box_threshold, "n_below_box_threshold": None}
+    pcts = [0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100]
+    q = np.percentile(values, pcts)
+    # Rounded, so the edges READ as 0.10 and 0.15 — the adapter's retry and primary thresholds —
+    # rather than as 0.15000000000000002, which is what stepping a float by 0.05 produces and which
+    # would put a score of exactly box_threshold in the bin below it. The counts either side of the
+    # threshold are not taken from this histogram in any case; see n_below_box_threshold.
+    edges = np.round(np.linspace(0.0, 1.0, int(round(1.0 / SCORE_HIST_BIN)) + 1), 4)
+    counts, edges = np.histogram(values, bins=edges)
+    below = (int(np.count_nonzero(values < box_threshold))
+             if isinstance(box_threshold, (int, float)) and not isinstance(box_threshold, bool)
+             else None)
+    return {
+        "n": int(values.size),
+        "min": float(values.min()),
+        "max": float(values.max()),
+        "mean": float(values.mean()),
+        "std": float(values.std(ddof=0)),
+        "percentiles": {f"p{p}": float(v) for p, v in zip(pcts, q)},
+        "histogram": {
+            "bin": float(SCORE_HIST_BIN),
+            "bin_edges": [float(e) for e in edges],
+            "counts": [int(c) for c in counts],
+        },
+        "box_threshold": box_threshold,
+        "n_below_box_threshold": below,
+        "n_below_box_threshold_meaning": (
+            "detections the first pass would have discarded, so they came from the "
+            "(retry_box_threshold, retry_text_threshold) retry. This is the retry's contribution to "
+            "coverage, measured. Nothing here says those masks are on the right object — that is "
+            "the adapter's first gate-qualification blocker and it is not answered by a number."
+        ),
+    }
+
+
+def estimator_stats_absent(why: str) -> dict[str, Any]:
+    """The record for a run whose estimator reported nothing. Explicit, and never zeros."""
+    return {
+        "recorded": False,
+        "absent_because": why,
+        "adapter": None,
+        "counters_at_start_of_run": None,
+        "counters_at_end_of_run": None,
+        "this_run": None,
+        "per_shard": None,
+        "detection_scores": {"recorded": False, "absent_because": why, "n": None,
+                             "distribution": None},
+        "note": (
+            "Absent is not zero. A run that recorded no adapter statistics says nothing about how "
+            "often the detector failed or the retry fired; a run that recorded zeros says those "
+            "things did not happen. Nothing downstream may read this block as the second claim."
+        ),
+    }
+
+
+class EstimatorStatsProbe:
+    """Snapshot an estimator adapter's counters, then report what THIS run did to them.
+
+    Constructed before the first frame and read after the last. Holds the module, never a name: the
+    adapter is reached through the same object the harness segments with, so a probe cannot end up
+    describing a different import of the same module.
+    """
+
+    def __init__(self, module: Any | None, absent_because: str | None) -> None:
+        self.module = module
+        self.absent_because = absent_because
+        self.spec: str | None = (
+            None if module is None else (getattr(module, "__name__", None) or repr(module)))
+        self.start: dict[str, Any] | None = None
+        if module is not None and absent_because is None:
+            stats, why = self._read()
+            if stats is None:
+                self.absent_because = why
+            else:
+                self.start = {k: stats.get(k) for k in ADAPTER_RUN_COUNTERS}
+
+    @classmethod
+    def open(cls, module: Any | None, *, why_absent: str | None = None) -> "EstimatorStatsProbe":
+        """A probe on ``module``, or one that records ``why_absent`` and measures nothing."""
+        if module is None:
+            return cls(None, why_absent or "no estimator module was involved in this run")
+        return cls(module, None)
+
+    def _read(self) -> tuple[dict[str, Any] | None, str | None]:
+        """``stats()`` as a dict, or None and the reason. Never raises into the harness."""
+        fn = getattr(self.module, "stats", None)
+        if not callable(fn):
+            return None, (
+                f"{self.spec!r} exports no callable stats(). The estimator contract is "
+                "segment(rgb) / estimate_depth(rgb) and stats() is an optional extra, so this is "
+                "not an error — it is the reason nothing was recorded."
+            )
+        try:
+            out = fn()
+        except Exception as exc:  # noqa: BLE001 - a broken stats() must not lose a measurement
+            return None, (
+                f"{self.spec!r} stats() raised {type(exc).__name__}: {exc}. The measurement is "
+                "unaffected — stats() is read for the record only and is never on the path that "
+                "produces a displacement."
+            )
+        if not isinstance(out, Mapping):
+            return None, f"{self.spec!r} stats() returned {type(out).__name__}, not a mapping."
+        return dict(out), None
+
+    def mark(self) -> int | None:
+        """How many scores the adapter has recorded so far, or None if it records none.
+
+        The unit of :meth:`since`. Taken per episode as well as per run, so a shard can attribute
+        its raw scores to the episode they came from and the merge can rebuild the pool in the
+        corpus's own order.
+        """
+        if self.module is None or self.absent_because is not None:
+            return None
+        seq = getattr(self.module, ADAPTER_SCORES_ATTR, None)
+        if not isinstance(seq, Sequence) or isinstance(seq, (str, bytes)):
+            return None
+        return len(seq)
+
+    def since(self, mark: int | None) -> list[float] | None:
+        """The scores recorded since ``mark``, or None when there are none to attribute.
+
+        Returns None rather than ``[]`` when the list SHRANK: a caller that reset the adapter's
+        state mid-run has invalidated the difference, and an empty list would read as "no detection
+        scored", which is a claim about the corpus.
+        """
+        if mark is None:
+            return None
+        now = self.mark()
+        if now is None or now < mark:
+            return None
+        try:
+            return [float(v) for v in getattr(self.module, ADAPTER_SCORES_ATTR)[mark:now]]
+        except (TypeError, ValueError):
+            # A list holding something that is not a number is not a score distribution, and it is
+            # not worth a four-GPU-hour run either: nothing here is on the path that produces a
+            # displacement, so it records an absence and the measurement continues.
+            return None
+
+    def block(self, scores: list[float] | None, *, include_raw: bool) -> dict[str, Any]:
+        """The artifact block: what the adapter is, what this run did, and the scores it recorded.
+
+        ``scores`` is this run's raw list, in call order (or None when the adapter records none).
+
+        ``include_raw`` decides whether the values themselves are written here. ``measure_est_drift``
+        sets it: its capture is a few hundred frames, it is never sharded, and keeping the values
+        beside the distribution makes the distribution re-derivable. ``measure_geom_tol`` does not —
+        its raw values go per episode, into ``per_episode[*].detection_scores`` on the shard path,
+        which is where the merge needs them and is exactly where ``displacements_px`` goes.
+        """
+        if self.module is None or self.absent_because is not None:
+            return estimator_stats_absent(
+                self.absent_because or "no estimator module was involved in this run")
+        end, why = self._read()
+        if end is None:
+            return estimator_stats_absent(why or "stats() became unreadable during the run")
+
+        start = self.start or {}
+        this_run: dict[str, Any] = {}
+        went_backwards: list[str] = []
+        for key in ADAPTER_RUN_COUNTERS:
+            a, b = start.get(key), end.get(key)
+            if not isinstance(a, int) or not isinstance(b, int) or isinstance(a, bool):
+                this_run[key] = None
+                continue
+            if b < a:
+                went_backwards.append(key)
+                this_run[key] = None
+                continue
+            this_run[key] = b - a
+        return {
+            "recorded": True,
+            "absent_because": None,
+            "source": f"{self.spec}.stats()",
+            "module": self.spec,
+            "scope": ADAPTER_STATS_SCOPE,
+            # stats() IN FULL, split by key and not summarised: `adapter` is every key that
+            # describes the estimator (its name, its pins, its thresholds, its blockers, its own
+            # prose about what each counter means) and `counters_at_end_of_run` is the rest, which
+            # is exactly ADAPTER_RUN_COUNTERS. The union of the two IS stats(). They are separated
+            # because one half is a property of the ADAPTER and pools across shards by being
+            # identical, while the other is a property of the PROCESS and does not pool at all.
+            "adapter": {k: v for k, v in end.items() if k not in set(ADAPTER_RUN_COUNTERS)},
+            "counters_at_start_of_run": {k: start.get(k) for k in ADAPTER_RUN_COUNTERS},
+            "counters_at_end_of_run": {k: end.get(k) for k in ADAPTER_RUN_COUNTERS},
+            "this_run": this_run,
+            "counters_went_backwards": went_backwards or None,
+            "counters_went_backwards_meaning": (
+                "a counter that ended below where it started was reset by something during the "
+                "run, so its difference is not this run's count and is recorded as null rather "
+                "than as a plausible number."
+            ) if went_backwards else None,
+            "process_local_counters_note": PROCESS_LOCAL_COUNTERS_NOTE,
+            "per_shard": None,
+            "detection_scores": self._scores_block(scores, end, include_raw=include_raw),
+        }
+
+    def _scores_block(self, scores: list[float] | None, end: Mapping,
+                      *, include_raw: bool) -> dict[str, Any]:
+        if scores is None:
+            return {
+                "recorded": False,
+                "absent_because": (
+                    f"{self.spec!r} exports no {ADAPTER_SCORES_ATTR} list of per-frame detection "
+                    "scores (or it was reset during the run, which makes the difference "
+                    "meaningless). The counts in this_run are unaffected."
+                ),
+                "n": None,
+                "distribution": None,
+            }
+        thr = end.get("box_threshold")
+        block: dict[str, Any] = {
+            "recorded": True,
+            "absent_because": None,
+            "attr": ADAPTER_SCORES_ATTR,
+            "n": len(scores),
+            "meaning": (
+                "the winning box's detection score for every frame of THIS RUN where a box was "
+                "found, in call order. Frames with no detection are absent, so n == "
+                "this_run.n_segment_calls - this_run.n_frames_without_detection."
+            ),
+            "distribution": score_distribution(
+                np.asarray(scores, dtype=float),
+                float(thr) if isinstance(thr, (int, float)) and not isinstance(thr, bool) else None,
+            ),
+        }
+        if include_raw:
+            # THE RAW VALUES. A distribution does not decompose and a binned one cannot be
+            # re-derived from its bins, so wherever they fit they are kept: that is here for a
+            # capture, and per episode for a corpus (see the docstring).
+            block["values"] = list(scores)
+        return block
 
 # -- corpus discovery ----------------------------------------------------------------------------
 
@@ -2047,6 +2412,147 @@ def _refuse_on_disagreement(label: str, values: list[tuple[int, Any]], why: str)
     )
 
 
+def merge_estimator_stats(loaded: list[tuple[Path, dict[str, Any]]],
+                          entries: list[tuple[int, dict[str, Any], list[float]]]) -> dict[str, Any]:
+    """Pool the shards' ``estimator_stats`` into one block, exactly as the displacements are pooled.
+
+    THE COUNTS SUM. ``this_run`` counts frames, and a shard's frames are disjoint from every other
+    shard's — the merge has already refused, above, unless the shards partition the corpus exactly
+    once — so the sums are the counts an un-sharded run over the same corpus would have reported.
+    The lifetime totals do NOT sum: eight processes' totals are eight overlapping statements about
+    eight interpreters. They are nulled here and listed per shard instead.
+
+    THE SCORES CONCATENATE IN THE CORPUS'S ORDER, not in shard order — out of
+    ``per_episode[*].detection_scores`` and through the same ``episode_index`` sort the
+    displacements use. That is what makes the merged distribution identical to the un-sharded one
+    rather than approximately equal to it: ``mean`` and ``std`` are floating-point sums, and a sum
+    is only bit-identical if the order is.
+
+    NOTHING HERE REFUSES. Every other refusal in this file guards a number the gate quotes; this
+    block is recorded evidence and feeds nothing — not ``gate_qualified``, not ``GEOM_TOL_px``, not
+    ``coverage``. A shard written by a version that did not record it, or a set of shards that
+    disagree about whether it was recorded, produces an ABSENCE WITH A REASON. Never zeros, and
+    never a merge that dies on the way to a tolerance somebody spent four GPU-hours on.
+    """
+    by_index = sorted(((int(rec["shard"]["index"]), path, rec) for path, rec in loaded),
+                      key=lambda t: t[0])
+    blocks: list[tuple[int, Path, dict[str, Any]]] = []
+    for idx, path, rec in by_index:
+        block = rec.get("estimator_stats")
+        if not isinstance(block, dict):
+            return estimator_stats_absent(
+                f"shard {idx} ({path}) carries no estimator_stats block, so there is nothing to "
+                "pool. A shard written before this field existed looks exactly like this; re-run "
+                "that shard with this version of the script if the evidence is wanted. The "
+                "tolerance is unaffected — nothing in GEOM_TOL is derived from these counts."
+            )
+        blocks.append((idx, path, block))
+
+    if any(b.get("recorded") is not True for _, _, b in blocks):
+        first = blocks[0][2]
+        if all(b == first for _, _, b in blocks):
+            # Every shard reported the SAME absence for the same reason — a precomputed-mask run,
+            # say, where no estimator was involved at all. Carrying it forward verbatim is what
+            # makes the merged artifact equal to the un-sharded one on that path.
+            return dict(first)
+        return estimator_stats_absent(
+            "the shards disagree about the estimator statistics: "
+            + "; ".join(
+                f"shard {idx} recorded none ({b.get('absent_because')})"
+                if b.get("recorded") is not True else f"shard {idx} recorded them"
+                for idx, _, b in blocks)
+            + ". Pooling a shard that measured the adapter with one that did not would report the "
+            "counts of part of the corpus as if they were the whole of it."
+        )
+
+    template = dict(blocks[0][2])
+    went_backwards = sorted({k for _, _, b in blocks
+                             for k in (b.get("counters_went_backwards") or ())})
+    this_run: dict[str, Any] = {}
+    for key in ADAPTER_RUN_COUNTERS:
+        parts = [(b.get("this_run") or {}).get(key) for _, _, b in blocks]
+        this_run[key] = (
+            sum(int(v) for v in parts)
+            if parts and all(isinstance(v, int) and not isinstance(v, bool) for v in parts)
+            else None
+        )
+
+    # The raw scores, attributed to episodes by the shards and re-sorted into the corpus's own
+    # enumeration order by the caller. A shard that recorded a distribution but no per-episode
+    # values cannot be pooled exactly, and an approximate pool is not offered.
+    missing_values = [ep.get("episode") for _, ep, _ in entries
+                      if not isinstance(ep.get("detection_scores"), list)]
+    pooled_scores: list[float] | None = None
+    scores_absent: str | None = None
+    if not all((b.get("detection_scores") or {}).get("recorded") is True for _, _, b in blocks):
+        scores_absent = "; ".join(
+            f"shard {idx}: {(b.get('detection_scores') or {}).get('absent_because')}"
+            for idx, _, b in blocks
+            if (b.get("detection_scores") or {}).get("recorded") is not True
+        )
+    elif missing_values:
+        scores_absent = (
+            f"{len(missing_values)} measured episode(s) carry no raw detection_scores "
+            f"({', '.join(str(k) for k in missing_values[:6])}"
+            + ("..." if len(missing_values) > 6 else "") + "). A distribution does not decompose, "
+            "so the merge pools the RAW scores or records nothing: a shard that reports only its "
+            "own binned distribution can be averaged, not merged, and averaging distributions is "
+            "the same wrong answer as averaging medians."
+        )
+    else:
+        pooled_scores = [float(v) for _, ep, _ in entries for v in ep["detection_scores"]]
+
+    if pooled_scores is None:
+        scores_block: dict[str, Any] = {
+            "recorded": False,
+            "absent_because": scores_absent or "no shard recorded per-frame detection scores",
+            "n": None,
+            "distribution": None,
+        }
+    else:
+        first_scores = template.get("detection_scores") or {}
+        thr = (first_scores.get("distribution") or {}).get("box_threshold")
+        scores_block = {
+            "recorded": True,
+            "absent_because": None,
+            "attr": first_scores.get("attr", ADAPTER_SCORES_ATTR),
+            "n": len(pooled_scores),
+            "meaning": first_scores.get("meaning"),
+            "distribution": score_distribution(
+                np.asarray(pooled_scores, dtype=float),
+                float(thr) if isinstance(thr, (int, float)) and not isinstance(thr, bool) else None,
+            ),
+        }
+
+    template.update({
+        "counters_at_start_of_run": {k: None for k in ADAPTER_RUN_COUNTERS},
+        "counters_at_end_of_run": {k: None for k in ADAPTER_RUN_COUNTERS},
+        "this_run": this_run,
+        "counters_went_backwards": went_backwards or None,
+        # Carried with its own list rather than templated from shard 0, which may not be the shard
+        # it happened in: a named defect with a null explanation beside it is a worse record than
+        # either half alone.
+        "counters_went_backwards_meaning": (
+            "at least one shard's counter ended below where it started, so its difference was not "
+            "that shard's count and was recorded as null; this_run therefore counts fewer frames "
+            "than the corpus was segmented over. The shard artifacts say which."
+        ) if went_backwards else None,
+        "per_shard": [
+            {
+                "index": idx,
+                "path": str(path),
+                "this_run": b.get("this_run"),
+                "counters_at_start_of_run": b.get("counters_at_start_of_run"),
+                "counters_at_end_of_run": b.get("counters_at_end_of_run"),
+                "n_detection_scores": (b.get("detection_scores") or {}).get("n"),
+            }
+            for idx, path, b in blocks
+        ],
+        "detection_scores": scores_block,
+    })
+    return template
+
+
 def merge_shard_records(loaded: list[tuple[Path, dict[str, Any]]],
                         out: Path) -> tuple[dict[str, Any], np.ndarray]:
     """Pool the shards into the committed GEOM_TOL artifact, or refuse.
@@ -2394,7 +2900,12 @@ def merge_shard_records(loaded: list[tuple[Path, dict[str, Any]]],
     coverage = float(values.size / n_steps_total) if n_steps_total else 0.0
     geom_tol = float(np.median(values)) if values.size else None
 
-    per_episode = [{k: v for k, v in ep.items() if k != "displacements_px"} for _, ep, _ in entries]
+    # The raw per-episode arrays are the shard's contribution to the pool and not part of the
+    # committed artifact: both are dropped here, and both for the same reason — the pooled
+    # statistic above is what the merge exists to produce, and the values it was taken over are
+    # still in the shard artifacts named under merged_from.shards.
+    per_episode = [{k: v for k, v in ep.items()
+                    if k not in ("displacements_px", "detection_scores")} for _, ep, _ in entries]
     ep_medians = [e["median_px"] for e in per_episode if e["median_px"] is not None]
 
     # Shard 0's record is the template for every field that is a property of the RUN rather than of
@@ -2535,6 +3046,13 @@ def merge_shard_records(loaded: list[tuple[Path, dict[str, Any]]],
         "distribution": distribution(values, bin_px),
         "per_episode": per_episode,
         "displacements_npy": None,
+
+        # POOLED, not templated from shard 0. The counts sum because the shards partition the
+        # corpus exactly once (proved by the refusals above) and the scores concatenate in the
+        # corpus's own enumeration order, so this block is the block an un-sharded run would have
+        # written — apart from the two lifetime totals, which belong to eight processes and are
+        # recorded per shard instead. Additive and read-only: nothing here feeds gate_qualified.
+        "estimator_stats": merge_estimator_stats(loaded, entries),
 
         # Re-derived HERE rather than carried from shard 0: it is read off
         # src/wam/robot/isaac_binding.py, the file it describes is under active change, and a
@@ -3109,6 +3627,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     episodes = [ep for _, ep in selected]
 
+    # OPENED BEFORE THE FIRST FRAME, and after the method is resolved so it can hold the module the
+    # frames will actually go through. The adapter's counters are lifetime totals; this snapshots
+    # them now so what lands in the artifact is this run's arithmetic and not a total shared with
+    # whatever else this interpreter has driven.
+    stats_probe = EstimatorStatsProbe.open(
+        getattr(method, "stats_module", None),
+        why_absent=(
+            f"mask method {method.name!r} is not backed by an estimator adapter module "
+            f"(frames_from={method.frames_from!r}), so there is no stats() to read. Only "
+            f"--method {SAM2_METHOD_CLI} reaches one."
+        ),
+    )
+    scores_at_run_start = stats_probe.mark()
+
     per_episode: list[dict[str, Any]] = []
     pooled: list[np.ndarray] = []
     skipped_no_masks: list[str] = []
@@ -3131,6 +3663,7 @@ def main(argv: list[str] | None = None) -> int:
             decoder = resolve_decoder(args.decoder, probe_clip)
             print(f"decoder     {decoder.name} {decoder.version}", file=sys.stderr)
         for ep_index, ep in selected:
+            scores_at_episode_start = stats_probe.mark()
             if method.frames_from == "masks":
                 mask_dir = args.masks / ep.key
                 if not mask_dir.is_dir():
@@ -3172,6 +3705,7 @@ def main(argv: list[str] | None = None) -> int:
                 "median_px": float(np.median(d)) if d.size else None,
                 "p95_px": float(np.percentile(d, 95)) if d.size else None,
             }
+            episode_scores = stats_probe.since(scores_at_episode_start)
             if shard_block is not None:
                 # THE RAW DISPLACEMENTS, and only on the shard path. A median does not decompose,
                 # so the merge cannot work from this episode's median — it needs the numbers the
@@ -3180,6 +3714,16 @@ def main(argv: list[str] | None = None) -> int:
                 # is a lossless representation and there is no error bound to state. It is ~430 kB
                 # per shard on the real corpus and it is NOT carried into the merged artifact.
                 entry["displacements_px"] = [float(x) for x in d]
+                if episode_scores is not None:
+                    # THE RAW DETECTION SCORES OF THIS EPISODE, for the same reason and on the same
+                    # path. A distribution decomposes no better than a median does, and pooling the
+                    # shards' scores in shard order rather than in the corpus's own order would
+                    # change mean, std and every histogram count — the merged artifact would then be
+                    # approximately, rather than exactly, the un-sharded one. Attributing them to
+                    # the episode is what lets the merge sort them by episode_index like everything
+                    # else. ~215 kB per shard on the real corpus, and NOT carried into the merged
+                    # artifact.
+                    entry["detection_scores"] = list(episode_scores)
             per_episode.append(entry)
     except MethodUnavailable as exc:
         print(str(exc), file=sys.stderr)
@@ -3242,6 +3786,12 @@ def main(argv: list[str] | None = None) -> int:
 
     gate_ok = bool(headline_valid and method.gate_qualified and not partial_reasons)
     fps = sorted(fps_seen)[0] if len(fps_seen) == 1 else None
+
+    # The run's scores, in the order the frames were segmented, which for the un-sharded path is the
+    # corpus's own enumeration order and for a shard is that order restricted to its episodes. Read
+    # once here rather than concatenated out of per_episode, so the two agree by construction on the
+    # path where both exist.
+    run_scores = stats_probe.since(scores_at_run_start)
 
     record: dict[str, Any] = {
         "schema": SCHEMA,
@@ -3380,6 +3930,18 @@ def main(argv: list[str] | None = None) -> int:
                               else "mean of all nonzero mask pixels"),
             "min_area_px": args.min_area_px,
         },
+
+        # WHAT THE ESTIMATOR SAW WHILE THIS RAN, beside what this measured. Additive and read-only:
+        # nothing here feeds gate_qualified, no refusal reads it, and an adapter that exports no
+        # stats() records an absence with a reason rather than zeros. See EstimatorStatsProbe for
+        # why it is a difference and not a total, and for what the blocker it serves does and does
+        # not consider discharged.
+        # include_raw is FALSE on every path here, shards included, and that is the displacements'
+        # rule and not an omission: a shard's raw values live in per_episode[*].detection_scores,
+        # attributed to the episode that produced them, because that is what lets the merge rebuild
+        # the pool in the corpus's own order. A second, un-attributed copy of the same list at the
+        # top of the shard would be ~215 kB that can only ever disagree with the first.
+        "estimator_stats": stats_probe.block(run_scores, include_raw=False),
 
         "GEOM_TOL_px": geom_tol,
         "geom_tol_px_median_of_episode_medians": (

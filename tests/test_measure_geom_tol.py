@@ -926,7 +926,7 @@ def bgr_frames(corners: list[tuple[int, int] | None], canvas: int = CANVAS) -> l
     return out
 
 
-def install_video_frames(monkeypatch, frames: dict[str, list[np.ndarray]]) -> None:
+def install_video_frames(monkeypatch, frames: dict[str, list[np.ndarray]], module=None) -> None:
     """Replace decoding, and ONLY decoding.
 
     The method's own segmenter, the centroid arithmetic, the largest-component rule and the
@@ -944,15 +944,19 @@ def install_video_frames(monkeypatch, frames: dict[str, list[np.ndarray]]) -> No
         if max_frames > 0:
             stack = stack[:max_frames]
         cents = [
-            mgt.centroid_of_mask(method.mask_fn(f, method), largest_component=True,
-                                 min_area=min_area)
+            (module or mgt).centroid_of_mask(method.mask_fn(f, method), largest_component=True,
+                                             min_area=min_area)
             for f in stack
         ]
         h, w = stack[0].shape[:2]
         return cents, (int(w), int(h)), 30.0
 
-    monkeypatch.setattr(mgt, "episode_centroids_from_video", fake)
-    monkeypatch.setattr(mgt, "resolve_decoder", lambda name, probe_clip: mgt.Decoder(
+    # ``module`` exists for the before/after test below, which drives a SECOND copy of this script
+    # (the one at the previous commit) over the same fixture and has to stub that copy's own
+    # attributes rather than this one's.
+    target = module or mgt
+    monkeypatch.setattr(target, "episode_centroids_from_video", fake)
+    monkeypatch.setattr(target, "resolve_decoder", lambda name, probe_clip: target.Decoder(
         name="stub", version="0",
         open_fn=lambda clip: (iter(frames[clip.stem]), 30.0),
         note=f"test stub; --decoder was {name!r}",
@@ -2816,3 +2820,460 @@ def test_carry_is_not_a_measurement_and_refuses_to_share_a_command_line_with_one
     rc = run(["--carry-est-drift", str(est), "--merge", str(tmp_path), "--out", str(tmp_path / "o")])
     assert rc == mgt.EXIT_FATAL
     assert "MEASURES NOTHING" in capsys.readouterr().err
+
+
+# -- what the adapter saw, recorded beside what the harness measured -----------------------------
+#
+# The evidence the adapter's second gate-qualification blocker asks for "from a full pass" — the
+# retry counts and the detection-score distribution — had nowhere to land until 2026-08-22: neither
+# harness read ``estimators.apple_sam2.stats()``, so the 402-episode, ~171 600-frame GEOM_TOL run
+# produced none of it. These tests are about the place it lands, and about the three ways that place
+# could be worse than useless: numbers that belong to a previous run in the same interpreter, a
+# distribution that does not survive the 8-way shard, and zeros written where nobody looked.
+
+
+def counting_adapter(monkeypatch, **kw) -> types.ModuleType:
+    """An adapter stub that keeps the counters and the score list the real one keeps.
+
+    CUMULATIVE, exactly as ``scripts/estimators/apple_sam2.py`` is: nothing resets them, so a second
+    measurement in the same interpreter sees the first one's totals. That is the property the probe
+    exists for, and a stub that reset itself per run would let a harness reading the totals straight
+    into its artifact pass.
+
+    The score is a function of the FRAME and not of the call order, so the same frame scores the
+    same whichever shard segments it — without that the sharded and un-sharded runs would pool
+    different values and the exactness test below would be asserting something it could not have.
+    """
+    mod = install_adapter(monkeypatch, **kw)
+    mod.DETECTION_SCORES = []
+    mod.SEGMENT_CALLS = 0
+    mod.NO_DETECTION_FRAMES = 0
+    mod.EMPTY_MASK_FRAMES = 0
+    mod.RETRY_FRAMES = 0
+    mod.RETRY_RECOVERED_FRAMES = 0
+    inner = mod.segment
+
+    def segment(rgb):
+        mod.SEGMENT_CALLS += 1
+        mask = inner(rgb)
+        if not np.asarray(mask).any():
+            mod.NO_DETECTION_FRAMES += 1
+            return mask
+        # Position-sensitive, so two frames of the same blob at two places do NOT score the same:
+        # a fixture where every score is equal is permutation-invariant, and the exactness claim
+        # below would then be a claim no wrong implementation could fail.
+        red = np.asarray(rgb)[:, :, 0].astype(np.int64)
+        h, w = red.shape
+        key = int((red * (np.arange(w) + 1)).sum() + (red.T * (np.arange(h) + 1)).sum())
+        score = round(0.08 + (key % 92) / 100.0, 6)
+        if score < 0.15:                      # only the retry can produce one of these
+            mod.RETRY_FRAMES += 1
+            mod.RETRY_RECOVERED_FRAMES += 1
+        mod.DETECTION_SCORES.append(score)
+        return mask
+
+    def stats():
+        return {
+            "estimator_name": mod.ESTIMATOR_NAME,
+            "estimator_version": mod.ESTIMATOR_VERSION,
+            "gate_qualified": mod.GATE_QUALIFIED,
+            "box_threshold": 0.15,
+            "retry_box_threshold": 0.1,
+            "n_segment_calls": mod.SEGMENT_CALLS,
+            "n_frames_without_detection": mod.NO_DETECTION_FRAMES,
+            "n_frames_with_empty_mask": mod.EMPTY_MASK_FRAMES,
+            "n_frames_retry_fired": mod.RETRY_FRAMES,
+            "n_frames_retry_recovered": mod.RETRY_RECOVERED_FRAMES,
+            "n_detection_scores": len(mod.DETECTION_SCORES),
+        }
+
+    mod.segment = segment
+    mod.stats = stats
+    return mod
+
+
+def _sam2_run(tmp_path: Path, monkeypatch, corners: dict, out: Path, extra=None) -> dict:
+    """One --method sam2 measurement over a synthetic corpus, and the artifact it wrote."""
+    corpus, _ = make_corpus(tmp_path, corners)
+    install_video_frames(monkeypatch, {k: bgr_frames(v) for k, v in corners.items()})
+    rc = run(["--corpus", str(corpus), "--method", "sam2", "--out", str(out), *(extra or [])])
+    assert rc == mgt.EXIT_OK, rc
+    return json.loads(out.read_text())
+
+
+def test_the_artifact_records_the_retry_counts_and_the_score_distribution(
+        tmp_path: Path, monkeypatch) -> None:
+    """The full-pass evidence blocker 2 asks for, in the artifact the full pass writes.
+
+    Counts AND scores: "the retry fired 41 times" does not say whether it bought 41 confident
+    detections or 41 masks of the plate, and the 169-frame local audit found the scores sharply
+    bimodal — p25 0.758 where the mask was right, 0.155-0.264 on every flagged frame. The part of
+    the distribution below box_threshold is the retry's contribution by construction: the first
+    pass discards everything under it.
+    """
+    counting_adapter(monkeypatch)
+    rec = _sam2_run(tmp_path, monkeypatch, {"ep0": walk((10, 10), (2, 0), 5)},
+                    tmp_path / "geom_tol.json")
+
+    stats = rec["estimator_stats"]
+    assert stats["recorded"] is True
+    assert stats["this_run"]["n_segment_calls"] == 5
+    assert stats["this_run"]["n_frames_without_detection"] == 0
+    for key in ("n_frames_retry_fired", "n_frames_retry_recovered"):
+        assert isinstance(stats["this_run"][key], int), key
+    dist = stats["detection_scores"]["distribution"]
+    assert dist["n"] == 5
+    assert stats["detection_scores"]["n"] == 5
+    assert dist["box_threshold"] == 0.15
+    assert dist["n_below_box_threshold"] == stats["this_run"]["n_frames_retry_recovered"]
+    assert 0.0 <= dist["min"] <= dist["percentiles"]["p50"] <= dist["max"] <= 1.0
+    assert sum(dist["histogram"]["counts"]) == 5
+    # The descriptive half of stats() is carried verbatim, so the artifact says which adapter, at
+    # which operating point, produced the counts beside them.
+    assert stats["adapter"]["estimator_name"] == rec["mask_method"]["name"]
+    assert stats["adapter"]["box_threshold"] == 0.15
+
+
+def test_the_recorded_counters_belong_to_this_run_and_not_to_the_interpreter(
+        tmp_path: Path, monkeypatch) -> None:
+    """THE LEAK THIS DESIGN EXISTS AGAINST. The adapter's counters are lifetime totals — nothing in
+    it resets them — so a harness that copied ``stats()`` into its artifact would report the first
+    measurement's frames in the second measurement's record, and the number would look right.
+
+    Two runs, one interpreter, one adapter instance. The second artifact must count its own five
+    frames, and must SAY that the interpreter was not fresh rather than hiding it.
+    """
+    counting_adapter(monkeypatch)
+    first = _sam2_run(tmp_path, monkeypatch, {"ep0": walk((10, 10), (2, 0), 5)},
+                      tmp_path / "first.json")
+    second = _sam2_run(tmp_path, monkeypatch, {"ep0": walk((10, 10), (2, 0), 5)},
+                       tmp_path / "second.json")
+
+    assert first["estimator_stats"]["this_run"]["n_segment_calls"] == 5
+    assert second["estimator_stats"]["this_run"]["n_segment_calls"] == 5, (
+        "the second run recorded the interpreter's total, not its own frames")
+    assert second["estimator_stats"]["counters_at_end_of_run"]["n_segment_calls"] == 10
+    assert second["estimator_stats"]["counters_at_start_of_run"]["n_segment_calls"] == 5, (
+        "a non-fresh interpreter has to be visible in the artifact, not corrected away silently")
+    assert second["estimator_stats"]["detection_scores"]["n"] == 5
+    # And the adapter's own state was not touched to achieve it: a harness that reset somebody
+    # else's module counters would break the next caller instead of itself.
+    assert sys.modules[SAM2_SPEC].SEGMENT_CALLS == 10
+
+
+def test_an_adapter_that_exports_no_stats_records_an_absence_and_not_zeros(
+        tmp_path: Path, monkeypatch) -> None:
+    """The contract both harnesses call is segment(rgb)/estimate_depth(rgb). stats() is an extra.
+
+    An adapter without one must measure exactly as before — and "we did not look" must not be
+    written down as "the retry never fired", which is what a block of zeros would say to a reader
+    holding a full pass and a blocker asking whether the retry bought its coverage.
+    """
+    install_adapter(monkeypatch)                      # no stats(), no DETECTION_SCORES
+    rec = _sam2_run(tmp_path, monkeypatch, {"ep0": walk((10, 10), (2, 0), 5)},
+                    tmp_path / "geom_tol.json")
+
+    stats = rec["estimator_stats"]
+    assert stats["recorded"] is False
+    assert "stats()" in stats["absent_because"]
+    assert stats["this_run"] is None and stats["counters_at_end_of_run"] is None
+    assert stats["detection_scores"]["recorded"] is False
+    assert stats["detection_scores"]["n"] is None
+    assert "Absent is not zero" in stats["note"]
+    # The measurement is untouched.
+    assert rec["GEOM_TOL_px"] == pytest.approx(2.0)
+    assert rec["gate_qualified"] is True
+
+
+def test_a_stats_that_raises_loses_the_evidence_and_not_the_measurement(
+        tmp_path: Path, monkeypatch) -> None:
+    """stats() is read for the record only. A GEOM_TOL pass costs four GPU-hours and must not die
+    on the way to its artifact because an optional accessor threw."""
+    mod = install_adapter(monkeypatch)
+
+    def boom():
+        raise RuntimeError("no counters here")
+
+    mod.stats = boom
+    rec = _sam2_run(tmp_path, monkeypatch, {"ep0": walk((10, 10), (2, 0), 5)},
+                    tmp_path / "geom_tol.json")
+    assert rec["GEOM_TOL_px"] == pytest.approx(2.0)
+    assert rec["estimator_stats"]["recorded"] is False
+    assert "RuntimeError: no counters here" in rec["estimator_stats"]["absent_because"]
+
+
+def _sam2_shards(tmp_path: Path, monkeypatch, corners: dict, n: int) -> list[str]:
+    corpus, _ = make_corpus(tmp_path, corners)
+    install_video_frames(monkeypatch, {k: bgr_frames(v) for k, v in corners.items()})
+    paths = []
+    for i in range(n):
+        p = tmp_path / f"sam2-shard-{i}.json"
+        assert run(["--corpus", str(corpus), "--method", "sam2", "--out", str(p),
+                    "--shard", str(i), "--num-shards", str(n)]) == mgt.EXIT_OK
+        paths.append(str(p))
+    return paths
+
+
+#: The fields of ``estimator_stats`` that are about the PROCESS rather than about the corpus, and
+#: are therefore the only ones a merged block does not reproduce from the un-sharded one. The
+#: lifetime totals of eight processes do not sum to anything, so the merge nulls them and lists them
+#: per shard; everything else — the counts, the scores, the distribution, the adapter's own
+#: description of itself — is the same object either way, which is the same standard
+#: ``test_the_merged_artifact_is_the_unsharded_artifact_exactly`` holds the rest of the record to.
+_STATS_PROCESS_LOCAL = {"counters_at_start_of_run", "counters_at_end_of_run", "per_shard"}
+
+
+def test_the_merged_score_distribution_is_the_unsharded_one_exactly(
+        tmp_path: Path, monkeypatch) -> None:
+    """Eleven episodes, three shards, and a distribution that has to survive the trip.
+
+    ``mean`` and ``std`` are floating-point sums and every histogram count is a count over the same
+    values, so pooling the shards in shard order rather than in the corpus's own enumeration order
+    would give a merged artifact that is approximately, not exactly, the un-sharded one — the same
+    failure the raw per-step displacements exist to prevent, and the reason the scores are carried
+    per EPISODE and sorted by ``episode_index`` rather than concatenated per shard.
+    """
+    corners = {f"ep{i:02d}": walk((10, 10 + 3 * i), (1 + (i % 5), i % 3), 6 + (i % 4))
+               for i in range(11)}
+    mod = counting_adapter(monkeypatch)
+
+    full = tmp_path / "full.json"
+    reference = _sam2_run(tmp_path, monkeypatch, corners, full)
+    # The un-sharded run's scores IN THE ORDER IT SEGMENTED THEM, read off the adapter rather than
+    # out of the artifact (the artifact keeps the distribution, not the values). This is the
+    # sequence the merge has to rebuild, and it is not permutation-invariant: the fixture scores
+    # each frame by where its blob is, so a pool assembled in shard order is a different list.
+    unsharded_scores = list(mod.DETECTION_SCORES)
+    assert len(set(unsharded_scores)) > 1, "the fixture must not score every frame the same"
+
+    shards = _sam2_shards(tmp_path, monkeypatch, corners, 3)
+    merged_path = tmp_path / "merged.json"
+    assert run(["--merge", *shards, "--out", str(merged_path)]) == mgt.EXIT_OK
+    merged = json.loads(merged_path.read_text())
+
+    ref_stats, got_stats = reference["estimator_stats"], merged["estimator_stats"]
+    assert got_stats["recorded"] is True
+    assert got_stats["detection_scores"]["distribution"] == (
+        ref_stats["detection_scores"]["distribution"]), "the pooled distribution is not exact"
+    differing = sorted(k for k in set(ref_stats) | set(got_stats)
+                       if k not in _STATS_PROCESS_LOCAL and ref_stats.get(k) != got_stats.get(k))
+    assert differing == [], f"merged and un-sharded estimator_stats disagree on {differing}"
+    assert got_stats["this_run"]["n_segment_calls"] == sum(
+        s["this_run"]["n_segment_calls"] for s in got_stats["per_shard"])
+    # WHERE THE RAW VALUES LIVE, which is exactly where displacements_px lives: attributed to an
+    # episode, in a shard artifact, and nowhere in the committed one. Attributed rather than
+    # top-level because the merge sorts by episode_index; absent from the merged artifact because
+    # the pooled statistic is what the merge exists to produce and the tracked document stays small.
+    assert "values" not in got_stats["detection_scores"]
+    assert all("detection_scores" not in ep for ep in merged["per_episode"])
+    shard_zero = json.loads(Path(shards[0]).read_text())
+    assert "values" not in shard_zero["estimator_stats"]["detection_scores"]
+    assert all(ep["detection_scores"] for ep in shard_zero["per_episode"])
+    # And the pooled values are all of them, in the corpus's own order and not in the shards'.
+    by_episode = sorted(
+        (ep["episode_index"], ep["detection_scores"])
+        for p in shards for ep in json.loads(Path(p).read_text())["per_episode"])
+    pooled = [v for _, scores in by_episode for v in scores]
+    assert pooled == unsharded_scores
+    shard_order = [v for p in shards
+                   for ep in json.loads(Path(p).read_text())["per_episode"]
+                   for v in ep["detection_scores"]]
+    assert shard_order != unsharded_scores, (
+        "this fixture must separate the two orders, or the assertion above is vacuous")
+
+
+def test_a_shard_that_recorded_no_adapter_stats_is_an_absence_and_not_a_dead_merge(
+        tmp_path: Path, monkeypatch) -> None:
+    """A shard written by an older version of this script carries no estimator_stats at all.
+
+    The merge must still produce GEOM_TOL — the counts are evidence, nothing subtracts them — and
+    must say WHY the evidence is missing rather than pooling the shards that do have it and
+    reporting the result as if it covered the corpus.
+    """
+    corners = {f"ep{i:02d}": walk((10, 10 + 3 * i), (1 + (i % 5), i % 3), 6 + (i % 4))
+               for i in range(11)}
+    counting_adapter(monkeypatch)
+    shards = _sam2_shards(tmp_path, monkeypatch, corners, 3)
+    victim = Path(shards[1])
+    rec = json.loads(victim.read_text())
+    rec.pop("estimator_stats")
+    victim.write_text(json.dumps(rec, indent=2) + "\n")
+
+    merged_path = tmp_path / "merged.json"
+    assert run(["--merge", *shards, "--out", str(merged_path)]) == mgt.EXIT_OK
+    merged = json.loads(merged_path.read_text())
+    assert merged["GEOM_TOL_px"] is not None
+    assert merged["gate_qualified"] is True
+    stats = merged["estimator_stats"]
+    assert stats["recorded"] is False
+    assert "shard 1" in stats["absent_because"]
+    assert stats["this_run"] is None
+
+
+def test_a_shard_that_kept_only_its_distribution_cannot_be_pooled(
+        tmp_path: Path, monkeypatch) -> None:
+    """The scores' half of "a median does not decompose". Two binned distributions pool only if
+    they were binned identically and even then not exactly, so the merge takes the raw values or
+    records that it could not."""
+    corners = {f"ep{i:02d}": walk((10, 10 + 3 * i), (1 + (i % 5), i % 3), 6 + (i % 4))
+               for i in range(11)}
+    counting_adapter(monkeypatch)
+    shards = _sam2_shards(tmp_path, monkeypatch, corners, 3)
+    victim = Path(shards[2])
+    rec = json.loads(victim.read_text())
+    for ep in rec["per_episode"]:
+        ep.pop("detection_scores")
+    victim.write_text(json.dumps(rec, indent=2) + "\n")
+
+    merged_path = tmp_path / "merged.json"
+    assert run(["--merge", *shards, "--out", str(merged_path)]) == mgt.EXIT_OK
+    stats = json.loads(merged_path.read_text())["estimator_stats"]
+    # The counts still pool — they are per-shard totals and none of them went missing.
+    assert stats["recorded"] is True
+    assert stats["this_run"]["n_segment_calls"] > 0
+    assert stats["detection_scores"]["recorded"] is False
+    assert "no raw detection_scores" in stats["detection_scores"]["absent_because"]
+    assert stats["detection_scores"]["distribution"] is None
+
+
+# -- the additive claim, checked against the script as it was ------------------------------------
+
+
+def _previous_version(tmp_path: Path, name: str, commit: str = "d9ac5d1") -> object:
+    """Import ``scripts/<name>.py`` AS IT WAS AT ``commit``, under its own module name.
+
+    ONE substitution is made in the source: ``_REPO_ROOT``, which both scripts derive from
+    ``__file__`` and use to find the repository, its git commit and the file the est_drift blocker
+    is read out of. A copy living under tmp_path would otherwise describe a repository that is not
+    this one, and the comparison would be against fields that differ for a reason having nothing to
+    do with the change under test. Every other byte is the previous version's.
+    """
+    import importlib.util
+    import subprocess
+
+    src = subprocess.run(["git", "show", f"{commit}:scripts/{name}.py"],
+                         cwd=str(Path(mgt.__file__).resolve().parents[1]),
+                         capture_output=True, text=True, check=True).stdout
+    anchor = "_REPO_ROOT = Path(__file__).resolve().parent.parent"
+    assert src.count(anchor) == 1, f"{name} at {commit} no longer derives _REPO_ROOT that way"
+    src = src.replace(anchor, f"_REPO_ROOT = Path({str(Path(mgt.__file__).resolve().parents[1])!r})")
+    path = tmp_path / f"{name}_at_{commit}.py"
+    path.write_text(src, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(f"{name}_baseline", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+#: Provenance of the individual run rather than of the measurement: a timestamp, and the two paths
+#: that name the file being written. Everything else in the record is the measurement and must come
+#: out of both versions identically.
+_RUN_LOCAL = {"measured_utc", "artifact_path", "artifact_sha256_sidecar"}
+
+
+def test_recording_the_adapter_stats_changed_no_number_this_script_already_produced(
+        tmp_path: Path, monkeypatch) -> None:
+    """THE WHOLE CLAIM OF THIS CHANGE, checked against the script as it was rather than asserted.
+
+    ``estimator_stats`` is additive: it is written beside the measurement, nothing reads it back,
+    and no refusal, exit code or gate flag depends on it. The way to be sure of that is not to read
+    the diff — it is to run the previous version of the script over the same fixture and compare
+    the two artifacts key for key. The only permitted differences are the new key itself and the
+    per-run provenance.
+    """
+    corners = {"ep0": walk((10, 10), (2, 0), 5),
+               "ep1": walk((10, 40), (3, 4), 6),
+               "ep2": walk((60, 10), (0, 8), 4)}
+    old = _previous_version(tmp_path, "measure_geom_tol")
+    counting_adapter(monkeypatch)
+    corpus, masks = make_corpus(tmp_path, corners)
+    frames = {k: bgr_frames(v) for k, v in corners.items()}
+    install_video_frames(monkeypatch, frames)
+    install_video_frames(monkeypatch, frames, module=old)
+
+    argv = ["--corpus", str(corpus), "--method", "sam2", "--out"]
+    assert old.main([*argv, str(tmp_path / "before.json")]) == mgt.EXIT_OK
+    assert run([*argv, str(tmp_path / "after.json")]) == mgt.EXIT_OK
+    before = json.loads((tmp_path / "before.json").read_text())
+    after = json.loads((tmp_path / "after.json").read_text())
+
+    assert set(after) - set(before) == {"estimator_stats"}, "a key appeared that was not declared"
+    assert set(before) - set(after) == set(), "a key the previous version wrote went missing"
+    differing = sorted(k for k in before if k not in _RUN_LOCAL and before[k] != after[k])
+    assert differing == [], f"recording the adapter's stats changed {differing}"
+
+    # The same, on the path that reads masks off disk and involves no estimator at all — where the
+    # new block is an ABSENCE, which must also change nothing.
+    argv = ["--corpus", str(corpus), "--masks", str(masks), "--out"]
+    assert old.main([*argv, str(tmp_path / "before_masks.json")]) == mgt.EXIT_OK
+    assert run([*argv, str(tmp_path / "after_masks.json")]) == mgt.EXIT_OK
+    before = json.loads((tmp_path / "before_masks.json").read_text())
+    after = json.loads((tmp_path / "after_masks.json").read_text())
+    assert after["estimator_stats"]["recorded"] is False
+    differing = sorted(k for k in before if k not in _RUN_LOCAL and before[k] != after[k])
+    assert differing == [], f"recording the adapter's stats changed {differing}"
+
+
+def test_the_merge_is_unchanged_by_it_too(tmp_path: Path, monkeypatch) -> None:
+    """The merge has its own record-building path, and the same claim has to hold there.
+
+    Shards written by the previous version merge under the previous version; shards written by this
+    one merge under this one; the two merged artifacts agree on everything the gate reads.
+    """
+    old = _previous_version(tmp_path, "measure_geom_tol")
+    corpus, masks = _eleven_episode_corpus(tmp_path)
+
+    def shard_with(module, tag: str) -> list[str]:
+        paths = []
+        for i in range(3):
+            p = tmp_path / f"{tag}-{i}.json"
+            assert module.main(["--corpus", str(corpus), "--masks", str(masks), "--out", str(p),
+                                "--shard", str(i), "--num-shards", "3"]) == mgt.EXIT_OK
+            paths.append(str(p))
+        return paths
+
+    assert old.main(["--merge", *shard_with(old, "old"), "--out",
+                     str(tmp_path / "before.json")]) == mgt.EXIT_OK
+    assert run(["--merge", *shard_with(mgt, "new"), "--out",
+                str(tmp_path / "after.json")]) == mgt.EXIT_OK
+    before = json.loads((tmp_path / "before.json").read_text())
+    after = json.loads((tmp_path / "after.json").read_text())
+
+    assert set(after) - set(before) == {"estimator_stats"}
+    ignore = _RUN_LOCAL | {"merged_from"}          # names the shard paths and their digests
+    differing = sorted(k for k in before if k not in ignore and before[k] != after[k])
+    assert differing == [], f"the merge changed {differing}"
+    assert before["merged_from"]["shards"][0]["n_steps_measured"] == (
+        after["merged_from"]["shards"][0]["n_steps_measured"])
+
+
+def test_the_counter_names_this_module_differences_are_the_ones_the_adapter_exports() -> None:
+    """A renamed counter would record ``null`` for every frame instead of failing.
+
+    ``ADAPTER_RUN_COUNTERS`` and ``ADAPTER_SCORES_ATTR`` are read off the adapter by name. The
+    failure mode of a rename is silent and it is the worst-shaped one available here: the run
+    completes, the artifact is written, ``this_run`` says ``null`` for the retry counts, and it
+    reads to a later human exactly like an adapter that was asked and had nothing to say. Checked by
+    PARSING the adapter, because importing it needs transformers, torch and 3 GB of weights, and
+    these tests run with none of the three.
+    """
+    import ast
+
+    tree = ast.parse(mgt.SAM2_ADAPTER_FILE.read_text(encoding="utf-8"))
+    assigned = {t.id for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
+                for t in ([node.target] if isinstance(node, ast.AnnAssign) else node.targets)
+                if isinstance(t, ast.Name)}
+    assert mgt.ADAPTER_SCORES_ATTR in assigned, (
+        f"{mgt.SAM2_ADAPTER_SPEC} no longer declares {mgt.ADAPTER_SCORES_ATTR}; the recorded "
+        "detection-score distribution would be an absence on every run, silently")
+
+    stats_fn = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "stats")
+    returned = next(n for n in ast.walk(stats_fn) if isinstance(n, ast.Dict))
+    keys = {k.value for k in returned.keys if isinstance(k, ast.Constant)}
+    missing = [k for k in mgt.ADAPTER_RUN_COUNTERS if k not in keys]
+    assert missing == [], (
+        f"{mgt.SAM2_ADAPTER_SPEC}.stats() no longer reports {missing}. Those counters would be "
+        "recorded as null — 'we asked and it said nothing' — on every full pass, which is what "
+        "the adapter's second gate-qualification blocker asks for and would not get.")

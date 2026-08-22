@@ -545,3 +545,164 @@ def test_the_measured_artifact_carries_the_scene_the_capture_named(contract, tmp
     assert block["asset_source"] == "--asset"
     assert block["camera_prim"] == ed.DEFAULT_CAMERA_PRIMS["persp"]
     assert block["render_hw_requested"] == [12, 20]
+
+
+# -- what the estimator saw, recorded beside the budget it produced ------------------------------
+#
+# EST_DRIFT_P95 is measured with the same adapter GEOM_TOL is, and that adapter's second
+# gate-qualification blocker asks for its retry counts and its detection-score distribution from a
+# real pass. Until 2026-08-22 this harness recorded the estimator's NAME, its version and its gate
+# flag and threw the rest away. These tests are about the block that now carries it — and about the
+# fact that an estimator which exports none of it must still measure exactly as it did before.
+
+
+def _counting_estimator(tmp_path) -> str:
+    """A stub that keeps the counters and the score list ``estimators.apple_sam2`` keeps.
+
+    Cumulative, because the real one is: nothing in it resets them, so a harness that copied
+    ``stats()`` straight into its artifact would report a total shared with every other run in the
+    same interpreter.
+    """
+    return _stub_module(
+        tmp_path,
+        "counting_estimator",
+        "import numpy as np\n"
+        "ESTIMATOR_NAME = 'counting-stub'\n"
+        "ESTIMATOR_VERSION = '0'\n"
+        "SEGMENT_CALLS = 0\n"
+        "NO_DETECTION_FRAMES = 0\n"
+        "RETRY_FRAMES = 0\n"
+        "RETRY_RECOVERED_FRAMES = 0\n"
+        "DETECTION_SCORES = []\n"
+        "\n"
+        "def segment(rgb):\n"
+        "    global SEGMENT_CALLS\n"
+        "    SEGMENT_CALLS += 1\n"
+        "    DETECTION_SCORES.append(round(0.1 + 0.01 * (SEGMENT_CALLS % 50), 6))\n"
+        "    return np.asarray(rgb)[:, :, 0] > 0\n"
+        "\n"
+        "def estimate_depth(rgb):\n"
+        "    return np.zeros(np.asarray(rgb).shape[:2], dtype='float32')\n"
+        "\n"
+        "def stats():\n"
+        "    return {\n"
+        "        'estimator_name': ESTIMATOR_NAME,\n"
+        "        'box_threshold': 0.15,\n"
+        "        'n_segment_calls': SEGMENT_CALLS,\n"
+        "        'n_frames_without_detection': NO_DETECTION_FRAMES,\n"
+        "        'n_frames_retry_fired': RETRY_FRAMES,\n"
+        "        'n_frames_retry_recovered': RETRY_RECOVERED_FRAMES,\n"
+        "        'n_detection_scores': len(DETECTION_SCORES),\n"
+        "    }\n",
+    )
+
+
+def test_the_budget_artifact_records_what_the_estimator_saw(capture, tmp_path):
+    """The counts and the scores of THIS run, beside the p95 they were produced with."""
+    out = tmp_path / "d.json"
+    ed.main(["measure", "--capture", str(capture), "--estimators", _counting_estimator(tmp_path),
+             "--object-class", "apple", "--min-coverage", "0.0", "--out", str(out)])
+    doc = json.loads(out.read_text())
+
+    stats = doc["estimator_stats"]
+    assert stats["recorded"] is True
+    assert stats["this_run"]["n_segment_calls"] == doc["n_frames"] - (
+        doc["n_frames_without_object_label"])
+    assert stats["detection_scores"]["n"] == stats["this_run"]["n_detection_scores"]
+    assert stats["detection_scores"]["distribution"]["n"] == stats["detection_scores"]["n"]
+    assert stats["detection_scores"]["distribution"]["box_threshold"] == 0.15
+    # The raw values are kept here — a capture is a few hundred frames, not the 171 600 of a
+    # GEOM_TOL pass — so the distribution beside them is re-derivable rather than merely quoted.
+    assert stats["detection_scores"]["values"] == pytest.approx(
+        [round(0.1 + 0.01 * ((i + 1) % 50), 6) for i in range(stats["detection_scores"]["n"])])
+    assert stats["adapter"]["estimator_name"] == "counting-stub"
+    # Recording evidence is not accepting it: nothing here reaches the verdict.
+    assert "estimator_stats" not in " ".join(doc["gate_disqualified_reasons"])
+
+
+def test_the_recorded_counts_are_this_runs_and_not_the_interpreters(capture, tmp_path):
+    """Two measurements, one interpreter, one imported estimator. The second one's counts are its
+    own — the adapter's totals are cumulative and are snapshotted and differenced, not copied."""
+    name = _counting_estimator(tmp_path)
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    for out in (first, second):
+        ed.main(["measure", "--capture", str(capture), "--estimators", name,
+                 "--object-class", "apple", "--min-coverage", "0.0", "--out", str(out)])
+    a = json.loads(first.read_text())["estimator_stats"]
+    b = json.loads(second.read_text())["estimator_stats"]
+
+    assert b["this_run"] == a["this_run"], "the second run recorded the interpreter's total"
+    assert b["counters_at_start_of_run"]["n_segment_calls"] == (
+        a["counters_at_end_of_run"]["n_segment_calls"])
+    # Stated as arithmetic rather than as absolute numbers: this module stays imported for the
+    # whole session, so what the counters START at depends on which tests ran before this one —
+    # which is the leak, reproduced. What must hold is that the difference is this run's.
+    assert b["counters_at_start_of_run"]["n_segment_calls"] > 0
+    assert (b["counters_at_end_of_run"]["n_segment_calls"]
+            - b["counters_at_start_of_run"]["n_segment_calls"]) == b["this_run"]["n_segment_calls"]
+    assert b["counters_at_end_of_run"]["n_segment_calls"] > b["this_run"]["n_segment_calls"]
+
+
+def test_an_estimator_with_no_stats_records_an_absence_and_measures_the_same(capture, tmp_path):
+    """The contract is segment(rgb)/estimate_depth(rgb). stats() is an extra, and "we did not look"
+    must not be written down as "the retry never fired"."""
+    out = tmp_path / "d.json"
+    ed.main(["measure", "--capture", str(capture), "--estimators", _naive_estimator(tmp_path),
+             "--object-class", "apple", "--min-coverage", "0.0", "--out", str(out)])
+    doc = json.loads(out.read_text())
+
+    stats = doc["estimator_stats"]
+    assert stats["recorded"] is False
+    assert "stats()" in stats["absent_because"]
+    assert stats["this_run"] is None
+    assert stats["detection_scores"]["n"] is None
+    assert doc["est_drift_p95_px"] is not None
+
+
+def _previous_version(tmp_path, name: str, commit: str = "d9ac5d1"):
+    """``scripts/<name>.py`` as it was at ``commit``, importable under its own module name.
+
+    One substitution, ``_REPO_ROOT``: the copy lives under tmp_path and would otherwise resolve the
+    committed GEOM_TOL contract, the git commit and the repository itself somewhere else, so the
+    comparison below would be against differences that have nothing to do with the change. Every
+    other byte is the previous version's.
+    """
+    import importlib.util
+    import subprocess
+
+    repo = pathlib.Path(ed.__file__).resolve().parents[1]
+    src = subprocess.run(["git", "show", f"{commit}:scripts/{name}.py"], cwd=str(repo),
+                         capture_output=True, text=True, check=True).stdout
+    anchor = "_REPO_ROOT = Path(__file__).resolve().parent.parent"
+    assert src.count(anchor) == 1
+    src = src.replace(anchor, f"_REPO_ROOT = Path({str(repo)!r})")
+    path = tmp_path / f"{name}_at_{commit}.py"
+    path.write_text(src, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(f"{name}_baseline", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_recording_the_estimator_stats_changed_no_number_this_script_already_produced(
+        capture, tmp_path):
+    """THE ADDITIVE CLAIM, checked against the script as it was rather than asserted.
+
+    The previous version of measure_est_drift and this one, over the same capture with the same
+    estimator. The only permitted difference is the new key and the timestamp — not the p95, not
+    the coverage, not the disqualification reasons, not the cross-check.
+    """
+    old = _previous_version(tmp_path, "measure_est_drift")
+    name = _counting_estimator(tmp_path)
+    argv = ["measure", "--capture", str(capture), "--estimators", name,
+            "--object-class", "apple", "--min-coverage", "0.0", "--out"]
+    old.main([*argv, str(tmp_path / "before.json")])
+    ed.main([*argv, str(tmp_path / "after.json")])
+    before = json.loads((tmp_path / "before.json").read_text())
+    after = json.loads((tmp_path / "after.json").read_text())
+
+    assert set(after) - set(before) == {"estimator_stats"}
+    assert set(before) - set(after) == set()
+    differing = sorted(k for k in before if k != "measured_utc" and before[k] != after[k])
+    assert differing == [], f"recording the estimator's stats changed {differing}"

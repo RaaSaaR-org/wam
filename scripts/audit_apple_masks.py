@@ -55,11 +55,13 @@ ATTENTION addressed to the reviewer and the artifact says so in the field beside
 **It will not measure the corpus rate of anything.** The retry rate, the no-detection rate and the
 score distribution recorded here are over a sample that deliberately over-weights the hard frames,
 so they are **biased upwards** as estimates of the corpus and are labelled that way in the artifact.
-Blocker 2 asks for those numbers *from a full pass*; the full pass is the GEOM_TOL array run, and as
-of 2026-08-22 **neither ``measure_geom_tol.py`` nor ``measure_est_drift.py`` records
-``apple_sam2.stats()`` into its artifact at all** — so the full-pass half of blocker 2 has nowhere to
-land yet. That is recorded in the artifact under ``full_pass_gap`` rather than left for someone to
-discover after paying 4.23 GPU-h.
+Blocker 2 asks for those numbers *from a full pass*; the full pass is the GEOM_TOL array run, which
+until 2026-08-22 recorded ``apple_sam2.stats()`` nowhere, so the full-pass half of blocker 2 had
+nowhere to land. It has one now: both harnesses write an ``estimator_stats`` block (per-run counters,
+snapshot-and-differenced, and the pooled detection-score distribution), and the shards carry their
+raw scores per episode so the merge pools them exactly. The place existing is not the evidence
+existing and neither is a discharge — see ``full_pass_gap`` in the artifact, which now says which
+run has to be done rather than which code has to be written.
 
 THE SAMPLING RULE
 -----------------
@@ -1485,12 +1487,16 @@ def build_artifact(
             "over": "THIS SAMPLE ONLY — see sampling.bias. Not a corpus rate.",
         },
         "full_pass_gap": (
-            "Blocker 2 asks for these counts FROM A FULL PASS. As of this file's writing neither "
-            "scripts/measure_geom_tol.py nor scripts/measure_est_drift.py reads "
-            "estimators.apple_sam2.stats() into its artifact, so a full GEOM_TOL run produces none "
-            "of them and the full-pass half of blocker 2 has nowhere to land. Recording stats() "
-            "into those two artifacts is a small additive change and it is NOT made here: this "
-            "script does not edit the gate harnesses."
+            "Blocker 2 asks for these counts FROM A FULL PASS, and this sample is not one. The "
+            "place they land now exists (2026-08-22): scripts/measure_geom_tol.py and "
+            "scripts/measure_est_drift.py each write an `estimator_stats` block holding this run's "
+            "counters — snapshotted before the pass and differenced after it, because the "
+            "adapter's own counters are lifetime totals — and the detection-score distribution, "
+            "with the shards carrying their raw scores per episode so the merge pools them exactly "
+            "rather than approximately. What is still missing is the RUN: no full GEOM_TOL pass has "
+            "been executed since, so the numbers in this artifact remain the only ones anybody has, "
+            "and they are over a sample that over-weights the hard frames. Neither the block nor "
+            "this sample discharges the blocker; a human still has to read them."
         ),
         "estimator": {
             "adapter_stats": stats,

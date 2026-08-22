@@ -1492,3 +1492,96 @@ def test_the_harness_reads_this_modules_contract_as_the_segmenter_it_cross_check
     module, _ = loaded
     est = ed.Estimators(module, MODULE)
     assert est.segmenter_contract == module.SEGMENTER_CONTRACT
+
+
+# -- the detection scores, which are the evidence blocker 2 asks for -----------------------------
+#
+# The blocker wants "the recorded detection-score distribution and retry counts from a full pass, so
+# the retry's contribution is visible rather than assumed". The counts were already here; the scores
+# were computed inside ``_best_box`` and thrown away, so a 171 600-frame pass could say how OFTEN
+# the retry fired and never how weak the detections it bought were. A 169-frame local audit found
+# nine frames whose mask was a confident, well-formed mask of the PLATE — and every one of them
+# scored between 0.155 and 0.264 while the correct masks sat at p25 0.758. That separation is only
+# visible in the values.
+
+
+def test_the_winning_score_is_recorded_for_every_frame_that_got_a_box(monkeypatch):
+    """One entry per detected frame, in call order, and it is the score of the box SAM 2 was
+    prompted with — not the highest score seen, which on the retry path is a different number."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[
+        [(0.41, [0.0, 0.0, 60.0, 44.0]), (0.88, [12.0, 8.0, 26.0, 22.0])],
+        [(0.62, [10.0, 10.0, 30.0, 30.0])],
+    ])
+    module = _fresh_import(monkeypatch)
+
+    module.segment(_frame())
+    module.segment(_frame())
+    assert module.DETECTION_SCORES == [pytest.approx(0.88), pytest.approx(0.62)]
+    assert module.stats()["n_detection_scores"] == 2
+    assert module.stats()["detection_scores_attr"] == "DETECTION_SCORES"
+
+
+def test_a_frame_with_no_box_records_no_score_rather_than_a_zero(monkeypatch):
+    """A zero would be a detection that scored zero. There was no detection: the frame is in
+    n_frames_without_detection and in nothing else, and the list is not index-aligned to frames."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[], [], [(0.7, [10.0, 10.0, 30.0, 30.0])]])
+    module = _fresh_import(monkeypatch)
+
+    assert not module.segment(_frame()).any()      # first pass empty, retry empty
+    module.segment(_frame())
+    record = module.stats()
+    assert module.DETECTION_SCORES == [pytest.approx(0.7)]
+    assert record["n_frames_without_detection"] == 1
+    assert record["n_detection_scores"] == 1
+    assert record["n_segment_calls"] - record["n_frames_without_detection"] == 1
+
+
+def test_a_score_the_retry_bought_is_recorded_and_is_below_the_primary_threshold(monkeypatch):
+    """THE POINT OF THE LIST. The first pass discards everything under BOX_THRESHOLD, so a recorded
+    score below it can only have come from the (0.10, 0.10) retry — which makes "how much of
+    coverage did the retry buy, and how weak was it" readable off the values instead of assumed."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[], [(0.11, [10.0, 10.0, 30.0, 30.0])]])
+    module = _fresh_import(monkeypatch)
+
+    module.segment(_frame())
+    assert module.RETRY_FRAMES == 1 and module.RETRY_RECOVERED_FRAMES == 1
+    assert module.DETECTION_SCORES == [pytest.approx(0.11)]
+    assert module.DETECTION_SCORES[0] < module.BOX_THRESHOLD
+    assert module.stats()["n_detection_scores"] == 1
+    assert "below box_threshold" in module.stats()["detection_scores_meaning"]
+
+
+def test_the_counters_are_cumulative_and_the_module_says_so(loaded):
+    """The property every caller has to know about, asserted rather than left to be discovered.
+
+    Nothing here resets them, so two measurements in one interpreter share them — which is why
+    measure_geom_tol/measure_est_drift snapshot and difference instead of copying. A module that
+    quietly reset them per run would break that arrangement in the other direction, so the
+    behaviour is pinned from this side too.
+    """
+    module, _ = loaded
+    for _ in range(3):
+        module.segment(_frame())
+    first = module.stats()
+    assert first["n_segment_calls"] == 3
+    module.segment(_frame())
+    assert module.stats()["n_segment_calls"] == 4, "the counters are not cumulative any more"
+    assert len(module.DETECTION_SCORES) == 4
+    assert "snapshot" in first["counters_are_cumulative"]
+
+
+def test_recording_the_scores_did_not_qualify_the_gate(loaded):
+    """Producing evidence and accepting it are two different acts. The blocker that asks for these
+    numbers stays in the tuple until a human reads them; nothing in this module may retire it."""
+    module, _ = loaded
+    assert module.GATE_QUALIFIED is False
+    assert any("detection-score distribution and retry counts" in b
+               for b in module.GATE_QUALIFICATION_BLOCKERS)
+    assert not any("detection-score distribution" in d
+                   for d in module.GATE_QUALIFICATION_DISCHARGED)
