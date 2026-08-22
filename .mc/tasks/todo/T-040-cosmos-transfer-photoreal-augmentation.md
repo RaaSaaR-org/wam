@@ -543,6 +543,69 @@ not an engineering question.**
 and whether the corrected identity prompt is pasted into the committed style source.
 
 
+**2026-08-22, late — somebody finally looked at a mask, and blocker 1 was right.**
+
+`GATE_QUALIFICATION_BLOCKERS[0]` has said since 2026-08-21 that *"coverage 1.0 says a box was
+returned on every frame, not that it was the APPLE's box"*, and that this adapter's failure mode is
+*"a plausible mask on the wrong object (the plate, the hand, the whole tabletop) which produces a
+centroid, a displacement and a p95 that all look like measurements."* `scripts/audit_apple_masks.py`
+(new) drives the adapter **unmodified** over a stratified sample and writes overlays a person can
+judge. A local CPU run over 12 of 402 episodes, **169 frames, 92 overlays opened one at a time**:
+
+* **156 of 169 masks are correct** — tight on the fruit, score 0.73–0.87, IoU 0.91–0.98 against an
+  independent colour heuristic. Including every case the blocker names: the grasp with the Dex3
+  fingers closing, fruit held over the plate with the plate untinted, fruit resting on the plate,
+  and the apple clipped by the frame edge.
+* **9 frames are a confident, well-formed mask of THE PLATE.** All in `episode_000094`, all frames
+  where the hand has hidden the fruit almost entirely (54–448 px of apple visible): ~31 000 px,
+  plate overlap **0.985–0.992**, IoU **0.00** with the colour heuristic.
+
+Three things make that worse than "a few bad frames", and all three are measurements rather than
+arguments:
+
+1. **Not one of them is a no-detection.** `n_frames_without_detection = 0` and
+   `n_frames_with_empty_mask = 0` over the whole sample — **coverage 1.000 while nine frames measure
+   crockery.** That is blocker 1's claim, confirmed on this corpus.
+2. **The plate is stationary**, so consecutive plate masks give adjacent steps of 0.006–0.45 px.
+   Those land in GEOM_TOL's displacement pool as near-zero and pull a **median** down, tightening
+   G0b; the onset frame contributes a single 245 px step, which distorts a p95 instead.
+3. **THE RETRY NEVER FIRED — not once in 169 frames.** `n_frames_retry_fired = 0`. So blocker 2's
+   hazard is **real and mislocated**: the wrong-object masks were bought by the primary
+   `BOX_THRESHOLD = 0.15`, not by the `(0.10, 0.10)` retry the blocker singles out. `ep000094 f130`
+   scored **0.155** — one thousandth over the threshold. At the adapter's previous 0.35 it would
+   have returned an honest all-False mask.
+
+The score distribution is cleanly bimodal (p25 **0.758** for correct masks; **0.155–0.264** for all
+13 flagged frames), so a gate near 0.30 would separate them — **and adding one is forbidden**, because
+it would make this a different segmenter from the generator's, which is exactly what §4 step 2 rules
+out. The finding is not "tune the threshold"; it is that the generator's own operating point
+mis-segments occluded frames while reporting full coverage.
+
+**Without the census this would have been invisible** — all nine sit in the one episode
+`build_identity_calibration probe-scan` forced into the sample.
+
+**`GATE_QUALIFIED` stays `False`, and the audit script cannot change that**: a test asserts the file
+contains no assignment to `GATE_QUALIFIED` / `GATE_QUALIFICATION_BLOCKERS` /
+`GATE_QUALIFICATION_DISCHARGED`, and the artifact copies all three blockers in verbatim with
+`blockers_discharged_by_this_run: []`. The question in front of the owner is no longer *"has anyone
+looked"* — it is what to do about ~5 % of hard frames returning the plate at coverage 1.0.
+
+**Three things remain open and are not rounded off.** The **human half** of blockers 1 and 2 is not
+discharged: every observer here is a model checking masks produced by a pipeline a model wired up,
+which is a correlated observer, and `human_review.looked_at` is `false`. **Blocker 3 is untouched** —
+but note that the plate-lock is a run of **~35 consecutive frames**, which is precisely the
+propagation-style failure blocker 3 says a per-frame estimator cannot see, appearing *in* a per-frame
+estimator. And blocker 2's *"from a full pass"* has **nowhere to land**: neither
+`measure_geom_tol.py` nor `measure_est_drift.py` reads `apple_sam2.stats()` into its artifact, so a
+full GEOM_TOL run records none of the retry or no-detection counts. That is a small additive change
+to both harnesses and it is recorded in the audit artifact as `full_pass_gap`.
+
+`cluster/discoverer/105_audit_apple_masks.sbatch` (new) runs the same audit on the cluster for a
+larger, independently-produced sample and the contact sheets a person needs. Sized from the
+measurement rather than from 103's inherited request: `--mem=24G --cpus-per-task=8` is
+**7.3 billing-min/min against 103's 49.9**, and still 5x job 189588's measured 4.75 GiB peak.
+
+
 ## Notes
 
 **Correction, 2026-08-06 — the Isaac conditioning signals do not exist yet.** Two statements above
