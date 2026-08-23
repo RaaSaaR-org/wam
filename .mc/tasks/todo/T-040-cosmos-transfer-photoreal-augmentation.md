@@ -895,4 +895,61 @@ stages cannot exceed what nobody measured.
 **V11 licenses nothing.** V1 §1 binds, every §6 gate is undischarged, §8 items 3 and 4 are open, and
 the determination block is empty — signing is the owner's.
 
+
+### 2026-08-23 — four defects closed in the gate path, and one V11 claim withdrawn
+
+**`T40_RULE_V10` (unsigned) — the mask-validity reference was answering for objects it has never
+seen.** Two measured defects, both of which made a broken instrument read as a fact about the
+corpus. (1) The `plate.` pass refused **100 % of SOURCE frames**: 20 segment calls, 20 refusals, all
+IoUs 0.0000, while the detector scored 0.7524–0.7773 — because a correct plate mask contains no warm
+fruit and `object_color_reference` is the apple predicate unconditionally. §6's plate half could not
+be measured at all, and presented as `coverage: 0.0`. (2) On a restyle the reference does not go
+quiet, **it moves to the table**: on `train-01-oak-tungsten` it returns 40.5–56.4 % of the frame, all
+warm oak, so `MASK_REFUSED_NO_REFERENCE_FRAMES` — the counter V6 §5.3 relies on to separate "the
+segmenter is wrong here" from "the reference does not fit here" — stays 0 and reports the wrong one.
+A *correct* mask was refused: same box in both styles, kept at IoU 0.46–0.49 on `train-02` and
+refused at 0.025–0.030 on `train-01`. Fix refuses instead of pretending to decide: an unknown label
+refuses the RUN, and an over-scale reference refuses the FRAME into its own counter. The 0.10 bound
+is read off a gap (source max 3.00 % over 154 447 frames vs 20.9–29.1 % mis-firing), not coined.
+
+**G0b compared two sides without recording how either became pixels.** The docstring claimed the two
+sides are verified to be one instrument; the **decoder** was neither recorded nor compared, while
+G0b's arithmetic is source frame *i* minus restyled frame *i* and `resolve_decoder` probes each side
+independently — one command line could resolve two. Now recorded per side and compared. **The rows
+do not refuse**: the two sides are not the same codec by construction (av1 source, job 189585 is the
+record of cv2 decoding ZERO frames of it), so a hard refusal would be a gate the real corpus cannot
+satisfy — the defect this file was already repaired for once. It costs gate qualification instead.
+
+**EST_DRIFT_P95 over 240 frames is a p95 over 20 configurations.** V5 §5's floor (≥ 20 states AND
+≥ 200 frames) can be satisfied by near-duplicate frames: measured, the spread *inside* a state is
+0.05–0.28 px and *between* states 0.06–39.9 px. Both numbers are now recorded side by side —
+additive, read-only, never a gate. Also: `mujoco.FatalError` is not a `RuntimeError`, so the
+headless GL crash escaped `main()`'s handler and gave a traceback where every other failure gives a
+named refusal.
+
+**106's documented N=3 partition cannot finish.** Its pilot ran (job 189707): p = 0.1981 s/frame
+measured, **2.59× slower** than the scaled workstation estimate it was sized on, +1.92 % for V9's
+filter, and the GEOM_TOL cross-check is higher still at 0.295 (used as the planning rate). N=3's
+heaviest shard is **310 min against a 4 h MaxWall**. Header now gives N=16 in four waves.
+Separately: *"every clip refuses"* is a round number — **128 of 129, not 129**; `episode_000243`
+has a non-empty robot mask on all 417 frames. And **68 % of the refusals are on frames the V9 filter
+did not empty**, so removing the filter would not make G0c pass.
+
+**V11 §2.3 withdrawn and corrected (§2.4).** Read by execution rather than by comment: **nothing
+hard-codes 10/25, 5/25, 10/25** — the shares are operator-supplied and the ceiling machinery already
+admits any split, so no change is owed there. What is owed is larger: **there is no way to generate a
+prefix of a style set at all** (`chosen = styles[style_set]`, no STAGE, no limit), so stage 1 cannot
+be expressed today without editing `styles.toml`, which V11 §0 forbids. And the stage selector must
+carry arm C's frame-match with it: the guard compares whole-`styles.toml` instances independent of
+`chosen`, so **a stage of 4 train styles against 10 identity repeats would pass every check in the
+file** — V11 §0's second bullet currently has no enforcement behind it.
+
+**Cluster.** GEOM_TOL wave 1 (189935) landed shards 0–3 with sha256 sidecars; wave 2 (189971,
+shards 4–7) and shards 8–9 (189984) are queued — 8/8 submit slots full, `MaxSubmitJobsPU` counts
+every array task. Waves 3–4 go in as slots free, then MERGE on the free CPU QoS.
+
+**Nothing here discharges a gate.** V9, V10 and V11 are all unsigned, `GATE_QUALIFIED` is still
+`False`, §8 items 3 and 4 are open, and §6 still says that if `GEOM_TOL − EST_DRIFT_P95 ≤ 0` then
+generation does not start.
+
 %% mc-links: [[T-39]] [[T-34]] [[T-36]] [[T-37]] [[T-041]] %%
