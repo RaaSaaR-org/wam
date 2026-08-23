@@ -597,14 +597,56 @@ def load_train_styles(path: pathlib.Path, count: int) -> list[dict]:
     return chosen
 
 
+def quarantine_every_generated_video(out_dir: pathlib.Path) -> list[pathlib.Path]:
+    """Rename EVERY ``.mp4`` in one unit directory out of every downstream glob's way.
+
+    A SWEEP, NOT A LIST OF NAMES, AND THAT IS THE WHOLE POINT. This function used to rename two
+    filenames it knew about — ``vision.mp4`` and ``<name>.mp4`` — and job 189926 proved that
+    enumerating what the framework writes is a guess that gets falsified by the framework. That run
+    generated all four units correctly and then failed its own audit, because
+    ``cosmos_transfer2/inference.py:311`` also writes ``<name>_control_depth.mp4`` and
+    ``<name>_control_seg.mp4`` next to the sample: the estimated depth and segmentation maps,
+    rendered as video. Nothing in this repository had ever seen those files, because until that job
+    no generation had ever succeeded.
+
+    They are GENERATED VIDEO — derived pixels the framework produced — so the quarantine applies to
+    them in full: ``assemble_restyled_lerobot.py`` files a clip directory by ``glob("*.mp4")``, and a
+    control map is exactly as consumable by that glob as a sample is. The rule is therefore stated
+    as a property of the directory rather than as a list of names: when this returns, no path under
+    ``out_dir`` ends in ``.mp4``. A future upstream version that writes a third video needs no edit
+    here, which is the difference between this and what it replaces.
+
+    The probe-source clip is untouched by this because it does not live here — it is an INPUT, it
+    lives in :data:`PROBE_INPUT_DIR`, and :data:`QUARANTINE_SUFFIX` explains at length why that
+    asymmetry is the quarantine having a scope rather than a hole.
+    """
+    moved: list[pathlib.Path] = []
+    for path in sorted(out_dir.rglob("*.mp4")):
+        if not path.is_file():
+            continue
+        # `.mp4` -> `.mp4.quarantined`, preserving the whole stem including any `_control_seg`
+        # discriminator, because which video a byte came from is exactly what a reader needs.
+        target = path.with_name(path.name + QUARANTINE_SUFFIX[len(".mp4"):])
+        path.replace(target)
+        moved.append(target)
+    return moved
+
+
 def generate(sample: dict, out_dir: pathlib.Path, setup: dict, backend: str) -> dict:
     """One generated clip, immediately renamed out of every downstream glob's way.
 
-    The rename is in a ``finally`` because the window between the framework writing ``<name>.mp4``
-    and this function returning is the only moment a consumable filename exists on disk, and a crash
+    The rename is in a ``finally`` because the window between the framework writing its video and
+    this function returning is the only moment a consumable filename exists on disk, and a crash
     inside it must not leave one behind. :func:`audit_output_tree` is the backstop, not the plan.
+
+    The sample itself lands as either ``vision.mp4`` or ``<name>.mp4`` depending on the backend, and
+    both become ``<name>.mp4.quarantined`` so the record can name one path. Every OTHER video the
+    framework wrote — the control maps — keeps its own stem and is swept by
+    :func:`quarantine_every_generated_video`, because naming them in advance is what job 189926
+    disproved.
     """
     produced = out_dir / "vision.mp4"
+    clip = out_dir / (str(sample["name"]) + QUARANTINE_SUFFIX)
     try:
         record = (
             rt._null_backend(sample, out_dir) if backend == "null"
@@ -612,11 +654,17 @@ def generate(sample: dict, out_dir: pathlib.Path, setup: dict, backend: str) -> 
         )
     finally:
         if produced.is_file():
-            produced.replace(out_dir / (str(sample["name"]) + QUARANTINE_SUFFIX))
+            produced.replace(clip)
         stray = out_dir / f"{sample['name']}.mp4"
         if stray.is_file():
-            stray.replace(out_dir / (str(sample["name"]) + QUARANTINE_SUFFIX))
-    record["clip"] = str(out_dir / (str(sample["name"]) + QUARANTINE_SUFFIX))
+            stray.replace(clip)
+        # Everything the framework wrote that this function did not predict. Runs unconditionally
+        # and after the two named renames, so it is a backstop for them too.
+        swept = quarantine_every_generated_video(out_dir)
+    record["clip"] = str(clip)
+    record["quarantined_control_maps"] = sorted(
+        str(p) for p in swept if p != clip
+    )
     return record
 
 

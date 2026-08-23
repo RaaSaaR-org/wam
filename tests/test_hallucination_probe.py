@@ -747,3 +747,51 @@ def test_the_style_set_is_a_constant_and_there_is_no_flag_that_moves_it():
     assert ph.PROBE_STYLE_SET == "train"
     declared = {o for a in ph.build_parser()._actions for o in a.option_strings}
     assert "--style-set" not in declared
+
+
+def test_EVERY_generated_video_is_quarantined_not_just_the_ones_we_named(tmp_path):
+    """THE REGRESSION FROM JOB 189926, PINNED.
+
+    That run generated all four units correctly and then failed its own audit, because upstream
+    writes ``<name>_control_depth.mp4`` and ``<name>_control_seg.mp4`` alongside the sample
+    (cosmos_transfer2/inference.py:311) and this module only knew two filenames. Enumerating what
+    the framework writes is a guess; the rule is a property of the directory. When the sweep
+    returns, nothing under it ends in .mp4 — including a name nobody has seen yet.
+    """
+    unit = tmp_path / "episode_000000__train-01__probe"
+    unit.mkdir()
+    names = [
+        "episode_000000__train-01__probe.mp4",
+        "episode_000000__train-01__probe_control_depth.mp4",
+        "episode_000000__train-01__probe_control_seg.mp4",
+        "some_future_upstream_artifact.mp4",
+    ]
+    for name in names:
+        (unit / name).write_bytes(b"generated")
+
+    moved = ph.quarantine_every_generated_video(unit)
+
+    assert len(moved) == len(names)
+    assert not list(unit.rglob("*.mp4")), "the sweep is a property of the directory, not a list"
+    for name in names:
+        assert (unit / (name + ".quarantined")).is_file(), (
+            f"{name} must keep its own stem: which video a byte came from is what a reader needs"
+        )
+    # and the audit, which is the backstop, now finds nothing to refuse
+    assert ph.audit_output_tree(unit) == []
+
+
+def test_the_control_maps_are_refused_by_the_audit_if_the_sweep_ever_stops_running(tmp_path):
+    """The backstop must still catch what the sweep exists to prevent.
+
+    If a future edit drops the sweep, the audit is the only thing between a control map and
+    assemble_restyled_lerobot.py's glob("*.mp4"). This asserts it fails on exactly the file job
+    189926 left behind, so removing the sweep cannot go unnoticed.
+    """
+    root = tmp_path / "pr08-hallucination-probe"
+    unit = root / "units" / "episode_000000__train-01__probe"
+    unit.mkdir(parents=True)
+    control = unit / "episode_000000__train-01__probe_control_seg.mp4"
+    control.write_bytes(b"generated depth/seg map, rendered as video")
+
+    assert str(control) in ph.audit_output_tree(root)
