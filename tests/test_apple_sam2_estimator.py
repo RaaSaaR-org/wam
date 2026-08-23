@@ -326,8 +326,20 @@ def staged(monkeypatch):
 #: the point. So the stub frames contain an apple where the stub detector says one is.
 STUB_APPLE_BOX = (10, 10, 30, 30)
 
+#: The stub frame's grid, and it MOVED on 2026-08-23 (48x64 -> 120x160) for a reason worth stating
+#: rather than leaving as a diff. PR-08 V10 refuses a frame whose colour reference covers more than
+#: ``MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION`` of the picture, because on a restyle the predicate
+#: stops describing the fruit and starts describing the table. At 48x64 the 20x20 stub apple was
+#: 13.0 % of the frame — a proportion no frame of the real corpus comes near (17 307 source frames
+#: measured 2026-08-23: p50 1.94 %, max 3.00 %; the committed 382-frame audit maxes at 2.90 %), so
+#: the old stub was a picture of the failure V10 refuses. At 120x160 the same blob is 2.08 %, which
+#: is inside the corpus's own range. The apple's coordinates are unchanged, so every box in this
+#: file still points at it.
+STUB_FRAME_HW: tuple[int, int] = (120, 160)
 
-def _frame(h=48, w=64, apple: tuple[int, int, int, int] | None = STUB_APPLE_BOX) -> np.ndarray:
+
+def _frame(h=STUB_FRAME_HW[0], w=STUB_FRAME_HW[1],
+           apple: tuple[int, int, int, int] | None = STUB_APPLE_BOX) -> np.ndarray:
     """A noisy but COLD frame with a warm, saturated blob at ``apple``.
 
     Cold everywhere else on purpose: the reference predicate is ``r > 90 and r - b > 50 and
@@ -394,8 +406,8 @@ def test_an_rgba_frame_is_accepted_with_the_alpha_dropped(loaded):
     """Replicator's rgb annotator hands back four channels; a capture from anything but
     isaac_binding.render_frame may still carry the alpha."""
     module, _ = loaded
-    rgba = np.dstack([_frame(), np.full((48, 64), 255, dtype=np.uint8)])
-    assert module.segment(rgba).shape == (48, 64)
+    rgba = np.dstack([_frame(), np.full(STUB_FRAME_HW, 255, dtype=np.uint8)])
+    assert module.segment(rgba).shape == STUB_FRAME_HW
 
 
 def test_version_names_all_three_checkpoints_their_revisions_and_both_thresholds(loaded):
@@ -673,7 +685,7 @@ def test_no_detection_yields_an_all_false_mask_and_never_raises(monkeypatch):
     module = _fresh_import(monkeypatch)
 
     mask = module.segment(_frame())
-    assert mask.shape == (48, 64)
+    assert mask.shape == STUB_FRAME_HW
     assert mask.dtype == np.bool_
     assert not mask.any()
     assert module.NO_DETECTION_FRAMES == 1
@@ -799,7 +811,7 @@ def test_the_configured_thresholds_reach_the_post_processor(loaded):
     module, state = loaded
     module.segment(_frame())
     assert state["thresholds"] == [(module.BOX_THRESHOLD, module.TEXT_THRESHOLD)]
-    assert state["target_sizes"] == [[(48, 64)]]
+    assert state["target_sizes"] == [[STUB_FRAME_HW]]
 
 
 # -- the generator's operating point, not ours ---------------------------------------------------------
@@ -962,7 +974,7 @@ def test_a_depth_map_on_a_different_grid_is_refused_not_resized(monkeypatch):
     monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
     _install(monkeypatch, depth_shape=(37, 37))
     module = _fresh_import(monkeypatch)
-    with pytest.raises(RuntimeError, match=r"\(37, 37\) map for a \(48, 64\) frame"):
+    with pytest.raises(RuntimeError, match=r"\(37, 37\) map for a \(120, 160\) frame"):
         module.estimate_depth(_frame())
 
 
@@ -982,7 +994,7 @@ def test_a_float_frame_is_refused_rather_than_rescaled(loaded):
 def test_a_non_image_array_is_refused(loaded):
     module, _ = loaded
     with pytest.raises(ValueError, match=r"\(H, W, 3\|4\)"):
-        module.segment(np.zeros((48, 64), dtype=np.uint8))
+        module.segment(np.zeros(STUB_FRAME_HW, dtype=np.uint8))
 
 
 # -- gate qualification is opt-in, and this module does not opt in --------------------------------------------
@@ -1825,7 +1837,7 @@ def test_a_correct_mask_is_returned_untouched(monkeypatch):
     module = _fresh_import(monkeypatch)
 
     mask = module.segment(_frame())
-    expected = np.zeros((48, 64), dtype=bool)
+    expected = np.zeros(STUB_FRAME_HW, dtype=bool)
     expected[10:30, 10:30] = True
     assert np.array_equal(mask, expected)
     assert module.MASK_REFUSED_FRAMES == 0
@@ -1943,7 +1955,7 @@ def test_the_reference_finds_the_fruit_and_nothing_else_in_a_stub_frame(loaded):
     the refusal tests for the wrong reason."""
     module, _ = loaded
     reference = module.object_color_reference(_frame())
-    expected = np.zeros((48, 64), dtype=bool)
+    expected = np.zeros(STUB_FRAME_HW, dtype=bool)
     expected[10:30, 10:30] = True
     assert np.array_equal(reference, expected)
     assert not module.object_color_reference(_frame(apple=None)).any()
@@ -1983,3 +1995,465 @@ def test_producing_the_fix_did_not_accept_it(loaded):
                for b in module.GATE_QUALIFICATION_BLOCKERS)
     assert len(module.GATE_QUALIFICATION_BLOCKERS) == 3
     assert not any("mask-validity" in d.lower() for d in module.GATE_QUALIFICATION_DISCHARGED)
+
+
+# -- PR-08 V10: where that reference is DEFINED ------------------------------------------------------
+#
+# V6 registered a filter and named its reference. It did not say what the reference is a reference
+# FOR, and this module assumed the answer was "anything". Two defects, both found on 2026-08-23,
+# both MEASURED before anything was changed, and both of them a filter that could not decide a frame
+# reporting a decision anyway.
+#
+#   (1) THE `plate.` PASS REFUSED 100 % OF FRAMES, ON THE SOURCE CORPUS. run_g0_gates documents §6's
+#       plate half as a second pass with WAM_PR08_OBJECT_PROMPT="plate.", which reaches segment().
+#       Twenty source frames of episode_000000: twenty refusals, validity IoU 0.0000 on every one,
+#       detection scores 0.7524-0.7773 — a detector doing its job perfectly, and a filter scoring a
+#       correct plate mask against a warm-FRUIT predicate. The same twenty frames at "apple." refuse
+#       nothing, at IoU 0.9686-0.9744. The harness reported coverage 0.0, i.e. a fact about the
+#       corpus.
+#
+#   (2) ON A RESTYLE THE REFERENCE DOES NOT GO QUIET, IT MOVES TO THE TABLE. V6 §5.3 anticipated the
+#       first and relies on n_frames_mask_refused_no_reference to tell "the segmenter is wrong here"
+#       from "the reference does not fit here". On job 189926's train-01-oak-tungsten the predicate
+#       returns 40.5-56.4 % of the frame — warm oak table — so it is non-empty, the counter stays 0,
+#       and a CORRECT mask of a green Granny Smith is recorded as a wrong one. Same detector box
+#       [188,127,236,176], same ~1 830 px mask: KEPT at IoU 0.46-0.49 on train-02-linen-overcast,
+#       REFUSED at 0.025-0.030 on train-01-oak-tungsten. Nothing about the mask changed.
+#
+# THE ARGUMENT THESE TESTS HAVE TO CARRY is V6 §4's and V9 §4's: a number admitted into a gate path
+# must not be able to become the finding. The defence is not that 0.10 was chosen carefully — it is
+# that every value across a range an order of magnitude wide produces the identical partition of
+# every frame anyone has measured, and that this is checkable.
+
+#: ``(what, provenance, reference_px, frame_px, is_applicable)``. EMBEDDED for AUDIT_FRAMES's reason:
+#: ``runs/`` is not tracked and half of these come from a cluster job's artifacts, so a test that
+#: skipped when a file was missing would be a test that never ran.
+#:
+#: ``is_applicable`` is fixed by WHAT THE FRAME IS, not by any threshold: the source rows are real
+#: AppleToPlate frames whose warm region is the fruit (that is what
+#: ``build_identity_calibration probe-scan`` measured all 154 447 frames of this corpus with), and
+#: the oak-tungsten rows are frames a person has looked at in which the warm region is the table and
+#: the fruit is green. Otherwise the sweep below would be checking that a threshold partitions the
+#: frames the way the threshold partitions them.
+REFERENCE_SCALE_OBSERVATIONS: tuple[tuple[str, str, float, int, bool], ...] = (
+    # SOURCE, full resolution, this module's own predicate.
+    ("source corpus, worst of 17 307 frames (every frame of 40 episodes)",
+     "local scan 2026-08-23", 9220, 307200, True),
+    ("source corpus, worst of the 382 audited frames (warm_apple_px)",
+     "job 189637, runs/pr08-mask-audit/MASK_AUDIT.json", 8922, 307200, True),
+    ("source corpus, worst of the 169 locally audited frames",
+     "runs/pr08-mask-audit-local-cpu/MASK_AUDIT.json", 8608, 307200, True),
+    ("source corpus, largest per-episode MEDIAN over 362 episodes / 154 447 frames",
+     "runs/t040-identity-prompt/calibration-2/probe_census.json", 7731.5, 307200, True),
+    ("source frames of the probe's own robot-free run, worst of 96",
+     "episode_000000 f415-f510, local 2026-08-23", 7182, 307200, True),
+    # SOURCE, through job 189926's contact sheets. The sheet path inflates this predicate by a
+    # measured 1.93-1.94x (established by matching each source panel to its own frame decoded
+    # locally), which is exactly why both ends of the gap are recorded on BOTH scales.
+    ("source panel, largest of the 12 tiles",
+     "sheets/episode_000000__train-01-oak-tungsten__probe__candidate_invention.png", 3466, 76800,
+     True),
+    ("source panel, smallest of the 12 tiles", "same sheet", 3441, 76800, True),
+    # RESTYLE, generated panels of the same sheets. linen-overcast is the style on which the filter
+    # demonstrably still works: it KEEPS the mask, at IoU 0.46-0.49.
+    ("train-02-linen-overcast generated, largest of 12", "job 189926", 3372, 76800, True),
+    ("train-02-linen-overcast generated, smallest of 12", "job 189926", 3278, 76800, True),
+    # RESTYLE, the style the reference moved on. A person has looked: the warm region is the oak
+    # table, the fruit is a bright green Granny Smith, and its committed prompt says so verbatim.
+    ("train-01-oak-tungsten generated, smallest of 12", "job 189926", 31112, 76800, False),
+    ("train-01-oak-tungsten generated, largest of 12", "job 189926", 43319, 76800, False),
+)
+
+#: The measured inflation of this predicate through job 189926's contact-sheet path, from matching
+#: each of the 12 source panels to the frame it came from decoded locally at full resolution. Steady
+#: to two decimals across all twelve, which is what makes it an instrument property rather than a
+#: fudge — and the reason the bound is required to sit inside the gap on BOTH scales, since the
+#: factor was measured on warm-RED fruit pixels and its transfer to warm-OAK pixels is not
+#: established.
+SHEET_INFLATION = 1.94
+
+
+def _fraction(px: float, frame_px: int) -> float:
+    return px / frame_px
+
+
+def _scale_partition(bound: float) -> frozenset[str]:
+    """Which observations a bound calls INAPPLICABLE."""
+    return frozenset(
+        what for what, _src, px, frame_px, _ok in REFERENCE_SCALE_OBSERVATIONS
+        if _fraction(px, frame_px) > bound
+    )
+
+
+TRUE_INAPPLICABLE = frozenset(
+    what for what, _src, _px, _f, ok in REFERENCE_SCALE_OBSERVATIONS if not ok
+)
+
+
+def test_the_two_populations_are_separated_by_a_gap_and_not_by_a_bound():
+    """The whole basis for admitting a number here: there is nothing in between to get wrong."""
+    applicable = [_fraction(px, f) for _w, _s, px, f, ok in REFERENCE_SCALE_OBSERVATIONS if ok]
+    scene = [_fraction(px, f) for _w, _s, px, f, ok in REFERENCE_SCALE_OBSERVATIONS if not ok]
+
+    assert max(applicable) == pytest.approx(0.04513, abs=1e-5), (
+        "the largest reference anyone has measured on a frame where it IS the object — and it is a "
+        "SOURCE frame seen through the contact sheet, not a restyle"
+    )
+    assert min(scene) == pytest.approx(0.40510, abs=1e-5)
+    assert min(scene) / max(applicable) > 8.0, "an order of magnitude, not a margin"
+
+    # And the gap survives deflating the sheet-derived rows to the source scale, which is the only
+    # comparison in which all eleven observations are the same quantity.
+    deflated_scene = min(
+        _fraction(px, f) / (SHEET_INFLATION if f != 307200 else 1.0)
+        for _w, _s, px, f, ok in REFERENCE_SCALE_OBSERVATIONS if not ok
+    )
+    deflated_applicable = max(
+        _fraction(px, f) / (SHEET_INFLATION if f != 307200 else 1.0)
+        for _w, _s, px, f, ok in REFERENCE_SCALE_OBSERVATIONS if ok
+    )
+    assert deflated_applicable < 0.031 < 0.20 < deflated_scene
+
+
+def test_every_bound_in_the_gap_partitions_the_measured_frames_identically():
+    """THE INSENSITIVITY EVIDENCE, made checkable rather than assertable.
+
+    36 values, and at every one of them the frames called inapplicable are exactly the ones a person
+    identified as the table from the contact sheets — an identity fixed by what the frame IS.
+    """
+    for step in range(36):
+        bound = round(0.05 + 0.01 * step, 2)
+        assert _scale_partition(bound) == TRUE_INAPPLICABLE, f"the partition moved at {bound}"
+
+
+def test_the_bound_this_module_ships_is_inside_that_range_on_both_scales(loaded):
+    module, _ = loaded
+    bound = module.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION
+    assert 0.05 < bound < 0.40, "a value read off a gap, and not on either edge of it"
+    assert bound == 0.10
+    # Inside the gap deflated to the source scale as well, which is what makes the choice
+    # independent of the sheet-inflation factor.
+    assert 0.031 < bound < 0.40 / SHEET_INFLATION
+    assert _scale_partition(bound) == TRUE_INAPPLICABLE
+
+
+def test_the_embedded_source_numbers_are_the_committed_artifacts_own():
+    """Where the artifact still exists on this machine, the copy above is checked against it."""
+    import json
+
+    for artifact, expected in (
+        (_REPO / "runs" / "pr08-mask-audit" / "MASK_AUDIT.json", 8922),
+        (_REPO / "runs" / "pr08-mask-audit-local-cpu" / "MASK_AUDIT.json", 8608),
+    ):
+        if not artifact.is_file():
+            continue
+        frames = json.loads(artifact.read_text())["frames"]
+        assert max(f["warm_apple_px"] for f in frames) == expected
+
+    census = _REPO / "runs" / "t040-identity-prompt" / "calibration-2" / "probe_census.json"
+    if census.is_file():
+        per_episode = json.loads(census.read_text())["per_episode"]
+        assert max(v["median_apple_warm_px"] for v in per_episode.values()) == 7731.5
+
+
+# -- defect 1: a label with no reference refuses the RUN, not every frame in it -----------------------
+
+
+def test_a_label_the_filter_has_no_reference_for_refuses_the_run(monkeypatch):
+    """The plate pass must not be able to look like a corpus with no plate in it."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    monkeypatch.setenv("WAM_PR08_OBJECT_PROMPT", "plate.")
+    _install(monkeypatch, detections=[[(0.76, [34.0, 4.0, 60.0, 44.0])]])
+    module = _fresh_import(monkeypatch)
+
+    assert module.mask_validity_reference_is_defined() is False
+    with pytest.raises(module.MaskValidityReferenceUndefined) as exc:
+        module.segment(_frame())
+
+    message = str(exc.value)
+    assert "'plate.'" in message
+    assert "apple." in message, "it has to say which label it IS defined for"
+    assert "NOT A FACT ABOUT THE CORPUS" in message
+    assert "0.7524-0.7773" in message, "the measurement, not an assertion that it was measured"
+
+
+def test_the_run_refuses_before_a_counter_moves_or_a_weight_loads(monkeypatch):
+    """A refusal that has already segmented half a corpus is a refusal nobody reads in time — and a
+    partial `stats()` block from a run that could never have been valid is worse than none."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    monkeypatch.setenv("WAM_PR08_OBJECT_PROMPT", "plate.")
+    state = _install(monkeypatch, detections=[[(0.76, [34.0, 4.0, 60.0, 44.0])]])
+    module = _fresh_import(monkeypatch)
+
+    with pytest.raises(module.MaskValidityReferenceUndefined):
+        module.segment(_frame())
+
+    assert module.SEGMENT_CALLS == 0
+    assert module.MASK_REFUSED_FRAMES == 0
+    assert module.MASK_VALIDITY_IOU == []
+    assert state["counters"]["detector_loads"] == 0
+    assert state["counters"]["predictor_loads"] == 0
+
+
+def test_the_refusal_is_not_an_import_failure_and_is_not_a_missing_weight(loaded):
+    """``measure_est_drift.resolve_estimators`` turns ImportError into 'the estimator is
+    unavailable'. Nothing here is unavailable — the models load, the frames decode, and the filter
+    has no second opinion — so reading this as a dependency problem would send the reader to the
+    hub cache."""
+    module, _ = loaded
+    assert issubclass(module.MaskValidityReferenceUndefined, RuntimeError)
+    assert not issubclass(module.MaskValidityReferenceUndefined, ImportError)
+    assert not issubclass(module.MaskValidityReferenceUndefined, module.EstimatorDependencyMissing)
+
+
+def test_the_default_label_is_the_one_the_reference_is_for(loaded):
+    """`apple.` is the default and the only registered label, so nothing that runs today changes."""
+    module, _ = loaded
+    assert module.OBJECT_TEXT_PROMPT == "apple."
+    assert module.MASK_VALIDITY_REFERENCE_LABELS == frozenset({"apple."})
+    assert module.mask_validity_reference_is_defined() is True
+    assert module.stats()["mask_validity_reference_is_defined_for_this_prompt"] is True
+
+
+def test_registering_a_label_is_a_pre_registration_and_not_an_env_var(monkeypatch):
+    """A per-run reference is a per-run decision about which frames enter a committed measurement,
+    taken on a submit line and invisible in the artifact. Same treatment as MASK_VALIDITY_MIN_IOU."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    monkeypatch.setenv("WAM_PR08_MASK_VALIDITY_REFERENCE_LABELS", "apple.,plate.")
+    monkeypatch.setenv("WAM_PR08_MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION", "0.9")
+    _install(monkeypatch)
+    module = _fresh_import(monkeypatch)
+
+    assert module.MASK_VALIDITY_REFERENCE_LABELS == frozenset({"apple."})
+    assert module.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION == 0.10
+
+
+# -- defect 2: a reference that describes the scene cannot arbitrate a mask on it ---------------------
+
+
+def _scene_frame(h=STUB_FRAME_HW[0], w=STUB_FRAME_HW[1]) -> np.ndarray:
+    """A frame whose warm, saturated region is the BACKGROUND, as train-01-oak-tungsten's is.
+
+    Half the picture warm, the apple's own box left cold — the shape the restyle produced: a warm
+    table and a green fruit. 50 % against the module's 10 %, and against the 3.00 % worst frame of
+    17 307 real ones.
+    """
+    frame = _frame(h, w, apple=None)
+    frame[: h // 2, :] = (220, 30, 30)
+    return frame
+
+
+def test_a_reference_that_covers_the_scene_refuses_the_frame_and_says_which_case_it_is(monkeypatch):
+    """The counter V6 §5.3 relies on, reporting the case that actually happened."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[(0.83, [100.0, 80.0, 120.0, 100.0])]])
+    module = _fresh_import(monkeypatch)
+
+    assert not module.segment(_scene_frame()).any()
+
+    record = module.stats()
+    assert record["n_frames_mask_refused"] == 1
+    assert record["n_frames_mask_refused_reference_not_object_scale"] == 1
+    # THE POINT OF THE FIX. Before it, this frame was counted here — "the segmenter is wrong on this
+    # corpus" — when the true statement is "the reference does not fit this corpus".
+    assert record["n_frames_mask_refused_no_reference"] == 0
+
+
+def test_the_scene_case_is_counted_INSIDE_the_refusals_and_not_beside_them(monkeypatch):
+    """`n_frames_without_detection + n_frames_with_empty_mask + n_frames_mask_refused` is documented
+    as the whole coverage shortfall this module is responsible for, and a fourth event outside that
+    sum would be a step silently dropped from every coverage number downstream."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    # Two empty entries for the no-detection frame: the primary pass and upstream's single
+    # (0.10, 0.10) retry each consume one, and a retry that found the NEXT frame's box would make
+    # this a test of something else.
+    _install(monkeypatch, detections=[
+        [], [],                                      # no detection, primary and retry
+        [(0.9, [4.0, 4.0, 4.0, 4.0])],               # a box, and SAM 2 fills nothing
+        [(0.26, [60.0, 4.0, 90.0, 44.0])],           # a box, filled, and it is not the fruit
+        [(0.83, [100.0, 80.0, 120.0, 100.0])],       # a reference that is the scene
+        [(0.83, [10.0, 10.0, 30.0, 30.0])],          # the fruit
+    ])
+    module = _fresh_import(monkeypatch)
+
+    for index in range(5):
+        module.segment(_scene_frame() if index == 3 else _frame())
+
+    r = module.stats()
+    assert r["n_segment_calls"] == 5
+    assert r["n_frames_without_detection"] == 1
+    assert r["n_frames_with_empty_mask"] == 1
+    assert r["n_frames_mask_refused"] == 2, "the wrong-object one AND the scene one"
+    assert r["n_frames_mask_refused_reference_not_object_scale"] == 1
+    assert r["n_frames_mask_refused_no_reference"] == 0
+    # The two sub-cases are sub-cases: they never exceed the total they live inside.
+    assert (r["n_frames_mask_refused_no_reference"]
+            + r["n_frames_mask_refused_reference_not_object_scale"]) <= r["n_frames_mask_refused"]
+
+
+def test_a_mask_that_AGREES_with_a_scene_reference_is_refused_too(monkeypatch):
+    """THE FAIL-OPEN HALF, and the reason the check gates the whole decision rather than the refusal
+    branch. A predicate that has moved to the table does not only reject the fruit — it ACCEPTS the
+    table, at IoU 1.0 against itself, and hands a table centroid to a geometry gate that cannot see
+    the difference. Refusing only on a LOW IoU would have fixed the visible half and left this one."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    h, w = STUB_FRAME_HW
+    # The detector's box IS the warm half of the picture, so the mask SAM 2 draws for it is the
+    # reference, exactly.
+    _install(monkeypatch, detections=[[(0.42, [0.0, 0.0, float(w), float(h // 2)])]])
+    module = _fresh_import(monkeypatch)
+
+    assert not module.segment(_scene_frame()).any()
+    assert module.MASK_VALIDITY_IOU[-1] == pytest.approx(1.0), (
+        "it agreed with the reference perfectly, which is the problem and not the defence"
+    )
+    assert module.MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES == 1
+
+
+def test_an_empty_reference_is_still_the_hard_case_and_v10_did_not_take_it_over(monkeypatch):
+    """V6's own sub-case is untouched. An empty reference on the source corpus means the fruit is
+    occluded or out of frame — a HARD frame, and V6 §5.1's recorded bias — and V10 must not
+    re-label it, because on a restyle whose apple is not warm the same signature means the reference
+    does not fit, and ONE FRAME CANNOT TELL THOSE APART. Closing the other end of the distribution
+    is what V10 does; pretending to close this one would be a claim nothing here can support."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[(0.21, [10.0, 10.0, 30.0, 30.0])]])
+    module = _fresh_import(monkeypatch)
+
+    assert not module.segment(_frame(apple=None)).any()
+    assert module.MASK_REFUSED_NO_REFERENCE_FRAMES == 1
+    assert module.MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES == 0
+    assert "cannot tell those apart" in module.stats()["mask_validity_reference_scope"]
+
+
+def test_an_object_scale_reference_is_decided_exactly_as_v6_decided_it(monkeypatch):
+    """V10's only possible effect on a frame is a refusal. Where the reference is a reference, the
+    mask that came back before comes back now, bit for bit."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[[(0.83, [10.0, 10.0, 30.0, 30.0])]])
+    module = _fresh_import(monkeypatch)
+
+    mask = module.segment(_frame())
+    expected = np.zeros(STUB_FRAME_HW, dtype=bool)
+    expected[10:30, 10:30] = True
+    assert np.array_equal(mask, expected)
+    assert module.MASK_REFUSED_FRAMES == 0
+    assert module.MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES == 0
+    assert module.reference_is_object_scale(module.object_color_reference(_frame())) is True
+
+
+def test_the_reference_fraction_is_recorded_per_frame_and_aligned_with_the_iou(monkeypatch):
+    """Raw values, for DETECTION_SCORES's reasons, and index-aligned so an audit rig reading the
+    last appended entry of each list is reading one frame."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    _install(monkeypatch, detections=[
+        [(0.83, [10.0, 10.0, 30.0, 30.0])],
+        [], [],                                      # no detection: primary and retry
+        [(0.83, [100.0, 80.0, 120.0, 100.0])],
+    ])
+    module = _fresh_import(monkeypatch)
+
+    module.segment(_frame())
+    module.segment(_frame())          # no detection: neither list moves
+    module.segment(_scene_frame())
+
+    assert len(module.MASK_VALIDITY_REFERENCE_FRACTION) == len(module.MASK_VALIDITY_IOU) == 2
+    assert module.MASK_VALIDITY_REFERENCE_FRACTION[0] == pytest.approx(400 / 19200)
+    assert module.MASK_VALIDITY_REFERENCE_FRACTION[1] == pytest.approx(0.5)
+    record = module.stats()
+    assert record["n_mask_validity_reference_fraction"] == 2
+    assert record["mask_validity_reference_fraction_attr"] == "MASK_VALIDITY_REFERENCE_FRACTION"
+    assert record["n_mask_validity_iou"] == (
+        record["n_segment_calls"]
+        - record["n_frames_without_detection"]
+        - record["n_frames_with_empty_mask"]
+    )
+
+
+def test_the_stub_frames_now_resemble_the_corpus_they_stand_in_for(loaded):
+    """The stub grid moved with this change, and if it drifts back the V10 tests stop testing V10:
+    a 20x20 apple in a 48x64 frame is 13 % of the picture, which is the shape V10 REFUSES."""
+    module, _ = loaded
+    fraction = module.reference_frame_fraction(module.object_color_reference(_frame()))
+    assert fraction < module.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION
+    assert 0.0194 <= fraction <= 0.0300, (
+        "inside the range 17 307 real source frames occupy (p50 1.94 %, max 3.00 %)"
+    )
+
+
+# -- what V10 did not change ---------------------------------------------------------------------------
+
+
+def test_v10_changed_no_detection_parameter_and_no_committed_contract_field(loaded):
+    """A number of ours in the detection path is what PR-08 §4 step 2 forbids, and a contract that
+    grew a field the committed one never had is a segmenter the committed one did not describe —
+    ``measure_geom_tol.contract_disagreements`` counts absence as disagreement, so adding one here
+    would disqualify every GEOM_TOL run against the committed document."""
+    module, _ = loaded
+    assert module.BOX_THRESHOLD == 0.15 and module.TEXT_THRESHOLD == 0.25
+    assert module.RETRY_BOX_THRESHOLD == 0.1 and module.RETRY_TEXT_THRESHOLD == 0.1
+    assert module.BOX_SELECTION == "highest_score"
+    assert module.MASK_VALIDITY_MIN_IOU == 0.10
+    assert module.MASK_VALIDITY_REFERENCE == "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)"
+    assert module.SEGMENTER_CONTRACT == _contract_doc()["segmenter"]
+    assert "mask_validity_reference_max_frame_fraction" not in module.SEGMENTER_CONTRACT
+
+
+def test_the_version_string_says_which_instrument_measured_a_number(loaded):
+    """`run_g0_gates.instrument_disagreements` compares ESTIMATOR_VERSION between the two sides of
+    G0b, so a source record dumped before this bound existed and a restyled one dumped after it
+    refuse to be compared. That is correct — they are two instruments — and it is why the bound is
+    in the string and not only in stats()."""
+    module, _ = loaded
+    assert f"mask_val_min_iou={module.MASK_VALIDITY_MIN_IOU}" in module.ESTIMATOR_VERSION
+    assert (f"mask_val_ref_max_frac={module.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION}"
+            in module.ESTIMATOR_VERSION)
+
+
+def test_the_coverage_arithmetic_a_harness_records_is_still_differenced(loaded):
+    """`measure_geom_tol.ADAPTER_RUN_COUNTERS` is a tuple in that module, which this workstream may
+    not edit. The TOTAL a coverage number is computed from is in it, so `estimator_stats.this_run`
+    stays correct. The new SUB-CASE is not, so its attribution is currently a lifetime total of the
+    process — recorded here as a known gap rather than left to be discovered from an artifact, and
+    closed by one line in a file this change did not touch."""
+    import measure_geom_tol as mgt
+
+    module, _ = loaded
+    assert "n_frames_mask_refused" in mgt.ADAPTER_RUN_COUNTERS
+    assert "n_frames_mask_refused_reference_not_object_scale" in module.stats()
+    assert "n_frames_mask_refused_reference_not_object_scale" not in mgt.ADAPTER_RUN_COUNTERS, (
+        "if this ever becomes true the comment above is stale and should be deleted with it"
+    )
+
+
+def test_v9s_robot_masker_still_gets_everything_it_refuses_to_run_without(loaded):
+    """`scripts/robot_composite.py` reaches into this module for the reference, the IoU and the name
+    of the predicate, and REFUSES rather than compositing an unfiltered mask if any of them is gone.
+    V10 adds beside them and removes none — and exports the applicability predicate so that if V9's
+    own §5.1 exposure is ever closed, there is still exactly one definition of "this reference is
+    applicable here" in the repository."""
+    module, _ = loaded
+    assert callable(module.object_color_reference)
+    assert callable(module.mask_validity_iou)
+    assert isinstance(module.MASK_VALIDITY_REFERENCE, str)
+    assert callable(module.reference_is_object_scale)
+    assert callable(module.reference_frame_fraction)
+
+
+def test_v10_discharged_nothing(loaded):
+    """Producing a fix and accepting it are different acts, and V10 is UNSIGNED besides."""
+    module, _ = loaded
+    assert module.GATE_QUALIFIED is False
+    assert len(module.GATE_QUALIFICATION_BLOCKERS) == 3
+    assert not any("V10" in d for d in module.GATE_QUALIFICATION_DISCHARGED)
+    assert not any("reference" in d.lower() and "scope" in d.lower()
+                   for d in module.GATE_QUALIFICATION_DISCHARGED)

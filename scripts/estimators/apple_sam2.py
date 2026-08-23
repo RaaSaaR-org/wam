@@ -129,6 +129,17 @@ check on the OUTPUT and it is emphatically NOT a change to the detection — see
 :data:`MASK_VALIDITY_MIN_IOU`, and PR-08 V6 (``docs/preregistration/PR-08-V6-mask-validity.md``),
 which registers it.
 
+**And it will not pretend to have decided a frame that check cannot decide.** As of 2026-08-23 the
+reference is checked before it is used as one, because it is a predicate for ONE object under ONE
+appearance and this module was applying it to any label on any pixels. A label outside
+:data:`MASK_VALIDITY_REFERENCE_LABELS` refuses the RUN — :class:`MaskValidityReferenceUndefined`,
+rather than the ``coverage: 0.0`` that a ``plate.`` pass used to report as a fact about the corpus —
+and a frame whose reference covers more than
+:data:`MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION` of the picture is refused as undecidable and
+counted in :data:`MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES`, because on a warm-table restyle
+the predicate stops describing the fruit and starts describing the table. PR-08 V10
+(``docs/preregistration/PR-08-V10-mask-validity-reference-scope.md``), **UNSIGNED**.
+
 **It will not rescale a float image.** ``rgb`` must be ``uint8``. A float array in [0, 1] and a
 float array in [0, 255] are indistinguishable from the array alone and rescale to different
 pictures, which is a different detection, which is a different centroid.
@@ -241,6 +252,22 @@ class EstimatorWeightsMissing(EstimatorDependencyMissing):
 
 class EstimatorCheckpointUnusable(EstimatorDependencyMissing):
     """A checkpoint (or its pin) is present but cannot produce the quantity this module promises."""
+
+
+class MaskValidityReferenceUndefined(RuntimeError):
+    """The mask-validity filter has no reference for the object this process was told to segment.
+
+    NOT an :class:`EstimatorDependencyMissing`, deliberately: nothing is absent, nothing failed to
+    import, and no weight is missing. The models are fine and the frames are fine. What is absent is
+    a SECOND OPINION about where the named object is, and the filter that PR-08 V6 put in the gate
+    path cannot decide a frame without one.
+
+    It is a refusal rather than a silently disabled filter (which would measure the label with no
+    validity check at all, in an artifact whose committed contract says one ran) and rather than a
+    per-frame all-False mask (which is what the module did before PR-08 V10 and is how this defect
+    hid: 20 of 20 frames refused reads out of the harness as ``coverage: 0.0``, a fact about the
+    corpus, when the true statement is that the filter is not defined for this label).
+    """
 
 
 # -- what this pair is, in the words the artifact will carry ---------------------------------------
@@ -401,6 +428,92 @@ MASK_VALIDITY_MIN_IOU = 0.10
 #: and in this refusal.
 MASK_VALIDITY_REFERENCE = "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)"
 
+# -- WHERE THAT REFERENCE IS DEFINED, WHICH V6 DID NOT SAY AND THIS MODULE ASSUMED ------------------
+#
+# Registered as PR-08 V10 (T40_RULE_V10), docs/preregistration/PR-08-V10-mask-validity-reference-
+# scope.md. UNSIGNED as this lands: nothing measured under it may be quoted until the project owner
+# signs it. V6 is NOT edited, weakened or superseded — every threshold, counter and frame decision
+# it registered still applies wherever its reference is defined. V10 only makes "wherever" explicit,
+# because the module was treating a predicate about ONE object under ONE lighting as a predicate
+# about any object under any lighting, and failing in two measured ways when it was not.
+#
+# DEFECT 1 — THE `plate.` PASS REFUSED 100 % OF FRAMES, ON THE SOURCE CORPUS. run_g0_gates documents
+# §6's plate half as a second pass of the same script with WAM_PR08_OBJECT_PROMPT="plate.", which
+# reaches segment() here. Measured on 20 source frames of episode_000000 (workstation GPU, this
+# adapter unmodified): n_segment_calls 20, n_frames_mask_refused 20, validity IoUs all 0.0000,
+# non-empty on 0 of 20 -- while the detector was doing its job perfectly, scoring 0.7524-0.7773 on
+# every frame. The matched control on the SAME twenty frames with "apple." refuses nothing and
+# scores 0.9686-0.9744. So this is not the corpus and not the detector: a correct plate mask
+# contains no warm fruit pixels and scores ~0 against a warm-fruit reference, exactly as V6's own
+# audit records (0.0000 on all twelve plate masks). The plate half of §6 could not be measured at
+# all, and the failure presented as `coverage: 0.0` -- a fact about the corpus.
+#
+# DEFECT 2 — ON A RESTYLE THE REFERENCE DOES NOT GO QUIET, IT MOVES TO THE TABLE. V6 §5.3 anticipated
+# the reference not firing on generated pixels, argued it fails CLOSED, and relies on
+# MASK_REFUSED_NO_REFERENCE_FRAMES to separate "the segmenter is wrong on this corpus" from "the
+# reference does not fit this corpus". Measured on job 189926's committed contact sheets -- the
+# first restyled frames this project has -- on train-01-oak-tungsten (a bright green Granny Smith on
+# warm oak under tungsten, its committed prompt) the predicate returns 40.5-56.4 % OF THE FRAME, all
+# of it warm oak table, and about a fortieth of that on the fruit. So the reference is non-empty, the
+# sub-case counter stays 0, and the twelve frames are recorded as "the mask was wrong" when the true
+# statement is "the reference does not fit here". What was refused was a CORRECT mask: the detector
+# put the same box [188,127,236,176] on the apple in both styles, SAM 2 drew ~1 830 px for it, and
+# the same mask is KEPT on train-02-linen-overcast at IoU 0.46-0.49 and REFUSED on
+# train-01-oak-tungsten at IoU 0.025-0.030. Nothing about the mask changed; the reference moved.
+#
+# WHAT V10 CHANGES, AND WHAT IT DELIBERATELY DOES NOT. It does not make the reference style-aware,
+# and it does not make it a function of the paired source frame -- see the rule's §3 for why the
+# second one is worse than the defect it would fix (under --g0b-percentile 100 it would refuse
+# exactly the frames whose displacement IS the verdict). It states the reference's scope and refuses
+# outside it. Fail closed, never open: a filter that cannot decide refuses loudly, and it never
+# quietly accepts, and it never quietly turns itself off.
+
+#: The object labels :func:`object_color_reference` is a reference FOR. Exactly one, because exactly
+#: one has ever been measured: "the only saturated warm thing in any of these frames is the fruit"
+#: is a claim about the fruit and says nothing about the plate, the cloth or the hand. A label that
+#: is not in here has no second opinion available, so :func:`segment` refuses the RUN rather than
+#: refusing every frame in it.
+#:
+#: ADDING A LABEL HERE IS NOT A CODE CHANGE, IT IS A PRE-REGISTRATION. A predicate for the plate
+#: would be a colour discriminator for a neutral-white object on a cloth this module's own reference
+#: docstring records as "neutral to within two counts" -- i.e. several numbers coined by us, in the
+#: gate path, with no measured gap to read them off, which is exactly what PR-08 §4 step 2 and V6 §4
+#: forbid. Whether §6's plate half is measured unfiltered instead is the project owner's call, and
+#: it needs the committed contract to say so (this module cannot say it alone: `mask_validity_min_iou`
+#: is cross-checked field for field against configs/transfer25/pr08_geom_tol.json, so an artifact
+#: whose filter silently did not run would still claim it did).
+MASK_VALIDITY_REFERENCE_LABELS: frozenset[str] = frozenset({"apple."})
+
+#: The largest fraction of a frame the reference may cover and still be a reference to THE OBJECT.
+#: Above it the predicate has latched onto the background and its own stated corpus assumption is
+#: false on this frame, so the filter cannot decide the frame and refuses it -- counted apart, in
+#: :data:`MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES`, which is the counter V6 §5.3 needed and
+#: did not have.
+#:
+#: A VALUE READ OFF A GAP, NOT A COINED ONE, and the gap is wide under both instruments that have
+#: measured it (the rule's §4 carries the whole table):
+#:
+#:   SOURCE, full resolution, this module's own predicate
+#:     17 307 frames -- every frame of 40 episodes, 2026-08-23, local  max 3.00 %
+#:     382-frame committed audit, job 189637 (warm_apple_px)           max 2.90 %
+#:     169-frame local CPU audit                                       max 2.80 %
+#:     154 447-frame census, 362 episodes (per-episode medians)        max 2.52 %
+#:   RESTYLE, via job 189926's contact sheets (half resolution; the sheet path inflates this
+#:   predicate by a measured 1.93-1.94x, established on the SOURCE half of the same sheets)
+#:     train-02-linen-overcast, filter working correctly    4.27-4.39 %  (2.20-2.26 % deflated)
+#:     train-01-oak-tungsten, filter mis-firing            40.5 -56.4 %  (20.9 -29.1 % deflated)
+#:
+#: So the gap is (4.39 %, 40.5 %) on the raw sheet scale and (3.00 %, 20.9 %) deflated, and 0.10 is
+#: the one round value inside BOTH -- which is the point, because the deflation factor is measured on
+#: warm-red fruit pixels and its transfer to warm-oak pixels is not established. The bound does not
+#: depend on it. The numeral coinciding with :data:`MASK_VALIDITY_MIN_IOU` is a coincidence: that one
+#: is an IoU between two masks, this one is a fraction of a frame, and they are never compared.
+#:
+#: NO ENV OVERRIDE, for MASK_VALIDITY_MIN_IOU's reason exactly: it decides which frames enter a
+#: committed measurement, and a knob that can silently change the measured population between two
+#: runs is what the segmenter contract exists to prevent.
+MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION = 0.10
+
 #: THE ONE REMAINING DIFFERENCE FROM UPSTREAM, named so it cannot be mistaken for an equivalence.
 #: Upstream drives ``SAM2VideoPredictor.from_pretrained(...).init_state(video_path=...)`` and
 #: PROPAGATES one mask through the clip; this adapter segments each frame independently, because the
@@ -440,7 +553,14 @@ ESTIMATOR_VERSION = (
     # In the version string because it decides which frames a recorded number was measured on, and
     # an artifact whose version cannot answer "was the mask-validity filter on?" cannot be compared
     # against one measured before it existed.
-    f"mask_val_min_iou={MASK_VALIDITY_MIN_IOU}"
+    f"mask_val_min_iou={MASK_VALIDITY_MIN_IOU};"
+    # PR-08 V10, and here for V6's reason: it decides which frames a recorded number was measured
+    # on. run_g0_gates.instrument_disagreements compares this string BETWEEN THE TWO SIDES of G0b,
+    # so a source record dumped before this token existed and a restyled record dumped after it
+    # refuse to be compared -- which is correct, they are two instruments, and it is the reason the
+    # token is here rather than only in stats(). Nothing committed carries ESTIMATOR_VERSION, so no
+    # cross-check against configs/transfer25/pr08_geom_tol.json moves.
+    f"mask_val_ref_max_frac={MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION}"
 )
 
 #: The join key PR-08 §4 step 2 is checked on. It is :data:`ESTIMATOR_NAME` and it is spelled once:
@@ -741,6 +861,23 @@ EMPTY_MASK_FRAMES = 0
 MASK_REFUSED_FRAMES = 0
 MASK_REFUSED_NO_REFERENCE_FRAMES = 0
 
+#: PR-08 V10. The OTHER sub-case of "the reference does not fit here", and the one V6 §5.3 assumed
+#: could not happen: the reference is not empty, it is enormous — the predicate has latched onto the
+#: background, so it describes the scene rather than the object and cannot arbitrate any mask on this
+#: frame. Counted INSIDE ``MASK_REFUSED_FRAMES`` and not beside it, exactly as
+#: ``MASK_REFUSED_NO_REFERENCE_FRAMES`` is, so that the identity ``n_frames_without_detection +
+#: n_frames_with_empty_mask + n_frames_mask_refused`` still spans the whole coverage shortfall this
+#: module is responsible for. A consumer that wants the three-way split reads the two sub-cases and
+#: subtracts.
+#:
+#: THE TWO SUB-CASES ARE NOT SYMMETRIC AND MUST NOT BE POOLED. An empty reference on the SOURCE
+#: corpus means the fruit is occluded or out of frame — a hard frame, refused because nothing can
+#: confirm the mask, which is V6 §5.1's recorded bias. An empty reference on a restyle whose apple is
+#: not warm means the reference does not fit, which is a different finding with a different fix. This
+#: module cannot tell those two apart from one frame and does not pretend to: see
+#: stats()['mask_validity_reference_scope'].
+MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES = 0
+
 #: The validity IoU of every frame the check RAN on, in call order — the same design, for the same
 #: reasons, as :data:`DETECTION_SCORES`: raw values pool exactly through JSON where a histogram only
 #: pools if it was binned identically, and a distribution recorded as a digest cannot answer the
@@ -752,6 +889,18 @@ MASK_REFUSED_NO_REFERENCE_FRAMES = 0
 #: one frame at a time reads the value this frame appended and can show the filter fired on exactly
 #: the frames a person flagged. ``scripts/audit_apple_masks.py`` does precisely that.
 MASK_VALIDITY_IOU: list[float] = []
+
+#: PR-08 V10. The fraction of the frame the colour reference covered, one per frame the check ran on,
+#: in call order and index-aligned to :data:`MASK_VALIDITY_IOU` (both are appended in the same
+#: branch, before either decides anything). Raw values for :data:`DETECTION_SCORES`'s reasons.
+#:
+#: It is the evidence that makes :data:`MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION` checkable in any
+#: artifact this adapter writes, rather than a number a reader has to take on trust. The condition
+#: that would make the bound matter — a corpus, a restyle or a render on which the applicable and
+#: inapplicable populations are NOT separated by a gap — is a distribution with mass between 0.03 and
+#: 0.21, and it is visible here the moment it occurs. If it ever does, the correct response is a
+#: further version alongside V10, not a bound moved inside it.
+MASK_VALIDITY_REFERENCE_FRACTION: list[float] = []
 
 #: Frames where the first pass found nothing and upstream's single (0.10, 0.10) retry fired, and of
 #: those, the ones where it produced a box. The gap between them and ``NO_DETECTION_FRAMES`` is the
@@ -813,6 +962,9 @@ def stats() -> dict[str, Any]:
         "box_selection": BOX_SELECTION,
         "mask_validity_min_iou": MASK_VALIDITY_MIN_IOU,
         "mask_validity_reference": MASK_VALIDITY_REFERENCE,
+        "mask_validity_reference_labels": sorted(MASK_VALIDITY_REFERENCE_LABELS),
+        "mask_validity_reference_max_frame_fraction": MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION,
+        "mask_validity_reference_is_defined_for_this_prompt": mask_validity_reference_is_defined(),
         "propagation": PROPAGATION,
         "upstream_propagation": UPSTREAM_PROPAGATION,
         "detection_params_source": (
@@ -832,7 +984,11 @@ def stats() -> dict[str, Any]:
         "n_frames_retry_recovered": RETRY_RECOVERED_FRAMES,
         "n_frames_mask_refused": MASK_REFUSED_FRAMES,
         "n_frames_mask_refused_no_reference": MASK_REFUSED_NO_REFERENCE_FRAMES,
+        "n_frames_mask_refused_reference_not_object_scale": (
+            MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES
+        ),
         "n_mask_validity_iou": len(MASK_VALIDITY_IOU),
+        "n_mask_validity_reference_fraction": len(MASK_VALIDITY_REFERENCE_FRACTION),
         "n_detection_scores": len(DETECTION_SCORES),
         "detection_scores_attr": "DETECTION_SCORES",
         "detection_scores_meaning": (
@@ -885,6 +1041,29 @@ def stats() -> dict[str, Any]:
             "and changes no threshold, prompt, retry or box rule; the detection operating point is "
             "still the generator's, as PR-08 §4 step 2 requires. Registered as PR-08 V6 "
             "(T40_RULE_V6), docs/preregistration/PR-08-V6-mask-validity.md."
+        ),
+        "mask_validity_reference_fraction_attr": "MASK_VALIDITY_REFERENCE_FRACTION",
+        "mask_validity_reference_scope": (
+            "PR-08 V10 (T40_RULE_V10, docs/preregistration/PR-08-V10-mask-validity-reference-"
+            "scope.md, UNSIGNED as this is recorded — nothing measured under it may be quoted "
+            "until the project owner signs it). The reference named in mask_validity_reference is "
+            "a predicate for ONE object under ONE appearance, and this module used to apply it to "
+            "any label on any pixels. Two consequences were MEASURED rather than supposed. (1) A "
+            "label outside mask_validity_reference_labels now refuses the RUN — "
+            "MaskValidityReferenceUndefined — instead of refusing every frame: at "
+            "WAM_PR08_OBJECT_PROMPT='plate.' twenty of twenty source frames of episode_000000 were "
+            "refused at validity IoU 0.0000 with detection scores 0.7524-0.7773, and the harness "
+            "reported that as coverage 0.0, a fact about the corpus. (2) A frame whose reference "
+            "covers more than mask_validity_reference_max_frame_fraction of the picture is refused "
+            "as undecidable and counted in n_frames_mask_refused_reference_not_object_scale, "
+            "because on job 189926's train-01-oak-tungsten the predicate returns 40.5-56.4 % of "
+            "the frame — warm oak table, not fruit — so it refused a CORRECT mask of a green apple "
+            "(IoU 0.025-0.030, the same box and the same ~1 830 px mask that is KEPT at IoU "
+            "0.46-0.49 on train-02-linen-overcast) while n_frames_mask_refused_no_reference stayed "
+            "0. WHAT IS STILL NOT SEPARATED: an EMPTY reference means 'the fruit is occluded or out "
+            "of frame' on the source corpus and 'the reference does not fit' on a restyle whose "
+            "apple is not warm, and one frame cannot tell those apart. V10 does not claim to; it "
+            "closes the other end, which V6 §5.3 assumed could not open."
         ),
         "mask_validity_threat_to_validity": (
             "n_frames_mask_refused_no_reference counts the refusals where the colour reference "
@@ -1219,6 +1398,91 @@ def mask_validity_iou(mask: np.ndarray, reference: np.ndarray) -> float:
     return float(inter) / float(union) if union else 0.0
 
 
+def reference_frame_fraction(reference: np.ndarray) -> float:
+    """Fraction of the frame the colour reference covers. ``0.0`` on an empty array."""
+    ref = np.asarray(reference, dtype=bool)
+    return float(ref.sum()) / float(ref.size) if ref.size else 0.0
+
+
+def reference_is_object_scale(reference: np.ndarray) -> bool:
+    """Is this reference the size of AN OBJECT, or the size of a SCENE? (PR-08 V10.)
+
+    :func:`object_color_reference` justifies itself with *"the only saturated warm thing in any of
+    these frames is the fruit"*. That is a claim about AppleToPlate's real pixels under
+    AppleToPlate's real lighting, and PR-08 is a pre-registration whose committed prompts change the
+    lighting and the fruit's colour on purpose. When the claim is false the predicate does not go
+    quiet — measured on job 189926's ``train-01-oak-tungsten``, it returns 40.5-56.4 % of the frame,
+    all of it warm oak table. A predicate covering half the scene cannot arbitrate whether any
+    particular mask is the fruit, in either direction: it refuses a correct mask of a green apple
+    (measured: IoU 0.025-0.030) and it would ACCEPT a mask of the table (IoU 1.0 against itself).
+    Both are silent, and the second is worse.
+
+    So the reference is checked before it is used as one. An EMPTY reference is deliberately
+    ``True`` here — it is not a scene, and V6 already handles it, refusing the frame through the IoU
+    and counting it in :data:`MASK_REFUSED_NO_REFERENCE_FRAMES`. V10 changes nothing about that
+    path; it adds the other end of the distribution, which V6 did not have.
+
+    Exported rather than kept private because ``scripts/robot_composite.py`` (PR-08 V9) drives this
+    module's reference over generated pixels too and is exposed to the same defect by its own §5.1.
+    V10 does not wire it there — that file belongs to V9 and to whoever signs it — but there is now
+    ONE definition of "this reference is applicable here" available to both, which is V9's own stated
+    reason for reaching into this module rather than restating anything.
+    """
+    return reference_frame_fraction(reference) <= MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION
+
+
+def mask_validity_reference_is_defined() -> bool:
+    """Does the filter have a reference for the object THIS PROCESS was told to segment?
+
+    Cheap, side-effect free and importable, so a harness can find out before decoding a corpus
+    instead of after. :func:`segment` asks the same question and refuses on the answer.
+    """
+    return OBJECT_TEXT_PROMPT in MASK_VALIDITY_REFERENCE_LABELS
+
+
+def _require_mask_validity_reference() -> None:
+    """Refuse the run when the mask-validity filter has no reference for this label. (PR-08 V10.)"""
+    if mask_validity_reference_is_defined():
+        return
+    raise MaskValidityReferenceUndefined(
+        f"REFUSED: the mask-validity filter has no reference for {OBJECT_TEXT_PROMPT!r}.\n"
+        f"       WAM_PR08_OBJECT_PROMPT={OBJECT_TEXT_PROMPT_RAW!r} normalises to "
+        f"{OBJECT_TEXT_PROMPT!r}, and PR-08 V6 requires every non-empty mask to clear\n"
+        f"       mask_validity_min_iou={MASK_VALIDITY_MIN_IOU} against "
+        f"{MASK_VALIDITY_REFERENCE} — a predicate for the FRUIT, which\n"
+        "       this module applied to every label unconditionally. The only label it is a "
+        "reference for is: "
+        + ", ".join(sorted(MASK_VALIDITY_REFERENCE_LABELS))
+        + ".\n"
+        "\n"
+        "       THIS IS NOT A FACT ABOUT THE CORPUS AND MUST NOT BE READ AS ONE. Measured on 20 "
+        "source frames of\n"
+        "       episode_000000 before this refusal existed: the detector scored 0.7524-0.7773 on "
+        "every frame, SAM 2\n"
+        "       drew a mask on every frame, and the filter refused all twenty at validity IoU "
+        "0.0000 — because a\n"
+        "       correct plate mask contains no warm fruit pixels. The harness then reported "
+        "coverage 0.0 and the\n"
+        "       gate refused for the wrong reason. The same twenty frames at "
+        "WAM_PR08_OBJECT_PROMPT='apple.' are\n"
+        "       refused zero times, at validity IoU 0.9686-0.9744.\n"
+        "\n"
+        "       What this does NOT mean: that the label cannot be measured. It means the FILTER is "
+        "not defined for\n"
+        "       it, and this module may not decide alone whether to measure the label without one — "
+        "the committed\n"
+        "       contract configs/transfer25/pr08_geom_tol.json states mask_validity_min_iou and is "
+        "cross-checked\n"
+        "       field for field, so a run that quietly skipped the filter would write an artifact "
+        "claiming it ran.\n"
+        "       Registering a reference for this label, or registering that it is measured "
+        "unfiltered, is a further\n"
+        "       version alongside PR-08 V10 and the project owner's signature — not an edit to this "
+        "file.\n"
+        "       docs/preregistration/PR-08-V10-mask-validity-reference-scope.md §2."
+    )
+
+
 def _device() -> str:
     if DEVICE_OVERRIDE:
         return DEVICE_OVERRIDE
@@ -1508,9 +1772,28 @@ def segment(rgb: np.ndarray) -> np.ndarray:
     OUTPUT: the detection operating point, the prompt, the retry and the box rule are untouched, so
     this is still the segmenter §4 step 2 asks for, applied identically to both sides of §6's
     subtraction by living in the module both harnesses call.
+
+    **The reference is checked before it is used as one, and a label it does not cover refuses the
+    RUN** (PR-08 V10). Two things this function used to do quietly and now does loudly:
+    ``WAM_PR08_OBJECT_PROMPT="plate."`` raises :class:`MaskValidityReferenceUndefined` on the first
+    call instead of refusing all twenty frames of the pass and reporting ``coverage: 0.0``; and a
+    frame whose colour reference covers more than
+    :data:`MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION` of the picture is refused as a frame this
+    filter cannot decide — counted in
+    :data:`MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES`, inside
+    :data:`MASK_REFUSED_FRAMES` — rather than being arbitrated by a predicate that has moved to the
+    background. Neither is a change to the detection path, and neither can ACCEPT a frame the module
+    accepted before: V10's only possible effect on a frame is a refusal, and its only possible effect
+    on a run is a refusal.
     """
     global SEGMENT_CALLS, NO_DETECTION_FRAMES, EMPTY_MASK_FRAMES
     global MASK_REFUSED_FRAMES, MASK_REFUSED_NO_REFERENCE_FRAMES
+    global MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES
+
+    # BEFORE ANY COUNTER MOVES AND BEFORE ANY WEIGHT LOADS. A label the filter has no reference for
+    # is not a frame this module can decide — refusing each frame instead reads out of the harness
+    # as coverage 0.0, i.e. as a fact about the corpus. PR-08 V10.
+    _require_mask_validity_reference()
 
     frame = _as_uint8_rgb(rgb)
     SEGMENT_CALLS += 1
@@ -1547,6 +1830,20 @@ def segment(rgb: np.ndarray) -> np.ndarray:
     reference = object_color_reference(frame)
     overlap = mask_validity_iou(mask, reference)
     MASK_VALIDITY_IOU.append(overlap)
+    MASK_VALIDITY_REFERENCE_FRACTION.append(reference_frame_fraction(reference))
+
+    # PR-08 V10, and it gates the WHOLE decision rather than only the refusal branch. When the
+    # reference covers the scene it cannot arbitrate this mask in either direction: it refuses a
+    # correct mask of a restyled apple (measured 0.025-0.030 on train-01-oak-tungsten) and it
+    # ACCEPTS a mask of the warm background (1.0 against itself). Reaching the IoU test at all would
+    # therefore be the fail-OPEN half of the same defect. Counted inside MASK_REFUSED_FRAMES, and
+    # apart from it, so V6 §5.3's question — is the segmenter wrong here, or does the reference not
+    # fit here — has an answer in the artifact instead of a zero that means neither.
+    if not reference_is_object_scale(reference):
+        MASK_REFUSED_FRAMES += 1
+        MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES += 1
+        return np.zeros((h, w), dtype=bool)
+
     if overlap < MASK_VALIDITY_MIN_IOU:
         MASK_REFUSED_FRAMES += 1
         if not reference.any():
