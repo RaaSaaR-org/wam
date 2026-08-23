@@ -127,10 +127,40 @@ the ceiling over the **whole** 25-instance partition, derived from a `TIMING=1` 
 ceiling that shrinks with the stage would let a sequence of small stages exceed the number nobody
 measured. **Stage 1 draws at most 8/25 of it.**
 
-This requires a code change to `97_transfer25_restyle.sbatch`: the expansion currently prices the
-whole partition and the share check hard-codes 10/25, 5/25, 10/25. That change is implementation of
-this rule and must not alter the derivation, the refusal on a missing ceiling, or the requirement
-that the number come from a measurement. **It has not been made as this is written.**
+~~This requires a code change to `97_transfer25_restyle.sbatch`: the expansion currently prices the
+whole partition and the share check hard-codes 10/25, 5/25, 10/25.~~
+
+### 2.4 CORRECTION, 2026-08-23, on what the code actually does and what is actually owed
+
+**The struck sentence above was written from the file's comments and is wrong about its code.** It
+is corrected here rather than silently rewritten, because a draft that quietly repairs its own
+claims about the artefact it governs teaches nobody where it was unreliable. Read by execution:
+
+- **Nothing hard-codes 10/25, 5/25, 10/25.** Those figures appear only in the usage header and in
+  the `:?` message of `CEILING_GPU_H`, as *what the shares would be at the committed partition*.
+  The enforcement is `CEILING_GPU_H <= PARTITION_CEILING_GPU_H` plus the run-wide ledger in
+  `${OUT}/run.env` summing the pinned shares against `PARTITION_CEILING_GPU_H`. The shares are
+  operator-supplied and required-with-no-default. **So the ceiling machinery already admits any
+  split, including a stage's, and no change is owed to it.**
+- **What is owed is a way to generate a PREFIX of a style set at all, and it does not exist.**
+  `chosen = styles[style_set]` takes the whole set, and each style's `repeats_of(s)` comes from
+  `styles.toml`. There is no `STAGE`, no style limit, no prefix selector anywhere in the file.
+  Stage 1 as §2 describes it therefore **cannot be expressed today** except by editing
+  `configs/transfer25/styles.toml` — which §0 forbids, because the partition hash is the provenance
+  of every clip. **A stage selector, passed at submit time and recorded per clip, is the change.**
+- **And a stage selector must carry arm C's frame-match with it, which §2.3 did not notice.** The
+  expansion's guard is `instances["train"] != instances["identity"]`, computed over the WHOLE
+  `styles.toml` and independent of `chosen`. Under staging that guard still passes — 10 == 10 — while
+  saying **nothing** about whether *the stage being generated* is matched, which is the property
+  `T40_RULE_V2` actually requires and the reason §0 promised B and C stay matched "at every stage".
+  A stage that generated 4 train styles against 10 identity repeats would pass every check in the
+  file. **The guard must be re-expressed at stage level, and until it is, §0's second bullet is a
+  promise with no enforcement behind it.**
+
+None of this changes the staging decision, the arithmetic in §2, or the ceiling discipline in §2.3's
+surviving text. It changes what a session must build before a stage can be run, and it removes one
+claim this document should not have made. **The change has not been made as this is written, and it
+is not made under an unsigned rule.**
 
 ## 3. What decides whether stage 2 happens
 
