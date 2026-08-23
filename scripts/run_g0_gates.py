@@ -68,6 +68,17 @@ Object and plate centroids in the restyled clip must agree with the source. The 
   plausible number that means nothing — the identical failure ``measure_est_drift.py``'s
   ``cross_check_geom_tol()`` exists to catch on the other end of the same subtraction.
 
+  **THE DECODER IS PART OF THAT INSTRUMENT AND IS NOW RECORDED AND COMPARED** (2026-08-23). A
+  segmenter is a function of the pixels it is handed, and two decoders hand it two different sets
+  of pixels for the same file; ``resolve_decoder`` probes each side's own bytes independently, so
+  one command line can resolve two. **It costs the run its gate qualification and does not refuse**
+  — G0b's two sides are not the same codec by construction (the PR-08 source is av1, job 189585 is
+  the record of cv2 decoding ZERO frames of it; the generator's output is not av1), so a hard
+  refusal would be a gate the real corpus cannot satisfy, which is the defect this file was already
+  repaired for once. Whether §6 should REQUIRE one decoder or only require the pair to be recorded
+  is a question for the rule, not for this runner; ``decoder_disagreements`` says where its rows
+  would move if the answer is "required".
+
   **Exactly how far that verification reaches is stated rather than implied.** Name, version and
   pixel grid are compared on EVERY path. The PINNED OPERATING POINT below the name — the three
   checkpoint revisions, the text prompt, both threshold pairs, the box rule, the propagation mode —
@@ -683,6 +694,16 @@ class Side:
     #: declared by the record rather than guessed from a naming convention here.
     source_of: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    #: The VIDEO DECODER that turned this side's bytes into the frames the segmenter saw, when the
+    #: record states one. It is part of the instrument and not a detail of it: a segmenter is a
+    #: function of pixels, and two decoders hand it two different sets of pixels for the same file —
+    #: different colour conversion, and on a stream one of them mis-parses, different frames
+    #: entirely. This gate's two sides are the corpus most exposed to that difference, because they
+    #: are not the same codec: the PR-08 source is av1 (job 189585 is the record of cv2 decoding
+    #: ZERO frames of it — "Missing Sequence Header") and the generator's output is not. So the two
+    #: sides can legitimately resolve two decoders on one command line, which is exactly the
+    #: "plausible pixel number that means nothing" this record exists to make impossible.
+    decoder: dict[str, Any] | None = None
 
     @property
     def segmenter_name(self) -> str:
@@ -692,6 +713,13 @@ class Side:
     def segmenter_version(self) -> str | None:
         version = self.segmenter.get("version")
         return None if version is None else str(version)
+
+    @property
+    def decoder_id(self) -> str | None:
+        """``"name version"``, or ``None`` when the record does not state a decoder at all."""
+        if not isinstance(self.decoder, dict) or not self.decoder.get("name"):
+            return None
+        return f"{self.decoder['name']} {self.decoder.get('version') or '?'}"
 
 
 def load_geom_config(path: Path) -> dict[str, Any]:
@@ -1421,6 +1449,11 @@ def load_centroid_record(path: Path, side: str) -> Side:
         clips=clips,
         source_of=source_of,
         notes=list(doc.get("notes") or []),
+        # ABSENT IS ALLOWED AND IS NOT AGREEMENT. Records written before this field existed carry
+        # no decoder, and refusing them would retire every centroid record ever produced for a
+        # property nobody could have stated. It costs the run its gate qualification instead, and
+        # only when the OTHER side does state one — see run_g0b.
+        decoder=doc["decoder"] if isinstance(doc.get("decoder"), dict) else None,
     )
 
 
@@ -1450,6 +1483,10 @@ def instrument_disagreements(
             "is the pinned checkpoint set (ESTIMATOR_VERSION); different weights are a different "
             "segmenter wearing the same name."
         )
+    # THE DECODER IS DELIBERATELY NOT COMPARED HERE. It is part of the instrument and it IS
+    # checked — in ``decoder_disagreements``, whose rows cost the run its gate qualification rather
+    # than refusing it. The reason for the asymmetry is written out there, and it is the same
+    # reason a gate is not allowed to be unpassable.
     if list(source.resolution_hw) != list(restyled.resolution_hw):
         out.append(
             f"the two sides were measured on different pixel grids: source {source.resolution_hw} "
@@ -1481,6 +1518,58 @@ def instrument_disagreements(
     ):
         out.append(f"the two sides' segmenter contracts disagree: {row}")
     return out
+
+
+def decoder_disagreements(source: Side, restyled: Side) -> list[str]:
+    """Everything the two records say about how their bytes became frames, and cannot join on.
+
+    THE DECODER IS PART OF THE INSTRUMENT. Until 2026-08-23 nothing here looked at it, while the
+    module docstring claimed the two sides are verified to have been measured with one. A segmenter
+    is a function of the pixels it is handed: two decoders differ in colour conversion and, on a
+    stream one of them mis-parses, in which frames exist at all — and G0b's arithmetic is source
+    frame *i* minus restyled frame *i*. ``resolve_decoder`` probes each side's own bytes
+    independently, so one command line can resolve two decoders with nothing in the record to show
+    for it.
+
+    **AND THESE ROWS DO NOT REFUSE, WHICH IS THE WHOLE DESIGN DECISION.** G0b's two sides are not
+    the same codec by construction — the PR-08 source is av1 (job 189585 is the record of cv2
+    decoding ZERO frames of it, *"Missing Sequence Header"*) and the generator's output is not — so
+    "both sides must name one decoder" is a condition the real corpus may be unable to satisfy at
+    all. A gate that cannot say yes blocks generation exactly as a wrong one would, and this file
+    has already been repaired once for precisely that (``_ca_mask_method_name``, 2026-08-22). So a
+    decoder difference is recorded as a loss of gate qualification — exit 3, "ran, nothing failed,
+    may not stand as the gate" — which is this repository's own slot for a comparison that
+    happened and cannot be shown to be one instrument.
+
+    Whether §6 should REQUIRE one decoder across both sides, or only require that the pair be
+    recorded, is a question about the rule and not about this runner. It is left to the owner and
+    to a versioned document; if the answer is "required", this function's rows move into
+    :func:`instrument_disagreements` and nothing else changes.
+
+    Neither side stating a decoder produces nothing: every centroid record written before this
+    field existed is silent, and silence about a property nobody could state is not a finding.
+    """
+    if source.decoder_id and restyled.decoder_id:
+        if source.decoder_id == restyled.decoder_id:
+            return []
+        return [
+            f"the two sides were decoded by different decoders: source {source.decoder_id!r} vs "
+            f"restyled {restyled.decoder_id!r}. A segmenter is a function of the pixels it is "
+            "handed, and two decoders hand it two different sets of pixels for the same file, so "
+            "the displacement between them cannot be shown to be a geometry measurement. This is "
+            "not refused because the two sides are not the same codec by construction (av1 source, "
+            "generated output that is not av1), and a gate the real corpus cannot satisfy is not a "
+            "gate."
+        ]
+    if bool(source.decoder_id) != bool(restyled.decoder_id):
+        stated, silent = (source, restyled) if source.decoder_id else (restyled, source)
+        return [
+            f"the {stated.side} centroid record was decoded by {stated.decoder_id!r} and the "
+            f"{silent.side} record states no decoder, so the two sides could not be shown to have "
+            "been decoded by one. The --*-clips path states its decoder by construction, so a "
+            "record that does not was written by something else."
+        ]
+    return []
 
 
 def paired_displacements(
@@ -1836,6 +1925,7 @@ def side_from_clips(args: argparse.Namespace, side: str, corpus: Path) -> Side:
         clips=clips,
         source_of=source_of,
         notes=notes,
+        decoder={"name": decoder.name, "version": decoder.version},
     )
 
 
@@ -1847,6 +1937,9 @@ def write_side_record(side: Side, path: Path) -> None:
         "side": side.side,
         "origin": side.origin,
         "segmenter": side.segmenter,
+        # Stated as its own field and not only inside `origin`'s prose, because the consumer
+        # COMPARES it: a decoder named in a sentence is a decoder nothing can join on.
+        "decoder": side.decoder,
         "resolution_hw": side.resolution_hw,
         "notes": side.notes,
         "clips": {
@@ -2070,6 +2163,10 @@ def run_g0b(args: argparse.Namespace) -> dict[str, Any]:
                 "were; 'two runs can share a name while disagreeing about every number below' is "
                 "the committed contract's own sentence about why that is not enough."
             )
+    # The decoder, which is part of the instrument and does NOT refuse — see decoder_disagreements
+    # for why a hard refusal here would make G0b unpassable on a corpus whose two sides are not the
+    # same codec, which is the defect this file was already repaired for once.
+    disqualified.extend(decoder_disagreements(source, restyled))
     for label in LABELS_GATED:
         if label not in by_label:
             disqualified.append(
@@ -2155,18 +2252,28 @@ def run_g0b(args: argparse.Namespace) -> dict[str, Any]:
         "instrument_verified": {
             "source": {
                 "segmenter": source.segmenter,
+                "decoder": source.decoder,
                 "resolution_hw": source.resolution_hw,
                 "origin": source.origin,
             },
             "restyled": {
                 "segmenter": restyled.segmenter,
+                "decoder": restyled.decoder,
                 "resolution_hw": restyled.resolution_hw,
                 "origin": restyled.origin,
             },
             "checked": (
                 "segmenter name, segmenter version, pixel grid — on both sides and against the "
                 "committed tolerance's own instrument. Verified from the records, not assumed "
-                "from one command line having produced both."
+                "from one command line having produced both. Any of these disagreeing REFUSES."
+            ),
+            "decoder_checked": (
+                "The video decoder is compared wherever both sides state it, and a difference is "
+                "recorded in not_gate_qualified_reasons rather than refused: G0b's two sides are "
+                "not the same codec by construction (av1 source, generated output that is not "
+                "av1), so requiring one decoder could make this gate unpassable on the real "
+                "corpus. The --*-clips path states its decoder by construction; a record written "
+                "before 2026-08-23 states none, and two silent records produce nothing here."
             ),
             "operating_point_checked": (
                 "The pinned operating point below the name (checkpoint revisions, text prompt, "
@@ -2270,9 +2377,14 @@ def inventory(args: argparse.Namespace, gates: list[str]) -> list[InputSpec]:
                 "--restyled-dataset (the generated corpus, canonical episodes)",
                 args.restyled_dataset,
                 "cluster/discoverer/97_transfer25_restyle.sbatch, then "
-                "scripts/assemble_restyled_lerobot.py + scripts/convert_lerobot_g1.py. NOTHING "
-                "generated exists yet: PR-08 §1 forbids generation until every §8 item is closed "
-                "and T-39 has reported",
+                "scripts/assemble_restyled_lerobot.py + scripts/convert_lerobot_g1.py. NO "
+                "RESTYLED CORPUS EXISTS. Generated frames now DO exist — job 189926 produced 4 "
+                "clips / 384 frames on 2026-08-23 — but they are the V8 hallucination probe's "
+                "QUARANTINED output (every clip suffixed .mp4.quarantined), and PR-08 V8 §4 "
+                "forbids anything downstream from consuming them as a corpus, so they are not "
+                "this input and may not be assembled into it. PR-08 §1 forbids the licensed "
+                "generation run 'until every item in §8 is closed and T-39 has reported'; T-39 "
+                "reported on 2026-08-16 and §8 items 3 and 4 are open, so §1 still forbids it",
             )
         )
         if args.holdout is not None:

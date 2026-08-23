@@ -312,6 +312,7 @@ def _centroids(
     grid: tuple[int, int] = (480, 640),
     gate_qualified: bool = True,
     contract: dict[str, Any] | None = DEFAULT_CONTRACT,
+    decoder: dict[str, Any] | None = None,
 ) -> Path:
     if clips is None:
         clips = {
@@ -327,19 +328,19 @@ def _centroids(
     }
     if contract is not None:
         segmenter["contract"] = contract
+    doc: dict[str, Any] = {
+        "schema": g0.CENTROID_SCHEMA,
+        "side": side,
+        "segmenter": segmenter,
+        "resolution_hw": list(grid),
+        "clips": clips,
+    }
+    # Absent by default: every record written before 2026-08-23 states no decoder, and the point of
+    # that branch is that it stays readable. Tests that care pass one explicitly.
+    if decoder is not None:
+        doc["decoder"] = decoder
     path = tmp_path / f"centroids-{side}.json"
-    path.write_text(
-        json.dumps(
-            {
-                "schema": g0.CENTROID_SCHEMA,
-                "side": side,
-                "segmenter": segmenter,
-                "resolution_hw": list(grid),
-                "clips": clips,
-            },
-            indent=2,
-        )
-    )
+    path.write_text(json.dumps(doc, indent=2))
     return path
 
 
@@ -503,6 +504,83 @@ def test_g0b_refuses_centroids_measured_on_a_grid_the_tolerance_was_not(tmp_path
     restyled = _centroids(tmp_path, "restyled", SOURCE_CLIPS, grid=(240, 320), contract=small)
     with pytest.raises(g0.GateRefusal, match="pixel budget on one grid"):
         g0.run_g0b(_args(tmp_path, geom, source, restyled))
+
+
+def test_two_sides_decoded_by_different_decoders_cannot_stand_as_the_gate(tmp_path: Path) -> None:
+    """The decoder is part of the instrument, and this is the comparison most exposed to it.
+
+    The PR-08 source corpus is av1 — job 189585 is the record of cv2 decoding ZERO frames of it,
+    "Missing Sequence Header" — and the generator's output is not av1. ``resolve_decoder`` probes
+    each side's own bytes independently, so ONE command line can resolve two decoders, and until
+    2026-08-23 nothing in this runner noticed. A segmenter is a function of the pixels it is
+    handed: two decoders differ in colour conversion and, on a stream one of them mis-parses, in
+    which frames exist at all — while G0b subtracts source frame i from restyled frame i.
+
+    IT IS EXIT 3 AND NOT A REFUSAL, and that is the load-bearing half of this test. The two sides
+    being different codecs is not an accident to be fixed, it is what a restyle produces — so
+    "both sides must name one decoder" is a condition the real corpus may be unable to meet, and a
+    gate that cannot say yes blocks generation exactly as a wrong one would. This file has already
+    been repaired once for exactly that shape (``_ca_mask_method_name``, 2026-08-22), and building
+    it back in one function over would be the same defect wearing a different name.
+    """
+    geom = _geom_config(tmp_path)
+    source = _centroids(
+        tmp_path, "source", SOURCE_CLIPS, decoder={"name": "pyav", "version": "13.1.0"}
+    )
+    restyled = _centroids(
+        tmp_path, "restyled", SOURCE_CLIPS, decoder={"name": "cv2", "version": "5.0.0"}
+    )
+    record = g0.run_g0b(_args(tmp_path, geom, source, restyled))
+    assert record["verdict"] == "NOT_GATE_QUALIFIED"
+    assert record["measured_verdict"] == "PASS"
+    assert any(
+        "different decoders" in r for r in record["not_gate_qualified_reasons"]
+    ), record["not_gate_qualified_reasons"]
+
+
+def test_two_sides_decoded_by_the_same_decoder_are_not_a_disagreement(tmp_path: Path) -> None:
+    """The check must not fire on the case it is meant to permit."""
+    geom = _geom_config(tmp_path)
+    same = {"name": "pyav", "version": "13.1.0"}
+    source = _centroids(tmp_path, "source", SOURCE_CLIPS, decoder=same)
+    restyled = _centroids(tmp_path, "restyled", SOURCE_CLIPS, decoder=same)
+    record = g0.run_g0b(_args(tmp_path, geom, source, restyled))
+    assert record["verdict"] == "PASS"
+    assert record["instrument_verified"]["source"]["decoder"] == same
+
+
+def test_a_record_pair_that_states_no_decoder_at_all_is_unchanged(tmp_path: Path) -> None:
+    """Silence about a property nobody could state is not a finding.
+
+    Every centroid record written before 2026-08-23 carries no decoder. Refusing them, or
+    disqualifying them, would retire the whole format for a field that did not exist — so the pair
+    passes exactly as it did, and the two branches that DO say something are the ones below and
+    above this test.
+    """
+    geom = _geom_config(tmp_path)
+    source = _centroids(tmp_path, "source", SOURCE_CLIPS)
+    restyled = _centroids(tmp_path, "restyled", SOURCE_CLIPS)
+    record = g0.run_g0b(_args(tmp_path, geom, source, restyled))
+    assert record["verdict"] == "PASS"
+    assert not any("decoder" in r for r in record["not_gate_qualified_reasons"])
+
+
+def test_one_side_stating_a_decoder_and_the_other_not_cannot_stand_as_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Unverifiable is not wrong and is not the gate either — the same shape as the missing
+    operating point and the absent .sha256 sidecar. A refusal here would punish the side that
+    recorded MORE, which is the wrong incentive to build into a gate."""
+    geom = _geom_config(tmp_path)
+    source = _centroids(
+        tmp_path, "source", SOURCE_CLIPS, decoder={"name": "pyav", "version": "13.1.0"}
+    )
+    restyled = _centroids(tmp_path, "restyled", SOURCE_CLIPS)
+    record = g0.run_g0b(_args(tmp_path, geom, source, restyled))
+    assert record["verdict"] == "NOT_GATE_QUALIFIED"
+    assert any(
+        "states no decoder" in r for r in record["not_gate_qualified_reasons"]
+    ), record["not_gate_qualified_reasons"]
 
 
 def test_g0b_refuses_a_clip_whose_frame_count_changed(tmp_path: Path) -> None:
@@ -1315,6 +1393,68 @@ def test_explain_reports_a_present_config_whose_numbers_are_still_null(
     # PR-08 §4 requires the estimator to be characterised before generation, never after.
     assert code == g0.EXIT_REFUSED
     assert "budget cannot be formed" in capsys.readouterr().out
+
+
+def test_explain_does_not_claim_that_nothing_generated_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Job 189926 produced the first generated frames this project has ever had (2026-08-23).
+
+    Until then this mode printed "NOTHING generated exists yet" beside --restyled-dataset, and that
+    sentence became false the moment the probe wrote its first clip. This repository has already
+    withdrawn a commit subject for asserting a failure that was not happening (7fdd466 / d739a87);
+    a gate runner whose own dry run states a fact about the world that stopped being true is the
+    same defect in the place an operator is most likely to believe it.
+
+    What replaces it must be no weaker. The probe's output is QUARANTINED under PR-08 V8 §4 —
+    nothing downstream may consume it as a corpus — so "generated frames exist" and "the restyled
+    corpus this input names exists" are different claims, and the second is still false. Both
+    halves are asserted here, because dropping the false sentence and saying nothing would read as
+    the restyle having landed.
+    """
+    code = g0.main(["--explain", "--gates", "g0a", "--out", str(tmp_path / "out.json")])
+    out = capsys.readouterr().out
+    assert code == g0.EXIT_REFUSED
+    assert "NOTHING generated exists yet" not in out
+    assert "NO RESTYLED CORPUS EXISTS" in out
+    assert ".mp4.quarantined" in out and "V8 §4" in out
+
+
+def test_a_quarantined_clip_tree_is_not_readable_as_a_corpus(tmp_path: Path) -> None:
+    """The V8 probe's clips are suffixed ``.mp4.quarantined``, and this runner must not read them.
+
+    ``measure_geom_tol.find_episodes`` enumerates ``*.mp4``; the suffix is what keeps the probe's
+    output out of every consumer's reach (PR-08 V8 §4: it "writes nothing
+    scripts/assemble_restyled_lerobot.py or 97_transfer25_restyle.sbatch can consume"). So pointing
+    --restyled-clips at the probe tree finds ZERO clips and refuses, which is the correct answer
+    and is pinned here so that a later convenience — a glob flag, a suffix fallback — cannot make
+    quarantined frames gate-readable without deleting this test and arguing for it.
+
+    ``hsv-red-diagnostic`` is used so the refusal under test is the empty scan and not "no
+    segmenter on this machine": the assertion is about which FILES are visible, not about weights.
+    """
+    corpus = tmp_path / "quarantine"
+    (corpus / "episode_000000__train-01-oak-tungsten__probe").mkdir(parents=True)
+    clip = (
+        corpus
+        / "episode_000000__train-01-oak-tungsten__probe"
+        / "episode_000000__train-01-oak-tungsten__probe.mp4.quarantined"
+    )
+    clip.write_bytes(b"not decoded, and never reached")
+
+    args = _args(
+        tmp_path,
+        _geom_config(tmp_path),
+        _centroids(tmp_path, "source", SOURCE_CLIPS),
+        _centroids(tmp_path, "restyled", SOURCE_CLIPS),
+    )
+    args.restyled_centroids = None
+    args.restyled_clips = corpus
+    args.method = "hsv-red-diagnostic"
+    with pytest.raises(g0.GateRefusal) as excinfo:
+        g0.run_g0b(args)
+    assert "no *.mp4" in str(excinfo.value)
+    assert "An empty scan is not a pass" in str(excinfo.value)
 
 
 # ------------------------------------------- G0a end to end: the injection reaches the actual CLI
