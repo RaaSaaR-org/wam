@@ -9,13 +9,21 @@
 #          any machine whose wall is longer than the run:
 #       sbatch --time=<from PILOT.json> 106_measure_robot_mask_area.sbatch
 #
-#   SHARD — the distribution as an array of N jobs, each measuring the episodes that hash to it:
-#       SHARD=1 NUM_SHARDS=3 sbatch --array=0-2%3 --time=02:00:00 \
-#           106_measure_robot_mask_area.sbatch
+#   SHARD — the distribution as an array of N jobs, each measuring the episodes that hash to it.
+#           N = 3 IS NO LONGER AN OPTION: at the measured rate its heaviest shard is 310 minutes
+#           against a 4 h MaxWall. The partition that fits is N = 16 in FOUR WAVES of four indices
+#           (MaxSubmitJobsPU=8 counts every array task as a submission, and `%N` does not help it):
+#       SHARD=1 NUM_SHARDS=16 sbatch --array=0-3%4   --time=01:30:00 106_measure_robot_mask_area.sbatch
+#       SHARD=1 NUM_SHARDS=16 sbatch --array=4-7%4   --time=01:30:00 106_measure_robot_mask_area.sbatch
+#       SHARD=1 NUM_SHARDS=16 sbatch --array=8-11%4  --time=01:30:00 106_measure_robot_mask_area.sbatch
+#       SHARD=1 NUM_SHARDS=16 sbatch --array=12-15%4 --time=01:30:00 106_measure_robot_mask_area.sbatch
+#           One wave at a time, each submitted only once the previous has drained, and only after
+#           `squeue -u $USER -r | tail -n +2 | wc -l` shows enough free slots against
+#           MaxSubmitJobsPU=8. A landed shard is skipped, so re-running a wave costs nothing.
 #
 #   MERGE — once every shard has landed, pool them. NO GPU IS USED, so it belongs on the free QoS,
 #           which needs its limits on the command line too:
-#       MERGE=1 NUM_SHARDS=3 sbatch --qos=2cpu-single-host --gres=none \
+#       MERGE=1 NUM_SHARDS=16 sbatch --qos=2cpu-single-host --gres=none \
 #           --cpus-per-task=2 --mem=8G --time=00:20:00 106_measure_robot_mask_area.sbatch
 #
 # WHAT THIS MEASURES, AND WHAT IT DELIBERATELY DOES NOT DECIDE.
@@ -50,57 +58,81 @@
 #
 # WHY THE FULL RUN IS SHARDED, WITH THE ARITHMETIC RATHER THAN A CHOSEN NUMBER.
 # The corpus is 171 625 frames (manifest: 402 episodes, 249-749 frames each). One GroundingDINO
-# forward plus one SAM 2 forward per frame, one frame at a time, no batching. The per-frame cost was
-# MEASURED rather than assumed — see PROVENANCE OF THE ESTIMATE below — at
+# forward plus one SAM 2 forward per frame, one frame at a time, no batching.
 #
-#     p = 0.0765 s/frame        (estimate for one H200; the PILOT re-derives it on the machine)
-#     L = 120 s                 (fixed: interpreter, torch, ~3.7 GB of GroundingDINO + SAM 2)
+# THE PILOT HAS RUN AND THE ESTIMATE BELOW IT WAS BUILT ON IS SUPERSEDED. Kept visible rather than
+# deleted, because the whole cost of getting this wrong is on the record twice: 103's array (job
+# 189658) was sized off a stale p and lost ~6 GPU-h producing no artifact, and this file's own
+# paragraph "IT IS NOT WHAT TO TYPE UNTIL THE PILOT HAS RUN" was already here when that happened.
 #
-#     full_run_seconds     171 625 x 0.0765 + 120                  = 13 249 s = 3.68 GPU-h
-#     MaxWall, every QoS                                             14 400 s
-#                                                                    ------------------
-#                          1.09x the wall. It fits only if the estimate is exactly right, which is
-#                          not a plan: the estimate is a scaled workstation measurement and the
-#                          pilot exists because this repository has published one throughput number
-#                          that was never measured (THROUGHPUT.json, job 189142, "9.56 GPU-h" from
-#                          a run that generated zero clips). A 25 % error puts it over the wall.
+#     SUPERSEDED    p = 0.0765 s/frame   a workstation measurement scaled by a cross-stack ratio.
+#                                        2.59x too fast against this masker's own measured rate and
+#                                        3.86x against the planning rate below. Its N = 2..8 table
+#                                        goes with it; what follows is the same arithmetic on
+#                                        measured rates.
+#
+#     MEASURED      p = 0.1981 s/frame   THIS masker, on an H200, job 189707 (the PILOT branch of
+#                                        this file, 9 min 35 s). full_run 34 099 s = 9.47 GPU-h,
+#                                        single_job_feasible false. PRE-V9.
+#     MEASURED      +1.92 %              what V9's per-candidate object-grounding filter adds to
+#                                        Sam2RobotMasker.mask(): 0.0115 s of a 0.596 s frame over
+#                                        119 frames of this corpus on the workstation, 608
+#                                        candidates scored, 7.9 candidates per frame that has any.
+#                                        A ratio, not a rate — the absolute seconds are contended
+#                                        workstation seconds and do not transfer.
+#                     -> p_v9 = 0.2019 s/frame on an H200, this masker as it stands today.
+#     CROSS-CHECK   p = 0.295 s/frame    the GEOM_TOL shards of job 189935, measured 2026-08-23 on
+#                                        the same hardware for the comparable stack (apple_sam2
+#                                        .segment: same two models, same module, ONE box instead of
+#                                        every box). 3.5x its own pilot's 0.0833. It is HIGHER than
+#                                        this masker's own measured rate, which is the wrong way
+#                                        round on box count alone, so it is used as the PLANNING
+#                                        rate and 0.2019 is not.
+#
+#     L = 120 s     fixed: interpreter, torch, ~3.7 GB of GroundingDINO + SAM 2. (The GEOM_TOL
+#                   pilot measured 116 s for the same load; 120 is this file's own and is kept.)
+#
+#     full_run_seconds     171 625 x 0.295 + 120          = 50 749 s = 14.10 GPU-h
+#     MaxWall, every QoS                                     14 400 s
+#                                                            ------------------
+#                          3.52x the wall at the planning rate, 2.41x at this masker's own measured
+#                          0.2019. It does not fit one job on either number. It is sharded.
 #
 # Sharding pays L once per shard instead of once, and the shards are NOT equal: the partition is
 # blake2b(episode_id) % N, which balances episode COUNTS approximately and FRAMES not at all. The
-# frames per shard are known exactly from the manifest, so the table below is the heaviest shard's
-# real load rather than an even-split floor:
+# frames per shard are known exactly from the manifest, so the table is the heaviest shard's real
+# load rather than an even-split floor. Recomputed 2026-08-23 against the manifest on disk:
 #
-#     N   shard frames (max)   heaviest = frames x p + L    x1.25    --time(x1.25)  wall/heaviest
-#     2          91 439                 7 115 s = 118.6 m   148.2 m    02:30:00        2.02x
-#     3          62 580                 4 907 s =  81.8 m   102.3 m    01:45:00        2.93x
-#     4          48 766                 3 851 s =  64.2 m    80.2 m    01:30:00        3.74x
-#     5          38 042                 3 030 s =  50.5 m    63.1 m    01:15:00        4.75x
-#     6          32 326                 2 593 s =  43.2 m    54.0 m    01:00:00        5.55x
-#     7          27 251                 2 205 s =  36.7 m    45.9 m    01:00:00        6.53x
-#     8          24 546                 1 998 s =  33.3 m    41.6 m    00:45:00        7.21x
-#     total cost is N x L + 171 625 x p either way: N = 3 costs 3.66 GPU-h, N = 8 costs 3.78 GPU-h.
-#     The whole price of sharding is the extra model loads: 0.03 GPU-h per shard.
+#      N   heaviest    @0.2019    @0.295   x1.25   --time     break-even p   /0.295  /0.2019
+#      3     62 580     212.6 m   309.7 m  387.1m  (over MaxWall — not an option)
+#      4     48 766     166.1 m   241.8 m  302.2m  (over MaxWall — not an option)
+#      6     32 326     110.8 m   160.9 m  201.2m  03:30:00      0.3861      1.31x    1.91x
+#      8     24 546      84.6 m   122.7 m  153.4m  02:45:00      0.3984      1.35x    1.97x
+#     12     17 404      60.6 m    87.6 m  109.5m  02:00:00      0.4068      1.38x    2.01x
+#     14     14 513      50.8 m    73.4 m   91.7m  01:45:00      0.4258      1.44x    2.11x
+#     16     14 162      49.7 m    71.6 m   89.5m  01:30:00      0.3728      1.26x    1.85x
+#     total cost is N x L + 171 625 x p: 14.26 GPU-h at N = 6, 14.60 at N = 16. The whole price of
+#     sharding is the extra model loads, 0.033 GPU-h per shard.
 #
-# THE `--time` COLUMN IS THE PILOT'S OWN FORMULA (x1.25, rounded up to the next 15 min) AND IT IS
-# NOT WHAT TO TYPE UNTIL THE PILOT HAS RUN. p above is a workstation measurement scaled by a
-# cross-stack ratio, not a measurement on an H200, and at N = 3 the x1.25 request leaves 2.7 minutes
-# of slack against its own estimate — enough for the formula and not enough for the estimate being
-# wrong. Until PILOT.json exists, round UP to the next half hour instead (N = 3 -> 02:00:00, which
-# is still 2.0x the estimate and 2.9x under the wall) and let the pilot replace the guess: it writes
-# per_shard_estimates with this same table computed from a p it measured on the machine.
+#     `break-even p` is (--time - L) / heaviest_shard_frames: the per-frame rate at which the
+#     heaviest shard exactly reaches the wall. It is the number to read, not the x1.25 margin —
+#     189658 died because the truth was 2.2x its plan, and a margin on a rate says nothing about
+#     how wrong the rate can be. N = 14 buys the most of it; N = 16 buys the least and is the
+#     shape today's GEOM_TOL re-plan is already running (N = 16, --time=01:30:00, --mem=32G,
+#     break-even 0.3728), which is the same number here because it is the same corpus, the same
+#     partition rule, the same N and the same wall.
 #
-# WHY N = 3 IS THE RECOMMENDATION, AND IT IS A SUBMISSION-LIMIT DECISION, NOT A COST ONE.
+# WHY N IS A SUBMISSION-LIMIT DECISION AS WELL AS A COST ONE.
 # The project QoS carries MaxSubmitJobsPU=8 and MaxJobsPU=4, per user, ACROSS THE QOS, and every
 # association carries DenyOnLimit — so an over-limit array is REJECTED at submission with
-# QOSMaxSubmitJobPerUserLimit rather than queued. An N-task array is N submissions. With five of my
-# jobs already in flight (189637, 189658 x4 tasks, 189661, 189662, 189665 — check with
-# `squeue -u $USER -r`), three submission slots are free, so N = 3 is what can be submitted at all
-# today, and it happens to run in ONE scheduling round because MaxJobsPU=4 >= 3. N = 8 buys 2.5x the
-# headroom on the shard that decides the outcome and costs 0.12 GPU-h more; it is the right choice
-# the moment the queue is empty, and the table above is there so the choice can be re-made without
-# re-deriving anything. NUM_SHARDS is a parameter of this file for that reason.
+# QOSMaxSubmitJobPerUserLimit rather than queued. AN N-TASK ARRAY IS N SUBMISSIONS, and `%N`
+# throttles RUNNING tasks only: it does NOT buy a submission slot. So an N > 8 partition is
+# submitted in WAVES of at most (8 - jobs already in flight) indices, each wave `--array=a,b,c,d%4`,
+# the next wave submitted only once the previous has drained. Count what is in flight FIRST —
+# `squeue -u $USER -r | tail -n +2 | wc -l` — because the count is across the QoS and includes
+# other tasks' arrays.
 #
-# `%3` in `--array=0-2%3` is not politeness — it keeps the array inside MaxJobsPU rather than
+# `%4` in `--array=0-3%4` is not politeness — it keeps the array inside MaxJobsPU rather than
 # relying on a DenyOnLimit QoS to queue the surplus instead of rejecting it.
 #
 # PROVENANCE OF THE ESTIMATE, WHICH IS A SCALED MEASUREMENT AND SAYS SO.
@@ -135,6 +167,37 @@
 #      learning it from a chunk of refusals costs a generation pass.
 # The pilot also runs the adapter for the first time in this venv on this data path, so a crash in
 # it is a finding worth 20 minutes rather than an array's worth of GPU.
+#
+# BOTH QUESTIONS HAVE BEEN ANSWERED, AND THE SECOND ANSWER IS WHY THIS JOB HAS NOT BEEN SUBMITTED.
+# Job 189707 measured p = 0.1981 s/frame (above) and an empty-robot-mask rate of 35.2 % over the
+# first three episodes. A local strided pass over all 402 episodes independently measured 37 %, and
+# a local 119-frame sample of four episodes measured 42 of 119 frames (35.3 %) with no box at all.
+# `runs/pr08-robot-mask-empty/DIAGNOSIS.json` then settled WHICH of the two opposite problems that
+# is: verdict ABSENT — the robot is genuinely out of shot, the empty masks are CORRECT answers, and
+# there are no robot pixels to composite on those frames. So it is check_mask's per-frame refusal
+# that the finding lands on, not ROBOT_TEXT_PROMPT and not the detector.
+#
+# What follows from that is a decision and not an edit, and it is the project owner's:
+# `max_frame_fraction` is the bound for a gate that, on this corpus, refuses before it ever reaches
+# the bound. Measured 2026-08-23 on the workstation against the source corpus with the V9 masker,
+# scanning each clip to its FIRST empty mask — the frame check_mask refuses on:
+#
+#     128 of 129 clips refuse (99.2 %)      106 of them on frame 0, 112 by frame 5
+#     the exception is episode_000243       non-empty on all 417 frames; it does not refuse on
+#                                           this rule, and whether it clears the AREA half is
+#                                           unknowable because no bound exists
+#     87 of the 128 refusals (68 %)         are on a frame the V9 filter did NOT empty, i.e. the
+#                                           pre-V9 masker refused the same clip on the same frame
+#
+# Two consequences for THIS job, neither of which is a reason to edit it:
+#   * ~14 GPU-h would buy a distribution for a bound that, on this corpus, is never reached. The
+#     empty-mask refusal fires first on 99 % of clips and there is no threshold in it to loosen.
+#   * The distribution it writes is a distribution OF THE V9 MASKER. `object_grounding_filter` is
+#     in SEGMENTER_IDENTITY_FIELDS, so load_area_bound's cross-check refuses a bound measured under
+#     a different filter — and T40_RULE_V9 is UNSIGNED. Spending the hours before it is signed buys
+#     an artifact that a refusal of V9 would invalidate.
+# THIS FILE MAKES NEITHER DECISION: nothing here is edited to work around the refusal, no bound is
+# coined, and the measurement is still correct and still runnable exactly as written.
 #
 # BOTH PILOT PASSES EXIT 3, AND EXIT 3 IS THE CORRECT OUTCOME THERE.
 # robot_composite.py forces `measurement_qualified: false` and exits 3 on ANY --limit or any
@@ -308,7 +371,10 @@ if (( MERGE_MODE )); then
   [[ -d "${SHARD_DIR}" ]] || {
     echo "FATAL: ${SHARD_DIR} does not exist — no shard has run yet."
     echo "       SHARD=1 NUM_SHARDS=${NUM_SHARDS} \\"
-    echo "         sbatch --array=0-$((NUM_SHARDS - 1))%3 --time=02:00:00 $(basename "$0")"
+    echo "         sbatch --array=0-3%4 --time=01:30:00 $(basename "$0")"
+    echo "       then the waves 4-7, 8-11, 12-15 one at a time: MaxSubmitJobsPU=8 counts every"
+    echo "       array task as a submission and DenyOnLimit rejects the surplus rather than"
+    echo "       queueing it, and %N throttles RUNNING tasks only."
     exit 1
   }
 
@@ -324,7 +390,7 @@ if (( MERGE_MODE )); then
     echo "       Re-submit just those array indices — completed shards are skipped, so this costs"
     echo "       only the shards that did not land:"
     echo "         SHARD=1 NUM_SHARDS=${NUM_SHARDS} \\"
-    echo "           sbatch --array=$(IFS=,; echo "${MISSING[*]}")%3 --time=02:00:00 $(basename "$0")"
+    echo "           sbatch --array=$(IFS=,; echo "${MISSING[*]}")%4 --time=01:30:00 $(basename "$0")"
     exit 1
   fi
 
@@ -582,7 +648,7 @@ if (( SHARD_MODE )); then
     echo "FATAL: SHARD=1 but this job is not an array task (SLURM_ARRAY_TASK_ID is unset)."
     echo "       The shard index IS the array index; there is no default, because the default would"
     echo "       be shard 0 and a run that measured a third of the corpus and exited 0."
-    echo "         SHARD=1 NUM_SHARDS=3 sbatch --array=0-2%3 --time=02:00:00 $(basename "$0")"
+    echo "         SHARD=1 NUM_SHARDS=16 sbatch --array=0-3%4 --time=01:30:00 $(basename "$0")"
     exit 1
   }
   # No apostrophes in this message; see the note on the MERGE branch.
@@ -716,7 +782,7 @@ PY
     echo "       will sit above. Exit 1 means it refused before measuring. Either way, fix the"
     echo "       cause and re-run THIS index:"
     echo "         SHARD=1 NUM_SHARDS=${NUM_SHARDS} \\"
-    echo "           sbatch --array=${SHARD_INDEX} --time=02:00:00 $(basename "$0")"
+    echo "           sbatch --array=${SHARD_INDEX} --time=01:30:00 $(basename "$0")"
     exit "${RC}"
   fi
   echo "=== NEXT, once every shard has landed (this is NOT the distribution and no shard is):"

@@ -788,3 +788,77 @@ def test_shards_that_enumerated_different_corpora_are_refused(corpus, tmp_path, 
     rec["shard"]["corpus_episode_keys_sha256"] = "0" * 64
     pathlib.Path(paths[1]).write_text(json.dumps(rec), encoding="utf-8")
     _refuses(paths, tmp_path / "merged.json", capsys, "enumerated different corpora")
+
+
+# -- the two failures 2026-08-23 put on the record, pinned so they cannot come back ---------------
+
+
+_SBATCH = _REPO_ROOT / "cluster" / "discoverer" / "106_measure_robot_mask_area.sbatch"
+
+
+def test_a_shard_is_qualified_by_its_own_truncation_and_by_nothing_in_the_adapter() -> None:
+    """``measurement_qualified`` is a function of ``--limit``/``--stride`` and of nothing else.
+
+    Commit ``4102e2e`` records the defect this pins, in the sibling harness: ``measure_geom_tol``
+    coupled its shard's exit code to ``apple_sam2.GATE_QUALIFIED``, so every ARITHMETICALLY CORRECT
+    shard exited 3, the sbatch treated any non-zero return as fatal, the resume validator refused a
+    ``gate_qualified: false`` artifact — and an array of any width could never converge. Sharding
+    was bought for resumability and handed it straight back.
+
+    This module is not coupled that way and must not become so: a gate-qualification flag is a
+    statement about whether the ESTIMATOR may produce a gate number, and ``measurement_qualified``
+    is a statement about whether THIS RUN saw the whole corpus. Two different facts. The behaviour
+    is already covered — ``_sharded`` asserts ``EXIT_OK`` on every untruncated shard — so what is
+    added here is the coupling itself, checked against the source, because the behavioural test
+    would keep passing right up until the day someone imports the flag.
+    """
+    module = (_REPO_ROOT / "scripts" / "robot_composite.py").read_text(encoding="utf-8")
+    for banned in ("GATE_QUALIFIED", "GATE_QUALIFICATION_BLOCKERS", "gate_qualified"):
+        offenders = [line.strip() for line in module.splitlines() if banned in line]
+        assert offenders == [], (
+            f"robot_composite.py now mentions {banned}: {offenders}. If the intent is to couple "
+            "this measurement's qualification to the adapter's gate flag, read 4102e2e first — "
+            "that is the change that made every correct shard exit 3."
+        )
+    assert "measurement_qualified" in module
+
+
+def test_the_sbatch_recipes_tile_the_partition_and_fit_the_submission_limits() -> None:
+    """106's committed SHARD waves cover 0..N-1 exactly once, and MERGE insists on the same N.
+
+    A header that recommends one N while its merge recipe insists on another produces a partition
+    that can never be merged, and the operator finds out after the GPU is spent. The submission
+    limits are checked in the same breath because they are why the waves exist at all:
+    ``MaxSubmitJobsPU=8`` counts every array task as a submission and ``DenyOnLimit`` rejects the
+    surplus rather than queueing it, so a wave may not exceed 8 indices; ``%k`` throttles RUNNING
+    tasks only and must stay within ``MaxJobsPU=4``.
+    """
+    import re
+
+    text = _SBATCH.read_text(encoding="utf-8")
+    header = text.split("#SBATCH", 1)[0]
+
+    waves = re.findall(
+        r"SHARD=1\s+NUM_SHARDS=(\d+)\s+sbatch\s+--array=(\d+)-(\d+)%(\d+)", header)
+    assert waves, "106's header no longer carries an explicit SHARD recipe"
+
+    ns = {int(w[0]) for w in waves}
+    assert len(ns) == 1, f"the SHARD waves disagree about NUM_SHARDS: {sorted(ns)}"
+    n = ns.pop()
+
+    covered: list[int] = []
+    for _, lo, hi, throttle in waves:
+        indices = list(range(int(lo), int(hi) + 1))
+        assert len(indices) <= 8, (
+            f"wave {lo}-{hi} is {len(indices)} submissions against MaxSubmitJobsPU=8; %N throttles "
+            "running tasks only and buys no submission slot")
+        assert int(throttle) <= 4, f"%{throttle} exceeds MaxJobsPU=4"
+        covered.extend(indices)
+    assert sorted(covered) == list(range(n)), (
+        f"the waves cover {sorted(covered)}, which is not 0..{n - 1} exactly once")
+
+    merges = re.findall(r"MERGE=1\s+NUM_SHARDS=(\d+)", header)
+    assert merges, "106's header no longer carries a MERGE recipe"
+    assert {int(m) for m in merges} == {n}, (
+        f"the MERGE recipe insists on NUM_SHARDS={merges} while the waves build {n}. A merge over "
+        "a different N is stamped measurement_qualified:false and load_area_bound refuses it.")

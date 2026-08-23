@@ -134,6 +134,27 @@ Four properties of the fix, each of which is a decision rather than an implement
   produce a single composited clip on this corpus." That is unchanged and is a separate open
   decision. What this removes is the *other* outcome — the clips that would have been composited
   with the apple frozen, and passed.
+
+  **That conclusion has since been measured directly against this masker rather than inferred from a
+  frame rate, and it is very nearly but not exactly right.** 2026-08-23, on the workstation's own
+  GPU, against ``data/pr08-apple-640x480-h264-lossless``, scanning each source clip in manifest
+  order to its FIRST empty mask — the frame :func:`check_mask` refuses on — **128 of 129 clips
+  refused (99.2 %)**, 106 of them on frame 0 and 112 by frame 5, over 2 653 masked frames of
+  ``episode_000000``-``085`` and ``episode_000201``-``243``. The exception is recorded rather than
+  rounded away: ``episode_000243`` carries a NON-EMPTY robot mask on all 417 of its frames and does
+  not refuse on this rule at all. So *"every clip refuses"* is a round number and not a
+  measurement — one clip in 129 survives, which is not a corpus and does not change the decision,
+  but ``DIAGNOSIS.json``'s wording is wider than its evidence and this file will not repeat it as
+  though it were exact. (That clip would still have to clear the AREA half of :func:`check_mask`,
+  which nobody can evaluate: there is no committed bound.)
+
+  **87 of the 128 refusals — 68 % — are on a frame the object-grounding filter did not empty**, so
+  the pre-V9 masker returned the same empty mask on the same frame and those clips refused before
+  V9 existed too: those frames ground nothing at all, upstream of the filter. Over the same 2 653
+  frames the filter dropped 860 of 16 070 candidates and emptied 41 frames. So the filter is not
+  what makes G0c refuse on this corpus, and removing it would not make G0c pass. The open decision
+  is unchanged and is the project owner's: whether a per-frame empty-mask refusal is the right rule
+  for a corpus the robot is genuinely out of shot in ~36 % of.
 * **It is a check on the OUTPUT, not on the detection.** The prompt, ``box_threshold``,
   ``text_threshold``, the absent retry and the union rule are all untouched; nothing is re-detected,
   re-prompted or re-drawn, and no mask is altered. All that is decided is whether a mask SAM 2
