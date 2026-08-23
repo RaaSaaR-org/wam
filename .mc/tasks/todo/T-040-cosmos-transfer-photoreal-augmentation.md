@@ -848,4 +848,51 @@ second half of that evidence, so it is not premature spend against a disqualifie
 (per-frame re-detection vs upstream's propagation) is untouched and would change the number, not
 just the flag. **The discharge is the owner's signature, not a session's.**
 
+**2026-08-23 (later) — THE PARTITION IS 27 % OF THE ALLOCATION, AND STAGE 1 IS 8.8 %.**
+`PR-08-V11-staged-partition.md`, **UNSIGNED**.
+
+Job 189926 gives the first and only measurement of what a Transfer2.5 frame costs: 96 frames in
+~111 s of H200 time, **1.16 s/frame** (`Average time per chunk: 55.47`, two chunks). The committed
+partition is 25 style-instances × 402 episodes = **10 050 clips / 4 290 625 frames ≈ 1 380 GPU-h**
+against a 5 000 GPU-h allocation. **That is ~27 % of everything, spent on a generator whose
+geometric fidelity has never once been measured** — G0a, G0b and G0c have not returned a verdict
+between them. (Billing is not the constraint: ~4 % at `--mem=32G`. GPU-hours are.)
+
+**THE 1.16 s/frame FIGURE IS NOT §8 ITEM 3's MEASUREMENT AND MAY NOT BE A BUDGET LINE.** It sized a
+decision; it is one diagnostic clip and likely optimistic (96-frame clips against episodes averaging
+~427 frames). A `TIMING=1` run still owes the ceiling.
+
+**The coupling that decides the cost, and it is not obvious.** The 25 instances are 10 `train_styles`
++ 5 `eval_styles` + identity `repeats = 10`. `T40_RULE_V2` requires arm C to MATCH arm B's frame
+count, and §5 says arm C "is not optional: … without C a gain from B is uninterpretable". So **one
+extra train style costs 804 clips, not 402.** Arm A is the 402 real episodes and generates nothing;
+arm D reuses B's clips.
+
+**V11 stages it.** Stage 1 = `train_styles[0:4]` + 4 matched identity repeats = 8 of 25 instances,
+3 216 clips, **~442 GPU-h (8.8 %)**. The four are a PREFIX of the committed order, not a selection —
+any "four most distinct" rule is a choice made with knowledge the document must not have. Eval is
+**DEFERRED, NOT CUT**: no arm trains on it, it is consumed once at evaluation time, and all five
+styles stay committed in `styles.toml` unmodified. `styles.toml` is untouched and its hash does not
+change.
+
+**Recorded dependency, not a reason to reorder:** three of the four prefix apples are non-warm
+(green Granny, Golden Delicious, russet), which puts stage 1 inside the defect `T40_RULE_V10`
+addresses — `object_color_reference` fires on ~34 632 px of oak table under `train-01-oak-tungsten`.
+V10 must land before stage 1's output is measured. Reordering the prefix to make a measurement
+easier would be choosing the experiment to fit the instrument.
+
+**Stage 2 is decided in advance** (V11 §3): B beats A *and* C → scale; B beats C but not A, or the
+reverse → stop and read; **B does not beat C → the gain is the generator's fingerprint and scaling k
+does not fix it.** The accepted threat: a null at k=4 is weaker than at k=10 and could be a false
+negative. Accepted because the sbatch is chunked and resumable, so k=4 → 10 costs the difference and
+not a restart. k=2 was rejected — two domains is not domain randomisation.
+
+**CODE CHANGE OWED, NOT YET MADE.** `97_transfer25_restyle.sbatch` prices the whole partition and
+hard-codes the ceiling shares 10/25, 5/25, 10/25. Under V11 stage 1 draws at most **8/25** of
+`PARTITION_CEILING_GPU_H`, which itself stays the whole-partition number so a sequence of small
+stages cannot exceed what nobody measured.
+
+**V11 licenses nothing.** V1 §1 binds, every §6 gate is undischarged, §8 items 3 and 4 are open, and
+the determination block is empty — signing is the owner's.
+
 %% mc-links: [[T-39]] [[T-34]] [[T-36]] [[T-37]] [[T-041]] %%
