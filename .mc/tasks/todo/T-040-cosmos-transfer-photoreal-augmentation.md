@@ -784,4 +784,68 @@ a `V2` alongside it, not an edit. See `docs/handoff.md` §3.
 data is [[T-041]] — a better fix for the embodiment defect, a much larger project, and frozen by
 PR-07 §7 by name.
 
+**2026-08-23 — COSMOS-TRANSFER2.5 GENERATED FRAMES, AND FOUR THINGS BROKE ON THE WAY.**
+
+Job **189926** (V8 hallucination probe, `runs/pr08-hallucination-probe-QUARANTINE-NOT-A-CORPUS-v2/`)
+is the **first successful generation in this project**. Four units, ~55 s per 96-frame chunk on one
+H200, `PROBE.json` + contact sheets + quarantined clips all landed.
+
+**Verdict `H`, 3 of 4 units** — `candidate_invention` 16 / 19 / 21 / 0 of 96 frames. `human_review.
+looked_at` is **false**, and V8 said in advance the count is an UPPER BOUND. Reading the sheets, the
+flagged masks sit at ~7 020–7 400 px and hold that value across a dozen consecutive frames — stable
+area over time is an object, and it is apple-scale at 640×480 with the outline on the fruit. So most
+of `H` is very likely the masker defect below rather than an invented manipulator. **That is a
+reading, not the finding.** Unexplained and not investigated: a persistent cyan vertical smear in
+`episode_000001`'s generated frames that is absent from source.
+
+**The green apple is NOT a defect.** `train-01-oak-tungsten`'s committed prompt says verbatim *"A
+bright green Granny Smith apple"*; the `apple` style axis explicitly permits colour and variety.
+Nearly filed as an unrequested identity change — checked the prompt actually sent first.
+
+**(1) The robot masker grounded the apple, and G0c composited it back — a silent PASS.** `fe72031`,
+`PR-08-V9` (unsigned). 2 845 detections re-scored: apple IoU ∈ [0.9364, 0.9847], everything else
+≤ 0.5131. `ROBOT_MASK_OBJECT_MAX_IOU = 0.70` sits in a gap where every cut partitions identically.
+Also corrects d739a87's "41 % corpus-wide" to "40.8 % of robot-absent frames in the 40-episode
+sample" — `stratified_plan` samples equal quotas per bucket and its own docstring says the rates are
+not corpus rates. **The corpus rate of the composite defect is not known.**
+
+**(2) NEW AND NOT PREVIOUSLY NAMED — the `plate.` pass refuses 100 % of frames, on the SOURCE
+corpus.** `run_g0_gates`'s own documented invocation is `WAM_PR08_OBJECT_PROMPT="plate." …
+--source-clips`, which reaches `measure_geom_tol:945` → `module.segment(rgb)`. Executed on 20 source
+frames: `n_frames_mask_refused = 20`, validity IoUs 0.0000–0.0036, non-empty on **0 of 20**.
+`apple_sam2.object_color_reference` is the APPLE predicate unconditionally and never reads
+`OBJECT_TEXT_PROMPT`. **§6's plate half cannot be measured at all**, and it presents as
+`coverage: 0.0` — a fact about the corpus — rather than as a filter undefined for the label. This is
+not restyle-dependent. **OPEN, not fixed.**
+
+**(3) V6's reference is a warm-colour predicate and five committed styles are not warm** (green
+Granny, pale-green waxy, Golden Delicious, russet, Pink Lady). V6 §5.3 anticipated this and says it
+fails closed — but on `train-01-oak-tungsten` the reference fires on **34 632 px of warm oak table**
+and ~1 000 px of green apple, so `n_frames_mask_refused_no_reference` stays 0. That is the exact
+counter §5.3 relies on to separate "the segmenter is wrong here" from "the reference does not fit
+here", and it reports the wrong one. **G0c is unaffected** — `composite_clip` masks `src` and never
+`gen`, pinned by a test. **OPEN, not fixed.** The proposed direction is to stop asking a colour
+predicate to identify the object on frames whose colours the pre-registration deliberately varies:
+the colour-free reference is the paired source frame's own mask (G0b already carries
+`--restyled-source-map`), and if the source mask is not a valid reference for the generated frame,
+**that is the G0b finding**.
+
+**(4) No GEOM_TOL shard could ever land.** `4102e2e`. `GATE_QUALIFIED = False` makes every CORRECT
+shard exit 3; the sbatch treated any non-zero RC as fatal and the resume validator refused a
+`gate_qualified: false` artifact, so every resubmission re-measured the whole partition and an array
+of any width could never converge. Sharding was bought for resumability and handed it straight back.
+Re-run submitted as **189935**, N=16 in four waves, `--time=01:30:00`, `--mem=32G` (192G → 32G saves
+365 billing-h, >5 GPU-h of runway, on a measurement costing nine). N chosen on **break-even p =
+0.3728 s/frame, 2.25× the measured floor** — 189658 died because the truth was 2.2× the plan.
+
+**On the gate-qualification blockers.** Blockers 1 and 2 discharge on a human looking at overlaid
+masks spanning the corpus **plus** the detection-score distribution and retry counts from a full
+pass. The sheets exist (`runs/pr08-mask-audit/sheets/`): the grasp is clean at IoU 0.97–0.98, and
+the predicted failure is visible — on occluded and apple-out-of-frame frames the segmenter returns
+the **entire plate**, ~31 000 px, score 0.16–0.29, IoU **0.00**, 98 % plate overlap. The two
+populations do not touch, and V6's committed 0.10 splits them with margin. **189935 is producing the
+second half of that evidence, so it is not premature spend against a disqualified flag.** Blocker 3
+(per-frame re-detection vs upstream's propagation) is untouched and would change the number, not
+just the flag. **The discharge is the owner's signature, not a session's.**
+
 %% mc-links: [[T-39]] [[T-34]] [[T-36]] [[T-37]] [[T-041]] %%
