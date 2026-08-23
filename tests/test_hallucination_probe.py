@@ -301,10 +301,25 @@ def test_the_sbatch_audits_its_own_output_tree_for_anything_consumable():
     """The script does this too. It is repeated in the shell because the script's walk cannot run
     if the script died, and a tree left by a crash is exactly the tree somebody later finds."""
     text = SBATCH_107.read_text(encoding="utf-8")
-    audit = text[text.index("CONSUMABLE=$(find"):]
+    audit = text[text.index('CONSUMABLE=""'):]
     for name in ("'*.mp4'", "'manifest.json'", "'work.jsonl'", "'sample_outputs.json'",
                  "'*.parquet'"):
         assert name in audit, f"the output audit does not look for {name}"
+    # The one exception, and it must be exact on BOTH halves in the shell too: dirname compared for
+    # equality (not a prefix) and the name suffix. A prefix test would allow a nested directory.
+    assert '"$(dirname "${candidate}")" == "${OUT}/probe_clips"' in audit
+    assert '*.probe-source.mp4' in audit
+
+
+def test_the_shell_audit_and_the_python_audit_allow_THE_SAME_one_thing():
+    """Two enforcements of one rule, so neither can drift into being a different rule.
+
+    The shell walk exists because the script's own walk cannot run if the script died; that is only
+    worth having if both allow exactly the same pair.
+    """
+    text = SBATCH_107.read_text(encoding="utf-8")
+    assert f'"${{OUT}}/{ph.PROBE_INPUT_DIR}"' in text
+    assert f"*{ph.PROBE_INPUT_SUFFIX}" in text
 
 
 # =================================================================================================
@@ -421,6 +436,45 @@ def test_the_output_audit_catches_every_name_a_consumer_could_file(tmp_path):
     offenders = ph.audit_output_tree(root)
     assert any(o.endswith("vision.mp4") for o in offenders)
     assert any(o.endswith("manifest.json") for o in offenders)
+
+
+def test_the_audit_allows_the_generators_INPUT_in_one_place_and_nowhere_else(tmp_path):
+    """The single named exception, tested on both halves separately.
+
+    The probe-source clip is the generator's input and keeps a readable extension, because upstream
+    refuses an input by extension. It is not generated data and carries no generated frame, so the
+    quarantine has nothing to contain there — but it still must not be mistakable for a corpus, and
+    what does that work is the pair (this directory, this name). Either half alone is not enough,
+    so either half alone must fail.
+    """
+    root = tmp_path / "pr08-hallucination-probe"
+    (root / ph.PROBE_INPUT_DIR).mkdir(parents=True)
+    (root / ph.PROBE_INPUT_DIR / ("ep000" + ph.PROBE_INPUT_SUFFIX)).write_bytes(b"ok")
+    assert ph.audit_output_tree(root) == [], "the allowed pair must pass"
+
+    # right name, wrong place
+    (root / "units").mkdir()
+    stray = root / "units" / ("ep000" + ph.PROBE_INPUT_SUFFIX)
+    stray.write_bytes(b"bad")
+    assert [o for o in ph.audit_output_tree(root) if o == str(stray)], (
+        "a .probe-source.mp4 outside probe_clips must still be refused"
+    )
+    stray.unlink()
+
+    # right place, wrong name — a generated clip hiding among the inputs
+    generated = root / ph.PROBE_INPUT_DIR / "unit-00.mp4"
+    generated.write_bytes(b"bad")
+    assert [o for o in ph.audit_output_tree(root) if o == str(generated)], (
+        "an ordinary .mp4 in probe_clips must still be refused"
+    )
+    generated.unlink()
+
+    # and nesting does not inherit the allowance
+    nested = root / ph.PROBE_INPUT_DIR / "sub"
+    nested.mkdir()
+    deep = nested / ("ep001" + ph.PROBE_INPUT_SUFFIX)
+    deep.write_bytes(b"bad")
+    assert [o for o in ph.audit_output_tree(root) if o == str(deep)]
 
 
 # =================================================================================================
@@ -553,16 +607,71 @@ def test_a_generator_that_grounds_a_robot_the_source_never_had_reports_H(corpus,
 
 
 def test_nothing_it_writes_can_be_filed_by_a_downstream_consumer(corpus, monkeypatch):
-    """The generated clip survives, under a name assemble_restyled_lerobot.py's glob cannot see."""
+    """The GENERATED clips survive under a name assemble_restyled_lerobot.py's glob cannot see, and
+    the only ordinary .mp4 in the tree is the generator's input, in the one directory it may be in.
+    """
     monkeypatch.setattr(rc, "build_masker", lambda: ProbeMasker(source_calls=96, invent=False))
     assert ph.main(_argv(corpus)) == 0
     assert ph.audit_output_tree(corpus["out"]) == []
-    assert list(corpus["out"].rglob("*.mp4")) == []
+
     quarantined = list(corpus["out"].rglob("*" + ph.QUARANTINE_SUFFIX))
-    assert len(quarantined) == 6, "two probe clips and four generated clips, all quarantined"
-    for path in quarantined:
+    assert len(quarantined) == 4, "four GENERATED clips, all quarantined"
+    ordinary = sorted(corpus["out"].rglob("*.mp4"))
+    assert len(ordinary) == 2, "two probe-source INPUTS, and nothing else readable"
+    for path in ordinary:
+        assert path.parent == corpus["out"] / ph.PROBE_INPUT_DIR
+        assert path.name.endswith(ph.PROBE_INPUT_SUFFIX)
+    for path in quarantined + ordinary:
         assert rc.decode_clip(path).shape[0] == 48, "the bytes must stay readable"
     assert (corpus["out"] / "NOT_A_CORPUS").read_text().startswith("NOT A CORPUS")
+
+
+def test_the_generator_is_handed_an_input_it_can_actually_OPEN(corpus, monkeypatch):
+    """THE REGRESSION FROM JOB 189769, PINNED.
+
+    That run reached `Loading input video...` and died in upstream's read_and_process_video with
+    `ValueError: Invalid video extension: .quarantined`, because the probe had renamed its own
+    INPUT out of the way of a glob that only ever mattered for OUTPUT. Upstream validates an input
+    by extension, so this asserts the extension the generator is handed — not the file's existence,
+    which the old code also satisfied. Re-applying QUARANTINE_SUFFIX to the probe-source clip fails
+    here instead of costing a GPU-hour of queue time.
+    """
+    monkeypatch.setattr(rc, "build_masker", lambda: ProbeMasker(source_calls=96, invent=False))
+    handed: list[str] = []
+    original = rt._null_backend
+
+    def watching(sample, out_dir):
+        handed.append(sample["video_path"])
+        return original(sample, out_dir)
+
+    monkeypatch.setattr(rt, "_null_backend", watching)
+    assert ph.main(_argv(corpus)) == 0
+
+    assert handed, "the generator was never called"
+    for path in handed:
+        assert path.endswith(".mp4"), f"upstream refuses this input by extension: {path}"
+        assert not path.endswith(ph.QUARANTINE_SUFFIX), (
+            "the quarantine suffix is a rule about GENERATED video. Applying it to the input is "
+            "what killed job 189769."
+        )
+        assert pathlib.Path(path).parent.name == ph.PROBE_INPUT_DIR
+    # and the asymmetry is the whole point: the OUTPUT of that same unit is quarantined.
+    payload = json.loads((corpus["out"] / "PROBE.json").read_text())
+    assert payload["units"][0]["clip"].endswith(ph.QUARANTINE_SUFFIX)
+    assert payload["selection"][0]["probe_clip"].endswith(ph.PROBE_INPUT_SUFFIX)
+
+
+def test_the_artifact_records_that_the_seg_control_is_conditioned_on_the_style_prompt(corpus, monkeypatch):
+    """Upstream logged: no control_prompt supplied, so it uses the first 128 words of the input
+    prompt. Every committed prompt ends '...and the robot are unchanged.', so the segmentation
+    control is conditioned on wording that names a robot — a second route by which the word reaches
+    the generator, which a reading of this probe's result has to carry."""
+    monkeypatch.setattr(rc, "build_masker", lambda: ProbeMasker(source_calls=96, invent=False))
+    assert ph.main(_argv(corpus)) == 0
+    note = json.loads((corpus["out"] / "PROBE.json").read_text())["instrument"]["generator"]
+    assert "seg_control_prompt" in note
+    assert "first 128 words" in note["seg_control_prompt"]
+    assert "does not separate them" in note["seg_control_prompt"]
 
 
 def test_a_partial_run_reports_U_rather_than_the_letter_its_finished_units_agree_on(corpus, monkeypatch):

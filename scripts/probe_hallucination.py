@@ -24,15 +24,23 @@ of which is a comment:
    against them and anything above exits non-zero (:func:`enforce_caps`). There is no environment
    variable, no flag and no config file that raises them. Raising them is a `V9`.
 2. It writes NOTHING a downstream consumer reads. No ``manifest.json``, no ``work.jsonl``, no
-   ``sample_outputs.json``, no ``vision.mp4``, no parquet, no ``meta/`` — and no file whose name
-   ends in ``.mp4`` at all, because ``scripts/assemble_restyled_lerobot.py`` files a clip directory
-   by ``glob("*.mp4")`` and ``97_transfer25_restyle.sbatch``'s harvest keys on a file called
-   ``vision.mp4``. Video output is renamed to ``.mp4.quarantined`` the moment the generator returns
-   it; both readers this repository has are content-based or explicit-plugin, so the bytes stay
-   inspectable while the two globs that could file them miss.
-3. :func:`audit_output_tree` walks what was written and REFUSES, non-zero, if any of those names
-   came back. A guarantee that rests on every future edit remembering a rule is weaker than one
-   that rests on a walk of the directory.
+   ``sample_outputs.json``, no ``vision.mp4``, no parquet, no ``meta/``. **Every clip the GENERATOR
+   returns** is renamed to ``.mp4.quarantined`` the moment it returns it, because
+   ``scripts/assemble_restyled_lerobot.py`` files a clip directory by ``glob("*.mp4")`` and
+   ``97_transfer25_restyle.sbatch``'s harvest keys on a file called ``vision.mp4``; both decoders
+   this repository uses are content-based or explicit-plugin, so the bytes stay inspectable while
+   the two globs that could file them miss.
+3. **THE ONE READABLE VIDEO IS THE INPUT, AND THE ASYMMETRY IS THE POINT.** The probe-source clip
+   keeps a plain ``.mp4`` extension — upstream's ``read_and_process_video`` refuses an input by
+   extension, and job 189769 died on ``Invalid video extension: .quarantined`` after four minutes.
+   That does not widen anything: the probe-source clip is a trimmed copy of ALREADY-COMMITTED
+   SOURCE pixels and carries no generated frame, so it cannot contaminate anything with the thing
+   the quarantine contains. It is kept out of a corpus by PLACEMENT AND NAME instead —
+   :data:`PROBE_INPUT_SUFFIX` inside :data:`PROBE_INPUT_DIR`, one named pattern in one named
+   directory. :func:`audit_output_tree` allows exactly that pair and REFUSES, non-zero, everything
+   else that could be filed: a stray generated ``.mp4`` anywhere, and a ``.probe-source.mp4``
+   anywhere but that directory. A guarantee that rests on every future edit remembering a rule is
+   weaker than one that rests on a walk of the directory.
 4. ``--out`` must carry :data:`QUARANTINE_TOKEN` in its name, so the output cannot be dropped into
    a corpus tree by typing a different path.
 
@@ -145,9 +153,30 @@ PROBE_STYLE_SET = "train"
 #: ``--out`` must contain this, so the output cannot be written into a corpus tree by typing a path.
 QUARANTINE_TOKEN = "hallucination-probe"
 
-#: Renamed to this the moment the generator returns a clip. ``.mp4`` is what
-#: ``assemble_restyled_lerobot.py`` globs and ``vision.mp4`` is what 97's harvest keys on.
+#: **A RULE ABOUT GENERATED VIDEO, AND ONLY ABOUT GENERATED VIDEO.** Every clip the generator
+#: returns is renamed to this the moment it returns it: ``.mp4`` is what
+#: ``assemble_restyled_lerobot.py`` globs and ``vision.mp4`` is what 97's harvest keys on, so the
+#: suffix is what keeps generated frames out of both.
+#:
+#: THE PROBE-SOURCE CLIP DOES NOT GET IT, AND THAT IS NOT AN EXCEPTION TO THE QUARANTINE — IT IS
+#: THE QUARANTINE HAVING A SCOPE. Job 189769 died proving why it needs one: upstream's
+#: ``read_and_process_video`` refuses an input by extension (``ValueError: Invalid video extension:
+#: .quarantined``), so a suffixed input is a clip the generator cannot open. And the reason it is
+#: safe is not convenience: the probe-source clip is a trimmed copy of ALREADY-COMMITTED SOURCE
+#: pixels. It contains zero generated frames, so it cannot contaminate anything with the thing the
+#: quarantine exists to contain. What it must still not do is be MISTAKEN for a corpus, and that is
+#: handled by placement and name — :data:`PROBE_INPUT_SUFFIX` inside :data:`PROBE_INPUT_DIR`, one
+#: named pattern in one named directory, allowed by :func:`audit_output_tree` there and nowhere
+#: else — rather than by making it unreadable.
 QUARANTINE_SUFFIX = ".mp4.quarantined"
+
+#: The ONE directory an ordinary ``.mp4`` may live in, and the ONE name it may have there. The
+#: audit allows this pair and nothing else: a stray generated ``.mp4`` fails wherever it is, and a
+#: file with this name OUTSIDE this directory fails too, because the whole guarantee is that a
+#: readable video in this tree is a trimmed SOURCE input and a reader can tell by looking at where
+#: it is.
+PROBE_INPUT_DIR = "probe_clips"
+PROBE_INPUT_SUFFIX = ".probe-source.mp4"
 
 #: Names that would make this tree consumable. :func:`audit_output_tree` refuses any of them.
 FORBIDDEN_NAMES = (
@@ -487,12 +516,21 @@ def audit_output_tree(root: pathlib.Path) -> list[str]:
     ``glob("*.mp4")`` and 97's harvest keys on ``vision.mp4``; a guarantee that rests on every
     future edit remembering that is weaker than one that rests on looking.
     """
+    root = pathlib.Path(root)
+    allowed_dir = root / PROBE_INPUT_DIR
     offenders: list[str] = []
-    for path in sorted(pathlib.Path(root).rglob("*")):
+    for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        if path.name in FORBIDDEN_NAMES or path.name.endswith(FORBIDDEN_SUFFIXES):
-            offenders.append(str(path))
+        if not (path.name in FORBIDDEN_NAMES or path.name.endswith(FORBIDDEN_SUFFIXES)):
+            continue
+        # THE ONE EXCEPTION, AND IT IS EXACT ON BOTH HALVES. `parent ==` and not `is_relative_to`:
+        # a nested probe_clips/whatever/x.probe-source.mp4 is NOT this directory and does not get
+        # the allowance, because the allowance is what a reader relies on to know that a readable
+        # video here is a trimmed source input rather than a generated one.
+        if path.parent == allowed_dir and path.name.endswith(PROBE_INPUT_SUFFIX):
+            continue
+        offenders.append(str(path))
     return offenders
 
 
@@ -513,10 +551,17 @@ one. V8 §4 forbids, explicitly:
 
 T40_RULE_V1 §1's prohibition on generating a corpus is UNCHANGED and binds in full.
 
-The generated video is stored with a .mp4.quarantined suffix on purpose: assemble_restyled_lerobot.py
+THE GENERATED video is stored with a .mp4.quarantined suffix on purpose: assemble_restyled_lerobot.py
 files a clip directory by glob("*.mp4") and 97_transfer25_restyle.sbatch's harvest keys on a file
 called vision.mp4. The bytes are readable by both decoders this repository uses; the two globs that
 could file them are not.
+
+THE ONE ORDINARY .mp4 IN THIS TREE IS AN INPUT, NOT AN OUTPUT. probe_clips/<episode>.probe-source.mp4
+is a trimmed copy of committed SOURCE pixels — no generated frame is in it — and it keeps a readable
+extension because the generator has to open it. It is not a corpus for the same reason it is not a
+risk: it is real footage this project already has, cut to the robot-free run, at a frame count that
+matches no source episode. The audit allows that name in that directory and nowhere else, and fails
+on any other video anywhere.
 
 The verdict letter in PROBE.json is NOT the finding until a person has looked at the sheets:
 human_review.looked_at is false, and the candidate count is an UPPER BOUND, because the committed
@@ -624,7 +669,7 @@ def main(argv: list[str] | None = None) -> int:
 
         out.mkdir(parents=True, exist_ok=True)
         (out / "NOT_A_CORPUS").write_text(NOT_A_CORPUS, encoding="utf-8")
-        clips_dir = out / "probe_clips"
+        clips_dir = out / PROBE_INPUT_DIR
         clips_dir.mkdir(parents=True, exist_ok=True)
 
         masker = robot_composite.build_masker()
@@ -652,18 +697,28 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"skip {record['episode']}: longest absent run "
                       f"{record['longest_absent_run']['length']} < {args.frames}", flush=True)
                 continue
-            clip = clips_dir / f"{record['episode']}.probe-source.mp4"
+            # A READABLE .mp4, DELIBERATELY, and it keeps that extension all the way into the
+            # generator. This is the INPUT: upstream's read_and_process_video refuses a video by
+            # extension, and job 189769 spent four minutes reaching `Loading input video...` and
+            # died on `Invalid video extension: .quarantined`. It is not quarantined by suffix
+            # because it is not generated data — it is a trimmed copy of committed source pixels —
+            # and it is kept out of a corpus by living in PROBE_INPUT_DIR under PROBE_INPUT_SUFFIX,
+            # which audit_output_tree allows there and refuses anywhere else.
+            clip = clips_dir / f"{record['episode']}{PROBE_INPUT_SUFFIX}"
             fps = robot_composite.container_fps(source_root / str(entry["video"])) or 30.0
             robot_composite.encode_clip(frames, clip, fps)
-            quarantined = clip.with_name(clip.stem + QUARANTINE_SUFFIX)
-            clip.replace(quarantined)
-            record["probe_clip"] = str(quarantined)
+            record["probe_clip"] = str(clip)
             record["probe_clip_fps"] = fps
-            record["_decoded"] = robot_composite.decode_clip(quarantined)
+            record["probe_clip_note"] = (
+                "the INPUT to the generator: a trimmed copy of committed SOURCE pixels, carrying "
+                "no generated frame. Readable .mp4 on purpose (upstream refuses an input by "
+                "extension); kept out of a corpus by placement and name, not by being unopenable."
+            )
+            record["_decoded"] = robot_composite.decode_clip(clip)
             selections.append(record)
             print(f"take {record['episode']}: frames "
                   f"{record['selected_frame_indices'][0]}..{record['selected_frame_indices'][-1]} "
-                  f"-> {quarantined.name}", flush=True)
+                  f"-> {PROBE_INPUT_DIR}/{clip.name}", flush=True)
 
         eligible = [s for s in selections if s["eligible"]]
         if len(eligible) < args.episodes:
@@ -790,6 +845,17 @@ def main(argv: list[str] | None = None) -> int:
                         "controls": [{"key": c.key, "weight": c.weight} for c in controls],
                         "control_maps": ("estimated in-framework; the probe clips carry no depth "
                                          "or segmentation map (docs/transfer25-api.md §8)"),
+                        "seg_control_prompt": (
+                            "NOT SUPPLIED, so upstream derives one. Job 189769 logged: 'No "
+                            "control_prompt provided for on-the-fly segmentation, using the first "
+                            "128 words of the input prompt' (config.py:578-588). The segmentation "
+                            "control the generator conditions on is therefore derived from the "
+                            "STYLE PROMPT TEXT — and every committed prompt ends '...and the robot "
+                            "are unchanged.', so the seg control is conditioned on wording that "
+                            "names a robot. A reading of this probe's result has to carry that: it "
+                            "is a second route by which the word could reach the generator, "
+                            "alongside the prompt itself, and this probe does not separate them."
+                        ),
                     },
                     "style_set": PROBE_STYLE_SET,
                     "styles": [{"id": s["id"], "seed": int(s["seeds"][0])} for s in styles],

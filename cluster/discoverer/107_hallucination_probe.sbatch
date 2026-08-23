@@ -70,10 +70,20 @@
 #            and refuses independently, so neither file can be widened alone.
 #         2. IT WRITES NOTHING A CONSUMER CAN READ. scripts/assemble_restyled_lerobot.py files a
 #            clip directory by glob("*.mp4"); 97's harvest keys on a file called vision.mp4. The
-#            probe renames every generated clip to *.mp4.quarantined the moment the framework
+#            probe renames every GENERATED clip to *.mp4.quarantined the moment the framework
 #            returns it, writes no manifest.json, no work.jsonl, no sample_outputs.json, no parquet
 #            and no meta/ — and BOTH the script and this job then WALK the output tree and fail
 #            non-zero if any such name came back.
+#
+#            THE QUARANTINE SUFFIX IS A RULE ABOUT GENERATED VIDEO AND HAS EXACTLY ONE COUNTERPART
+#            ON THE INPUT SIDE. probe_clips/<episode>.probe-source.mp4 keeps a readable extension,
+#            because upstream read_and_process_video refuses an input BY EXTENSION and job 189769
+#            died on `Invalid video extension: .quarantined` after reaching `Loading input video`.
+#            That does not widen the licence by one frame: the probe-source clip is a trimmed copy
+#            of ALREADY-COMMITTED SOURCE pixels and contains no generated frame, so it cannot carry
+#            the thing the quarantine exists to contain. It is kept out of a corpus by PLACEMENT
+#            AND NAME — one pattern, one directory — and both audits allow that pair THERE and
+#            refuse it anywhere else, as well as refusing any other video anywhere.
 #         3. THE OUTPUT DIRECTORY NAME SAYS WHAT IT IS, and both this job and the script refuse a
 #            path that does not.
 #         4. IT DOES NOT ROUTE THROUGH 97's WORK LIST, G0c COMPOSITE OR HARVEST. No STYLE_SET, no
@@ -134,7 +144,15 @@
 # partition (the clause holds the robot still on the 56.5 % of clip-time it is in shot) but it is a
 # plausible MECHANISM for the failure this asks about, and it is why the probe must run the
 # committed prompts verbatim: a probe under a prompt that does not mention a robot would measure a
-# generator this project is not going to run. TRAIN_STYLES only — arm B is what the intervention
+# generator this project is not going to run.
+#
+# AND THERE IS A SECOND ROUTE FOR THAT WORD, FOUND BY JOB 189769 AND NOW RECORDED IN THE ARTIFACT.
+# Our manifest supplies no segmentation map, so Transfer2.5 estimates one on the fly — and with no
+# control_prompt supplied it logs "No control_prompt provided for on-the-fly segmentation, using the
+# first 128 words of the input prompt". So the SEG CONTROL is conditioned on the style prompt text,
+# which ends "...and the robot are unchanged." This probe does NOT separate the two routes, and
+# PROBE.json says so under instrument.generator.seg_control_prompt rather than leaving it to be
+# rediscovered from a log. TRAIN_STYLES only — arm B is what the intervention
 # runs, EVAL_STYLES is the held-out domain and has no business being touched before the experiment,
 # and the identity style is arm C's question.
 #
@@ -498,9 +516,24 @@ echo "=== probe_hallucination.py exited ${RC} after $((SECONDS - S))s"
 # different: the script's walk cannot run if the script died, and a tree left behind by a crash is
 # exactly the tree somebody would later find and wonder about. assemble_restyled_lerobot.py files a
 # clip directory by glob("*.mp4"); 97's harvest keys on vision.mp4.
-CONSUMABLE=$(find "${OUT}" -type f \( -name '*.mp4' -o -name 'manifest.json' -o -name 'work.jsonl' \
+CONSUMABLE=""
+while IFS= read -r candidate; do
+  [[ -z "${candidate}" ]] && continue
+  # THE ONE EXCEPTION, EXACT ON BOTH HALVES, and it is the same one probe_hallucination.py makes.
+  # probe_clips/<episode>.probe-source.mp4 is the generator's INPUT: a trimmed copy of committed
+  # SOURCE pixels, carrying no generated frame. It keeps a readable extension because upstream
+  # refuses an input by extension (job 189769: `Invalid video extension: .quarantined`). `dirname`
+  # compared for EQUALITY, not a prefix: a nested probe_clips/anything/x.probe-source.mp4 is not
+  # this directory and is refused, because what a reader relies on is that a readable video in this
+  # tree is in that one place and is therefore source and not output.
+  if [[ "$(dirname "${candidate}")" == "${OUT}/probe_clips" \
+        && "$(basename "${candidate}")" == *.probe-source.mp4 ]]; then
+    continue
+  fi
+  CONSUMABLE+="${candidate}"$'\n'
+done < <(find "${OUT}" -type f \( -name '*.mp4' -o -name 'manifest.json' -o -name 'work.jsonl' \
   -o -name 'sample_outputs.json' -o -name 'chunk_metadata.json' -o -name '*.parquet' \
-  -o -name 'info.json' -o -name '*.g0c.json' \) -print 2>/dev/null | head -20 || true)
+  -o -name 'info.json' -o -name '*.g0c.json' \) -print 2>/dev/null || true)
 if [[ -n "${CONSUMABLE}" ]]; then
   echo "FATAL: this probe left file(s) a downstream consumer could read, which T40_RULE_V8 section 4"
   echo "       item 1 forbids:"
@@ -510,7 +543,9 @@ if [[ -n "${CONSUMABLE}" ]]; then
   echo "       rename them before anything else reads this tree."
   exit 3
 fi
-echo "=== output tree audit: nothing consumable. No mp4, no manifest, no work list, no parquet."
+echo "=== output tree audit: nothing consumable. The only readable video is the generator's INPUT,"
+echo "===   ${OUT}/probe_clips/<episode>.probe-source.mp4 — trimmed committed SOURCE pixels, no"
+echo "===   generated frame in it. Every generated clip is *.mp4.quarantined."
 
 if (( RC != 0 )); then
   echo "FATAL: the probe exited ${RC}. Read the FATAL line above it — every refusal in that script"
