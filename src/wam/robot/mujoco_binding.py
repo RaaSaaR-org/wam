@@ -639,7 +639,37 @@ class MuJoCoGroundTruthBinding:
                 "and hand back a differently-sized frame, which `measure` disqualifies as "
                 "resolution_disagrees_with_geom_tol."
             )
-        return self._mj.Renderer(self._model, height=height, width=width)
+        try:
+            return self._mj.Renderer(self._model, height=height, width=width)
+        except Exception as exc:  # noqa: BLE001 — mujoco.FatalError is not a RuntimeError
+            # MEASURED 2026-08-23 on this workstation: with no DISPLAY and no MUJOCO_GL, this
+            # line raises `mujoco.FatalError: gladLoadGL error`, whose base is `Exception` and
+            # not `RuntimeError` — so `measure_est_drift.main`'s
+            # `except (FileNotFoundError, ValueError, RuntimeError)` does NOT catch it and the
+            # operator gets a traceback and exit 1 instead of `FATAL: ...` and exit 2. Every
+            # other way this constructor can fail is a named refusal; the one that fires first
+            # on a headless box was the one that crashed. `tests/test_mujoco_binding.py` never
+            # saw it because it renders in a subprocess with MUJOCO_GL=egl already set.
+            #
+            # THE BACKEND IS NOT CHOSEN HERE. MuJoCo binds its GL backend at `import mujoco`,
+            # so a setenv from inside this process is a no-op — the fix is in the operator's
+            # environment, and quietly picking one for them would make the capture's renderer
+            # depend on which import happened to come first.
+            if isinstance(exc, (ValueError, RuntimeError, FileNotFoundError)):
+                raise
+            raise RuntimeError(
+                f"MuJoCo could not create an offscreen GL context ({type(exc).__name__}: "
+                f"{exc}). Nothing was rendered.\n"
+                f"       $MUJOCO_GL: {os.environ.get('MUJOCO_GL') or 'unset'}\n"
+                f"       $DISPLAY:   {os.environ.get('DISPLAY') or 'unset'}\n"
+                "       Headless (no DISPLAY) needs an explicit backend, set BEFORE the "
+                "process starts — MuJoCo binds it at `import mujoco` and a later setenv does "
+                "nothing:\n"
+                "           MUJOCO_GL=egl    python scripts/measure_est_drift.py capture ...\n"
+                "           MUJOCO_GL=osmesa python scripts/measure_est_drift.py capture ...  "
+                "(software, no GPU)\n"
+                "       `egl` is what tests/test_mujoco_binding.py's render subprocess uses."
+            ) from exc
 
     # -- the members `capture_frames` uses ---------------------------------------------------
 

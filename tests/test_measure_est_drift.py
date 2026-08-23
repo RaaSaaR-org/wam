@@ -708,12 +708,18 @@ def test_recording_the_estimator_stats_changed_no_number_this_script_already_pro
     # capture came from and which way that route's error points. Over a FakeIsaacBinding capture
     # — which is what `capture` is — there is no route, the pair below falls back to the old
     # unconditional stamp verbatim, and the `differing == []` assertion is what proves it.
+    # `independent_samples` (2026-08-23) is additive in the same sense again: it records how many
+    # scene configurations the measured frames came from, and it is read by nothing. Over a
+    # FakeIsaacBinding capture the header carries no `steps_per_state`, so it records an absence
+    # with a reason — which is itself the check that it invents no grouping.
     assert set(after) - set(before) == {
         "estimator_stats",
         "error_direction",
         "error_direction_measured",
         "ground_truth_route",
+        "independent_samples",
     }
+    assert after["independent_samples"]["recorded"] is False
     assert set(before) - set(after) == set()
     assert after["is_lower_bound"] is before["is_lower_bound"] is True
     assert after["is_lower_bound_reason"] == before["is_lower_bound_reason"]
@@ -958,3 +964,122 @@ def test_the_mujoco_backends_default_stage_is_the_committed_scene():
         None, "isaacsim.storage.native.get_assets_root_path() + DEFAULT_ASSET_SUBPATH"
     )
     assert ed.resolve_stage(None, "/tmp/x.xml", "mujoco") == ("/tmp/x.xml", "--scene")
+
+
+# -- the sample size behind the p95, which a frame count does not give -------------------------
+#
+# MEASURED 2026-08-23 on a real 20-state / 240-frame MuJoCo capture: the displacement spread
+# INSIDE each scene state was 0.05-0.28 px while the spread BETWEEN states was 0.06-39.9 px, and
+# the one state whose mask went to the left hand failed on all twelve of its frames. So
+# `T40_RULE_V5` §5's two floors — >= 20 states AND >= 200 measured frames — were both met by a
+# capture carrying 19 independent observations. This block records that; it gates nothing.
+
+
+def _sched_header(steps_per_state: int, n_frames: int, **extra) -> dict:
+    return {"steps_per_state": steps_per_state, "ticks": list(range(1, n_frames + 1)), **extra}
+
+
+def test_frames_are_grouped_by_the_headers_own_ticks_and_not_by_division():
+    """A run that ended early must not have its frames spread over states it never visited."""
+    states, absent = ed.scene_state_per_frame(_sched_header(4, 10))
+    assert absent is None
+    assert states == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2], "ticks are 1-based; state 0 is ticks 1..4"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"ticks": [1, 2, 3]},                          # Isaac: no schedule at all
+        {"steps_per_state": 4},                        # no ticks
+        {"steps_per_state": 0, "ticks": [1, 2]},       # nonsense stride
+        {"steps_per_state": "twelve", "ticks": [1]},   # nonsense type
+    ],
+)
+def test_a_capture_that_cannot_be_grouped_records_an_absence_with_a_reason(header):
+    """An absence with a reason, never a fabricated grouping — the module's rule everywhere."""
+    states, absent = ed.scene_state_per_frame(header)
+    assert states is None
+    assert absent and isinstance(absent, str)
+    block = ed.independent_sample_block(header, [0.1, 0.2])
+    assert block["recorded"] is False
+    assert block["absent_because"] == absent or block["absent_because"]
+
+
+def test_the_block_counts_configurations_where_n_measured_counts_duplicates():
+    """THE MEASUREMENT THIS BLOCK EXISTS FOR, as arithmetic rather than as a claim.
+
+    Twenty configurations, twelve near-identical frames each, one configuration bad in all
+    twelve. ``n_measured`` says 240 and ``T40_RULE_V5`` §5's second floor is met twelvefold; the
+    number of independent observations is 20. Both are now in the artifact, so a reader is not
+    asked to divide one by the other to find out.
+
+    Note what is NOT asserted: that the two p95s differ. When every configuration carries the
+    same number of frames and fails as a whole, they mostly agree — the duplication does not
+    move the percentile, it moves how many observations the percentile is over, which is a
+    property of the SAMPLE and not of the statistic. Both are recorded because a capture with
+    uneven frames per configuration is the case where they do separate.
+    """
+    per_frame = [0.1] * 12 * 19 + [35.0] * 12
+    block = ed.independent_sample_block(_sched_header(12, 240), per_frame)
+    assert block["recorded"] is True
+    assert block["n_measured_frames"] == 240
+    assert block["n_scene_states_with_a_measured_frame"] == 20, "the real sample size"
+    assert block["frames_per_scene_state"] == {"min": 12, "max": 12, "median": 12.0}
+    # Zero spread inside a configuration, the full range between them: that ratio is what says
+    # the twelve frames of a configuration are one observation and not twelve.
+    assert block["within_state_displacement_spread_px"]["max"] == pytest.approx(0.0)
+    medians = block["scene_state_median_displacement_px"]
+    assert min(medians.values()) == pytest.approx(0.1)
+    assert max(medians.values()) == pytest.approx(35.0)
+    assert block["p95_over_frames_px"] is not None
+    assert block["p95_over_scene_state_medians_px"] is not None
+
+
+def test_dropped_frames_are_absent_from_the_block_rather_than_folded_in_as_zero():
+    """Same rule as ``paired_displacements``: an unmeasurable frame is dropped and counted.
+
+    Folding it in as 0 px would pull every statistic here down, which is the direction that
+    widens G0b — the failure the whole harness is careful about.
+    """
+    per_frame = [None, None, 5.0, 5.0, 0.1, 0.1, 0.1, 0.1]
+    block = ed.independent_sample_block(_sched_header(4, 8), per_frame)
+    assert block["n_measured_frames"] == 6
+    assert block["measured_frames_per_scene_state"] == {"0": 2, "1": 4}
+    assert block["scene_state_median_displacement_px"]["0"] == pytest.approx(5.0)
+    assert 0.0 not in block["scene_state_median_displacement_px"].values()
+
+
+def test_a_state_with_no_measurable_frame_at_all_does_not_appear_as_a_zero():
+    per_frame = [None, None, 0.4, 0.6]
+    block = ed.independent_sample_block(_sched_header(2, 4), per_frame)
+    assert block["n_scene_states_with_a_measured_frame"] == 1
+    assert block["measured_frames_per_scene_state"] == {"1": 2}
+
+
+def test_a_header_and_a_frame_list_that_disagree_refuse_to_group():
+    """--limit shortens the frame list while the header still lists every tick."""
+    block = ed.independent_sample_block(_sched_header(12, 240), [0.1] * 24)
+    assert block["recorded"] is False
+    assert "240" in block["absent_because"] and "24" in block["absent_because"]
+
+
+def test_the_block_is_additive_and_moves_no_gate(capture, tmp_path):
+    """It appears in the artifact, and it changes no number and no reason that was there before."""
+    est = _stub_module(
+        tmp_path,
+        "stub_independent",
+        "import numpy as np\n"
+        "OBJECT_TEXT_PROMPT = 'apple.'\n"
+        "def segment(rgb):\n"
+        "    m = np.zeros(rgb.shape[:2], bool); m[1:, 1:] = True; return m\n"
+        "def estimate_depth(rgb):\n"
+        "    return np.zeros(rgb.shape[:2], np.float32)\n",
+    )
+    out = tmp_path / "drift.json"
+    rc = ed.main(["measure", "--capture", str(capture), "--estimators", est, "--out", str(out)])
+    doc = json.loads(out.read_text())
+    assert "independent_samples" in doc
+    assert "independent_samples" not in str(doc["gate_disqualified_reasons"])
+    # The gated number is still the frame-wise percentile of centroid_displacement, untouched.
+    assert doc["est_drift_p95_px"] == doc["centroid_displacement"]["percentiles_px"]["p95"]
+    assert rc in (0, 3)

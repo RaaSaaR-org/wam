@@ -364,6 +364,119 @@ def paired_displacements(
     return np.asarray(out, dtype=float), dropped
 
 
+def scene_state_per_frame(header: Mapping[str, Any]) -> tuple[list[int] | None, str | None]:
+    """Which scene configuration each captured frame belongs to, or why that is unknowable.
+
+    Derived from the capture header's own ``ticks`` and ``steps_per_state`` rather than from
+    ``n_frames // n_scene_states``: a run that ended early would make that arithmetic assign
+    frames to states it never visited, which is the same class of error as computing
+    ``n_scene_states_visited`` from ``--frames``.
+
+    ``(None, reason)`` for a capture that records no ``steps_per_state`` — the Isaac route
+    declares no schedule, and a fabricated grouping is worse than an absence with a reason.
+    """
+    steps_per_state = header.get("steps_per_state")
+    ticks = header.get("ticks")
+    if not steps_per_state or not isinstance(ticks, Sequence) or not ticks:
+        return None, (
+            "the capture header records no steps_per_state/ticks, so which frames share a "
+            "scene configuration cannot be recovered. Isaac captures declare no schedule."
+        )
+    try:
+        per_state = int(steps_per_state)
+        if per_state < 1:
+            raise ValueError
+        return [max(0, (int(t) - 1)) // per_state for t in ticks], None
+    except (TypeError, ValueError):
+        return None, f"steps_per_state={steps_per_state!r} is not a positive integer"
+
+
+def independent_sample_block(
+    header: Mapping[str, Any],
+    per_frame_px: Sequence[float | None],
+) -> dict[str, Any]:
+    """HOW MANY INDEPENDENT OBSERVATIONS ARE BEHIND THE p95. Additive, read-only, never a gate.
+
+    **Nothing here is subtracted from anything and no disqualification reason depends on it.**
+    ``est_drift_p95_px`` at the top of the artifact is the budget PR-08 §6 names, and it is
+    unchanged by this block existing. What this records is the one property of the sample that
+    a frame count cannot express.
+
+    ``T40_RULE_V5`` §5 registers a floor of *"≥ 20 distinct scene states and ≥ 200 measured
+    frames"*, on the reasoning that *"below ~100 measured frames a p95 is essentially the
+    fifth-largest sample"* and *"over one configuration it is a percentile over one
+    viewpoint"*. Both halves can be satisfied at once by a capture whose frames are near
+    duplicates: the object is a static prop (V5 §4.4) and the arm settles in milliseconds, so
+    the frames inside one configuration differ by a fraction of a pixel and the p95 over 240 of
+    them is a p95 over the number of *configurations*. Measured on this box 2026-08-23, a
+    20-state / 240-frame MuJoCo capture: the displacement spread **inside** each state was
+    0.05–0.28 px while the spread **between** states was 0.06–39.9 px, and the one state that
+    failed failed on all twelve of its frames.
+
+    So both numbers are recorded side by side — the p95 over frames, and the p95 over one
+    representative (the per-state median) per configuration — and the reader is not asked to
+    infer the difference from ``n_measured``.
+    """
+    states, absent = scene_state_per_frame(header)
+    if states is None:
+        return {"recorded": False, "absent_because": absent}
+    if len(states) != len(per_frame_px):
+        return {
+            "recorded": False,
+            "absent_because": (
+                f"the header lists {len(states)} ticks for {len(per_frame_px)} frames — the "
+                "capture and the measure disagree about how many frames there are, and a "
+                "grouping built on that would be fiction"
+            ),
+        }
+
+    by_state: dict[int, list[float]] = {}
+    frames_per_state: dict[int, int] = {}
+    for state, value in zip(states, per_frame_px):
+        frames_per_state[state] = frames_per_state.get(state, 0) + 1
+        if value is not None:
+            by_state.setdefault(state, []).append(float(value))
+
+    medians = [float(np.median(v)) for v in by_state.values()]
+    spreads = [float(max(v) - min(v)) for v in by_state.values() if len(v) > 1]
+    measured = [v for v in per_frame_px if v is not None]
+    counts = sorted(frames_per_state.values())
+    return {
+        "recorded": True,
+        "absent_because": None,
+        "meaning": (
+            "ADDITIVE AND READ-ONLY. est_drift_p95_px is the budget; this block says how many "
+            "independent configurations it was computed over. A p95 over frames and a p95 over "
+            "configurations differ whenever the frames inside a configuration are duplicates, "
+            "which a static-prop capture makes them (T40_RULE_V5 §4.4)."
+        ),
+        "n_scene_states_with_a_measured_frame": len(by_state),
+        "n_scene_states_visited": header.get("n_scene_states_visited"),
+        "n_measured_frames": len(measured),
+        "frames_per_scene_state": {
+            "min": counts[0] if counts else None,
+            "max": counts[-1] if counts else None,
+            "median": float(np.median(counts)) if counts else None,
+        },
+        "measured_frames_per_scene_state": {
+            str(k): len(v) for k, v in sorted(by_state.items())
+        },
+        "p95_over_frames_px": float(np.percentile(measured, 95)) if measured else None,
+        "p95_over_scene_state_medians_px": (
+            float(np.percentile(medians, 95)) if medians else None
+        ),
+        "within_state_displacement_spread_px": {
+            "n_states": len(spreads),
+            "min": min(spreads) if spreads else None,
+            "median": float(np.median(spreads)) if spreads else None,
+            "max": max(spreads) if spreads else None,
+        },
+        "scene_state_median_displacement_px": {
+            str(k): float(np.median(v)) for k, v in sorted(by_state.items())
+        },
+    }
+
+
 def depth_error(estimated: np.ndarray, true: np.ndarray, mask: np.ndarray | None) -> dict[str, Any]:
     """Absolute depth error over finite true pixels, optionally restricted to a mask.
 
@@ -1393,6 +1506,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "geom_tol_cross_check": geom_compare,
         "centroid_displacement": distribution(values, args.hist_bin_px),
+        # HOW MANY INDEPENDENT OBSERVATIONS ARE UNDER THAT p95. Additive and read-only, in the
+        # same class as estimator_stats: nothing reads it back and no disqualification reason
+        # depends on it. See independent_sample_block for why a frame count is not a sample size
+        # on a static-prop capture.
+        "independent_samples": independent_sample_block(
+            header,
+            [
+                (
+                    None
+                    if est is None or true is None
+                    else float(np.hypot(est[0] - true[0], est[1] - true[1]))
+                )
+                for est, true in pairs
+            ],
+        ),
         "depth_absolute_error_over_object": depth_stats,
         "capture": {
             "path": str(args.capture),

@@ -220,6 +220,31 @@ def test_the_schedule_states_are_actually_distinct():
     assert len({(s.object_xy, s.object_yaw_rad, s.arm_pitch_offset_rad) for s in states}) == 20
 
 
+def test_the_schedule_saturates_at_sixty_configurations_and_then_repeats_exactly():
+    """THE INDEPENDENT-SAMPLE CEILING OF THIS ROUTE, pinned so it is a known limit and not a
+    surprise found by somebody asking for more states and getting the same number back.
+
+    The object walks a 4x5 lattice, the yaw advances on ``i % 5`` and the arm offset on
+    ``i % 3``, so the state tuple repeats with period ``lcm(20, 5, 3) = 60``. Past that
+    ``--scene-states`` buys duplicate configurations, and the frames of a duplicate are not a
+    second observation — measured 2026-08-23, the displacement spread INSIDE one configuration
+    was 0.05-0.28 px against 0.03-39.9 px between them.
+
+    So ``EST_DRIFT_P95`` from the committed scene is a percentile over at most 60 independent
+    samples however long the capture runs. That is a fact about the SCENE, and raising it means
+    arguing a new lattice in a V-document (the placements are registered: ``T40_RULE_V5`` §4.5
+    forbids changing the capture scene to improve the number), not passing a bigger integer.
+    """
+    def tuples(n):
+        s = mb.default_scene_schedule(n)
+        return {(x.object_xy, x.object_yaw_rad, x.arm_pitch_offset_rad) for x in s}
+
+    assert len(tuples(60)) == 60
+    for n in (61, 120, 240):
+        assert len(tuples(n)) == 60, f"--scene-states {n} still yields 60 configurations"
+    assert mb.default_scene_schedule(120)[:60] == mb.default_scene_schedule(60), "and repeats"
+
+
 def test_a_schedule_of_no_states_is_refused():
     with pytest.raises(ValueError, match="n_states"):
         mb.default_scene_schedule(0)
@@ -335,6 +360,55 @@ def test_a_render_grid_past_the_offscreen_buffer_is_refused_before_any_gl(mesh):
         mb.MuJoCoGroundTruthBinding(
             object_mesh=mesh, render_hw=(2000, 2000), build_renderer=True
         )
+
+
+def test_no_gl_backend_is_a_named_refusal_and_not_a_mujoco_traceback(mesh, monkeypatch):
+    """MEASURED 2026-08-23: headless, with no ``MUJOCO_GL``, this raised
+    ``mujoco.FatalError: gladLoadGL error``.
+
+    ``mujoco.FatalError`` derives from ``Exception``, **not** ``RuntimeError``, so
+    ``measure_est_drift.main``'s ``except (FileNotFoundError, ValueError, RuntimeError)`` did not
+    catch it: the operator got a traceback and exit 1 where every other failure of this
+    constructor gives ``FATAL: ...`` and exit 2. It was invisible to this file because the
+    render tests below run in a subprocess that already exports ``MUJOCO_GL=egl``.
+
+    The stub raises a bare ``Exception`` rather than ``mujoco.FatalError`` on purpose — what is
+    asserted is the conversion of *anything that is not one of the module's own refusals*, so
+    the test does not go quiet if the vendor re-parents its error class.
+    """
+    binding = _binding(mesh)
+    monkeypatch.delenv("MUJOCO_GL", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+
+    class _NoGL:
+        def __init__(self, *a, **kw):
+            raise Exception("gladLoadGL error")
+
+    monkeypatch.setattr(binding._mj, "Renderer", _NoGL)
+    with pytest.raises(RuntimeError) as excinfo:
+        binding._make_renderer()
+    message = str(excinfo.value)
+    assert "MUJOCO_GL" in message, "the refusal must name the variable that fixes it"
+    assert "egl" in message and "osmesa" in message, "and both backends that work"
+    assert "$MUJOCO_GL: unset" in message, "and what it actually was, so a typo is visible"
+    assert "gladLoadGL error" in message, "and the vendor's own words, not a paraphrase"
+
+
+def test_the_gl_refusal_does_not_swallow_the_modules_own_refusals(mesh, monkeypatch):
+    """The catch is broad, so it must re-raise ValueError/RuntimeError unchanged.
+
+    Otherwise a real refusal from inside ``Renderer`` construction — or any future one — would
+    be rewritten into "set MUJOCO_GL", which is the wrong fix stated confidently.
+    """
+    binding = _binding(mesh)
+
+    class _Refuses:
+        def __init__(self, *a, **kw):
+            raise ValueError("offscreen buffer")
+
+    monkeypatch.setattr(binding._mj, "Renderer", _Refuses)
+    with pytest.raises(ValueError, match="offscreen buffer"):
+        binding._make_renderer()
 
 
 @pytest.mark.parametrize("bad", [(480,), (0, 640), (480, 0)])
