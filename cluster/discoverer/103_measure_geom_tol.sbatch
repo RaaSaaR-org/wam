@@ -9,21 +9,32 @@
 #          run, and because the sharded path has to be checkable against something:
 #       GEOM_STEP_FRAMES=1 sbatch --time=<from PILOT.json> 103_measure_geom_tol.sbatch
 #
-#   SHARD — the committed number as an array of N jobs, each measuring the episodes that hash to it:
-#       SHARD=1 NUM_SHARDS=8 GEOM_STEP_FRAMES=1 \
-#           sbatch --array=0-7%4 --time=01:00:00 103_measure_geom_tol.sbatch
+#   SHARD — the committed number as an array of N jobs, each measuring the episodes that hash to it.
+#           N = 16 AND --time=01:30:00 SINCE 2026-08-23; see RE-RUN SHAPE below for the arithmetic.
+#           MaxSubmitJobsPU = 8 counts EVERY ARRAY TASK, so the sixteen go up in waves of at most
+#           the free submit slots — `%4` throttles running tasks and does nothing for the submit
+#           limit. One wave, repeated with the next four indices once the previous wave has left
+#           the queue:
+#       SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \
+#           sbatch --array=0-3%4 --time=01:30:00 103_measure_geom_tol.sbatch
 #
 #   MERGE — once every shard has landed, pool them into the committed artifact. NO GPU IS USED, so
 #           it belongs on the free QoS, which needs its limits on the command line too:
-#       MERGE=1 NUM_SHARDS=8 sbatch --qos=2cpu-single-host --gres=none \
+#       MERGE=1 NUM_SHARDS=16 sbatch --qos=2cpu-single-host --gres=none \
 #           --cpus-per-task=2 --mem=8G --time=00:20:00 103_measure_geom_tol.sbatch
 #
-# ON THE `%4` IN `--array=0-7%4`, AND ON THE MERGE OVERRIDES.
-# MaxJobsPU=4 on the project QoS and every association carries DenyOnLimit, so `%4` is not a
-# politeness — it keeps the array inside the limit rather than relying on a DenyOnLimit QoS to
-# queue the surplus instead of rejecting it. The MERGE line overrides four directives at once
+# ON THE `%4`, WHICH IS ABOUT THE RUNNING LIMIT AND NOT THE SUBMIT LIMIT, AND ON THE MERGE
+# OVERRIDES.
+# The project QoS carries TWO limits and they are not the same limit. MaxJobsPU=4 caps RUNNING
+# jobs, and `%4` is the throttle that respects it: it holds the array's own tasks to four at a
+# time so Slurm does not have to reject the surplus under DenyOnLimit. MaxSubmitJobsPU=8 caps
+# SUBMITTED (pending + running) jobs, AN ARRAY TASK COUNTS AS ONE EACH, AND `%4` DOES NOTHING FOR
+# IT: the throttle is applied inside an array that has already been accepted, so `--array=0-15%4`
+# is sixteen submissions and is rejected outright at sbatch time. Getting these two the wrong way
+# round is what cost job 189658. The submit limit is respected by SUBMITTING IN WAVES; see RE-RUN
+# SHAPE below. The MERGE line overrides four directives at once
 # because they belong to the GPU path: 2cpu-single-host caps at cpu=2 and rejects a --gres, and the
-# file asks for 26 threads, 192 GB and one GPU. If the override is rejected for any reason, the
+# file asks for 26 threads, 32 GB and one GPU. If the override is rejected for any reason, the
 # fallback is to submit MERGE with no overrides at all: it then runs under the project QoS and
 # spends roughly twenty seconds of one H200 doing arithmetic, which is wasteful and correct. It is
 # NOT correct to drop --qos to get around it; that lands on `normal`, which is 1 minute and 0 GPUs.
@@ -98,16 +109,88 @@
 #
 # AND THE REASON N = 4 WAS CHOSEN ANYWAY, so the next person does not repeat it: the QoS has
 # MaxSubmitJobsPU = 8, an N-task array is N submissions, and two other jobs were already pending,
-# so --array=0-7 was REJECTED outright with QOSMaxSubmitJobPerUserLimit. The fix is to clear the
-# queue and submit N = 8, NOT to shard coarser. Sharding coarser trades a scheduling constraint
+# so --array=0-7 was REJECTED outright with QOSMaxSubmitJobPerUserLimit. The fix is to submit the
+# partition IN WAVES, NOT to shard coarser. Sharding coarser trades a scheduling constraint
 # for a wall-clock cliff, and the wall does not negotiate: a shard that overruns loses everything
-# it computed, because every shard exits 3 while GATE_QUALIFIED is false and the resume check
-# refuses a non-gate-qualified artifact. Job 189658 cost roughly six GPU-hours and produced no
-# artifact at all.
+# it computed. Job 189658 cost roughly six GPU-hours and produced no artifact at all.
 # ------------------------------------------------------------------------------------------------
-# Frames are still not balanced, so 58/402 is itself a count-based floor on the real worst case.
-# The SHARD branch's own run-time estimate below prints the EVEN-SPLIT figure — it re-reads the
-# pilot at run time and does not know the partition — and says so where it prints it.
+# RE-RUN SHAPE, DERIVED 2026-08-23 FROM THE MANIFEST'S OWN PER-EPISODE FRAME COUNTS. N = 16.
+#
+# The frame counts are not estimated here. ${SOURCE}/manifest.json carries `episodes[].frames` for
+# all 402 keys (sum 171 625, range 249-749, mean 426.93), and running measure_geom_tol.shard_of over
+# those keys gives the heaviest shard EXACTLY. The reconstruction is checked against the machine:
+# at N = 4 it reproduces job 189658's own shard 0 (100 episodes, 42 673 frames) and shard 2
+# (114 episodes, 48 766 frames) to the frame.
+#
+#   N   heaviest shard   x mean    at p=0.18 s/frame + L=120 s      x1.25      total GPU-h
+#   --------------------------------------------------------------------------------------
+#    4      48 766 f      1.137          02:28:17                 03:05:22        8.715
+#    5      38 042 f      1.108          01:56:07                 02:25:09        8.748
+#    6      32 326 f      1.130          01:38:58                 02:03:43        8.781
+#    8      24 546 f      1.144          01:15:38                 01:34:32        8.848
+#   10      21 265 f      1.239          01:05:47                 01:22:14        8.915
+#   12      17 404 f      1.217          00:54:12                 01:07:45        8.981
+#   16      14 162 f      1.320          00:44:29                 00:55:36        9.115
+#   20      13 363 f      1.557          00:42:05                 00:52:36        9.248
+#   24      10 677 f      1.493          00:34:01                 00:42:32        9.381
+#
+# p = 0.18 IS A PLANNING CONSTANT OVER A FLOOR, NOT A MEASUREMENT. 189658 established only
+# p >= 0.166 (shard 0 did not finish 42 673 frames in 7 200 s less a 116 s load). The true rate is
+# unknown above that floor, so the number that decides the shape is not the estimate but the
+# BREAK-EVEN p -- the rate at which the heaviest shard exactly hits the request:
+#
+#     N = 16, --time=01:30:00   break-even p = (5400 - 120)/14 162 = 0.3728 s/frame
+#                              = 2.25x the measured floor, 2.07x the plan, 4.5x the pilot
+#     N =  8, --time=02:00:00   break-even p = 0.2884 = 1.74x the floor   <- the old shape
+#     N =  5, --time=03:00:00   break-even p = 0.2807 = 1.69x the floor
+#
+# 189658 died because the true p was 2.2x the number it was planned against. N = 16 at 01:30:00 is
+# the cheapest shape that survives that same error again. It costs 0.27 GPU-h more than N = 8 (the
+# eight extra model loads) and it caps the loss from ONE dead shard at 44 minutes instead of 76.
+#
+# AND THE SUBMIT LIMIT IS WHY IT GOES UP IN WAVES RATHER THAN AS ONE ARRAY.
+# MaxSubmitJobsPU = 8 and MaxJobsPU = 4 on the project QoS, both DenyOnLimit. AN N-TASK ARRAY IS N
+# SUBMISSIONS: `--array=0-15%4` is sixteen against the submit limit and is rejected outright with
+# QOSMaxSubmitJobPerUserLimit, exactly as `--array=0-7` was in 189658. `%4` CAPS RUNNING TASKS ONLY
+# -- it is a throttle inside an array that has already been accepted, and it does nothing for the
+# submit limit. That distinction is the whole reason 189658 dropped to N = 4, which traded a
+# scheduling constraint for the wall-clock cliff that killed it.
+#
+# The fix is waves, not coarser shards. With F free submit slots, submit min(F, 4) indices at a
+# time -- 4 is the ceiling worth using because MaxJobsPU = 4 caps RUNNING tasks anyway, so a fifth
+# queued task buys queue position and no throughput. Four waves of four:
+#
+#     squeue -u "${USER}" -r -h -o '%i' | wc -l        # must be <= 4 before each wave
+#     SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 sbatch --array=0-3%4   --time=01:30:00 <this file>
+#     ... then 4-7, then 8-11, then 12-15, each after the previous wave has left the queue.
+#
+# NUM_SHARDS STAYS 16 IN EVERY WAVE. It is the denominator of the partition, not the size of the
+# submission; the merge insists on all sixteen. The per-wave NOTE below says so.
+#
+# WHAT THE RUN CANNOT PRODUCE TODAY, AND IT IS NOT A SCHEDULING PROBLEM.
+# scripts/estimators/apple_sam2.py sets GATE_QUALIFIED = False and its GATE_QUALIFICATION_BLOCKERS
+# still lead with "NOBODY HAS LOOKED AT A MASK". Every shard therefore records
+# gate_qualified: false with the single reason "mask method ... is not gate-qualified", and the
+# merge propagates it: the pooled median is written, and it is written DISQUALIFIED. Flipping that
+# flag is a claim about human review and is not this file's to make. So these ~9 GPU-h buy a
+# measured, committed-contract-checked, NOT-yet-quotable GEOM_TOL, and a later discharge of the
+# blocker requires re-measuring the corpus, because gate_qualified is baked into each shard at
+# measurement time. That is a decision to take BEFORE the array goes in, not after.
+#
+# The SHARD path below no longer treats that standing, corpus-independent disqualification as a
+# failed shard: an artifact whose ONLY gate_disqualified_reason is the adapter's own flag LANDS,
+# is skipped on re-submission, and the job exits 0. Before 2026-08-23 it exited 3, the operator
+# saw FATAL, and the resume check refused to reuse it -- so every re-submission re-measured the
+# whole partition and the array could never make progress at all. Nothing else about exit 3 is
+# forgiven: a truncating flag, coverage under the floor, or an empty measurement is still FATAL.
+# ------------------------------------------------------------------------------------------------
+# SUPERSEDED BY THE RE-RUN SHAPE ABOVE, AND KEPT SO THE ERROR IS LEGIBLE. Everything from here to
+# the next divider was written against the pilot's p = 0.0833 and is optimistic by at least 1.99x.
+# Two of its claims are now false as well as optimistic: the SHARD branch below no longer prints an
+# even-split figure re-read from the pilot (it computes THIS shard's exact frames from the manifest,
+# and it refuses a pilot whose segmenter does not match the committed contract), and its closing
+# sentence -- "N = 16 would double the load cost again for headroom nothing suggests is needed" --
+# is exactly the reasoning 189658 disproved. N = 16 is what the corrected arithmetic chooses.
 #
 # WHY N = 8 AND NOT 4, WHICH WOULD BE ONE SCHEDULING ROUND.
 #     even split at N = 4  (14 418 - 120)/4 + 120                   = 3 694 s = 61 m 34 s
@@ -222,11 +305,21 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-# 26 threads / 192 GB is the fair-share rate for ONE GPU (330 900 billing-h / 5 000 GPU-h = 66.18).
+# 26 threads / 257 GB is the fair-share rate for ONE GPU (330 900 billing-h / 5 000 GPU-h = 66.18).
 # Asking for more empties the billing counter before the GPU-hours and strands the rest of the
-# allocation permanently. See cluster/discoverer/README.md rule 3.
+# allocation permanently. See cluster/discoverer/README.md rule 3. NEVER exceed 26 threads or
+# 257 GB per GPU.
 #SBATCH --cpus-per-task=26
-#SBATCH --mem=192G
+# 32 G, NOT the 192 G this file asked for until 2026-08-23, and the change is a measurement and not
+# a preference. Billing/min = GPUs x 1.0 + MemGB x 0.25 + Threads x 0.035714, so MEMORY DOMINATES:
+# 192 G bills 1.0 + 48.0 + 0.93 = 49.93 units/wall-hour, 32 G bills 1.0 + 8.0 + 0.93 = 9.93. Job
+# 189588 ran THIS estimator stack (GroundingDINO + SAM 2 + Depth-Anything, one frame at a time) and
+# peaked at MaxRSS 4.75 GiB; 32 G is 6.7x that. 106_measure_robot_mask_area.sbatch is already at
+# 32 G off the same measurement. Over the ~9.1 GPU-h the N = 16 partition costs, that is 455
+# billing-h at 192 G against 91 at 32 G -- 365 billing-h saved, which at the 66.18 fair-share rate
+# is 5.5 GPU-h of allocation runway, more than half of what the measurement itself costs. The 26
+# threads stay: they are 0.93 of the ~9.93 and cutting them is a rounding error against the memory.
+#SBATCH --mem=32G
 # Sized for the PILOT. The full path needs the --time the pilot derives, passed on the command
 # line — the same override 97's TIMING recipe carries, and for the same reason: `common` runs two
 # nodes against ~40 pending jobs, so an honest short request backfills and a padded one waits.
@@ -311,7 +404,7 @@ if (( MERGE_MODE )); then
   [[ -d "${SHARD_DIR}" ]] || {
     echo "FATAL: ${SHARD_DIR} does not exist — no shard has run yet."
     echo "       SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=1 \\"
-    echo "         sbatch --array=0-$((NUM_SHARDS - 1))%4 --time=01:00:00 $(basename "$0")"
+    echo "         sbatch --array=0-$((NUM_SHARDS - 1))%4 --time=01:30:00 $(basename "$0")"
     exit 1
   }
 
@@ -327,7 +420,7 @@ if (( MERGE_MODE )); then
     echo "       Re-submit just those array indices — the completed shards are skipped, so this"
     echo "       costs only the shards that did not land:"
     echo "         SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=1 \\"
-    echo "           sbatch --array=$(IFS=,; echo "${MISSING[*]}")%4 --time=01:00:00 $(basename "$0")"
+    echo "           sbatch --array=$(IFS=,; echo "${MISSING[*]}")%4 --time=01:30:00 $(basename "$0")"
     exit 1
   fi
 
@@ -375,13 +468,35 @@ PY
     --merge "${SHARD_DIR}" \
     --out "${ARTIFACT}"; then RC=0; else RC=$?; fi
   echo "=== measure_geom_tol.py --merge exited ${RC}"
+  # EXIT 3 IS NOT A FAILED MERGE. It means the pool was complete, every refusal passed, the median
+  # was taken over the whole corpus and the RESULT is disqualified from the gate — which is what
+  # apple_sam2.GATE_QUALIFIED=False guarantees today, for every possible run of this partition. The
+  # artifact IS written by measure_geom_tol.py in that case, and this branch used to exit before
+  # copying it, so nine GPU-hours of measurement stayed on the cluster where sync.sh --pull (which
+  # only walks ${PROJ}/runs) could not see it. Transport it and refuse to call it committable; the
+  # exit code stays 3 so nothing automated reads this as a pass.
+  if (( RC == 3 )) && [[ -f "${ARTIFACT}" && -f "${ARTIFACT}.sha256" ]]; then
+    cp "${ARTIFACT}" "${ARTIFACT}.sha256" "${OUT}/"
+    echo "=== copied the DISQUALIFIED artifact + sidecar to ${OUT}/ for sync.sh --pull"
+    echo "=== DO NOT COMMIT IT AS GEOM_TOL. Exit 3 means the merge completed and the number carries"
+    echo "===   gate_qualified:false. Read gate_disqualified_reasons in the artifact: if the only"
+    echo "===   entries are 'mask method ... is not gate-qualified', the corpus was measured"
+    echo "===   correctly and what is missing is the adapter's own opt-in — apple_sam2's"
+    echo "===   GATE_QUALIFICATION_BLOCKERS, which lead with NOBODY HAS LOOKED AT A MASK. That is"
+    echo "===   discharged by a human, not by a longer run, and discharging it means re-measuring"
+    echo "===   the corpus, because gate_qualified is baked into each shard at measurement time."
+    echo "===   Restore the pre-commitment before anything else reads that path:"
+    echo "===     git -C ${WAM} checkout -- configs/transfer25/pr08_geom_tol.json"
+    exit "${RC}"
+  fi
   if (( RC != 0 )); then
     echo "FATAL: the merge exited ${RC} and whatever is at ${ARTIFACT} is not GEOM_TOL."
     echo "       Exit 2 is a refusal — a missing shard, shards that disagree about the segmenter,"
     echo "       the decoder, the pixel grid or the step, a gate_qualified split between shards, or"
     echo "       a union of episodes that is not the corpus exactly once. Nothing was written in"
     echo "       that case. Exit 3 means the merge completed and the number is disqualified from"
-    echo "       the gate. Read the refusal above; it names which one and why."
+    echo "       the gate — handled above when the artifact landed. Read the refusal; it names"
+    echo "       which one and why."
     exit "${RC}"
   fi
 
@@ -570,8 +685,8 @@ if (( SHARD_MODE )); then
     echo "       The shard index IS the array index; there is no default, because the default would"
     echo "       be shard 0 and a run that measured a twelfth of the corpus and exited 0."
     echo "       Submit it as an array:"
-    echo "         SHARD=1 NUM_SHARDS=8 GEOM_STEP_FRAMES=1 \\"
-    echo "           sbatch --array=0-7%4 --time=01:00:00 $(basename "$0")"
+    echo "         SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \\"
+    echo "           sbatch --array=0-3%4 --time=01:30:00 $(basename "$0")"
     exit 1
   }
   # No apostrophes in this message; see the note on the MERGE branch and on GEOM_STEP_FRAMES below.
@@ -595,14 +710,17 @@ if (( SHARD_MODE )); then
     echo "       measure the empty set and report it as a clean run."
     exit 1
   fi
-  # Not fatal, and it must not be: re-running two failed shards is --array=2,5 over the same
-  # partition, and that is the resumable shape this whole mode exists for. Say it out loud, though,
-  # because a FIRST submission whose array does not span the partition produces a set of shards the
-  # merge will refuse, and the operator should learn that now and not in the merge job.
+  # Not fatal, and it must not be: an array narrower than the partition is the NORMAL shape here,
+  # for two reasons. Re-running two failed shards is --array=2,5 over the same partition. And
+  # MaxSubmitJobsPU=8 counts every array task, so a partition wider than the free submit slots has
+  # to go up in waves of four — `%4` throttles RUNNING tasks and does nothing for the submit limit.
+  # Say it out loud anyway, because the merge insists on all NUM_SHARDS and an operator who submits
+  # ONE wave and stops should learn that here and not in the merge job.
   if [[ "${SLURM_ARRAY_TASK_COUNT:-}" != "${NUM_SHARDS}" ]]; then
     echo "=== NOTE: this array has ${SLURM_ARRAY_TASK_COUNT:-?} task(s) and the partition has"
-    echo "===       ${NUM_SHARDS}. That is correct for a re-run of specific shards and wrong for a"
-    echo "===       first submission. The merge insists on all ${NUM_SHARDS}."
+    echo "===       ${NUM_SHARDS}. That is EXPECTED for a wave of a wave-submitted partition and for"
+    echo "===       a re-run of specific shards; it is wrong only if this is meant to be the whole"
+    echo "===       partition. The merge insists on all ${NUM_SHARDS} shard artifacts."
   fi
   # Same discipline as the FULL path, and now load-bearing across jobs: measure_geom_tol.py --merge
   # REFUSES a set of shards that disagree on step_frames, because GEOM_TOL scales ~linearly with it
@@ -619,15 +737,31 @@ if (( SHARD_MODE )); then
   mkdir -p "${SHARD_DIR}"
   SHARD_OUT=${SHARD_DIR}/shard-${SHARD_INDEX}.json
 
-  # RESUMABLE, in the shape 97 gets from its DONE stamps: a shard that already landed is not
-  # re-measured. This is what makes "re-submit the two that failed" cost two shards rather than a
-  # partition, and it is what makes a preempted array task free to simply re-run. The stamp is the
-  # artifact itself and it is VALIDATED, not merely present: a truncated file from a task killed at
-  # the wall must not be mistaken for a finished one, and neither must a shard artifact for a
-  # different index or a disqualified measurement.
-  if [[ -f "${SHARD_OUT}" && "${FORCE:-0}" == "0" ]]; then
-    if python - "${SHARD_OUT}" "${SHARD_INDEX}" "${NUM_SHARDS}" "${GEOM_STEP_FRAMES}" <<'PY'
-import json, sys
+  # WHETHER A SHARD ARTIFACT ON DISK COUNTS AS LANDED. One definition, used in two places: before
+  # the measurement (skip a shard that is already done) and after it (decide whether exit 3 was a
+  # failure or the standing, corpus-independent disqualification described in the header). Two
+  # copies of this rule would eventually disagree, and the direction they would disagree in is a
+  # re-measured partition or a bad shard reaching the merge.
+  #
+  # The stamp is the artifact itself and it is VALIDATED, not merely present: a truncated file from
+  # a task killed at the wall must not be mistaken for a finished one, and neither must a shard
+  # artifact for a different index, a different partition or a different step.
+  #
+  # ON gate_qualified. Refusing every artifact with gate_qualified:false was correct against a
+  # DATA-dependent disqualification and catastrophic against the one this corpus actually has.
+  # scripts/estimators/apple_sam2.py sets GATE_QUALIFIED=False, so EVERY shard of a perfectly good
+  # measurement records exactly one reason -- "mask method ... is not gate-qualified" -- and the old
+  # check therefore refused to reuse ANY shard, ever: each re-submission re-measured the whole
+  # partition and the array could never converge. That reason is a property of the ADAPTER, is
+  # identical across all N shards, and is re-derived by the merge from the same artifact, which
+  # still refuses to write a gate-qualified GEOM_TOL from it. Reusing such a shard therefore
+  # launders nothing. Every OTHER reason -- a truncating flag, coverage under the floor, an empty
+  # measurement -- is data-dependent, means THIS shard measured the wrong thing, and is still
+  # refused. headline_valid and the two truncating flags are checked directly rather than inferred
+  # from the reason strings, so a reason this rule does not recognise cannot be waved through.
+  shard_artifact_landed () {  # $1 path $2 index $3 num_shards $4 step -> 0 when it counts as landed
+    python - "$1" "$2" "$3" "$4" <<'PY'
+import json, re, sys
 path, want_i, want_n, want_step = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 try:
     d = json.loads(open(path).read())
@@ -640,14 +774,44 @@ for label, got, want in (("schema", d.get("schema"), "wam.geom_tol_shard/1"),
                          ("step_frames", d.get("step_frames"), want_step)):
     if got != want:
         print(f"    not reusable: {label} is {got!r}, wanted {want!r}"); raise SystemExit(1)
+# The exact string measure_geom_tol.main() appends for an adapter that has not opted in. Anchored
+# at both ends so a longer sentence that merely starts this way is not swallowed.
+ADAPTER_BLOCKER = re.compile(r"^mask method .* is not gate-qualified$")
 if not d.get("gate_qualified"):
-    why = "; ".join(d.get("gate_disqualified_reasons") or ["(no reason recorded)"])
-    print(f"    not reusable: gate_qualified is false -- {why}")
-    raise SystemExit(1)
+    reasons = list(d.get("gate_disqualified_reasons") or [])
+    unrecognised = [r for r in reasons if not ADAPTER_BLOCKER.match(str(r))]
+    blockers = []
+    if not reasons:
+        blockers.append("gate_qualified is false and no reason is recorded")
+    if unrecognised:
+        blockers.append("data-dependent disqualification(s): " + "; ".join(unrecognised))
+    if not d.get("headline_valid"):
+        blockers.append("headline_valid is false")
+    if d.get("partial_measurement"):
+        blockers.append("partial_measurement is true")
+    if d.get("limit") or d.get("max_frames"):
+        blockers.append(f"limit={d.get('limit')!r} max_frames={d.get('max_frames')!r}")
+    if not d.get("n_steps_measured"):
+        blockers.append("n_steps_measured is 0")
+    if blockers:
+        print("    not reusable: " + " | ".join(blockers))
+        raise SystemExit(1)
+    print("    LANDED BUT NOT GATE-QUALIFIED, and that is the adapter's standing flag and not this")
+    print("    shard: " + "; ".join(reasons))
+    print("    The measurement is complete and reusable. The merge will pool it and will write the")
+    print("    pooled median DISQUALIFIED, which is the correct outcome while apple_sam2 sets")
+    print("    GATE_QUALIFIED=False. It must not be committed as GEOM_TOL.")
 print(f"    reusable: {sh.get('n_episodes_in_shard')} episodes, "
       f"{d.get('n_steps_measured')} steps, median {d.get('shard_median_px')} px")
 raise SystemExit(0)
 PY
+  }
+
+  # RESUMABLE, in the shape 97 gets from its DONE stamps: a shard that already landed is not
+  # re-measured. This is what makes "re-submit the two that failed" cost two shards rather than a
+  # partition, and it is what makes a preempted array task free to simply re-run.
+  if [[ -f "${SHARD_OUT}" && "${FORCE:-0}" == "0" ]]; then
+    if shard_artifact_landed "${SHARD_OUT}" "${SHARD_INDEX}" "${NUM_SHARDS}" "${GEOM_STEP_FRAMES}"
     then
       echo "=== SHARD ${SHARD_INDEX}/${NUM_SHARDS}: ${SHARD_OUT} already landed. Skipping."
       echo "===   FORCE=1 re-measures it."
@@ -662,45 +826,145 @@ PY
   echo "===   episode list: shards are computed by different jobs at different times, and a range"
   echo "===   would silently re-partition the corpus the moment a clip is added or removed."
 
-  # The pilot's own numbers, re-read here rather than trusted from the header comment, turned into
-  # this shard's expected cost. A header comment cannot notice that the pilot was re-run; this can.
-  if [[ -f "${OUT}/GEOM_TOL_PILOT.json" ]]; then
-    NUM_SHARDS="${NUM_SHARDS}" PILOT_JSON="${OUT}/GEOM_TOL_PILOT.json" python - <<'PY' || true
-import json, os, time
-d = json.loads(open(os.environ["PILOT_JSON"]).read())
-n = int(os.environ["NUM_SHARDS"])
-full, load = d.get("full_run_seconds"), d.get("load_seconds")
-if full is None or load is None:
-    print("===   pilot carries no slope (blockers: "
-          + "; ".join(d.get("blockers") or ["?"]) + ") — no per-shard estimate")
+  # -- THE WALLTIME SELF-CHECK -------------------------------------------------------------------
+  #
+  # WHAT THIS USED TO DO AND WHY IT WAS WORSE THAN NOTHING. It re-read full_run_seconds and
+  # load_seconds out of ${OUT}/GEOM_TOL_PILOT.json, divided by NUM_SHARDS, multiplied by a hardcoded
+  # 1.155 count-imbalance factor measured at N=8, and warned if the result exceeded the request. The
+  # committed pilot is job 189588's, produced at box_threshold 0.35 with no retry branch, and
+  # scripts/estimators/apple_sam2.py has since moved to 0.15 with a (0.10, 0.10) retry — so its
+  # slope is at least 1.99x optimistic (job 189658 measured p >= 0.166 against the pilot's 0.0833).
+  # Against that artifact the old check would have printed a comfortable estimate and NO warning for
+  # every shard of an array that was about to die at the wall, which is precisely what a self-check
+  # exists to prevent. It also never knew THIS shard's size: it printed an even split scaled by a
+  # constant from a different N.
+  #
+  # WHAT IT DOES NOW. Three changes, in order of how much they matter:
+  #
+  #   1. THE DENOMINATOR IS EXACT. ${SOURCE}/manifest.json carries episodes[].frames for every key,
+  #      and shard_of() is re-derived here from the same rule measure_geom_tol.py uses, so this is
+  #      THIS shard's real frame count and not an even split wearing a fudge factor.
+  #   2. THE PILOT IS TRUSTED ONLY IF IT MEASURED THE COMMITTED SEGMENTER. The pilot records the
+  #      mask_method it ran under; configs/transfer25/pr08_geom_tol.json holds the PR-08 §4 step 2
+  #      pre-commitment, and measure_geom_tol.py refuses the whole run if the adapter disagrees with
+  #      it. So the committed contract is a free, correct proxy for the adapter's operating point:
+  #      a pilot whose segmenter block does not match it is DISCREDITED and its slope is discarded
+  #      in favour of GEOM_SECONDS_PER_FRAME. This is the same comparison PR-08 §4 step 2 is checked
+  #      on, applied to the cost model instead of to the number.
+  #   3. IT REFUSES INSTEAD OF WARNING. A shard that provably cannot finish costs GPU-hours and
+  #      produces nothing — 189658 spent six of them proving it. GEOM_ALLOW_TIGHT_WALL=1 overrides,
+  #      and the refusal prints the command that would.
+  #
+  # GEOM_SECONDS_PER_FRAME defaults to 0.18: the planning constant over 189658's measured floor of
+  # 0.166. It is an env var so a re-measured pilot does not need an edit here — but note that a
+  # PILOT that matches the committed contract is preferred over it automatically.
+  GEOM_SECONDS_PER_FRAME=${GEOM_SECONDS_PER_FRAME:-0.18}
+  GEOM_LOAD_SECONDS=${GEOM_LOAD_SECONDS:-120}
+  if ! SHARD_INDEX="${SHARD_INDEX}" NUM_SHARDS="${NUM_SHARDS}" \
+       MANIFEST="${SOURCE}/manifest.json" PILOT_JSON="${OUT}/GEOM_TOL_PILOT.json" \
+       CONTRACT_FILE="${WAM}/configs/transfer25/pr08_geom_tol.json" \
+       P_FALLBACK="${GEOM_SECONDS_PER_FRAME}" L_FALLBACK="${GEOM_LOAD_SECONDS}" \
+       ALLOW_TIGHT="${GEOM_ALLOW_TIGHT_WALL:-0}" python - <<'PY'
+import hashlib, json, os, time
+
+def contract_of(doc):
+    """The segmenter block, wherever this repo writes it. None when the document makes no claim."""
+    if not isinstance(doc, dict):
+        return None
+    params = (doc.get("mask_method") or {}).get("params") or {}
+    for block in (doc.get("segmenter"), params.get("segmenter")):
+        if isinstance(block, dict):
+            return block
+    return None
+
+def load(path):
+    try:
+        return json.loads(open(path).read())
+    except Exception:
+        return None
+
+i, n = int(os.environ["SHARD_INDEX"]), int(os.environ["NUM_SHARDS"])
+manifest = load(os.environ["MANIFEST"])
+episodes = (manifest or {}).get("episodes") or []
+if not episodes:
+    print("===   NO SELF-CHECK: %s carries no episodes[], so this shard's frame count is unknown."
+          % os.environ["MANIFEST"])
+    print("===   The run is NOT stopped — the manifest is provenance, not an input to the "
+          "measurement — but")
+    print("===   nothing here can say whether this request is long enough. Watch the wall.")
+    raise SystemExit(0)
+
+# The same rule as measure_geom_tol.shard_of(), re-derived rather than imported: this check runs
+# before the interpreter that owns that function is started, and a copy that drifts would size the
+# wrong shard. It is eleven bytes of arithmetic and the merge re-derives it too.
+def shard_of(key, num):
+    return int.from_bytes(hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest(), "big") % num
+
+mine = [e for e in episodes if shard_of(str(e["id"]), n) == i]
+frames = sum(int(e["frames"]) for e in mine)
+total = sum(int(e["frames"]) for e in episodes)
+
+p, load_s, basis = float(os.environ["P_FALLBACK"]), float(os.environ["L_FALLBACK"]), None
+pilot = load(os.environ["PILOT_JSON"])
+committed = contract_of(load(os.environ["CONTRACT_FILE"]))
+if pilot is None:
+    basis = "no pilot artifact"
+elif pilot.get("seconds_per_frame") is None or pilot.get("load_seconds") is None:
+    basis = "pilot carries no slope (%s)" % "; ".join(pilot.get("blockers") or ["?"])
+elif committed is None:
+    basis = "no committed segmenter contract to check the pilot against"
 else:
-    # AN EVEN SPLIT OF FRAMES, which the blake2b partition does not provide: it balances episode
-    # COUNTS only approximately and frames not at all (this corpus runs 249-749 frames per episode).
-    # The header re-does this for the heaviest shard; here the partition is not known, so the
-    # even-split figure is printed and labelled rather than silently used as if it were this
-    # shard's. IMBALANCE is the measured count factor at N=8 over this corpus's 402 keys (58/50.25)
-    # and is applied so the warning below fires on the shard it should fire on.
-    IMBALANCE = 1.155
-    even = (full - load) / n + load
-    est = (full - load) / n * IMBALANCE + load
-    print(f"===   pilot: full {full:.0f}s, fixed load {load:.0f}s -> even split {even:.0f}s, "
-          f"x{IMBALANCE} for count imbalance -> this shard ~{est:.0f}s "
-          f"({est/60:.1f} min), x1.25 = {est*1.25/60:.1f} min")
-    print("===   (the factor is a COUNT imbalance measured over 402 keys at N=8; frames are not "
-          "balanced at all, so it is a floor)")
-    end = os.environ.get("SLURM_JOB_END_TIME")
-    if end and end.isdigit():
-        left = int(end) - int(time.time())
-        print(f"===   walltime remaining {left}s ({left/60:.1f} min)")
-        if est * 1.25 > left:
-            print("===   WARNING: the estimate with the pilot margin exceeds this request. The run "
-                  "is not stopped —")
-            print("===   the estimate is an extrapolation from 3 of 402 episodes and the "
-                  "measurement is the better")
-            print("===   evidence — but if this task dies at the wall, that is why. Raise --time "
-                  "(4 h is the cap) or")
-            print("===   raise NUM_SHARDS and re-run the partition.")
+    theirs = contract_of(pilot)
+    if theirs is None:
+        basis = "the pilot records no segmenter block, so its operating point is unknown"
+    else:
+        diff = sorted(k for k in set(theirs) | set(committed) if theirs.get(k) != committed.get(k))
+        if diff:
+            basis = ("PILOT DISCREDITED: its segmenter disagrees with the committed contract on "
+                     + ", ".join(diff))
+        else:
+            p, load_s = float(pilot["seconds_per_frame"]), float(pilot["load_seconds"])
+            basis = "pilot %s, segmenter matches the committed contract" % (
+                pilot.get("slurm_job_id") or "?")
+
+est = frames * p + load_s
+print(f"===   shard {i}/{n}: {len(mine)} episodes, {frames} of {total} frames "
+      f"({frames / (total / n):.3f}x the even split)")
+print(f"===   cost model: p={p:.4f} s/frame, fixed load={load_s:.0f}s  [{basis}]")
+if basis and basis.startswith(("PILOT DISCREDITED", "the pilot records no")):
+    print("===   -> using GEOM_SECONDS_PER_FRAME instead. A pilot measured at a segmenter this "
+          "adapter has")
+    print("===      replaced is evidence about a different run; see the header block on job "
+          "189658.")
+print(f"===   estimate {est:.0f}s ({est/60:.1f} min), x1.25 = {est*1.25/60:.1f} min")
+
+end = os.environ.get("SLURM_JOB_END_TIME")
+if not (end and end.isdigit()):
+    print("===   SLURM_JOB_END_TIME is unset — cannot compare the estimate against the request.")
+    raise SystemExit(0)
+left = int(end) - int(time.time())
+print(f"===   walltime remaining {left}s ({left/60:.1f} min); "
+      f"break-even p for this request = {(left - load_s) / frames:.4f} s/frame")
+if est * 1.25 <= left:
+    raise SystemExit(0)
+if os.environ.get("ALLOW_TIGHT", "0") != "0":
+    print("===   WARNING: the estimate with margin exceeds this request, and "
+          "GEOM_ALLOW_TIGHT_WALL=1 says run anyway.")
+    raise SystemExit(0)
+print("FATAL: this shard needs ~%.0f min (x1.25 = %.0f min) and the request leaves %.0f min."
+      % (est / 60, est * 1.25 / 60, left / 60))
+print("       REFUSING TO START. A shard that dies at the wall writes nothing and the GPU-hours are")
+print("       gone: job 189658 spent roughly six of them proving exactly this. The estimate is")
+print("       built on THIS shard's real frame count from the manifest, so it is not the "
+      "three-episode")
+print("       extrapolation the old warning apologised for.")
+print("       Raise --time (04:00:00 is the QoS cap), or raise NUM_SHARDS and re-run the whole")
+print("       partition, or set GEOM_ALLOW_TIGHT_WALL=1 if you believe the cost model is wrong.")
+raise SystemExit(1)
 PY
+  then
+    echo "FATAL: the walltime self-check refused this shard (see above). Nothing was measured."
+    exit 1
   fi
 
   START=${SECONDS}
@@ -715,15 +979,36 @@ PY
     --out "${SHARD_OUT}"; then RC=0; else RC=$?; fi
   ELAPSED=$((SECONDS - START))
   echo "=== shard ${SHARD_INDEX} exited ${RC} after ${ELAPSED}s"
+  # EXIT 3 IS TWO DIFFERENT EVENTS AND THIS FILE USED TO CONFLATE THEM. It means "the measurement
+  # is disqualified from the gate", which today is TRUE OF EVERY CORRECT SHARD, because
+  # apple_sam2.GATE_QUALIFIED is False and nothing about the corpus can change that. Treating it as
+  # FATAL printed sixteen failures over sixteen good measurements and — with the old resume check —
+  # guaranteed that every re-submission re-measured the whole partition. So exit 3 is re-classified
+  # by asking the SAME question the resume check asks, of the artifact that was actually written:
+  # a shard whose only disqualification is the adapter's standing flag has LANDED. Anything else,
+  # and every other exit code, is still fatal and still writes nothing to the merge.
+  if (( RC == 3 )) && [[ -f "${SHARD_OUT}" ]] \
+     && shard_artifact_landed "${SHARD_OUT}" "${SHARD_INDEX}" "${NUM_SHARDS}" "${GEOM_STEP_FRAMES}"
+  then
+    echo "=== SHARD ${SHARD_INDEX}/${NUM_SHARDS} LANDED. Exit 3 here is the adapter's standing gate"
+    echo "===   blocker (apple_sam2.GATE_QUALIFIED=False, 'NOBODY HAS LOOKED AT A MASK'), which is"
+    echo "===   identical across every shard of this partition and is not a fact about this shard."
+    echo "===   The merge will pool it and will write the pooled median DISQUALIFIED. THAT NUMBER"
+    echo "===   MUST NOT BE COMMITTED AS GEOM_TOL until the blocker is discharged, and discharging"
+    echo "===   it later means re-measuring the corpus: gate_qualified is baked in at measurement"
+    echo "===   time and no merge re-derives it."
+    RC=0
+  fi
   if (( RC != 0 )); then
     echo "FATAL: shard ${SHARD_INDEX} exited ${RC} and its artifact must not reach the merge."
-    echo "       Exit 3 means the shard measured something that is disqualified from the gate --"
-    echo "       an ungated segmenter, coverage under the floor, or a truncating flag. The merge"
-    echo "       refuses a partition where one shard says gate_qualified false and another says"
-    echo "       true, so this stops the whole measurement rather than skewing it. Exit 2 means"
-    echo "       nothing was measured at all. Either way, fix the cause and re-run THIS index:"
+    echo "       Exit 3 here is NOT the adapter's standing gate blocker — that case is handled"
+    echo "       above and lands. It means this shard measured the wrong thing: coverage under the"
+    echo "       floor, a truncating flag, or no displacement at all. The merge refuses a partition"
+    echo "       where one shard says gate_qualified false and another says true, so this stops the"
+    echo "       whole measurement rather than skewing it. Exit 2 means nothing was measured at"
+    echo "       all. Either way, fix the cause and re-run THIS index:"
     echo "         SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=${GEOM_STEP_FRAMES} \\"
-    echo "           sbatch --array=${SHARD_INDEX} --time=01:00:00 $(basename "$0")"
+    echo "           sbatch --array=${SHARD_INDEX} --time=01:30:00 $(basename "$0")"
     exit "${RC}"
   fi
   echo "=== NEXT, once every shard has landed (this is NOT GEOM_TOL and no shard is):"

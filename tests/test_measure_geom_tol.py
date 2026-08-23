@@ -3277,3 +3277,338 @@ def test_the_counter_names_this_module_differences_are_the_ones_the_adapter_expo
         f"{mgt.SAM2_ADAPTER_SPEC}.stats() no longer reports {missing}. Those counters would be "
         "recorded as null — 'we asked and it said nothing' — on every full pass, which is what "
         "the adapter's second gate-qualification blocker asks for and would not get.")
+
+
+# -- 103_measure_geom_tol.sbatch: the plumbing that decides whether the measurement survives -------
+#
+# Job 189658 lost roughly six GPU-hours and produced zero artifacts. Two of the three reasons are
+# not in measure_geom_tol.py at all — they are in the sbatch that drives it — and both are the kind
+# of defect that costs the hours BEFORE anyone can read a Python traceback:
+#
+#   the walltime self-check   It sized the shard from GEOM_TOL_PILOT.json, an artifact produced at
+#   trusted a discredited     box_threshold 0.35 with no retry branch, while the adapter had moved
+#   pilot                     to 0.15 with a (0.10, 0.10) retry. Against that file it printed a
+#                             comfortable estimate and NO warning for an array that was about to
+#                             die at the wall. A self-check that reassures is worse than none.
+#
+#   exit 3 was fatal, so no   apple_sam2.GATE_QUALIFIED is False, so EVERY correct shard exits 3
+#   shard could ever land     with the single reason "mask method ... is not gate-qualified". The
+#                             job called that FATAL and the resume check refused to reuse the
+#                             artifact, so every re-submission re-measured the whole partition and
+#                             the array could never converge. Sharding buys resumability; this gave
+#                             it back.
+#
+# These tests RUN THE SBATCH'S OWN HEREDOCS, extracted from the file, rather than a copy of them
+# here. A copy would pass forever after the sbatch changed.
+
+import os  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+
+SBATCH_103 = _REPO_ROOT / "cluster/discoverer/103_measure_geom_tol.sbatch"
+
+
+def _heredoc_after(anchor: str) -> str:
+    """The first ``<<'PY' ... PY`` block at or after ``anchor``. Refuses rather than guessing."""
+    text = SBATCH_103.read_text(encoding="utf-8")
+    at = text.index(anchor)
+    start = text.index("<<'PY'\n", at) + len("<<'PY'\n")
+    end = text.index("\nPY\n", start)
+    return text[start:end]
+
+
+def _run_snippet(source: str, argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-c", source, *argv],
+                          capture_output=True, text=True,
+                          env={**os.environ, **env})
+
+
+def _landed(tmp_path: Path, doc: dict, *, index: int = 0, num_shards: int = 16,
+            step: int = 1) -> subprocess.CompletedProcess:
+    path = tmp_path / "shard-0.json"
+    path.write_text(json.dumps(doc))
+    return _run_snippet(_heredoc_after("shard_artifact_landed () {"),
+                        [str(path), str(index), str(num_shards), str(step)], {})
+
+
+def _shard_doc(**over) -> dict:
+    """A shard artifact in the shape main() writes for a complete, correctly measured shard."""
+    doc = {
+        "schema": "wam.geom_tol_shard/1",
+        "shard": {"index": 0, "num_shards": 16, "n_episodes_in_shard": 33},
+        "step_frames": 1,
+        "gate_qualified": False,
+        "gate_disqualified_reasons": [ADAPTER_BLOCKER_REASON],
+        "headline_valid": True,
+        "partial_measurement": False,
+        "limit": 0,
+        "max_frames": 0,
+        "n_steps_measured": 14129,
+        "shard_median_px": 1.5,
+    }
+    doc.update(over)
+    return doc
+
+
+#: The exact sentence ``measure_geom_tol.main()`` appends when the adapter has not opted in. Built
+#: the way main() builds it, so a reword there fails this file rather than silently turning the
+#: sbatch's re-classification into a rule that matches nothing.
+ADAPTER_BLOCKER_REASON = f"mask method {'grounding-dino+sam2+depth-anything-v2'!r} is not gate-qualified"
+
+
+def test_the_adapter_blocker_sentence_is_the_one_main_actually_writes() -> None:
+    """The sbatch re-classifies exit 3 by matching a reason string. Pin the string to its producer.
+
+    If ``main()`` rewords that reason, the sbatch stops recognising it, every shard goes back to
+    FATAL, and the array goes back to being unable to make progress — silently, and only on the
+    cluster. So the sentence is read out of the source of the branch that writes it.
+    """
+    source = mgt.__file__ and Path(mgt.__file__).read_text(encoding="utf-8")
+    assert 'f"mask method {method.name!r} is not gate-qualified"' in source, (
+        "measure_geom_tol.main() no longer writes the reason 103's shard_artifact_landed() "
+        "matches. Update BOTH, or every shard of the partition becomes FATAL again.")
+    pattern = re.compile(r"^mask method .* is not gate-qualified$")
+    assert pattern.match(ADAPTER_BLOCKER_REASON)
+
+
+def test_a_shard_disqualified_only_by_the_adapters_standing_flag_counts_as_landed(tmp_path) -> None:
+    """The defect that made sharding pointless: no shard could ever be reused.
+
+    ``GATE_QUALIFIED = False`` is a property of scripts/estimators/apple_sam2.py, identical across
+    every shard of the partition and re-derived by the merge from the same artifact. Refusing to
+    reuse a shard over it meant each re-submission re-measured the corpus from scratch.
+    """
+    r = _landed(tmp_path, _shard_doc())
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LANDED BUT NOT GATE-QUALIFIED" in r.stdout
+    assert "MUST NOT be committed" in r.stdout or "must not be committed" in r.stdout.lower()
+
+
+def test_a_gate_qualified_shard_is_reusable_without_any_of_that(tmp_path) -> None:
+    r = _landed(tmp_path, _shard_doc(gate_qualified=True, gate_disqualified_reasons=[]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "reusable:" in r.stdout
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"gate_disqualified_reasons": [ADAPTER_BLOCKER_REASON, "coverage 0.412 < --min-coverage 0.9"]},
+     "a data-dependent reason rides along with the standing one"),
+    ({"gate_disqualified_reasons": ["no step yielded a displacement"]},
+     "the shard measured nothing"),
+    ({"gate_disqualified_reasons": []},
+     "gate_qualified is false and nothing says why"),
+    ({"headline_valid": False}, "headline_valid is false"),
+    ({"partial_measurement": True}, "a partial measurement"),
+    ({"limit": 3}, "--limit truncated the episode list"),
+    ({"max_frames": 180}, "--max-frames truncated every clip"),
+    ({"n_steps_measured": 0}, "no steps were measured"),
+    ({"schema": "wam.geom_tol/1"}, "a finished GEOM_TOL is not a shard"),
+    ({"shard": {"index": 1, "num_shards": 16, "n_episodes_in_shard": 33}}, "a different index"),
+    ({"shard": {"index": 0, "num_shards": 8, "n_episodes_in_shard": 33}}, "a different partition"),
+    ({"step_frames": 2}, "a different step"),
+])
+def test_everything_else_is_still_refused(tmp_path, over, why) -> None:
+    """The forgiveness is exactly one reason wide. Everything data-dependent still re-measures."""
+    r = _landed(tmp_path, _shard_doc(**over))
+    assert r.returncode == 1, f"{why} was accepted as landed:\n{r.stdout}{r.stderr}"
+    assert "not reusable" in r.stdout
+
+
+def test_a_truncated_shard_artifact_is_not_landed(tmp_path) -> None:
+    """What a task killed at the wall leaves behind. It must never be mistaken for a finished one."""
+    path = tmp_path / "shard-0.json"
+    path.write_text('{"schema": "wam.geom_tol_shard/1", "shard": {"ind')
+    r = _run_snippet(_heredoc_after("shard_artifact_landed () {"), [str(path), "0", "16", "1"], {})
+    assert r.returncode == 1
+    assert "does not parse" in r.stdout
+
+
+# -- the walltime self-check -----------------------------------------------------------------------
+
+SELFCHECK = "ALLOW_TIGHT=\"${GEOM_ALLOW_TIGHT_WALL:-0}\" python - <<'PY'"
+
+#: A segmenter block in the shape apple_sam2.SEGMENTER_CONTRACT has. Only equality matters here.
+CONTRACT_NOW = {"method_name": "grounding-dino+sam2+depth-anything-v2", "box_threshold": 0.15,
+                "retry_box_threshold": 0.10, "pixel_grid_hw": [480, 640]}
+CONTRACT_PILOT_ERA = {"method_name": "grounding-dino+sam2+depth-anything-v2", "box_threshold": 0.35,
+                      "retry_box_threshold": None, "pixel_grid_hw": [480, 640]}
+
+
+def _selfcheck(tmp_path, *, pilot: dict | None, contract: dict | None, num_shards: int = 16,
+               index: int = 0, frames_per_episode: int = 400, n_episodes: int = 402,
+               remaining: int | None = 5400, allow_tight: str = "0",
+               p_fallback: str = "0.18") -> subprocess.CompletedProcess:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"episodes": [
+        {"id": f"episode_{i:06d}", "frames": frames_per_episode} for i in range(n_episodes)]}))
+    pilot_path = tmp_path / "GEOM_TOL_PILOT.json"
+    if pilot is not None:
+        pilot_path.write_text(json.dumps(pilot))
+    contract_path = tmp_path / "pr08_geom_tol.json"
+    if contract is not None:
+        contract_path.write_text(json.dumps({"segmenter": contract}))
+    env = {
+        "SHARD_INDEX": str(index), "NUM_SHARDS": str(num_shards),
+        "MANIFEST": str(manifest), "PILOT_JSON": str(pilot_path),
+        "CONTRACT_FILE": str(contract_path),
+        "P_FALLBACK": p_fallback, "L_FALLBACK": "120", "ALLOW_TIGHT": allow_tight,
+    }
+    if remaining is None:
+        env["SLURM_JOB_END_TIME"] = ""
+    else:
+        import time as _t
+        env["SLURM_JOB_END_TIME"] = str(int(_t.time()) + remaining)
+    return _run_snippet(_heredoc_after(SELFCHECK), [], env)
+
+
+def _pilot(contract: dict | None, *, per_frame: float = 0.0833) -> dict:
+    rec = {"seconds_per_frame": per_frame, "load_seconds": 120.0, "slurm_job_id": "189588"}
+    if contract is not None:
+        rec["mask_method"] = {"params": {"segmenter": contract}}
+    return rec
+
+
+def test_a_pilot_measured_at_a_replaced_operating_point_is_discredited(tmp_path) -> None:
+    """THE DEFECT THIS CHECK EXISTS FOR, in the exact shape that cost job 189658 six GPU-hours.
+
+    ``GEOM_TOL_PILOT.json`` on the cluster was produced at box_threshold 0.35 with no retry branch;
+    apple_sam2 has since moved to 0.15 with a (0.10, 0.10) retry because PR-08 §4 step 2 requires
+    our detection point to BE the generator's. Its slope is at least 1.99x optimistic. The check
+    must not use it, and it must say why rather than quietly substituting a number.
+    """
+    r = _selfcheck(tmp_path, pilot=_pilot(CONTRACT_PILOT_ERA), contract=CONTRACT_NOW)
+    assert r.returncode == 0, r.stdout
+    assert "PILOT DISCREDITED" in r.stdout
+    assert "box_threshold" in r.stdout and "retry_box_threshold" in r.stdout
+    assert "p=0.1800" in r.stdout, f"the discredited slope was used anyway:\n{r.stdout}"
+
+
+def test_a_pilot_that_matches_the_committed_contract_is_used(tmp_path) -> None:
+    """The check is not "ignore the pilot" — a re-measured pilot at the current point is better
+    evidence than a planning constant, and the committed contract is what tells the two apart."""
+    r = _selfcheck(tmp_path, pilot=_pilot(CONTRACT_NOW, per_frame=0.19), contract=CONTRACT_NOW)
+    assert r.returncode == 0, r.stdout
+    assert "PILOT DISCREDITED" not in r.stdout
+    assert "p=0.1900" in r.stdout
+    assert "189588" in r.stdout
+
+
+def test_a_pilot_with_no_segmenter_block_states_nothing_and_is_not_trusted(tmp_path) -> None:
+    r = _selfcheck(tmp_path, pilot=_pilot(None), contract=CONTRACT_NOW)
+    assert r.returncode == 0, r.stdout
+    assert "records no segmenter block" in r.stdout
+    assert "p=0.1800" in r.stdout
+
+
+def test_with_no_pilot_at_all_the_corrected_constant_is_used(tmp_path) -> None:
+    r = _selfcheck(tmp_path, pilot=None, contract=CONTRACT_NOW)
+    assert r.returncode == 0, r.stdout
+    assert "no pilot artifact" in r.stdout
+    assert "p=0.1800" in r.stdout
+
+
+def test_the_estimate_is_this_shards_real_frames_and_not_an_even_split(tmp_path) -> None:
+    """The old check divided the corpus by N and multiplied by a constant measured at a different N.
+
+    Here every episode is the same length, so the partition's frame imbalance is exactly its episode
+    imbalance and the expected number is arithmetic: the shard's own episode count times 400.
+    """
+    n_eps, per_ep, n = 402, 400, 16
+    mine = sum(1 for i in range(n_eps) if mgt.shard_of(f"episode_{i:06d}", n) == 0)
+    r = _selfcheck(tmp_path, pilot=None, contract=CONTRACT_NOW,
+                   num_shards=n, index=0, frames_per_episode=per_ep, n_episodes=n_eps,
+                   remaining=4 * 3600)
+    assert r.returncode == 0, r.stdout
+    assert f"{mine} episodes, {mine * per_ep} of {n_eps * per_ep} frames" in r.stdout, r.stdout
+    # ... and it is NOT the even split, which is the number the old check printed.
+    assert mine * per_ep != n_eps * per_ep // n
+
+
+def test_a_shard_that_cannot_finish_refuses_to_start(tmp_path) -> None:
+    """189658's shards ran for two hours and wrote nothing. Refusing costs zero and says why.
+
+    The old code warned and ran anyway, on the argument that the estimate came from three of 402
+    episodes. That argument is gone: the frame count is exact and p is either contract-checked or
+    the measured floor.
+    """
+    r = _selfcheck(tmp_path, pilot=None, contract=CONTRACT_NOW, remaining=600)
+    assert r.returncode == 1, r.stdout
+    assert "REFUSING TO START" in r.stdout
+    assert "GEOM_ALLOW_TIGHT_WALL=1" in r.stdout
+
+
+def test_the_operator_can_override_the_refusal_deliberately(tmp_path) -> None:
+    r = _selfcheck(tmp_path, pilot=None, contract=CONTRACT_NOW, remaining=600, allow_tight="1")
+    assert r.returncode == 0, r.stdout
+    assert "WARNING" in r.stdout
+
+
+def test_a_comfortable_request_passes_quietly(tmp_path) -> None:
+    r = _selfcheck(tmp_path, pilot=None, contract=CONTRACT_NOW, remaining=5400)
+    assert r.returncode == 0, r.stdout
+    assert "REFUSING" not in r.stdout
+    assert "break-even p for this request" in r.stdout
+
+
+def test_a_missing_manifest_says_so_instead_of_guessing(tmp_path) -> None:
+    """No frame counts means no estimate. It must not fall back to an even split and it must not
+    refuse the run either — the manifest is provenance, not an input to the measurement."""
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"episodes": []}))
+    r = _run_snippet(_heredoc_after(SELFCHECK), [], {
+        "SHARD_INDEX": "0", "NUM_SHARDS": "16", "MANIFEST": str(manifest),
+        "PILOT_JSON": str(tmp_path / "nope.json"), "CONTRACT_FILE": str(tmp_path / "nope2.json"),
+        "P_FALLBACK": "0.18", "L_FALLBACK": "120", "ALLOW_TIGHT": "0",
+        "SLURM_JOB_END_TIME": "0",
+    })
+    assert r.returncode == 0, r.stdout
+    assert "NO SELF-CHECK" in r.stdout
+
+
+def test_the_shard_rule_in_the_sbatch_is_the_rule_measure_geom_tol_uses() -> None:
+    """Two spellings of the partition would size the wrong shard. Run the sbatch's copy and compare.
+
+    It is re-derived rather than imported because the check runs before the interpreter that owns
+    ``shard_of`` is started — so the guarantee has to come from a test, not from an import.
+    """
+    src = _heredoc_after(SELFCHECK)
+    body = src[src.index("def shard_of("):]
+    body = body[:body.index("\n\n")] if "\n\n" in body else body
+    ns: dict = {}
+    exec("import hashlib\n" + body, ns)
+    keys = [f"episode_{i:06d}" for i in range(402)]
+    for n in (4, 8, 16):
+        assert [ns["shard_of"](k, n) for k in keys] == [mgt.shard_of(k, n) for k in keys], (
+            f"the sbatch and measure_geom_tol.py disagree about the partition at N={n}")
+
+
+# -- the two directives job 189658 got wrong --------------------------------------------------------
+
+
+def test_the_array_log_path_is_per_task() -> None:
+    """189658's four tasks all wrote to one geom-tol.189658.out: three headers lost, and the
+    surviving one described a different shard than the progress lines under it."""
+    text = SBATCH_103.read_text(encoding="utf-8")
+    out = re.search(r"^#SBATCH -o (\S+)$", text, re.M)
+    assert out is not None, "103 declares no -o path"
+    assert "%A_%a" in out.group(1), f"log path {out.group(1)} is not per-array-task"
+    assert "%j" not in out.group(1)
+
+
+def test_the_request_stays_inside_the_fair_share_rate() -> None:
+    """Billing/min = GPUs x 1.0 + MemGB x 0.25 + Threads x 0.035714, and 26 threads / 257 GB / 1 GPU
+    is exactly the 66.18 fair-share rate. Above it the billing counter empties before the GPU-hours
+    and the rest of the allocation is lost permanently (docs/discoverer.md §3)."""
+    text = SBATCH_103.read_text(encoding="utf-8")
+    cpus = int(re.search(r"^#SBATCH --cpus-per-task=(\d+)$", text, re.M).group(1))
+    mem = int(re.search(r"^#SBATCH --mem=(\d+)G$", text, re.M).group(1))
+    assert cpus <= 26, f"{cpus} threads exceeds the fair-share rate for one GPU"
+    assert mem <= 257, f"{mem} GB exceeds the fair-share rate for one GPU"
+    rate = cpus * 0.035714286 + mem * 0.25 + 1.0
+    assert rate <= 66.18
+    # And it is right-sized, not merely legal: job 189588 peaked at MaxRSS 4.75 GiB on this exact
+    # estimator stack, so 192 G was 40x the measured peak and five times the billing it needed.
+    assert mem <= 64, (
+        f"--mem={mem}G bills {rate:.2f} units/wall-hour against 9.93 at 32 G. The stack peaks at "
+        "4.75 GiB (job 189588, cited in 106_measure_robot_mask_area.sbatch); memory is the single "
+        "biggest lever on this allocation.")
