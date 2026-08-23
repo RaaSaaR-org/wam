@@ -93,6 +93,59 @@ thresholds and this argument's summary, and the string is part of the mask cache
 reader cannot mistake these masks for ones the adapter would have produced. Anyone who reverses this
 decision must move that record with it, because the cached masks are keyed on it.
 
+A DETECTION THAT IS THE APPLE IS NOT A ROBOT, AND IS DROPPED BEFORE THE UNION
+------------------------------------------------------------------------------
+The union rule above has an exposure the ``apple_sam2`` path does not, and it was found by
+measurement rather than by reading: **on frames where the robot is out of shot, this prompt grounds
+the apple.** GroundingDINO grounds phrases, it does not decide that a phrase is absent, so
+``"robot arm. robotic hand. robotic gripper."`` against a tablecloth, a plate and a piece of fruit
+returns its best-scoring box above 0.15 and that box lands on the fruit. ``d739a87`` measured it and
+``runs/pr08-robot-mask-empty/`` records it: the robot is genuinely absent from ~36 % of this
+corpus's frames (verdict ABSENT, which is settled and is not what this section is about), and on the
+robot-absent frames of the 40-episode sample the masker returned a non-empty mask on 98 of 240.
+Re-segmenting every box of those 710 frames puts 146 detections at IoU 0.94-0.98 against
+``apple_sam2.object_color_reference`` — they are the apple, and a person has looked at them
+(``runs/pr08-robot-mask-apple/sheet_absent_now_empty.png``).
+
+**Under G0c an apple inside the robot mask is the worst shape a defect can have, because it is a
+SILENT PASS.** The robot mask is the region composited back from the source, so the generated apple
+is overwritten by the source apple: the object the task is about stops being restyled, and arms B
+and C become arm A for that object while still costing their GPU hours. No gate downstream can see
+it. G0a measures labels. G0b measures geometry, and a pixel-identical apple has moved zero pixels —
+it does not merely pass G0b, it passes it perfectly. The robot-mask IoU is "a diagnostic on the
+generator, never a gate" by §6's own sentence. An apple-sized mask is ~0.02 of the frame, far below
+any plausible area bound, so :func:`check_mask` sees nothing wrong either. The empty-mask refusal
+never fires, because the mask is not empty.
+
+So every candidate mask is scored against the frame's own colour reference before the union, and one
+that is essentially coincident with it is dropped: **a candidate that is the apple is not a robot.**
+The threshold, where it came from and why its exact value is irrelevant over a 0.42-wide interval
+are on :data:`ROBOT_MASK_OBJECT_MAX_IOU`.
+
+Four properties of the fix, each of which is a decision rather than an implementation detail:
+
+* **It fails LOUD, in the direction this file already fails.** Dropping every candidate leaves an
+  all-False mask, and :func:`check_mask`'s existing "zero is zero" refusal takes the clip. There is
+  no fallback that keeps a weak box to avoid a refusal — that is the same thing upstream's
+  ``(0.10, 0.10)`` retry would have been, refused three paragraphs up for the same reason. The
+  filter therefore makes G0c refuse MORE clips, never fewer, and it cannot manufacture a pass.
+* **It cannot make G0c workable and does not pretend to.** ``DIAGNOSIS.json`` already concluded that
+  with a median 152 robot-absent frames per episode "every clip refuses. G0c as written cannot
+  produce a single composited clip on this corpus." That is unchanged and is a separate open
+  decision. What this removes is the *other* outcome — the clips that would have been composited
+  with the apple frozen, and passed.
+* **It is a check on the OUTPUT, not on the detection.** The prompt, ``box_threshold``,
+  ``text_threshold``, the absent retry and the union rule are all untouched; nothing is re-detected,
+  re-prompted or re-drawn, and no mask is altered. All that is decided is whether a mask SAM 2
+  already drew is admitted to the union. Same argument, same shape, as ``T40_RULE_V6`` §3 makes for
+  ``apple_sam2.segment``.
+* **It is not the IoU threshold §6 refuses.** §6's refused number is a *gate*: a pass/fail cut on
+  the robot-mask IoU between source and generated, i.e. a verdict on the generator. This one is
+  computed on the SOURCE frame alone, before any generated pixel exists, compares our own estimator
+  against a non-learned second opinion, and its only possible effect is a refusal. It gates nothing
+  and licenses nothing. It is still a number in this path, which is why it is pre-registered rather
+  than merely commented — ``docs/preregistration/PR-08-V9-robot-mask-object-grounding.md``.
+
 HARD EDGE, NO FEATHER, NO DILATION — AND THE ARGUMENT, BECAUSE THE BURDEN IS ON FEATHERING
 -------------------------------------------------------------------------------------------
 A binary mask leaves a one-pixel discontinuity where the source's robot meets the generated
@@ -260,6 +313,43 @@ ROBOT_TEXT_PROMPT = "robot arm. robotic hand. robotic gripper."
 assert ROBOT_TEXT_PROMPT == ROBOT_TEXT_PROMPT.strip().lower(), ROBOT_TEXT_PROMPT
 assert ROBOT_TEXT_PROMPT.endswith("."), ROBOT_TEXT_PROMPT
 
+#: THE ROBOT-MASK VALIDITY FILTER'S ONE NUMBER. A detection whose SAM 2 mask overlaps the frame's
+#: apple this much IS the apple, and is dropped before the union — see the module docstring's
+#: "A DETECTION THAT IS THE APPLE IS NOT A ROBOT" section for why, and PR-08 V9 for the licence.
+#:
+#: HOW 0.70 WAS CHOSEN, AND FROM WHICH MEASUREMENT. Not tuned, and not a midpoint of nothing: it is
+#: a value read off a measured gap, the same defence ``apple_sam2.MASK_VALIDITY_MIN_IOU`` makes and
+#: for the same reason — a number introduced into a gate path must not be able to become the
+#: finding. Every GroundingDINO box above the committed operating point on the 710 frames of
+#: ``runs/pr08-robot-mask-empty/plan_corpus.json`` (40 episodes, the stratified plan the ABSENT
+#: diagnosis was produced from) was segmented and scored against
+#: ``apple_sam2.object_color_reference``. 2 845 detections, and the two populations do not touch:
+#:
+#:     apple detections   :  IoU in [0.9364, 0.9847]   (146 of them; the mask IS the colour region)
+#:     everything else    :  IoU <= 0.5131             (2 699 of them; robot, plate, tablecloth,
+#:                                                      and gripper-over-apple boxes at 0.19-0.51)
+#:
+#: Nothing at all lands in (0.5131, 0.9364), so EVERY cut in that open interval produces the
+#: identical partition of those 2 845 detections, and 0.70 sits inside it with 0.187 of margin
+#: below and 0.236 above. ``tests/test_robot_composite_object_filter.py`` sweeps the interval
+#: against the measured IoUs and asserts the partition never moves, and asserts that the value this
+#: module ships lies strictly inside it — so the insensitivity is checked rather than claimed.
+#:
+#: The gap is not an accident of this sample, it is what the two shapes are. A mask of the apple and
+#: the warm-saturated colour predicate are two outlines of one object, so they agree at ~0.95. A
+#: mask of anything else on this corpus — the robot is black and bare metal, the cloth and the plate
+#: are neutral to within two counts (``apple_sam2.object_color_reference``'s own note) — contains
+#: essentially none of those pixels. The only in-between shape is a real robot detection whose box
+#: also swallows the fruit during a grasp, and those are the 0.19-0.51 tail: KEPT, correctly, and
+#: the measurement shows dropping the apple box beside them removes 140 px of a 31 710 px mask.
+#:
+#: NO ENVIRONMENT OVERRIDE AND NO FLAG, for ``ROBOT_TEXT_PROMPT``'s reason exactly. This decides
+#: which pixels the generator is allowed to touch. A per-run value would be a per-run decision about
+#: that, taken on a submit line, recorded nowhere anybody would look, and invisible in the output.
+#: Moving it means editing this file, :data:`SEGMENTER_IDENTITY_FIELDS`' consequences (every cached
+#: mask and any committed area bound stop matching) and a pre-registration, together.
+ROBOT_MASK_OBJECT_MAX_IOU = 0.70
+
 #: The committed artifact carrying the area bound, tracked rather than under ``runs/`` for
 #: ``measure_geom_tol``'s reason: ``runs/`` is gitignored, so an artifact written there can never be
 #: the pre-commitment the rule asks for.
@@ -297,6 +387,15 @@ SEGMENTER_IDENTITY_FIELDS = (
     "text_threshold",
     "box_rule",
     "upstream_retry_not_run",
+    # The object-grounding filter changes WHICH DETECTIONS SURVIVE, so it changes the mask for a
+    # given frame, so it belongs here by this tuple's own definition. Both consequences are the
+    # intended ones and neither is a side effect to be worked around: a mask cached before the
+    # filter existed is a different mask and must not be reused, and an area-fraction distribution
+    # measured before it existed is a distribution of a different masker and must not be sat above.
+    # (No such bound exists today — configs/transfer25/pr08_robot_mask_area.json is not in the tree
+    # — so nothing committed is invalidated by adding this; it is here so that nothing committed
+    # LATER can be reused across the filter being changed or removed.)
+    "object_grounding_filter",
 )
 
 
@@ -453,17 +552,60 @@ class Sam2RobotMasker:
 
     Everything model-shaped is reached through that module: its detector, its predictor, its device
     resolution, its uint8 contract, its detection thresholds, its offline enforcement and its
-    refusals. What differs is two things, both argued in the module docstring: the prompt is
-    :data:`ROBOT_TEXT_PROMPT` instead of its ``OBJECT_TEXT_PROMPT``, and every box above threshold is
-    segmented and OR-ed instead of only the highest-scoring one.
+    refusals. What differs is three things, all argued in the module docstring: the prompt is
+    :data:`ROBOT_TEXT_PROMPT` instead of its ``OBJECT_TEXT_PROMPT``, every box above threshold is
+    segmented and OR-ed instead of only the highest-scoring one, and a candidate mask that IS the
+    apple is dropped before that union (:data:`ROBOT_MASK_OBJECT_MAX_IOU`).
 
     The import is lazy — inside ``_estimator()`` — because ``apple_sam2`` reaches ``transformers``
     and ``sam2`` at import time and this module is imported by the driver, whose other paths and
     whose tests must run on a machine with neither.
+
+    :attr:`filter_counters` accumulate over the masker's life; :meth:`filter_record` reads them and
+    :func:`composite_clip` differences it, because a filter whose firing is not recorded cannot be
+    told apart from a corpus that never triggered it.
     """
+
+    #: Cumulative, and never reset by anything here. Differenced by the caller.
+    _COUNTERS = (
+        "frames_masked",
+        "detections_segmented",
+        "detections_dropped_as_object",
+        "frames_with_a_dropped_detection",
+        "frames_emptied_by_the_filter",
+        "frames_with_no_object_reference",
+    )
 
     def __init__(self) -> None:
         self._module: Any = None
+        self.filter_counters: dict[str, int] = dict.fromkeys(self._COUNTERS, 0)
+
+    # -- what the filter did ---------------------------------------------------------------------
+
+    def filter_record(self) -> dict:
+        """The counters plus the constants they were produced under, as one readable block."""
+        return {
+            "rule": (
+                "a detection whose SAM 2 mask has IoU > max_iou against the frame's own colour "
+                "reference IS that object and is dropped before the union; if that leaves nothing, "
+                "the mask is empty and check_mask refuses the clip"
+            ),
+            "max_iou": float(ROBOT_MASK_OBJECT_MAX_IOU),
+            "reference": self._object_reference_name(),
+            **{name: int(self.filter_counters[name]) for name in self._COUNTERS},
+        }
+
+    def _object_reference_name(self) -> str:
+        module = self._estimator()
+        name = getattr(module, "MASK_VALIDITY_REFERENCE", None)
+        if not name:
+            raise CompositeError(
+                "scripts/estimators/apple_sam2.py no longer declares MASK_VALIDITY_REFERENCE, so "
+                "this module cannot say WHICH second opinion decided that a detection was the "
+                "apple rather than the robot. Every G0c record makes that claim; an unnameable "
+                "predicate in 10 050 records is worse than a refusal here."
+            )
+        return str(name)
 
     # -- the pinned pair, loaded once ----------------------------------------------------------
 
@@ -577,6 +719,19 @@ class Sam2RobotMasker:
             "text_threshold": float(module.TEXT_THRESHOLD),
             "box_rule": "union of every detection above threshold (see robot_composite docstring)",
             "upstream_retry_not_run": retry_note,
+            # THE THIRD DIVERGENCE FROM THE PINNED ADAPTER, WRITTEN DOWN, for the same reason as the
+            # one above it: this changes which pixels come back from the source for a given frame,
+            # so a reader of one clip's record must be able to see it without reading this file. It
+            # is in SEGMENTER_IDENTITY_FIELDS and therefore in the mask cache key: turning the
+            # filter off, or moving its number, invalidates every cached mask, which is correct,
+            # because every one of them would be a different mask.
+            "object_grounding_filter": (
+                f"a detection whose SAM 2 mask has IoU > {ROBOT_MASK_OBJECT_MAX_IOU} against "
+                f"{self._object_reference_name()} is the OBJECT, not the robot, and is dropped "
+                "before the union; if that empties the mask, check_mask refuses the clip. "
+                "PR-08 V9. The detection operating point, the prompt and the union rule are "
+                "unchanged and no mask is altered."
+            ),
         }
 
     # -- one frame -----------------------------------------------------------------------------
@@ -633,6 +788,40 @@ class Sam2RobotMasker:
         boxes = np.asarray(results["boxes"].detach().cpu(), dtype=np.float64).reshape(-1, 4)
         return boxes
 
+    def object_grounding_iou(self, frame: np.ndarray, masks: np.ndarray) -> np.ndarray:
+        """``(N,)`` float: each candidate mask's IoU against the frame's own colour reference.
+
+        Both halves come from the pinned adapter — ``object_color_reference`` is the warm-and-
+        saturated predicate ``T40_RULE_V6`` already runs on every ``segment()`` call, and
+        ``mask_validity_iou`` is the symmetric IoU it scores with. They are reached rather than
+        restated so that there is exactly one definition of "this region is the apple" in the
+        repository: two copies of a discriminator drifting apart is the failure PR-13 is about, and
+        this one would drift silently, because the two callers never compare their answers.
+
+        Symmetric IoU rather than "how much of the candidate is apple-coloured", deliberately. The
+        one-sided containment ratio would also drop the whole-tablecloth masks — they contain the
+        fruit — and those are :func:`check_mask`'s area bound's business, not this filter's. A
+        filter that quietly took over another check's failure mode would turn an over-large-mask
+        refusal into an empty-mask refusal and change what the operator is told.
+        """
+        module = self._estimator()
+        for name in ("object_color_reference", "mask_validity_iou"):
+            if getattr(module, name, None) is None:
+                raise CompositeError(
+                    f"scripts/estimators/apple_sam2.py no longer declares {name}(), which is the "
+                    "second opinion this module uses to tell a robot detection from a detection "
+                    "that has grounded on the apple (PR-08 V9). Without it every robot-absent "
+                    "frame would silently composite the SOURCE apple over the generated one, which "
+                    "no PR-08 gate can see. Re-read the adapter and update "
+                    "Sam2RobotMasker.object_grounding_iou()."
+                )
+        reference = module.object_color_reference(frame)
+        if not reference.any():
+            self.filter_counters["frames_with_no_object_reference"] += 1
+        return np.asarray(
+            [float(module.mask_validity_iou(m, reference)) for m in masks], dtype=np.float64
+        )
+
     def mask(self, rgb: np.ndarray) -> np.ndarray:
         """``(H, W)`` bool: every pixel this frame's robot occupies. All-False when nothing grounds.
 
@@ -640,10 +829,19 @@ class Sam2RobotMasker:
         robot mask means, and here it means the clip is refused — see :func:`check_mask`. Making the
         masker raise would conflate "the segmenter could not run" with "the segmenter ran and found
         no robot", and those two need different messages.
+
+        **A detection that is the apple is dropped before the union**, at
+        :data:`ROBOT_MASK_OBJECT_MAX_IOU`, and the module docstring argues why. Note the ordering:
+        the drop happens BEFORE the OR, per candidate, not on the finished union. On a grasp frame
+        the detector returns both real robot boxes and a box on the fruit; filtering the union would
+        have to choose between discarding the robot and admitting the apple, and per-candidate
+        filtering has to do neither. Dropping every candidate is how this returns all-False, which
+        is the loud path — there is no fallback that keeps the best-scoring reject.
         """
         module = self._estimator()
         frame = module._as_uint8_rgb(rgb)
         h, w = frame.shape[:2]
+        self.filter_counters["frames_masked"] += 1
 
         boxes = self._boxes(frame)
         if boxes.shape[0] == 0:
@@ -656,7 +854,22 @@ class Sam2RobotMasker:
             predictor.set_image(frame)
             masks, _scores, _logits = predictor.predict(box=boxes, multimask_output=False)
         stacked = np.asarray(masks).reshape(-1, h, w) > 0
-        return np.ascontiguousarray(np.any(stacked, axis=0))
+        self.filter_counters["detections_segmented"] += int(stacked.shape[0])
+
+        overlaps = self.object_grounding_iou(frame, stacked)
+        keep = overlaps <= ROBOT_MASK_OBJECT_MAX_IOU
+        dropped = int(stacked.shape[0] - np.count_nonzero(keep))
+        if dropped:
+            self.filter_counters["detections_dropped_as_object"] += dropped
+            self.filter_counters["frames_with_a_dropped_detection"] += 1
+            if not keep.any():
+                # Every candidate was the apple, so this frame has no robot detection left and the
+                # mask is empty. check_mask refuses the clip on it, by name and with no threshold —
+                # which is the intended outcome and the whole reason nothing weaker is admitted
+                # here to avoid it.
+                self.filter_counters["frames_emptied_by_the_filter"] += 1
+                return np.zeros((h, w), dtype=bool)
+        return np.ascontiguousarray(np.any(stacked[keep], axis=0))
 
 
 def build_masker() -> Sam2RobotMasker:
@@ -1308,7 +1521,14 @@ def composite_clip(
             "G0b would then score it as a generator defect."
         )
 
+    before_filter = dict(getattr(context.masker, "filter_counters", {}) or {})
     masks, from_cache = source_masks(source_video, src, context)
+    # Differenced HERE and not after the loop: the IoU diagnostic below runs the masker over the
+    # GENERATED frames too, and the object filter's behaviour there is a different question — the
+    # colour reference describes the SOURCE corpus's apple, and a restyle whose whole point is to
+    # change how the scene looks may not fire it at all. Pooling the two would make a block that
+    # answers neither.
+    after_filter = dict(getattr(context.masker, "filter_counters", {}) or {})
 
     fractions: list[float] = []
     ious: list[float] = []
@@ -1358,6 +1578,21 @@ def composite_clip(
         "fps": float(fps),
         "source_video": str(source_video),
         "mask_source_frames_from_cache": bool(from_cache),
+        "robot_mask_object_filter": {
+            "note": (
+                "PR-08 V9. Counted over the SOURCE frames of this clip only; the robot-mask IoU "
+                "diagnostic below masks the generated frames and is deliberately not pooled here. "
+                "All-zero counts with masks_from_cache true mean the masks predate this run, NOT "
+                "that the filter never fired — the cache key carries the filter, so a hit is a hit "
+                "against the same filter."
+            ),
+            "masks_from_cache": bool(from_cache),
+            "max_iou": float(ROBOT_MASK_OBJECT_MAX_IOU),
+            **{
+                name: int(after_filter.get(name, 0) - before_filter.get(name, 0))
+                for name in sorted(set(after_filter) | set(before_filter))
+            },
+        },
         "mask_area_fraction": {
             "min": float(np.min(fractions)),
             "mean": float(np.mean(fractions)),

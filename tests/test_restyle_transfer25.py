@@ -1097,6 +1097,10 @@ def test_the_recorded_mask_provenance_names_the_robot_prompt_and_not_the_apple_o
         TEXT_THRESHOLD = 0.25
         RETRY_BOX_THRESHOLD = 0.1
         RETRY_TEXT_THRESHOLD = 0.1
+        # The object-grounding filter's second opinion, named here because the real adapter names
+        # it and provenance() refuses a stub that cannot say which predicate decided a detection
+        # was the apple (PR-08 V9).
+        MASK_VALIDITY_REFERENCE = "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)"
 
     real = rc.Sam2RobotMasker()
     real._module = StubAdapter()
@@ -1132,6 +1136,10 @@ def test_the_record_says_that_upstream_s_retry_is_deliberately_not_run():
         TEXT_THRESHOLD = 0.25
         RETRY_BOX_THRESHOLD = 0.1
         RETRY_TEXT_THRESHOLD = 0.1
+        # The object-grounding filter's second opinion, named here because the real adapter names
+        # it and provenance() refuses a stub that cannot say which predicate decided a detection
+        # was the apple (PR-08 V9).
+        MASK_VALIDITY_REFERENCE = "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)"
 
     real = rc.Sam2RobotMasker()
     real._module = StubAdapter()
