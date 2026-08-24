@@ -1,0 +1,522 @@
+[
+ {
+  "tile": "t0006",
+  "episode": "episode_000212",
+  "frame": 56,
+  "area_at_tile": 697,
+  "area_min": 3,
+  "area_max": 2103,
+  "area_rel_range": 0.999,
+  "centroid_disp_px": 628.5
+ },
+ {
+  "tile": "t0048",
+  "episode": "episode_000008",
+  "frame": 82,
+  "area_at_tile": 707,
+  "area_min": 242,
+  "area_max": 975,
+  "area_rel_range": 0.752,
+  "centroid_disp_px": 428.1
+ },
+ {
+  "tile": "t0042",
+  "episode": "episode_000000",
+  "frame": 64,
+  "area_at_tile": 325,
+  "area_min": 49,
+  "area_max": 591,
+  "area_rel_range": 0.917,
+  "centroid_disp_px": 411.3
+ },
+ {
+  "tile": "t0071",
+  "episode": "episode_000300",
+  "frame": 294,
+  "area_at_tile": 48,
+  "area_min": 0,
+  "area_max": 301,
+  "area_rel_range": 1.0,
+  "centroid_disp_px": 359.7
+ },
+ {
+  "tile": "t0059",
+  "episode": "episode_000240",
+  "frame": 54,
+  "area_at_tile": 159,
+  "area_min": 0,
+  "area_max": 700,
+  "area_rel_range": 1.0,
+  "centroid_disp_px": 307.0
+ },
+ {
+  "tile": "t0040",
+  "episode": "episode_000168",
+  "frame": 374,
+  "area_at_tile": 118,
+  "area_min": 43,
+  "area_max": 149,
+  "area_rel_range": 0.711,
+  "centroid_disp_px": 301.1
+ },
+ {
+  "tile": "t0061",
+  "episode": "episode_000360",
+  "frame": 38,
+  "area_at_tile": 323,
+  "area_min": 323,
+  "area_max": 1737,
+  "area_rel_range": 0.814,
+  "centroid_disp_px": 261.0
+ },
+ {
+  "tile": "t0063",
+  "episode": "episode_000360",
+  "frame": 426,
+  "area_at_tile": 769,
+  "area_min": 448,
+  "area_max": 1268,
+  "area_rel_range": 0.647,
+  "centroid_disp_px": 220.9
+ },
+ {
+  "tile": "t0029",
+  "episode": "episode_000272",
+  "frame": 62,
+  "area_at_tile": 314,
+  "area_min": 80,
+  "area_max": 574,
+  "area_rel_range": 0.861,
+  "centroid_disp_px": 168.8
+ },
+ {
+  "tile": "t0049",
+  "episode": "episode_000008",
+  "frame": 348,
+  "area_at_tile": 808,
+  "area_min": 374,
+  "area_max": 1578,
+  "area_rel_range": 0.763,
+  "centroid_disp_px": 156.1
+ },
+ {
+  "tile": "t0036",
+  "episode": "episode_000272",
+  "frame": 290,
+  "area_at_tile": 334,
+  "area_min": 254,
+  "area_max": 5724,
+  "area_rel_range": 0.956,
+  "centroid_disp_px": 133.3
+ },
+ {
+  "tile": "t0050",
+  "episode": "episode_000320",
+  "frame": 422,
+  "area_at_tile": 722,
+  "area_min": 526,
+  "area_max": 2235,
+  "area_rel_range": 0.765,
+  "centroid_disp_px": 128.9
+ },
+ {
+  "tile": "t0068",
+  "episode": "episode_000260",
+  "frame": 64,
+  "area_at_tile": 1134,
+  "area_min": 95,
+  "area_max": 3508,
+  "area_rel_range": 0.973,
+  "centroid_disp_px": 120.9
+ },
+ {
+  "tile": "t0017",
+  "episode": "episode_000360",
+  "frame": 28,
+  "area_at_tile": 733,
+  "area_min": 433,
+  "area_max": 2311,
+  "area_rel_range": 0.813,
+  "centroid_disp_px": 113.0
+ },
+ {
+  "tile": "t0015",
+  "episode": "episode_000028",
+  "frame": 80,
+  "area_at_tile": 844,
+  "area_min": 480,
+  "area_max": 1173,
+  "area_rel_range": 0.591,
+  "centroid_disp_px": 106.2
+ },
+ {
+  "tile": "t0037",
+  "episode": "episode_000128",
+  "frame": 294,
+  "area_at_tile": 545,
+  "area_min": 154,
+  "area_max": 1169,
+  "area_rel_range": 0.868,
+  "centroid_disp_px": 96.8
+ },
+ {
+  "tile": "t0070",
+  "episode": "episode_000320",
+  "frame": 20,
+  "area_at_tile": 4080,
+  "area_min": 1832,
+  "area_max": 4514,
+  "area_rel_range": 0.594,
+  "centroid_disp_px": 89.8
+ },
+ {
+  "tile": "t0035",
+  "episode": "episode_000352",
+  "frame": 34,
+  "area_at_tile": 1113,
+  "area_min": 656,
+  "area_max": 1946,
+  "area_rel_range": 0.663,
+  "centroid_disp_px": 88.2
+ },
+ {
+  "tile": "t0027",
+  "episode": "episode_000040",
+  "frame": 54,
+  "area_at_tile": 1454,
+  "area_min": 0,
+  "area_max": 2847,
+  "area_rel_range": 1.0,
+  "centroid_disp_px": 72.4
+ },
+ {
+  "tile": "t0058",
+  "episode": "episode_000040",
+  "frame": 56,
+  "area_at_tile": 1971,
+  "area_min": 181,
+  "area_max": 3140,
+  "area_rel_range": 0.942,
+  "centroid_disp_px": 71.3
+ },
+ {
+  "tile": "t0034",
+  "episode": "episode_000352",
+  "frame": 32,
+  "area_at_tile": 1183,
+  "area_min": 610,
+  "area_max": 1806,
+  "area_rel_range": 0.662,
+  "centroid_disp_px": 70.5
+ },
+ {
+  "tile": "t0022",
+  "episode": "episode_000352",
+  "frame": 0,
+  "area_at_tile": 32,
+  "area_min": 32,
+  "area_max": 62,
+  "area_rel_range": 0.484,
+  "centroid_disp_px": 59.7
+ },
+ {
+  "tile": "t0044",
+  "episode": "episode_000168",
+  "frame": 56,
+  "area_at_tile": 1771,
+  "area_min": 106,
+  "area_max": 4267,
+  "area_rel_range": 0.975,
+  "centroid_disp_px": 56.6
+ },
+ {
+  "tile": "t0039",
+  "episode": "episode_000272",
+  "frame": 66,
+  "area_at_tile": 574,
+  "area_min": 301,
+  "area_max": 984,
+  "area_rel_range": 0.694,
+  "centroid_disp_px": 55.6
+ },
+ {
+  "tile": "t0067",
+  "episode": "episode_000180",
+  "frame": 44,
+  "area_at_tile": 1305,
+  "area_min": 312,
+  "area_max": 3719,
+  "area_rel_range": 0.916,
+  "centroid_disp_px": 53.4
+ },
+ {
+  "tile": "t0021",
+  "episode": "episode_000180",
+  "frame": 42,
+  "area_at_tile": 1096,
+  "area_min": 158,
+  "area_max": 3225,
+  "area_rel_range": 0.951,
+  "centroid_disp_px": 53.0
+ },
+ {
+  "tile": "t0007",
+  "episode": "episode_000180",
+  "frame": 40,
+  "area_at_tile": 798,
+  "area_min": 2,
+  "area_max": 2581,
+  "area_rel_range": 0.999,
+  "centroid_disp_px": 47.3
+ },
+ {
+  "tile": "t0012",
+  "episode": "episode_000180",
+  "frame": 46,
+  "area_at_tile": 1834,
+  "area_min": 577,
+  "area_max": 4248,
+  "area_rel_range": 0.864,
+  "centroid_disp_px": 46.7
+ },
+ {
+  "tile": "t0069",
+  "episode": "episode_000000",
+  "frame": 84,
+  "area_at_tile": 927,
+  "area_min": 654,
+  "area_max": 927,
+  "area_rel_range": 0.294,
+  "centroid_disp_px": 46.0
+ },
+ {
+  "tile": "t0028",
+  "episode": "episode_000360",
+  "frame": 52,
+  "area_at_tile": 407,
+  "area_min": 407,
+  "area_max": 2644,
+  "area_rel_range": 0.846,
+  "centroid_disp_px": 36.8
+ },
+ {
+  "tile": "t0031",
+  "episode": "episode_000360",
+  "frame": 462,
+  "area_at_tile": 663,
+  "area_min": 624,
+  "area_max": 682,
+  "area_rel_range": 0.085,
+  "centroid_disp_px": 30.3
+ },
+ {
+  "tile": "t0046",
+  "episode": "episode_000220",
+  "frame": 4,
+  "area_at_tile": 298,
+  "area_min": 209,
+  "area_max": 408,
+  "area_rel_range": 0.488,
+  "centroid_disp_px": 30.0
+ },
+ {
+  "tile": "t0051",
+  "episode": "episode_000180",
+  "frame": 48,
+  "area_at_tile": 2581,
+  "area_min": 798,
+  "area_max": 5023,
+  "area_rel_range": 0.841,
+  "centroid_disp_px": 27.7
+ },
+ {
+  "tile": "t0020",
+  "episode": "episode_000180",
+  "frame": 36,
+  "area_at_tile": 312,
+  "area_min": 0,
+  "area_max": 1305,
+  "area_rel_range": 1.0,
+  "centroid_disp_px": 22.7
+ },
+ {
+  "tile": "t0055",
+  "episode": "episode_000340",
+  "frame": 334,
+  "area_at_tile": 173,
+  "area_min": 165,
+  "area_max": 476,
+  "area_rel_range": 0.653,
+  "centroid_disp_px": 19.4
+ },
+ {
+  "tile": "t0065",
+  "episode": "episode_000080",
+  "frame": 98,
+  "area_at_tile": 878,
+  "area_min": 682,
+  "area_max": 974,
+  "area_rel_range": 0.3,
+  "centroid_disp_px": 16.9
+ },
+ {
+  "tile": "t0054",
+  "episode": "episode_000160",
+  "frame": 22,
+  "area_at_tile": 251,
+  "area_min": 121,
+  "area_max": 303,
+  "area_rel_range": 0.601,
+  "centroid_disp_px": 13.8
+ },
+ {
+  "tile": "t0026",
+  "episode": "episode_000080",
+  "frame": 110,
+  "area_at_tile": 1682,
+  "area_min": 899,
+  "area_max": 2253,
+  "area_rel_range": 0.601,
+  "centroid_disp_px": 13.7
+ },
+ {
+  "tile": "t0002",
+  "episode": "episode_000360",
+  "frame": 498,
+  "area_at_tile": 668,
+  "area_min": 643,
+  "area_max": 678,
+  "area_rel_range": 0.052,
+  "centroid_disp_px": 13.3
+ },
+ {
+  "tile": "t0004",
+  "episode": "episode_000280",
+  "frame": 24,
+  "area_at_tile": 275,
+  "area_min": 18,
+  "area_max": 887,
+  "area_rel_range": 0.98,
+  "centroid_disp_px": 9.0
+ },
+ {
+  "tile": "t0000",
+  "episode": "episode_000100",
+  "frame": 428,
+  "area_at_tile": 400,
+  "area_min": 278,
+  "area_max": 400,
+  "area_rel_range": 0.305,
+  "centroid_disp_px": 7.3
+ },
+ {
+  "tile": "t0062",
+  "episode": "episode_000000",
+  "frame": 0,
+  "area_at_tile": 76,
+  "area_min": 72,
+  "area_max": 76,
+  "area_rel_range": 0.053,
+  "centroid_disp_px": 5.8
+ },
+ {
+  "tile": "t0073",
+  "episode": "episode_000000",
+  "frame": 38,
+  "area_at_tile": 64,
+  "area_min": 60,
+  "area_max": 128,
+  "area_rel_range": 0.531,
+  "centroid_disp_px": 5.3
+ },
+ {
+  "tile": "t0010",
+  "episode": "episode_000380",
+  "frame": 10,
+  "area_at_tile": 1555,
+  "area_min": 1488,
+  "area_max": 1809,
+  "area_rel_range": 0.177,
+  "centroid_disp_px": 5.0
+ },
+ {
+  "tile": "t0072",
+  "episode": "episode_000380",
+  "frame": 22,
+  "area_at_tile": 2484,
+  "area_min": 1605,
+  "area_max": 4468,
+  "area_rel_range": 0.641,
+  "centroid_disp_px": 4.6
+ },
+ {
+  "tile": "t0024",
+  "episode": "episode_000360",
+  "frame": 480,
+  "area_at_tile": 664,
+  "area_min": 637,
+  "area_max": 690,
+  "area_rel_range": 0.077,
+  "centroid_disp_px": 3.9
+ },
+ {
+  "tile": "t0075",
+  "episode": "episode_000232",
+  "frame": 0,
+  "area_at_tile": 222,
+  "area_min": 183,
+  "area_max": 232,
+  "area_rel_range": 0.211,
+  "centroid_disp_px": 3.5
+ },
+ {
+  "tile": "t0056",
+  "episode": "episode_000060",
+  "frame": 346,
+  "area_at_tile": 2023,
+  "area_min": 1995,
+  "area_max": 2191,
+  "area_rel_range": 0.089,
+  "centroid_disp_px": 2.8
+ },
+ {
+  "tile": "t0025",
+  "episode": "episode_000232",
+  "frame": 34,
+  "area_at_tile": 174,
+  "area_min": 117,
+  "area_max": 180,
+  "area_rel_range": 0.35,
+  "centroid_disp_px": 2.5
+ },
+ {
+  "tile": "t0018",
+  "episode": "episode_000008",
+  "frame": 408,
+  "area_at_tile": 243,
+  "area_min": 222,
+  "area_max": 246,
+  "area_rel_range": 0.098,
+  "centroid_disp_px": 2.2
+ },
+ {
+  "tile": "t0047",
+  "episode": "episode_000380",
+  "frame": 0,
+  "area_at_tile": 1525,
+  "area_min": 1488,
+  "area_max": 1580,
+  "area_rel_range": 0.058,
+  "centroid_disp_px": 1.2
+ },
+ {
+  "tile": "t0041",
+  "episode": "episode_000100",
+  "frame": 0,
+  "area_at_tile": 538,
+  "area_min": 527,
+  "area_max": 538,
+  "area_rel_range": 0.02,
+  "centroid_disp_px": 0.9
+ }
+]
