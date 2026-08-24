@@ -1061,12 +1061,19 @@ for s in chosen:
 # slicing its style list would take all ten repeats or none. Arm C stays frame-matched only if both
 # sides are cut the same way, and the seeds prove it: train styles 0..3 carry 7001..7004 and
 # identity repeats 0..3 carry the same four, so a prefix on each side spans the same seed block.
-def repeat_span(s):
-    """The half-open repeat range of style ``s`` under this stage."""
+def repeat_span(s, kset):
+    """The half-open repeat range of style ``s`` of set ``kset`` under this stage.
+
+    WHICH AXIS A SET IS CUT ON IS A PROPERTY OF THE SET, NOT OF THE STYLE'S REPEAT COUNT, and
+    getting that backwards is a latent bug the committed partition happens to hide: every TRAIN
+    style there carries repeats=1, so a rule keyed on "n > 1" behaves identically to the right one
+    today and diverges the moment a train style gains a repeat. TRAIN and EVAL are staged by
+    slicing the STYLE LIST, so a style that is in this stage is in it WHOLE — cutting its repeats
+    as well would drop clips out of both stages and out of the partition. Only IDENTITY, which is
+    one style carrying all ten instances, is cut on the repeat axis.
+    """
     n = repeats_of(s)
-    if stage == "all" or n == 1:
-        # repeats=1 styles are whole in whichever stage their style slice put them; there is no
-        # repeat axis to cut. Cutting one anyway would silently drop the style from both stages.
+    if stage == "all" or kset != "identity":
         return 0, n
     if n <= k1:
         sys.exit(f"FATAL: style {s['id']!r} has repeats={n}, which is not more than the stage-1 "
@@ -1077,6 +1084,16 @@ def repeat_span(s):
 
 
 if stage != "all":
+    # THE REPEAT-AXIS CUT IS ONLY WELL-DEFINED FOR ONE STYLE. With two identity styles at five
+    # repeats each, taking repeats 0..k-1 of EACH yields 2k instances rather than k, so stage 1
+    # would quietly draw twice its share and arm C would stop being frame-matched by exactly the
+    # factor nobody looked at. The committed partition has one (identity-source, repeats=10); a
+    # rendering with more is not that partition and is refused rather than reinterpreted.
+    if len(styles.get("identity") or []) > 1:
+        sys.exit(f"FATAL: the rendering carries {len(styles['identity'])} identity styles. "
+                 "T40_RULE_V11 §2 stages arm C by slicing the REPEAT range of its single style, "
+                 "and that cut is not well defined across several. Stage this partition only "
+                 "after registering how arm C is to be divided.")
     if style_set == "train":
         if len(chosen) <= k1:
             sys.exit(f"FATAL: '{style_set}' has {len(chosen)} styles, which is not more than the "
@@ -1102,7 +1119,7 @@ for kset in SETS:
     if stage == "1" and kset == "eval":
         staged[kset] = 0          # deferred, not cut. Priced at zero for stage 1.
         continue
-    staged[kset] = sum(b - a for s in pool for a, b in [repeat_span(s)])
+    staged[kset] = sum(b - a for s in pool for a, b in [repeat_span(s, kset)])
 
 # -- the whole partition, priced here so the ceiling gate can be about the EXPERIMENT -------------
 # The gate below enforces TWO bounds (T40_RULE_V2 §3): the whole-partition projection against
@@ -1163,7 +1180,7 @@ if stage != "all" and "train" in staged and "identity" in staged:
         pool = styles[kset]
         if kset == "train":
             pool = pool[:k1] if stage == "1" else pool[k1:]
-        return {x for s in pool for x in seeds_of(s)[slice(*repeat_span(s))]}
+        return {x for s in pool for x in seeds_of(s)[slice(*repeat_span(s, kset))]}
     if staged_seeds("train") != staged_seeds("identity"):
         sys.exit(f"FATAL: ARM B AND ARM C DO NOT SPAN THE SAME SEED SET AT STAGE {stage}: "
                  f"{sorted(staged_seeds('train'))} vs {sorted(staged_seeds('identity'))}. Equal "
@@ -1176,7 +1193,7 @@ with open(out, "w") as f:
     for e in mine:
         for s in chosen:
             style_seeds = seeds_of(s)
-            lo, hi = repeat_span(s)
+            lo, hi = repeat_span(s, style_set)
             for r in range(lo, hi):
                 # The unit id carries the repeat on EVERY style, including the repeats=1 ones. A
                 # suffix only where it is needed would make two naming schemes, and the clip files
