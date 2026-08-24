@@ -5,7 +5,7 @@
 #   measure first, it is a GATE and not a warm-up (PR-08 §8 item 3). PR-08 §1 licenses "timing one
 #   episode on an H200" WITHOUT waiting for T-39, so the timing path asks for neither a T-39
 #   attestation nor a budget — the budget is what it MEASURES. See (a) and (c) below:
-#       TIMING=1 STYLE_SET=train CHUNK_INDEX=1 CHUNK_TOTAL=1 CONTROL=depth:0.5,seg:0.5 \
+#       TIMING=1 STAGE=1 STYLE_SET=train CHUNK_INDEX=1 CHUNK_TOTAL=1 CONTROL=depth:0.5,seg:0.5 \
 #         sbatch --time=01:30:00 97_transfer25_restyle.sbatch
 #
 #   THE --time OVERRIDE IS PART OF THE RECIPE, NOT A TWEAK. The #SBATCH --time=04:00:00 below is
@@ -20,8 +20,18 @@
 #   then one submission per chunk, at most 4 in flight (MaxJobsPU=4):
 #       PR08_T39_REPORTED="<verdict letter> ... <YYYY-MM-DD>" PR08_T39_ARTIFACT=<path> \
 #         PARTITION_CEILING_GPU_H=<whole partition> CEILING_GPU_H=<this style set's share> \
-#         GEOM_STEP_FRAMES=<registered step> STYLE_SET=train CONTROL=<key:weight,...> \
+#         GEOM_STEP_FRAMES=<registered step> STAGE=1 STYLE_SET=train CONTROL=<key:weight,...> \
 #         CHUNK_INDEX=1 CHUNK_TOTAL=4 sbatch 97_transfer25_restyle.sbatch
+#
+#   STAGE IS REQUIRED AND HAS NO DEFAULT (T40_RULE_V11, adopted 2026-08-24). `1` is the first four
+#   TRAIN_STYLES in committed order plus their four matched identity repeats — 8 of 25 style-
+#   instances, 3 216 clips, ~442 GPU-h against the whole partition's ~1 380 — with the eval set
+#   DEFERRED, not cut. `2` is the complement (six train styles, six identity repeats, all five eval
+#   styles) and V11 §3 fixes IN ADVANCE which stage-1 outcome licenses it. `all` is the unstaged
+#   committed partition. STAGE=1 with STYLE_SET=eval is refused, because deferring the eval set is
+#   the point rather than an oversight. The stage is hashed into WORK_SHA, carried in CHUNK_TAG,
+#   stamped in chunk.env and recorded on every clip's sidecar, so two stages can neither resume
+#   into one another's directory nor be told apart later by guesswork.
 #
 #   THE TWO GPU-h NUMBERS, AND WHY THERE ARE TWO (changed 2026-08-15 — see (e) below).
 #     PARTITION_CEILING_GPU_H  the ceiling T40_RULE_V2 §3 step 2 requires: derived from the timed
@@ -359,11 +369,30 @@ if [[ "${TIMING:-0}" != "0" ]]; then TIMING_MODE=1; fi
 : "${CHUNK_INDEX:?1-based chunk number. Chunking is not optional under 4 h MaxWall (PR-08 §8 item 3).}"
 : "${CHUNK_TOTAL:?how many chunks this run is split into. At most 4 may be in flight (MaxJobsPU=4).}"
 : "${CONTROL:?which Transfer2.5 control blocks condition the restyle and at what weight, e.g. depth:0.5,seg:0.5. Required on BOTH paths and never defaulted, for the reason restyle_transfer25.py refuses to default it: the choice decides how much geometry survives, which is exactly what PR-08 §6 G0b measures, so picking it after looking at clips is the failure the committed style partition exists to prevent. It also decides the TIMING number — our manifest carries no depth or segmentation maps, so each control block Transfer2.5 has to ESTIMATE is GPU time the measurement must include.}"
+: "${STAGE:?which stage of the committed partition to generate: 1 | 2 | all. T40_RULE_V11, adopted 2026-08-24. Stage 1 is the first four TRAIN_STYLES in committed order plus their four matched identity repeats — 8 of 25 style-instances, ~442 GPU-h instead of ~1380 — and the eval set is DEFERRED, so STAGE=1 with STYLE_SET=eval is refused rather than quietly generated. Stage 2 is the complement, and V11 §3 fixes IN ADVANCE which stage-1 outcome licenses it. `all` is the unstaged committed partition and is what a run that is not staging should pass. There is deliberately NO default: defaulting to `all` would spend the full partition for a missing variable, and defaulting to `1` would silently truncate a run that meant the whole thing.}"
 
 case "${STYLE_SET}" in
   train|eval|identity) ;;
   *) echo "FATAL: STYLE_SET=${STYLE_SET} is not one of train|eval|identity."; exit 1 ;;
 esac
+# THE STAGE IS NOT A STYLE COUNT AND IS NOT OPERATOR-SIZED. T40_RULE_V11 §2 fixes k = 4 as the
+# stage-1 prefix length, in committed order, and §2.4 is explicit that the selector is the owed
+# change: the alternative — editing configs/transfer25/styles.toml — is forbidden by V11 §0 because
+# the partition hash is the provenance of every clip. So the prefix length lives here as a constant
+# citing the rule, and no environment variable can move it. An operator who wants a different k is
+# asking for a different rule, not a different submission.
+case "${STAGE}" in
+  1|2|all) ;;
+  *) echo "FATAL: STAGE=${STAGE} is not one of 1|2|all (T40_RULE_V11 §2)."; exit 1 ;;
+esac
+STAGE1_TRAIN_STYLES=4          # T40_RULE_V11 §2. Not a knob.
+if [[ "${STAGE}" == "1" && "${STYLE_SET}" == "eval" ]]; then
+  echo "FATAL: STAGE=1 with STYLE_SET=eval. T40_RULE_V11 §2 DEFERS the eval set out of stage 1;"
+  echo "       it is deferred, not cut, and it is generated in stage 2. Generating it now would"
+  echo "       spend the eval budget before the stage-1 result that decides whether stage 2"
+  echo "       happens at all, which is the whole point of staging."
+  exit 1
+fi
 [[ "${CHUNK_TOTAL}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: CHUNK_TOTAL=${CHUNK_TOTAL} is not a positive integer."; exit 1; }
 [[ "${CHUNK_INDEX}" =~ ^[1-9][0-9]*$ ]] || { echo "FATAL: CHUNK_INDEX=${CHUNK_INDEX} is not a positive integer."; exit 1; }
 (( CHUNK_INDEX <= CHUNK_TOTAL )) || { echo "FATAL: CHUNK_INDEX=${CHUNK_INDEX} > CHUNK_TOTAL=${CHUNK_TOTAL}."; exit 1; }
@@ -563,7 +592,13 @@ WAM=${PROJ}/wam
 RUN_ID=${RUN_ID:-t040-transfer25-restyle}
 OUT=${PROJ}/runs/${RUN_ID}
 # Job-id-independent, so --open-mode=append accumulates one log per chunk across every pass.
-CHUNK_TAG=$(printf '%s-%02dof%02d' "${STYLE_SET}" "${CHUNK_INDEX}" "${CHUNK_TOTAL}")
+# The STAGE is in the tag, not only in the stamp below. Without it stage 1 and stage 2 of the same
+# style set and chunk number resolve to ONE directory, and the stamp check would refuse the second
+# with a WORK_SHA mismatch — a true diagnostic pointing at the wrong cause. With it they are simply
+# different runs. (CLIPS is deliberately NOT staged: the stages generate disjoint styles and
+# disjoint identity repeats, so their unit ids cannot collide, and the corpus a consumer reads is
+# the union of the stages rather than one of them.)
+CHUNK_TAG=$(printf 's%s-%s-%02dof%02d' "${STAGE}" "${STYLE_SET}" "${CHUNK_INDEX}" "${CHUNK_TOTAL}")
 CHUNK_DIR=${OUT}/chunks/${CHUNK_TAG}
 CLIPS=${OUT}/clips/${STYLE_SET}
 RAW=${CHUNK_DIR}/_raw
@@ -844,10 +879,11 @@ source "${FRAMEWORK}/.venv/bin/activate"
 WORK_LIST=${CHUNK_DIR}/work.jsonl
 PARTITION_FACTS=${CHUNK_DIR}/partition_facts.json
 python - "${SOURCE}/manifest.json" "${STYLE_PARTITION}" "${STYLE_SET}" \
-         "${CHUNK_INDEX}" "${CHUNK_TOTAL}" "${WORK_LIST}" "${TIMING_MODE}" "${PARTITION_FACTS}" <<'PY'
+         "${CHUNK_INDEX}" "${CHUNK_TOTAL}" "${WORK_LIST}" "${TIMING_MODE}" "${PARTITION_FACTS}" \
+         "${STAGE}" "${STAGE1_TRAIN_STYLES}" <<'PY'
 import hashlib, json, pathlib, re, sys
-man_p, styles_p, style_set, idx, total, out, timing, facts_p = sys.argv[1:9]
-idx, total, timing = int(idx), int(total), int(timing)
+man_p, styles_p, style_set, idx, total, out, timing, facts_p, stage, k1 = sys.argv[1:11]
+idx, total, timing, k1 = int(idx), int(total), int(timing), int(k1)
 man = json.loads(pathlib.Path(man_p).read_text())
 res = tuple(man.get("resolution") or ())
 if res != (640, 480):
@@ -1013,6 +1049,61 @@ for s in chosen:
         sys.exit(f"FATAL: a style in '{style_set}' has no id or no prompt: {s!r}")
     repeats_of(s)
 
+# -- T40_RULE_V11's stage selector ----------------------------------------------------------------
+# THE STAGE IS A PREFIX OF THE COMMITTED ORDER, NEVER A SELECTION. §2 names stage 1's four styles
+# explicitly and in the order styles.toml already carries them, so the selector takes a slice and
+# does not sort, filter or choose. Anything else would let the stage be picked after seeing which
+# styles rendered well, which is the failure the committed partition exists to prevent.
+#
+# THE TWO SETS ARE STAGED DIFFERENTLY BECAUSE THEY ARE SHAPED DIFFERENTLY, and this is the part
+# §2.4 flags as easy to get wrong. TRAIN is ten styles at repeats=1, so its stage is a slice of the
+# STYLE LIST. IDENTITY is ONE style at repeats=10, so its stage is a slice of the REPEAT RANGE —
+# slicing its style list would take all ten repeats or none. Arm C stays frame-matched only if both
+# sides are cut the same way, and the seeds prove it: train styles 0..3 carry 7001..7004 and
+# identity repeats 0..3 carry the same four, so a prefix on each side spans the same seed block.
+def repeat_span(s):
+    """The half-open repeat range of style ``s`` under this stage."""
+    n = repeats_of(s)
+    if stage == "all" or n == 1:
+        # repeats=1 styles are whole in whichever stage their style slice put them; there is no
+        # repeat axis to cut. Cutting one anyway would silently drop the style from both stages.
+        return 0, n
+    if n <= k1:
+        sys.exit(f"FATAL: style {s['id']!r} has repeats={n}, which is not more than the stage-1 "
+                 f"prefix k={k1}, so stage 2 would be empty for it. T40_RULE_V11 §2 sizes the "
+                 "stages against the committed partition (identity repeats=10, k=4); this "
+                 "rendering is not that partition.")
+    return (0, k1) if stage == "1" else (k1, n)
+
+
+if stage != "all":
+    if style_set == "train":
+        if len(chosen) <= k1:
+            sys.exit(f"FATAL: '{style_set}' has {len(chosen)} styles, which is not more than the "
+                     f"stage-1 prefix k={k1}: stage 2 would be empty. T40_RULE_V11 §2 sizes the "
+                     "stages against the committed partition (10 train styles, k=4).")
+        chosen = chosen[:k1] if stage == "1" else chosen[k1:]
+    elif style_set == "eval":
+        # STAGE=1 + eval was already refused in bash, before a GPU was asked for. Stage 2 takes the
+        # eval set whole: §2 defers it out of stage 1, it does not split it.
+        pass
+    # identity is cut on the repeat axis by repeat_span(), not here.
+
+# What THIS invocation will actually emit, per episode — the number the ceiling gate must price and
+# the arm-C guard must compare. Computed for every set, not just this one, because a stage-level
+# frame-match is a statement about two sets at once and this invocation only generates one of them.
+staged = {}
+for kset in SETS:
+    if kset not in styles:
+        continue
+    pool = styles[kset]
+    if stage != "all" and kset == "train":
+        pool = pool[:k1] if stage == "1" else pool[k1:]
+    if stage == "1" and kset == "eval":
+        staged[kset] = 0          # deferred, not cut. Priced at zero for stage 1.
+        continue
+    staged[kset] = sum(b - a for s in pool for a, b in [repeat_span(s)])
+
 # -- the whole partition, priced here so the ceiling gate can be about the EXPERIMENT -------------
 # The gate below enforces TWO bounds (T40_RULE_V2 §3): the whole-partition projection against
 # PARTITION_CEILING_GPU_H, and this style set's projection against its CEILING_GPU_H share. Only
@@ -1051,6 +1142,33 @@ if "train" in instances and "identity" in instances and instances["train"] != in
     sys.exit(f"FATAL: ARM C IS NOT FRAME-MATCHED. The expansion gives arm B "
              f"{instances['train']} clips per episode and arm C {instances['identity']}. PR-08 §5 "
              "requires the same frame count; unequal, B − C confounds diversity with volume.")
+# THE SAME PROPERTY, AT STAGE LEVEL, WHICH IS THE ONE THAT IS ACTUALLY GENERATED.
+# T40_RULE_V11 §2.4: the guard above is computed over the WHOLE rendering and is independent of
+# `chosen`, so under staging it passes at 10 == 10 while saying NOTHING about the stage. A stage
+# that generated four train styles against ten identity repeats would clear every other check in
+# this file and produce an arm C with 2.5x arm B's volume — B − C would then measure volume and be
+# read as diversity. This is the enforcement behind V11 §0's promise that B and C stay matched "at
+# every stage", and until 2026-08-24 that promise had none.
+if stage != "all" and "train" in staged and "identity" in staged:
+    if staged["train"] != staged["identity"]:
+        sys.exit(f"FATAL: ARM C IS NOT FRAME-MATCHED AT STAGE {stage}. This stage gives arm B "
+                 f"{staged['train']} clips per episode and arm C {staged['identity']}. The whole-"
+                 f"partition guard above passes ({instances.get('train')} == "
+                 f"{instances.get('identity')}) and is not the property that matters here: PR-08 §5 "
+                 "requires the frame match in what is GENERATED, and this stage is what is "
+                 "generated. T40_RULE_V11 §2.4.")
+    # Seeds too, for the reason the whole-file check at the top exists: equal COUNTS drawn from
+    # different seed blocks is still a confound, and it is the one a count comparison cannot see.
+    def staged_seeds(kset):
+        pool = styles[kset]
+        if kset == "train":
+            pool = pool[:k1] if stage == "1" else pool[k1:]
+        return {x for s in pool for x in seeds_of(s)[slice(*repeat_span(s))]}
+    if staged_seeds("train") != staged_seeds("identity"):
+        sys.exit(f"FATAL: ARM B AND ARM C DO NOT SPAN THE SAME SEED SET AT STAGE {stage}: "
+                 f"{sorted(staged_seeds('train'))} vs {sorted(staged_seeds('identity'))}. Equal "
+                 "clip counts over different seeds is still a confound; arm C exists to isolate "
+                 "the generator's fingerprint, and it can only do that seed for seed.")
 
 mine = eps[idx - 1::total]
 rows, frames = [], 0
@@ -1058,19 +1176,26 @@ with open(out, "w") as f:
     for e in mine:
         for s in chosen:
             style_seeds = seeds_of(s)
-            for r in range(repeats_of(s)):
+            lo, hi = repeat_span(s)
+            for r in range(lo, hi):
                 # The unit id carries the repeat on EVERY style, including the repeats=1 ones. A
                 # suffix only where it is needed would make two naming schemes, and the clip files
                 # are named after the unit — so `__r00` present everywhere is also the cheapest
                 # way to tell a repeat-expanded tree from a pre-fix one by `ls`.
                 unit = f'{e["id"]}__{s["id"]}__r{r:02d}'
+                # `stage` travels WITH the clip, per T40_RULE_V11 §2.4's "recorded per clip". The
+                # unit id deliberately does not encode it: the stages hold disjoint styles and
+                # disjoint identity repeats, so the id is already unique, and putting the stage in
+                # the filename would make a clip's name depend on a decision about scheduling
+                # rather than on what the clip IS.
                 row = {"unit": unit, "episode": e["id"], "frames": int(e["frames"]),
-                       "style": s["id"], "repeat": r, "seed": style_seeds[r]}
+                       "style": s["id"], "repeat": r, "seed": style_seeds[r], "stage": stage}
                 f.write(json.dumps(row) + "\n")
-                # Seed in the hashed material, not just the unit id: a resume under a different
-                # seed list is a different experiment in the same directory, and the stamp check
-                # below is the only thing that could ever notice.
-                rows.append(f'{unit}|{style_seeds[r]}')
+                # Seed and stage in the hashed material, not just the unit id: a resume under a
+                # different seed list — or under a different stage — is a different experiment in
+                # the same directory, and the stamp check below is the only thing that could ever
+                # notice.
+                rows.append(f'{unit}|{style_seeds[r]}|s{stage}')
                 frames += int(e["frames"])
 sha = hashlib.sha256("\n".join(rows).encode()).hexdigest()
 pathlib.Path(out + ".sha256").write_text(sha + "\n")
@@ -1086,10 +1211,25 @@ pathlib.Path(facts_p).write_text(json.dumps({
     "seeds_used_by_set": {k: sorted(v) for k, v in seeds_used.items()},
     "repeats_by_style": {s["id"]: repeats_of(s) for k in SETS if k in styles for s in styles[k]},
     "this_set": style_set, "this_set_instances_per_episode": instances[style_set],
+    # -- T40_RULE_V11 ----------------------------------------------------------------------------
+    # The ceiling gate reads THIS file, so the staged numbers have to reach it here or the gate
+    # prices a stage against the whole set's share and refuses a run that is well inside budget.
+    # `stage_instances_per_set` is what this stage emits; `style_instances_per_set` above is left
+    # untouched and still describes the whole committed partition, because the whole-partition
+    # ceiling is a bound on the EXPERIMENT and does not move when one invocation generates less.
+    "stage": stage,
+    "stage_rule": "T40_RULE_V11 §2 (adopted 2026-08-24)",
+    "stage1_train_styles": k1,
+    "stage_instances_per_set": staged,
+    "this_stage_instances_per_episode": staged.get(style_set, instances[style_set]),
+    "stage_styles": [s["id"] for s in chosen],
+    "stage_clips": len(eps) * staged.get(style_set, instances[style_set]),
+    "stage_frames": corpus_frames * staged.get(style_set, instances[style_set]),
 }, indent=2) + "\n")
 print(f"chunk {idx}/{total}: {len(mine)} episodes, {len(chosen)} styles, "
-      f"{instances[style_set]} clips/episode in set '{style_set}', {len(rows)} units, "
-      f"{frames} frames  sha256 {sha[:16]}")
+      f"{staged.get(style_set, instances[style_set])} clips/episode in set '{style_set}' "
+      f"at stage {stage}, {len(rows)} units, {frames} frames  sha256 {sha[:16]}")
+print(f"stage {stage}: {staged} instances/episode by set, styles {[s['id'] for s in chosen]}")
 print(f"whole partition: {partition_instances} style-instances ({instances}), "
       f"{partition_clips} clips, {partition_frames} frames over {len(eps)} episodes")
 PY
@@ -1103,7 +1243,7 @@ PARTITION_FRAMES=$(python -c 'import json,sys;print(json.load(open(sys.argv[1]))
 # different one would silently be a different experiment in the same directory and nothing
 # downstream could detect it. Pin on pass 1, refuse to contradict it afterwards.
 ENV_FILE=${CHUNK_DIR}/chunk.env
-STAMP="RUN_ID=${RUN_ID} STYLE_SET=${STYLE_SET} CHUNK=${CHUNK_INDEX}/${CHUNK_TOTAL} \
+STAMP="RUN_ID=${RUN_ID} STYLE_SET=${STYLE_SET} STAGE=${STAGE} CHUNK=${CHUNK_INDEX}/${CHUNK_TOTAL} \
 WORK_SHA=${WORK_SHA} STYLES_CONTENT_SHA=${STYLES_CONTENT_SHA} SOURCE=${SOURCE} \
 CKPT=${TRANSFER_CHECKPOINT_PATH} REV=${TRANSFER_MODEL_REVISION} RES=640x480 NPROC=${NPROC}"
 if [[ -f "${ENV_FILE}" ]]; then
@@ -1523,7 +1663,15 @@ projected_chunk = spf * chunk_frames * nproc / 3600.0
 # quietly approves a set that does not fit its share. The corpus frame count and this set's
 # style-instance count are both in partition_facts.json, so the set can be priced from the corpus
 # instead of extrapolated from a sample of it.
-projected_style_set = (spf * int(facts["corpus_frames"]) * instances[style_set] * nproc / 3600.0)
+# ...and it is the STAGE's instance count, not the whole set's, once T40_RULE_V11 is staging.
+# partition_facts.json carries both: `style_instances_per_set` is the committed partition and does
+# not move, `stage_instances_per_set` is what this invocation will actually emit. Pricing a stage
+# at the whole set's count would refuse a run that is well inside its share — stage 1 draws 4 of
+# train's 10 instances — and, worse, would make the share meaningless as a bound on what was spent.
+# The fallback to `instances` keeps a partition_facts.json written before the selector existed
+# readable; `stage` is recorded beside the number so a reader can tell which was used.
+staged_instances = facts.get("stage_instances_per_set") or instances
+projected_style_set = (spf * int(facts["corpus_frames"]) * staged_instances[style_set] * nproc / 3600.0)
 projected_partition = spf * partition_frames * nproc / 3600.0
 # The share buys passes for THIS style set's chunks only — that is what a share is. Dividing the
 # whole-partition figure by (style_sets * chunks), as this did while CEILING_GPU_H meant the whole
@@ -1883,6 +2031,10 @@ def evidence(unit, row):
     return {"unit": unit, "frames": want, "g0c": g0c,
             "seed": payload.get("seed"), "episode": payload.get("episode"),
             "style": payload.get("style"), "backend": payload.get("backend"),
+            # T40_RULE_V11 §2.4 asks for the stage "recorded per clip", and this sidecar is the
+            # per-clip record. Read off the work-list row rather than off the environment, so a
+            # clip says which stage PRODUCED it and not which stage happened to be harvesting.
+            "stage": payload.get("stage"),
             "verified_by": "97_transfer25_restyle.sbatch harvest()",
             "verified": ["status==success", "backend==transfer25", "g0c.composited",
                          "frames_composited==frames_total==work_list.frames",
@@ -2139,6 +2291,19 @@ rec = {
     "rule": "T40_RULE_V1",
     "rule_v2": "T40_RULE_V2 (docs/preregistration/PR-08-V2-arm-c-frame-matching.md) — arm C "
                "frame-matched to arm B at 10 x 402, ceiling derived over the whole partition",
+    "rule_v11": "T40_RULE_V11 (docs/preregistration/PR-08-V11-staged-partition.md), adopted "
+                "2026-08-24 — the partition is generated in stages; stage 1 is the first four "
+                "TRAIN_STYLES in committed order plus their four matched identity repeats, and "
+                "the eval set is DEFERRED out of it rather than cut",
+    # Off `facts`, not off a shell variable: partition_facts.json is what the expansion actually
+    # emitted, so the record and the work list cannot disagree about which stage this chunk is.
+    "stage": facts.get("stage"),
+    "stage_rule": facts.get("stage_rule"),
+    "stage1_train_styles": facts.get("stage1_train_styles"),
+    "stage_instances_per_set": facts.get("stage_instances_per_set"),
+    "stage_styles": facts.get("stage_styles"),
+    "stage_clips": facts.get("stage_clips"),
+    "stage_frames": facts.get("stage_frames"),
     "t39_reported": t39,
     # A T-39 VOID refuses (PR-07 §4/§6, PR-08 §1 — see (a) in the sbatch header). If this field is
     # non-null a human typed the whole acknowledgement sentence to generate anyway, and every clip
