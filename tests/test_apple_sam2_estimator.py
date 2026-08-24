@@ -2393,11 +2393,19 @@ def test_the_stub_frames_now_resemble_the_corpus_they_stand_in_for(loaded):
 # -- what V10 did not change ---------------------------------------------------------------------------
 
 
-def test_v10_changed_no_detection_parameter_and_no_committed_contract_field(loaded):
-    """A number of ours in the detection path is what PR-08 §4 step 2 forbids, and a contract that
-    grew a field the committed one never had is a segmenter the committed one did not describe —
-    ``measure_geom_tol.contract_disagreements`` counts absence as disagreement, so adding one here
-    would disqualify every GEOM_TOL run against the committed document."""
+def test_v10_changed_no_detection_parameter_and_the_contract_moved_with_the_committed_doc(loaded):
+    """A number of ours in the DETECTION path is what PR-08 §4 step 2 forbids, and that half is
+    unchanged: every threshold below is still the generator's own operating point.
+
+    The contract half was true until 2026-08-24 and is now the opposite, on purpose.
+    ``measure_geom_tol.contract_disagreements`` counts absence as a disagreement, which is why V10
+    §6 held ``mask_validity_reference_max_frame_fraction`` out of ``SEGMENTER_CONTRACT`` while the
+    16-shard GEOM_TOL array was in flight — adding it then would have disqualified every landed
+    shard. The array merged, so the field moved into the contract AND into
+    ``configs/transfer25/pr08_geom_tol.json`` in the same commit. The assertion that matters is the
+    equality below: module and committed document must agree key for key, or every run refuses at
+    ``merge_committed_contract``. Which direction the field was added from does not matter; that the
+    two never disagree does."""
     module, _ = loaded
     assert module.BOX_THRESHOLD == 0.15 and module.TEXT_THRESHOLD == 0.25
     assert module.RETRY_BOX_THRESHOLD == 0.1 and module.RETRY_TEXT_THRESHOLD == 0.1
@@ -2405,7 +2413,9 @@ def test_v10_changed_no_detection_parameter_and_no_committed_contract_field(load
     assert module.MASK_VALIDITY_MIN_IOU == 0.10
     assert module.MASK_VALIDITY_REFERENCE == "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)"
     assert module.SEGMENTER_CONTRACT == _contract_doc()["segmenter"]
-    assert "mask_validity_reference_max_frame_fraction" not in module.SEGMENTER_CONTRACT
+    assert module.SEGMENTER_CONTRACT["mask_validity_reference_max_frame_fraction"] == (
+        module.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION
+    )
 
 
 def test_the_version_string_says_which_instrument_measured_a_number(loaded):
@@ -2419,20 +2429,30 @@ def test_the_version_string_says_which_instrument_measured_a_number(loaded):
             in module.ESTIMATOR_VERSION)
 
 
-def test_the_coverage_arithmetic_a_harness_records_is_still_differenced(loaded):
-    """`measure_geom_tol.ADAPTER_RUN_COUNTERS` is a tuple in that module, which this workstream may
-    not edit. The TOTAL a coverage number is computed from is in it, so `estimator_stats.this_run`
-    stays correct. The new SUB-CASE is not, so its attribution is currently a lifetime total of the
-    process — recorded here as a known gap rather than left to be discovered from an artifact, and
-    closed by one line in a file this change did not touch."""
+def test_the_coverage_arithmetic_a_harness_records_is_differenced_sub_case_and_all(loaded):
+    """Every counter the adapter exports must be DIFFERENCED, not copied as a lifetime total.
+
+    The gap this test used to record — the V10 sub-case being absent from
+    ``measure_geom_tol.ADAPTER_RUN_COUNTERS`` — was closed on 2026-08-24, once the GEOM_TOL array
+    that a mid-run contract change would have disqualified had merged. Its sibling
+    ``n_mask_validity_reference_fraction`` was absent for no recorded reason at all and was closed
+    with it.
+
+    The sub-case is a refusal INSIDE ``n_frames_mask_refused``, so no coverage number changed value;
+    only the attribution did, from a total since import to this run's count. The failure mode being
+    guarded is silent and reads exactly like a real measurement, which is why it is asserted rather
+    than trusted."""
     import measure_geom_tol as mgt
 
     module, _ = loaded
-    assert "n_frames_mask_refused" in mgt.ADAPTER_RUN_COUNTERS
-    assert "n_frames_mask_refused_reference_not_object_scale" in module.stats()
-    assert "n_frames_mask_refused_reference_not_object_scale" not in mgt.ADAPTER_RUN_COUNTERS, (
-        "if this ever becomes true the comment above is stale and should be deleted with it"
-    )
+    stats = module.stats()
+    for key in ("n_frames_mask_refused",
+                "n_frames_mask_refused_no_reference",
+                "n_frames_mask_refused_reference_not_object_scale",
+                "n_mask_validity_iou",
+                "n_mask_validity_reference_fraction"):
+        assert key in stats, f"the adapter stopped exporting {key}"
+        assert key in mgt.ADAPTER_RUN_COUNTERS, f"{key} would be recorded as a lifetime total"
 
 
 def test_v9s_robot_masker_still_gets_everything_it_refuses_to_run_without(loaded):

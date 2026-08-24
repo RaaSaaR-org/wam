@@ -597,15 +597,23 @@ SEGMENTER_CONTRACT: dict[str, Any] = {
     "retry_box_threshold": RETRY_BOX_THRESHOLD,
     "retry_text_threshold": RETRY_TEXT_THRESHOLD,
     "box_selection": BOX_SELECTION,
-    # NOT a detection parameter — a validity check on the output, and therefore a statement about
-    # WHICH FRAMES were measured rather than about how a mask was drawn. It is in the contract for
-    # exactly the reason the thresholds are: GEOM_TOL and EST_DRIFT_P95 are subtracted in §6, and a
-    # GEOM_TOL measured with the filter minus an EST_DRIFT_P95 measured without it is a subtraction
-    # over two different frame populations that would still look like arithmetic. Absence counts as
-    # a disagreement in contract_disagreements(), so an artifact from before PR-08 V6 now fails the
-    # cross-check instead of pooling silently.
+    # THE NEXT THREE ARE NOT detection parameters — they are validity checks on the output, and
+    # therefore statements about WHICH FRAMES were measured rather than about how a mask was drawn.
+    # They are in the contract for exactly the reason the thresholds are: GEOM_TOL and EST_DRIFT_P95
+    # are subtracted in §6, and a GEOM_TOL measured with a filter minus an EST_DRIFT_P95 measured
+    # without it is a subtraction over two different frame populations that would still look like
+    # arithmetic. Absence counts as a disagreement in contract_disagreements(), so an artifact from
+    # before PR-08 V6 now fails the cross-check instead of pooling silently.
+    #
+    # mask_validity_reference_max_frame_fraction JOINED THEM ON 2026-08-24, under T40_RULE_V10 as
+    # adopted that day. V10 §6 deliberately did NOT move it here, and said why: the 16-shard GEOM_TOL
+    # array was in flight, and a field present on one side and absent on the other is a disagreement,
+    # so adding it then would have cost the landed shards their qualification mid-run. That array has
+    # merged. The sequencing reason is spent and the field belongs in the contract on the same
+    # grounds as the two above it — it refuses frames, so it changes the measured population.
     "mask_validity_min_iou": MASK_VALIDITY_MIN_IOU,
     "mask_validity_reference": MASK_VALIDITY_REFERENCE,
+    "mask_validity_reference_max_frame_fraction": MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION,
     "propagation": PROPAGATION,
     "upstream_propagation": UPSTREAM_PROPAGATION,
     "pixel_grid_hw": list(PIXEL_GRID_HW),

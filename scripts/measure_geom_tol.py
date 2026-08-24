@@ -1238,7 +1238,16 @@ ADAPTER_RUN_COUNTERS: tuple[str, ...] = (
     # the first one belongs beside a coverage number.
     "n_frames_mask_refused",
     "n_frames_mask_refused_no_reference",
+    # T40_RULE_V10's sub-case, added 2026-08-24 once the 16-shard array it would have disqualified
+    # mid-run had merged. It is a refusal INSIDE n_frames_mask_refused, so no coverage number above
+    # changes value — only the attribution does, from a lifetime total of the process to this run's.
+    "n_frames_mask_refused_reference_not_object_scale",
     "n_mask_validity_iou",
+    # Same shape as n_mask_validity_iou beside it (both are list lengths that only grow) and absent
+    # from this tuple for no reason anybody wrote down. Differenced for the same reason: "the
+    # reference fraction was recorded on 12 frames of this run" and "on 12 frames since this
+    # interpreter started" are different claims, and only the first belongs beside a coverage number.
+    "n_mask_validity_reference_fraction",
     "n_detection_scores",
 )
 
@@ -2249,13 +2258,54 @@ def write_artifact(out: Path, record: dict[str, Any]) -> tuple[Path, str]:
     return side, digest
 
 
+#: Where :func:`_git_commit` found the commit it returned. Recorded beside the hash rather than
+#: inferred from it, because the two sources are not the same claim: ``git`` says what the tree
+#: IS, a synced ``GIT_COMMIT`` file says what an operator PUSHED, and only the first is checkable
+#: from inside the process that read it.
+_GIT_COMMIT_SOURCE: str | None = None
+
+
 def _git_commit() -> str | None:
+    """The commit this run's code came from, or ``None`` when nothing on disk can say.
+
+    TWO SOURCES, IN THIS ORDER, BECAUSE THE CLUSTER COPY IS NOT A GIT REPOSITORY.
+    ``cluster/discoverer/sync.sh`` rsyncs the tree to ``${PROJ}/wam`` and, in the same invocation,
+    writes the pushed commit to ``${PROJ}/wam/GIT_COMMIT``. There is no ``.git`` beside it, so
+    ``git rev-parse`` fails there and this function used to return ``None`` without saying why.
+    **Every one of the sixteen GEOM_TOL shards of 2026-08-23/24 recorded ``git_commit: null`` for
+    exactly that reason**, and so did their merge — a full-corpus measurement that cannot name the
+    code that produced it, which is the AC-04 traceability the artifact exists to carry. The file
+    was already being written and simply never read.
+
+    The ``-dirty`` suffix ``sync.sh`` appends when the pushed tree had uncommitted edits is
+    preserved verbatim. It is the honest half: the hash alone does not reproduce what ran.
+
+    Reading the file is NOT a fallback to a weaker claim silently — :data:`_GIT_COMMIT_SOURCE`
+    records which of the two answered, so a reader of the artifact can tell a live repository from
+    a synced snapshot instead of having to assume.
+    """
+    global _GIT_COMMIT_SOURCE
     try:
         out = subprocess.run(["git", "-C", str(_REPO_ROOT), "rev-parse", "HEAD"],
                              capture_output=True, text=True, check=True, timeout=10)
-        return out.stdout.strip() or None
+        commit = out.stdout.strip()
+        if commit:
+            _GIT_COMMIT_SOURCE = "git rev-parse HEAD"
+            return commit
     except (OSError, subprocess.SubprocessError):
+        pass
+    # The synced snapshot. Bounded read: this file is one line and a truncated or binary one is a
+    # broken sync, not a commit, so it is refused rather than recorded as a plausible hash.
+    try:
+        text = (_REPO_ROOT / "GIT_COMMIT").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        _GIT_COMMIT_SOURCE = None
         return None
+    if not text or len(text) > 80 or any(c.isspace() for c in text):
+        _GIT_COMMIT_SOURCE = None
+        return None
+    _GIT_COMMIT_SOURCE = "GIT_COMMIT file written by cluster/discoverer/sync.sh"
+    return text
 
 
 # -- sharding, and the merge that puts the median back together -----------------------------------
@@ -2960,8 +3010,12 @@ def merge_shard_records(loaded: list[tuple[Path, dict[str, Any]]],
         "measured_date": date.today().isoformat(),
         "measured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
+        # MUST stay below the line above: _git_commit() sets _GIT_COMMIT_SOURCE as it decides which
+        # source answered, and a dict literal evaluates its values in source order. Reordering
+        # these two silently records the PREVIOUS call's source, which is worse than recording none.
+        "git_commit_source": _GIT_COMMIT_SOURCE,
 
-        "artifact_path": str(out),
+        "artifact_path":str(out),
         "artifact_sha256_sidecar": str(sidecar_path(out)),
         "artifact_is_tracked_default": out == DEFAULT_OUT,
 
@@ -3810,8 +3864,12 @@ def main(argv: list[str] | None = None) -> int:
         "measured_date": date.today().isoformat(),
         "measured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
+        # MUST stay below the line above: _git_commit() sets _GIT_COMMIT_SOURCE as it decides which
+        # source answered, and a dict literal evaluates its values in source order. Reordering
+        # these two silently records the PREVIOUS call's source, which is worse than recording none.
+        "git_commit_source": _GIT_COMMIT_SOURCE,
 
-        "artifact_path": str(args.out),
+        "artifact_path":str(args.out),
         "artifact_sha256_sidecar": str(sidecar_path(args.out)),
         "artifact_is_tracked_default": args.out == DEFAULT_OUT,
         # What a consumer (cluster/discoverer/97_transfer25_restyle.sbatch) must assert before

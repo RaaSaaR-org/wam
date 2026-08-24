@@ -3179,8 +3179,16 @@ def test_recording_the_adapter_stats_changed_no_number_this_script_already_produ
     ``estimator_stats`` is additive: it is written beside the measurement, nothing reads it back,
     and no refusal, exit code or gate flag depends on it. The way to be sure of that is not to read
     the diff — it is to run the previous version of the script over the same fixture and compare
-    the two artifacts key for key. The only permitted differences are the new key itself and the
-    per-run provenance.
+    the two artifacts key for key. The only permitted differences are the new keys themselves and
+    the per-run provenance.
+
+    ``git_commit_source`` is the SECOND key added since the pinned baseline, and it is additive on
+    the same terms. It names which of two sources answered ``_git_commit()`` — a live
+    ``git rev-parse`` or the ``GIT_COMMIT`` file ``cluster/discoverer/sync.sh`` writes beside the
+    rsynced tree. The fallback exists because the cluster copy is not a git repository, so
+    ``rev-parse`` failed there and ``git_commit`` came out ``null`` on all sixteen GEOM_TOL shards
+    of 2026-08-23/24 and on their merge. The set below is the declaration: a key that appears here
+    without being added to it fails this test, which is the point.
     """
     corners = {"ep0": walk((10, 10), (2, 0), 5),
                "ep1": walk((10, 40), (3, 4), 6),
@@ -3198,7 +3206,8 @@ def test_recording_the_adapter_stats_changed_no_number_this_script_already_produ
     before = json.loads((tmp_path / "before.json").read_text())
     after = json.loads((tmp_path / "after.json").read_text())
 
-    assert set(after) - set(before) == {"estimator_stats"}, "a key appeared that was not declared"
+    assert set(after) - set(before) == {"estimator_stats", "git_commit_source"}, \
+        "a key appeared that was not declared"
     assert set(before) - set(after) == set(), "a key the previous version wrote went missing"
     differing = sorted(k for k in before if k not in _RUN_LOCAL and before[k] != after[k])
     assert differing == [], f"recording the adapter's stats changed {differing}"
@@ -3240,7 +3249,7 @@ def test_the_merge_is_unchanged_by_it_too(tmp_path: Path, monkeypatch) -> None:
     before = json.loads((tmp_path / "before.json").read_text())
     after = json.loads((tmp_path / "after.json").read_text())
 
-    assert set(after) - set(before) == {"estimator_stats"}
+    assert set(after) - set(before) == {"estimator_stats", "git_commit_source"}
     ignore = _RUN_LOCAL | {"merged_from"}          # names the shard paths and their digests
     differing = sorted(k for k in before if k not in ignore and before[k] != after[k])
     assert differing == [], f"the merge changed {differing}"
