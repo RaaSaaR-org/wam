@@ -952,4 +952,69 @@ every array task. Waves 3–4 go in as slots free, then MERGE on the free CPU Qo
 `False`, §8 items 3 and 4 are open, and §6 still says that if `GEOM_TOL − EST_DRIFT_P95 ≤ 0` then
 generation does not start.
 
+### 2026-08-24 — the array finished, three rules were adopted by delegation, and two instruments were repaired
+
+**Four decisions were delegated and three were taken.** V9, V10 and V11 are ADOPTED — each is
+either an instrument bug-fix whose evidence predates the rule it changes, or a scope reduction that
+spends less than the plan it replaces. `GATE_QUALIFIED` was **DECLINED**: its blocker 3 names a
+measurement nobody has made, and a signature is not that measurement. Lifting §1 was **DECLINED**:
+it is conditional on facts, names no signatory, and §8 items 3 and 4 are open. `max_frame_fraction`
+was found **not decidable** — the distribution behind it had never been measured. Reasoning and what
+was refused: `docs/preregistration/PR-08-DET-2026-08-24-four-determinations.md`. V12 is drafted and
+deliberately left unsigned.
+
+**GEOM_TOL exists for the first time, over the whole corpus, and may not be quoted.** All 16 shards
+landed; the merge (job 190191, free CPU QoS, 8 s) pooled **402/402 episodes, 171 625 frames,
+coverage 1.000** to **`GEOM_TOL = 0.4786 px`** — one median over the pooled displacements, never an
+average of shard medians. With `EST_DRIFT_P95 = 0.2361 px` (MuJoCo route, 720 frames, 2026-08-23)
+the G0b budget is **+0.2425 px**, positive — which §6 requires and nobody could state before. **Both
+carry `gate_qualified: false`** from one flag, `apple_sam2.GATE_QUALIFIED`. The committed
+pre-commitment was restored immediately after the merge overwrote it; `configs/` is unchanged.
+Full record: `docs/preregistration/PR-08-RESULT-2026-08-24-geom-tol-full-corpus.md`.
+
+**Blocker 1's full-pass evidence landed; blocker 0 got worse.** Over 171 625 frames the retry fired
+**0 times** and `n_below_box_threshold = 0`. The hazard blocker 1 names is not small on this corpus,
+it is **empty** — the mechanism never ran. But `n_frames_without_detection = 0` and
+`n_frames_with_empty_mask = 0` mean a box came back on **every frame of the corpus**, which is
+exactly the witness blocker 0 calls worthless. Blocker 2 is untouched, and one fact is owed to
+whoever takes it: **the MuJoCo captures on disk cannot serve it** — 20 and 60 *discrete* scene
+configurations at 12 frames each with the apple a static prop, so propagating from frame 0 crosses
+a jump cut. It needs a temporally coherent capture with ground truth; none exists here.
+
+**The 36 refusals are all one episode, and it is *the* episode.** V6's mask-validity filter refused
+36 frames corpus-wide (0.021 %), all in shard 7. Of 402 episodes exactly one has
+`n_frames != n_frames_with_centroid`: **`episode_000094`, gap 36** — the episode the 2026-08-22
+human audit flagged as ~35 consecutive confident masks **of the plate**. Two instruments converge.
+Recorded with its limit: the audit saw **0.1 %** of the corpus and both instruments sit downstream
+of the same segmenter, so it is **not** offered as discharging blocker 0.
+
+**The cluster copy had been running stale code, and nothing could say so.** Every shard recorded
+`git_commit: null`: `git rev-parse` fails on `${PROJ}/wam`, which is an rsync target with no `.git`,
+and `sync.sh` had been writing `GIT_COMMIT` beside it all along with nothing reading it. Worse —
+the shards' `ESTIMATOR_VERSION` shows they ran a **pre-`6a32143`** adapter, *including six that ran
+hours after that commit landed*. All 16 agree with each other, so the merge was internally
+consistent; the mismatch was found by reading artifacts by hand. Both measurement paths now read
+`GIT_COMMIT` and record **which source answered**, and `robot_composite`'s merge **refuses** shards
+that disagree on the commit — the check that would have caught this.
+
+**V10's two owed consequences landed** (contract field + counter, atomically across module, tuple,
+committed JSON and sidecar), plus a third counter absent from the same tuple for no recorded reason.
+
+**V11 §2.4's owed change landed, and executing it found a bug the committed partition was hiding.**
+`STAGE` is now required with no default. Stage 1 = 8/25 instances, 3 216 clips, exactly the four
+styles the determination names; the two stages partition the committed 10 050 with no overlap and
+no remainder. The stage-level arm-C guard compares counts **and seeds**, and fires on a partition
+where the whole-partition guard passes. The bug: `repeat_span` cut the repeat axis for *every*
+multi-repeat style, including train styles — invisible today because every committed train style has
+`repeats=1`. `tests/test_97_stage_selector.py` executes the heredoc rather than re-typing it, which
+is how it was caught.
+
+**Pre-existing and unrelated:** `tests/test_e2e_m4.py` fails 1 / errors 4 and then **never exits**
+(a leaked non-daemon `PolicyServer` thread), which is why the full suite has never completed here.
+It touches nothing under `src/wam/` that this session changed.
+
+**Still nothing is discharged.** `GATE_QUALIFIED` is `False`, §8 items 3 and 4 are OPEN, no §6 gate
+has ever returned a verdict, §1 binds in full, and 106 (job 190192, wave 1 of 4) is queued behind a
+fully-allocated cluster.
+
 %% mc-links: [[T-39]] [[T-34]] [[T-36]] [[T-37]] [[T-041]] %%
