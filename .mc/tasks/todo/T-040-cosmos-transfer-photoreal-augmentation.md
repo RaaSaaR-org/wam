@@ -1017,4 +1017,29 @@ It touches nothing under `src/wam/` that this session changed.
 has ever returned a verdict, §1 binds in full, and 106 (job 190192, wave 1 of 4) is queued behind a
 fully-allocated cluster.
 
+### 2026-08-25 — Cosmos 3 landed and Transfer2.5 is frozen
+
+**Cosmos-Transfer2.5 is soft-deprecated, not dead.** Last release v1.5.4 (2026-05-13), last commit
+2026-06-07 ("Add Cosmos 3 README redirect"), README: *"no longer under active development … We
+encourage all users to migrate to Cosmos 3"*. But it is **not archived**, the HF card carries no
+deprecation notice and `docs.nvidia.com/.../transfer2.5/` has no banner — so `97`/`98`/`99` and the
+pinned revision keep working. Frozen, with an end date nobody has named.
+
+**Cosmos 3 (released 2026-05-31) has a full transfer mode** — `TransferHintKey` = EDGE/BLUR/DEPTH/
+SEG/**WSM**, a superset — but it is not drop-in: Edge 4B does not do video-to-video, transfer is a
+mode of the base checkpoints rather than separate weights, and **only edge and blur are derived on
+the fly**. For depth/seg/WSM `transfer.py` raises *"Missing pre-computed control input"* and **no
+estimator ships**, where Transfer2.5 estimates them itself (`97:371`). So `apple_sam2.py` would move
+onto the critical path as a **production** instrument, not only a measurement one.
+
+**No released Cosmos 3 checkpoint supports Unitree G1** — both policy models are DROID-only, 8D, and
+"Unitree" appears zero times across the README, four model cards and all 1 148 framework paths.
+**Trap:** `.../robot_assets/G1_omnipicker_calibrated.urdf` is **AgiBot Genie-1**, not a Unitree G1
+(`<robot name="genie">`, generated from `genie.robot.xacro`, loaded by `agibot_fk.py`). A grep for
+"G1" there is a false positive.
+
+**Nothing here changes this task.** Swapping the generator changes PR-08's header premise and needs
+a new V-document or pre-registration (`docs/handoff.md` §3), not a quiet sbatch edit. Findings,
+sources and the three costed options: **`docs/cosmos3-vs-transfer25.md`**.
+
 %% mc-links: [[T-39]] [[T-34]] [[T-36]] [[T-37]] [[T-041]] %%

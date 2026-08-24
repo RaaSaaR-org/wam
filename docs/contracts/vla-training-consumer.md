@@ -527,6 +527,13 @@ Written as gaps, not papered over.
    > the dated note it cited (`.mc/tasks/todo/T-040-…md` Notes, 2026-08-06) is a historical
    > record that is correct as of its own date and must not be rewritten.
    >
+   > [**Note, 2026-08-25 — this item gets *harder*, not easier, if the generator changes.**
+   > Transfer2.5 estimates depth and segmentation on the fly (`97_transfer25_restyle.sbatch:371`).
+   > **Cosmos 3 ships no depth estimator and no segmenter**, and its `transfer.py` raises *"Missing
+   > pre-computed control input"* for depth/seg/WSM — so under Cosmos 3 the **producer** would have
+   > to supply both maps itself. Findings and sources: `docs/cosmos3-vs-transfer25.md` §5.2, §7.3.
+   > No generator change is proposed or made here.]
+   >
    > **What actually blocks G0b today is item 3 below, not this item.** `EST_DRIFT_P95` and
    > `GEOM_TOL` are both *measured* but both carry `gate_qualified: false`, so **nothing was
    > written into `configs/`**: `configs/transfer25/pr08_geom_tol.json` still has `geom_tol_px`,
