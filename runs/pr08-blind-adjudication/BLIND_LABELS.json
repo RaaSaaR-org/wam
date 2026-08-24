@@ -1,0 +1,336 @@
+{
+  "schema": "wam.robot_mask_blind_adjudication_labels/1",
+  "produced_by": "scripts/diagnose_robot_mask_empty.py blind-sheet",
+  "established_by": "the project owner (huhn.dev@gmail.com), 2026-08-25, by looking at all 7 sheets",
+  "established_by_note": "A MODEL FILLING THIS IN IS NOT THE MEASUREMENT. Copied verbatim from scripts/audit_apple_masks.py's CORRELATED_OBSERVER (audit_apple_masks.py:245-251), which copies runs/t040-identity-prompt/calibration-2/probe_observations.json's seed pass: \"If the `observed` fields below were written by a model rather than a person, say so in `established_by` and leave `looked_at` alone. A model looking at masks produced by a pipeline another model wired up is a CORRELATED OBSERVER: it is capable of reproducing the same misreading on both sides, and blocker 1 asks for a human.\" AND ONE MORE, WHICH IS THIS SHEET'S OWN: these tiles are blind so that the answer is written down before the pipeline's answer is known. A model with the repository in front of it can recover the pipeline's answer and would be unblinding itself, which costs this instrument the one property it has that the existing labels do not. Set `established_by` to whoever looked; leave `looked_at` false unless that was a person.",
+  "how_to_use": "Open the sheets. For each tile id, look at the picture and decide ONE thing: is any part of the robot - arm, wrist, hand, a fingertip at the border - visible in it? Write arm_present, arm_absent or undecidable in `label`, and what you saw in `note`. undecidable is a real answer and is worth more than a guess. Rename this file to BLIND_LABELS.json when every row is filled, then run `blind-score`.",
+  "label_values": [
+    "arm_present",
+    "arm_absent",
+    "undecidable"
+  ],
+  "sheets": [
+    "blind_sheet_01.png",
+    "blind_sheet_02.png",
+    "blind_sheet_03.png",
+    "blind_sheet_04.png",
+    "blind_sheet_05.png",
+    "blind_sheet_06.png",
+    "blind_sheet_07.png"
+  ],
+  "human_review": {
+    "looked_at": true,
+    "established_by": "",
+    "who": "the project owner",
+    "date": "2026-08-25",
+    "verbatim": "Sheets: 'ich sehe auf keinem der kacheln einen robotert'. Scope, asked and answered explicitly: all 7 sheets. Edge marks, asked and answered explicitly: 'dasks koennten die fingerspitzen der dex3 finger sein - ist aber schwer erkenntbar. kann aber gut sein. aber nur spitzen.'"
+  },
+  "tiles": {
+    "t0000": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0001": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0002": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0003": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0004": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0005": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0006": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0007": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0008": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0009": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0010": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0011": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0012": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0013": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0014": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0015": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0016": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0017": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0018": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0019": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0020": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0021": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0022": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0023": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0024": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0025": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0026": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0027": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0028": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0029": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0030": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0031": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0032": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0033": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0034": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0035": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0036": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0037": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0038": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0039": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0040": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0041": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0042": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0043": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0044": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0045": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0046": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0047": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0048": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0049": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0050": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0051": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0052": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0053": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0054": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0055": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0056": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0057": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0058": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0059": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0060": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0061": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0062": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0063": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0064": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0065": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0066": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0067": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0068": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0069": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0070": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0071": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0072": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0073": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    },
+    "t0074": {
+      "label": "arm_absent",
+      "note": "no robot seen by the owner, and no dark border object detected"
+    },
+    "t0075": {
+      "label": "undecidable",
+      "note": "dark object detected in the outermost 26 px; owner says such marks could well be Dex3 fingertips but are hard to make out"
+    }
+  },
+  "how_the_two_answers_were_encoded": "The owner gave a GLOBAL answer (no robot on any tile) plus a QUALIFICATION on the small dark marks at the frame border, which they said could well be Dex3 fingertips and were hard to make out. Encoding both faithfully means a tile carrying such a mark is NOT a confident arm_absent. So: every tile with a dark object detected in the outermost 26 px is recorded as `undecidable`; every tile without one is recorded as `arm_absent`. THE OWNER DID NOT ENUMERATE THAT SET - the session derived it by the stated rule below, and the owner can correct any tile. This split is the session's encoding of the owner's words, and the two are recorded separately above so they can be told apart.",
+  "edge_object_rule": "Per tile: decode the episode, take diagnose_robot_mask_empty.background_median over it, and flag pixels in the outermost 26 px whose luminance is more than 28 below the background median. A tile is an edge case if at least 30 such pixels are present. A STATIC fixture would be inside the background median and would not register, so what this finds has moved. It is a NOMINATION RULE, not ground truth, and its constants are coined - which is admissible because a human adjudicates, and is NOT admissible as a measurement."
+}

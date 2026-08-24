@@ -1,0 +1,75 @@
+{
+  "schema": "wam.robot_mask_blind_adjudication_score/1",
+  "produced_by": "scripts/diagnose_robot_mask_empty.py blind-score",
+  "this_is_a_measurement": "This file reports what a reviewer wrote down against a draw taken before they saw any instrument's answer. It settles no open question, releases no gate and permits no run. What it is FOR is the one thing the existing labels cannot do: put an interval on the cell where the masker and the reference predicate could be wrong together.",
+  "cells": {
+    "a": "the robot is genuinely out of shot; an empty mask is the correct answer",
+    "b": "the robot is in shot and the committed masker returned nothing",
+    "undecidable": "the reviewer could not tell from the picture; counted, never assigned"
+  },
+  "seed": 20260825,
+  "corpus": "/home/humanoid/wam-t041/pr08-apple-640x480-h264-lossless",
+  "population": {
+    "n_frames_with_an_empty_mask": 237,
+    "by_empty_reason": {
+      "no_boxes_above_threshold": 237
+    },
+    "by_reference_predicate": {
+      "absent": 142,
+      "ambiguous": 76,
+      "present": 19
+    },
+    "note": "the sampling frame for all three arms: every frame in the detect artifact whose committed-masker mask was empty, including frames the reference pass never measured. It is NOT the corpus: the detect plan is stratified."
+  },
+  "n_tiles": 76,
+  "labels_established_by": "the project owner (huhn.dev@gmail.com), 2026-08-25, by looking at all 7 sheets",
+  "labels_looked_at_by_a_person": true,
+  "correlated_observer_warning": "A MODEL FILLING THIS IN IS NOT THE MEASUREMENT. Copied verbatim from scripts/audit_apple_masks.py's CORRELATED_OBSERVER (audit_apple_masks.py:245-251), which copies runs/t040-identity-prompt/calibration-2/probe_observations.json's seed pass: \"If the `observed` fields below were written by a model rather than a person, say so in `established_by` and leave `looked_at` alone. A model looking at masks produced by a pipeline another model wired up is a CORRELATED OBSERVER: it is capable of reproducing the same misreading on both sides, and blocker 1 asks for a human.\" AND ONE MORE, WHICH IS THIS SHEET'S OWN: these tiles are blind so that the answer is written down before the pipeline's answer is known. A model with the repository in front of it can recover the pipeline's answer and would be unblinding itself, which costs this instrument the one property it has that the existing labels do not. Set `established_by` to whoever looked; leave `looked_at` false unless that was a person.",
+  "per_arm": {
+    "uniform_random": {
+      "n": 40,
+      "a_robot_absent": 13,
+      "b_robot_present_mask_empty": 0,
+      "undecidable": 27,
+      "b_rate_of_decided": 0.0,
+      "b_rate_ci95_wilson": [
+        0.0,
+        0.228102
+      ],
+      "b_rate_upper_bound_counting_undecidable_as_b": 0.675,
+      "b_by_empty_reason": {},
+      "sampling": "uniformly at random, without replacement, from every frame of the population, consulting neither the reference predicate nor the blind-spot score. Drawn FIRST, so no exclusion touches it.",
+      "estimate": "UNBIASED over the population above. This is the only arm whose split may be read as an estimate, and the only one whose interval bounds anything."
+    },
+    "predicate_nominated": {
+      "n": 12,
+      "a_robot_absent": 3,
+      "b_robot_present_mask_empty": 0,
+      "undecidable": 9,
+      "b_rate_of_decided": 0.0,
+      "b_rate_ci95_wilson": [
+        0.0,
+        0.561506
+      ],
+      "b_rate_upper_bound_counting_undecidable_as_b": 0.75,
+      "b_by_empty_reason": {},
+      "sampling": "at random from the frames the reference predicate calls robot-PRESENT, minus anything the uniform arm already took. This is the cell the existing contact sheets already show.",
+      "estimate": "BIASED, deliberately and upward: conditioned on one instrument already disagreeing with the masker. Its split is not a rate over anything."
+    },
+    "blind_spot_targeted": {
+      "n": 24,
+      "a_robot_absent": 8,
+      "b_robot_present_mask_empty": 0,
+      "undecidable": 16,
+      "b_rate_of_decided": 0.0,
+      "b_rate_ci95_wilson": [
+        0.0,
+        0.324416
+      ],
+      "b_rate_upper_bound_counting_undecidable_as_b": 0.6666666666666666,
+      "b_by_empty_reason": {},
+      "sampling": "the highest blind_spot_score frames remaining: moving, near-neutral and too BRIGHT for the reference predicate's dark clause. Ranked, not sampled, so the arm reaches the extreme rather than a random draw from a second coined threshold.",
+      "estimate": "BIASED, deliberately: an over-sample of the frames the reference predicate cannot score. Its split is not a rate over anything."
+    }
+  }
+}
