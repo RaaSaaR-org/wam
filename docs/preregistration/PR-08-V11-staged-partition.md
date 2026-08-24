@@ -204,7 +204,7 @@ randomisation, and a null there would have cost ~221 GPU-h to learn nothing.
 
 ## 5. Determination
 
-**Decided by: nobody yet. UNSIGNED.**
+**Decided by: the project owner, by delegation, 2026-08-24. ADOPTED.**
 
 Whether generation proceeds in stages, and whether stage 1 is these four styles, is the project
 owner's call. A session may draft this document; it may not sign it, and it may not treat a draft as
@@ -212,10 +212,27 @@ a licence. No clip may be generated under V11 until the determination below is f
 person, and not then unless V1 §1, §6 and §8 independently permit it.
 
 ```
-determination:  ____________________
-decided by:     nobody yet
-date:           ____________________
+determination:  ADOPTED. Generation proceeds in stages. Stage 1 is train_styles[0:4]
+                in committed order -- train-01-oak-tungsten, train-02-linen-overcast,
+                train-03-melamine-fluorescent, train-04-slate-lowkey -- with their four
+                matched identity repeats. The eval set is DEFERRED, not cut. The
+                stage-2 branches in section 3 are adopted as written and are not
+                re-openable after stage 1's results are seen.
+decided by:     the project owner, delegated to a Claude Code session on 2026-08-24
+                with the instruction "make the four decisions with your
+                recommendations". The session's reasoning, and what it declined to
+                decide, are recorded in
+                PR-08-DET-2026-08-24-four-determinations.md. The owner delegated
+                WITHOUT having seen the recommendation, so this determination is
+                reversible on their reading of it.
+date:           2026-08-24
 ```
+
+**Adoption puts the staging rule in force, and licenses the code change §2.4 says is owed — a stage
+selector and a stage-level arm-C frame-match guard. It licenses no clip.** The paragraph above this
+block is unchanged and still binds: a clip may be generated under V11 only if `V1` §1, §6 and §8
+*independently* permit it, and as of this date they do not. §8 item 3 has no measurement, §8 item 4
+is `null` on disk, and no §6 gate has ever returned a verdict.
 
 ## 6. Provenance
 

@@ -3,6 +3,20 @@
 **Rule `T40_RULE_V10`. Drafted 2026-08-23. UNSIGNED — see §8. Nothing here is in force until the
 project owner signs it, and no number produced under it may be quoted before that.**
 
+> **ADOPTED 2026-08-24 — see §8.** The header sentence above records this document's state *as
+> drafted*; §8 records its state *now*. The project owner delegated the determination to a Claude
+> Code session on 2026-08-24 with the instruction *"make the four decisions with your
+> recommendations"*, and the session's reasoning — including what it **declined** to decide and why
+> — is recorded in
+> [`PR-08-DET-2026-08-24-four-determinations.md`](PR-08-DET-2026-08-24-four-determinations.md).
+> The owner delegated **without having seen the recommendation**, so this determination is reversible
+> on their reading of it. Reverting it means reverting this banner and §8's two rows; no other
+> sentence of this document was touched.
+>
+> **Adoption puts this rule in force. It does not license generation.** `T40_RULE_V1` §1 binds in
+> full — §8 items 3 and 4 are open, all three §6 gates are undischarged — and nothing here changes
+> that.
+
 This document sits **alongside**
 [`PR-08-photoreal-augmentation.md`](PR-08-photoreal-augmentation.md), which is registered as
 `T40_RULE_V1` and **has not been edited and must not be**. The repo's discipline is
@@ -489,11 +503,11 @@ stale silently.
 | | |
 |---|---|
 | rule | `T40_RULE_V10` |
-| status | **UNSIGNED DRAFT.** Not in force |
+| status | **ADOPTED 2026-08-24.** In force — see the banner at the head of this document |
 | drafted | 2026-08-23, before the corrected filter has produced any gate number |
 | supersedes | nothing. It **supplements** `T40_RULE_V1`, which stands and is unedited |
 | changes | which labels the mask-validity filter will run for, and which frames it will claim to have decided (§2). In the estimator only |
-| decided by | **nobody yet.** Signing is the project owner's, and no session may sign it or act as though it were signed |
+| decided by | **the project owner**, delegated to a Claude Code session on 2026-08-24 (*"make the four decisions with your recommendations"*). Reasoning, and what was declined, in `PR-08-DET-2026-08-24-four-determinations.md`. Reversible: the owner delegated without having seen the recommendation |
 | evidence | both defects reproduced from scratch before any change: the `plate.` pass and its matched `apple.` control on 20 source frames of `episode_000000`; the twelve generated and twelve source panels of job 189926's `episode_000000__train-01-oak-tungsten` and `…__train-02-linen-overcast` contact sheets, with overlays; a 17 307-frame scan of the source corpus; and the committed `runs/pr08-mask-audit/MASK_AUDIT.json`, `runs/pr08-mask-audit-local-cpu/MASK_AUDIT.json` and `runs/t040-identity-prompt/calibration-2/probe_census.json` |
 | bound | `MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION = 0.10`, inside the measured gap on both scales — (4.51 %, 40.5 %) raw and (3.00 %, 20.9 %) deflated; insensitivity swept and asserted in `tests/test_apple_sam2_estimator.py` |
 | touched | `scripts/estimators/apple_sam2.py`, `tests/test_apple_sam2_estimator.py`, this document |

@@ -3,6 +3,20 @@
 **Rule `T40_RULE_V9`. Drafted 2026-08-23. UNSIGNED — see §8. Nothing here is in force until the
 project owner signs it, and no number produced under it may be quoted before that.**
 
+> **ADOPTED 2026-08-24 — see §8.** The header sentence above records this document's state *as
+> drafted*; §8 records its state *now*. The project owner delegated the determination to a Claude
+> Code session on 2026-08-24 with the instruction *"make the four decisions with your
+> recommendations"*, and the session's reasoning — including what it **declined** to decide and why
+> — is recorded in
+> [`PR-08-DET-2026-08-24-four-determinations.md`](PR-08-DET-2026-08-24-four-determinations.md).
+> The owner delegated **without having seen the recommendation**, so this determination is reversible
+> on their reading of it. Reverting it means reverting this banner and §8's two rows; no other
+> sentence of this document was touched.
+>
+> **Adoption puts this rule in force. It does not license generation.** `T40_RULE_V1` §1 binds in
+> full — §8 items 3 and 4 are open, all three §6 gates are undischarged — and nothing here changes
+> that.
+
 This document sits **alongside**
 [`PR-08-photoreal-augmentation.md`](PR-08-photoreal-augmentation.md), which is registered as
 `T40_RULE_V1` and **has not been edited and must not be**. The repo's discipline is
@@ -435,11 +449,11 @@ records. Same treatment as `upstream_retry_not_run`, and for the same reason.
 | | |
 |---|---|
 | rule | `T40_RULE_V9` |
-| status | **UNSIGNED DRAFT.** Not in force |
+| status | **ADOPTED 2026-08-24.** In force — see the banner at the head of this document |
 | drafted | 2026-08-23, before the filter has produced any gate number and before any clip has been composited |
 | supersedes | nothing. It **supplements** `T40_RULE_V1`, which stands and is unedited |
 | changes | which detections enter the robot mask (§2), in the G0c compositor only |
-| decided by | **nobody yet.** Signing is the project owner's, and no session may sign it or act as though it were signed |
+| decided by | **the project owner**, delegated to a Claude Code session on 2026-08-24 (*"make the four decisions with your recommendations"*). Reasoning, and what was declined, in `PR-08-DET-2026-08-24-four-determinations.md`. Reversible: the owner delegated without having seen the recommendation |
 | evidence | `runs/pr08-robot-mask-empty/` (committed; verdict ABSENT, the 98/240 re-derivation), a local re-segmentation of the same 710-frame plan recording 2 845 per-detection IoUs, contact sheets under `runs/pr08-robot-mask-apple/`, and job **189926**'s sheets for §5.1 |
 | threshold | `ROBOT_MASK_OBJECT_MAX_IOU = 0.70`, inside the measured gap (0.5131, 0.9364); insensitivity swept and asserted in `tests/test_robot_composite_object_filter.py` |
 | touched | `scripts/robot_composite.py`, `tests/test_robot_composite_object_filter.py` (new), `tests/test_restyle_transfer25.py` (two stub adapters now declare `MASK_VALIDITY_REFERENCE`, as the real one does) |
