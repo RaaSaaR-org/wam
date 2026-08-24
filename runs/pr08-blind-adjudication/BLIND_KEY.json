@@ -1,0 +1,815 @@
+{
+  "schema": "wam.robot_mask_blind_adjudication_key/1",
+  "produced_by": "scripts/diagnose_robot_mask_empty.py blind-sheet",
+  "seal": "THIS FILE IS THE ANSWER SHEET. Reading it before filling BLIND_LABELS.json in destroys the one property this instrument has that every existing label lacks: the label was written before the pipeline's answer was known.",
+  "seed": 20260825,
+  "corpus": "/home/humanoid/wam-t041/pr08-apple-640x480-h264-lossless",
+  "band": {
+    "absent_below_px": 800,
+    "present_above_px": 3000
+  },
+  "population": {
+    "n_frames_with_an_empty_mask": 237,
+    "by_empty_reason": {
+      "no_boxes_above_threshold": 237
+    },
+    "by_reference_predicate": {
+      "absent": 142,
+      "ambiguous": 76,
+      "present": 19
+    },
+    "note": "the sampling frame for all three arms: every frame in the detect artifact whose committed-masker mask was empty, including frames the reference pass never measured. It is NOT the corpus: the detect plan is stratified."
+  },
+  "arms": {
+    "uniform_random": {
+      "requested": 40,
+      "drawn": 40,
+      "sampling": "uniformly at random, without replacement, from every frame of the population, consulting neither the reference predicate nor the blind-spot score. Drawn FIRST, so no exclusion touches it.",
+      "reporting": "UNBIASED over the population above. This is the only arm whose split may be read as an estimate, and the only one whose interval bounds anything."
+    },
+    "predicate_nominated": {
+      "requested": 12,
+      "drawn": 12,
+      "sampling": "at random from the frames the reference predicate calls robot-PRESENT, minus anything the uniform arm already took. This is the cell the existing contact sheets already show.",
+      "reporting": "BIASED, deliberately and upward: conditioned on one instrument already disagreeing with the masker. Its split is not a rate over anything."
+    },
+    "blind_spot_targeted": {
+      "requested": 24,
+      "drawn": 24,
+      "sampling": "the highest blind_spot_score frames remaining: moving, near-neutral and too BRIGHT for the reference predicate's dark clause. Ranked, not sampled, so the arm reaches the extreme rather than a random draw from a second coined threshold.",
+      "reporting": "BIASED, deliberately: an over-sample of the frames the reference predicate cannot score. Its split is not a rate over anything."
+    }
+  },
+  "sheets": [
+    "blind_sheet_01.png",
+    "blind_sheet_02.png",
+    "blind_sheet_03.png",
+    "blind_sheet_04.png",
+    "blind_sheet_05.png",
+    "blind_sheet_06.png",
+    "blind_sheet_07.png"
+  ],
+  "instrument_note": "blind_spot_px is scripts/diagnose_robot_mask_empty.py's own pixel score, not a detector and not ground truth; it ranks frames for a person to look at. See blind_spot_score.",
+  "tiles": {
+    "t0000": {
+      "episode": "episode_000100",
+      "frame_index": 428,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 3234
+    },
+    "t0001": {
+      "episode": "episode_000240",
+      "frame_index": 0,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 4293,
+      "blind_spot_px": 5866
+    },
+    "t0002": {
+      "episode": "episode_000360",
+      "frame_index": 498,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 589,
+      "blind_spot_px": 11657
+    },
+    "t0003": {
+      "episode": "episode_000260",
+      "frame_index": 434,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 49,
+      "blind_spot_px": 4089
+    },
+    "t0004": {
+      "episode": "episode_000280",
+      "frame_index": 24,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3210,
+      "blind_spot_px": 7238
+    },
+    "t0005": {
+      "episode": "episode_000200",
+      "frame_index": 350,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 3702
+    },
+    "t0006": {
+      "episode": "episode_000212",
+      "frame_index": 56,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1072,
+      "blind_spot_px": 7440
+    },
+    "t0007": {
+      "episode": "episode_000180",
+      "frame_index": 40,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1005,
+      "blind_spot_px": 12655
+    },
+    "t0008": {
+      "episode": "episode_000160",
+      "frame_index": 366,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 290,
+      "blind_spot_px": 1504
+    },
+    "t0009": {
+      "episode": "episode_000272",
+      "frame_index": 390,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 2,
+      "blind_spot_px": 13481
+    },
+    "t0010": {
+      "episode": "episode_000380",
+      "frame_index": 10,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1920,
+      "blind_spot_px": 12657
+    },
+    "t0011": {
+      "episode": "episode_000392",
+      "frame_index": 30,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 5907
+    },
+    "t0012": {
+      "episode": "episode_000180",
+      "frame_index": 46,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 2849,
+      "blind_spot_px": 12835
+    },
+    "t0013": {
+      "episode": "episode_000280",
+      "frame_index": 378,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 1991
+    },
+    "t0014": {
+      "episode": "episode_000028",
+      "frame_index": 0,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 40,
+      "blind_spot_px": 11223
+    },
+    "t0015": {
+      "episode": "episode_000028",
+      "frame_index": 80,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1177,
+      "blind_spot_px": 9601
+    },
+    "t0016": {
+      "episode": "episode_000140",
+      "frame_index": 0,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 5226,
+      "blind_spot_px": 7850
+    },
+    "t0017": {
+      "episode": "episode_000360",
+      "frame_index": 28,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1424,
+      "blind_spot_px": 9832
+    },
+    "t0018": {
+      "episode": "episode_000008",
+      "frame_index": 408,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 6444
+    },
+    "t0019": {
+      "episode": "episode_000180",
+      "frame_index": 0,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 187,
+      "blind_spot_px": 13802
+    },
+    "t0020": {
+      "episode": "episode_000180",
+      "frame_index": 36,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 699,
+      "blind_spot_px": 12847
+    },
+    "t0021": {
+      "episode": "episode_000180",
+      "frame_index": 42,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1505,
+      "blind_spot_px": 13092
+    },
+    "t0022": {
+      "episode": "episode_000352",
+      "frame_index": 0,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 2,
+      "blind_spot_px": 11927
+    },
+    "t0023": {
+      "episode": "episode_000168",
+      "frame_index": 418,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 14,
+      "blind_spot_px": 531
+    },
+    "t0024": {
+      "episode": "episode_000360",
+      "frame_index": 480,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 18,
+      "blind_spot_px": 12121
+    },
+    "t0025": {
+      "episode": "episode_000232",
+      "frame_index": 34,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 35,
+      "blind_spot_px": 12318
+    },
+    "t0026": {
+      "episode": "episode_000080",
+      "frame_index": 110,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3083,
+      "blind_spot_px": 8125
+    },
+    "t0027": {
+      "episode": "episode_000040",
+      "frame_index": 54,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 2374,
+      "blind_spot_px": 11642
+    },
+    "t0028": {
+      "episode": "episode_000360",
+      "frame_index": 52,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 916,
+      "blind_spot_px": 11668
+    },
+    "t0029": {
+      "episode": "episode_000272",
+      "frame_index": 62,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 910,
+      "blind_spot_px": 4580
+    },
+    "t0030": {
+      "episode": "episode_000280",
+      "frame_index": 0,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 408,
+      "blind_spot_px": 10042
+    },
+    "t0031": {
+      "episode": "episode_000360",
+      "frame_index": 462,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 10,
+      "blind_spot_px": 12102
+    },
+    "t0032": {
+      "episode": "episode_000252",
+      "frame_index": 0,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3015,
+      "blind_spot_px": 7075
+    },
+    "t0033": {
+      "episode": "episode_000140",
+      "frame_index": 426,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 498
+    },
+    "t0034": {
+      "episode": "episode_000352",
+      "frame_index": 32,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 241,
+      "blind_spot_px": 12547
+    },
+    "t0035": {
+      "episode": "episode_000352",
+      "frame_index": 34,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3568,
+      "blind_spot_px": 9689
+    },
+    "t0036": {
+      "episode": "episode_000272",
+      "frame_index": 290,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 124,
+      "blind_spot_px": 10767
+    },
+    "t0037": {
+      "episode": "episode_000128",
+      "frame_index": 294,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 3,
+      "blind_spot_px": 1832
+    },
+    "t0038": {
+      "episode": "episode_000252",
+      "frame_index": 18,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 2797,
+      "blind_spot_px": 7032
+    },
+    "t0039": {
+      "episode": "episode_000272",
+      "frame_index": 66,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1829,
+      "blind_spot_px": 4573
+    },
+    "t0040": {
+      "episode": "episode_000168",
+      "frame_index": 374,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 20,
+      "blind_spot_px": 437
+    },
+    "t0041": {
+      "episode": "episode_000100",
+      "frame_index": 0,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 48,
+      "blind_spot_px": 1405
+    },
+    "t0042": {
+      "episode": "episode_000000",
+      "frame_index": 64,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 811,
+      "blind_spot_px": 13097
+    },
+    "t0043": {
+      "episode": "episode_000020",
+      "frame_index": 360,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 4,
+      "blind_spot_px": 5151
+    },
+    "t0044": {
+      "episode": "episode_000168",
+      "frame_index": 56,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3126,
+      "blind_spot_px": 10947
+    },
+    "t0045": {
+      "episode": "episode_000272",
+      "frame_index": 324,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 9,
+      "blind_spot_px": 12501
+    },
+    "t0046": {
+      "episode": "episode_000220",
+      "frame_index": 4,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 606,
+      "blind_spot_px": 8179
+    },
+    "t0047": {
+      "episode": "episode_000380",
+      "frame_index": 0,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1857,
+      "blind_spot_px": 12786
+    },
+    "t0048": {
+      "episode": "episode_000008",
+      "frame_index": 82,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 910,
+      "blind_spot_px": 3704
+    },
+    "t0049": {
+      "episode": "episode_000008",
+      "frame_index": 348,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 70,
+      "blind_spot_px": 8709
+    },
+    "t0050": {
+      "episode": "episode_000320",
+      "frame_index": 422,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 4082
+    },
+    "t0051": {
+      "episode": "episode_000180",
+      "frame_index": 48,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3669,
+      "blind_spot_px": 12745
+    },
+    "t0052": {
+      "episode": "episode_000040",
+      "frame_index": 0,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 187,
+      "blind_spot_px": 12902
+    },
+    "t0053": {
+      "episode": "episode_000180",
+      "frame_index": 18,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 203,
+      "blind_spot_px": 13336
+    },
+    "t0054": {
+      "episode": "episode_000160",
+      "frame_index": 22,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 620,
+      "blind_spot_px": 9903
+    },
+    "t0055": {
+      "episode": "episode_000340",
+      "frame_index": 334,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 1648
+    },
+    "t0056": {
+      "episode": "episode_000060",
+      "frame_index": 346,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 244,
+      "blind_spot_px": 11550
+    },
+    "t0057": {
+      "episode": "episode_000168",
+      "frame_index": 20,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 370,
+      "blind_spot_px": 12048
+    },
+    "t0058": {
+      "episode": "episode_000040",
+      "frame_index": 56,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3643,
+      "blind_spot_px": 11281
+    },
+    "t0059": {
+      "episode": "episode_000240",
+      "frame_index": 54,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3470,
+      "blind_spot_px": 6094
+    },
+    "t0060": {
+      "episode": "episode_000340",
+      "frame_index": 30,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 7668
+    },
+    "t0061": {
+      "episode": "episode_000360",
+      "frame_index": 38,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1622,
+      "blind_spot_px": 17281
+    },
+    "t0062": {
+      "episode": "episode_000000",
+      "frame_index": 0,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 290,
+      "blind_spot_px": 11963
+    },
+    "t0063": {
+      "episode": "episode_000360",
+      "frame_index": 426,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 0,
+      "blind_spot_px": 12149
+    },
+    "t0064": {
+      "episode": "episode_000160",
+      "frame_index": 322,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 23,
+      "blind_spot_px": 1002
+    },
+    "t0065": {
+      "episode": "episode_000080",
+      "frame_index": 98,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 940,
+      "blind_spot_px": 8734
+    },
+    "t0066": {
+      "episode": "episode_000168",
+      "frame_index": 0,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 309,
+      "blind_spot_px": 12033
+    },
+    "t0067": {
+      "episode": "episode_000180",
+      "frame_index": 44,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 1819,
+      "blind_spot_px": 13038
+    },
+    "t0068": {
+      "episode": "episode_000260",
+      "frame_index": 64,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3410,
+      "blind_spot_px": 259
+    },
+    "t0069": {
+      "episode": "episode_000000",
+      "frame_index": 84,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "ambiguous",
+      "predicate_px": 2683,
+      "blind_spot_px": 11636
+    },
+    "t0070": {
+      "episode": "episode_000320",
+      "frame_index": 20,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3885,
+      "blind_spot_px": 4424
+    },
+    "t0071": {
+      "episode": "episode_000300",
+      "frame_index": 294,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 3,
+      "blind_spot_px": 1538
+    },
+    "t0072": {
+      "episode": "episode_000380",
+      "frame_index": 22,
+      "arm": "predicate_nominated",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "present",
+      "predicate_px": 3302,
+      "blind_spot_px": 12629
+    },
+    "t0073": {
+      "episode": "episode_000000",
+      "frame_index": 38,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 299,
+      "blind_spot_px": 11601
+    },
+    "t0074": {
+      "episode": "episode_000272",
+      "frame_index": 356,
+      "arm": "blind_spot_targeted",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 4,
+      "blind_spot_px": 13298
+    },
+    "t0075": {
+      "episode": "episode_000232",
+      "frame_index": 0,
+      "arm": "uniform_random",
+      "mask_px": 0,
+      "empty_reason": "no_boxes_above_threshold",
+      "predicate_verdict": "absent",
+      "predicate_px": 50,
+      "blind_spot_px": 12415
+    }
+  }
+}

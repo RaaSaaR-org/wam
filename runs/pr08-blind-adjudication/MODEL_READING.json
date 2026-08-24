@@ -1,0 +1,83 @@
+{
+  "schema": "wam.pr08_blind_adjudication/1-model-reading",
+  "established_by": "model",
+  "IS_THIS_THE_MEASUREMENT": "NO.",
+  "established_by_note": "THIS IS NOT THE HUMAN ADJUDICATION THE INSTRUMENT WAS BUILT FOR, and it must not be scored as one. The reader is a model of the same family as the one that built this instrument and wrote the masker it adjudicates, i.e. a CORRELATED OBSERVER, capable of reproducing the same misreading on both sides. Same weakness, same words, as runs/pr08-mask-audit-local-cpu/MODEL_OBSERVATIONS.json and runs/t040-identity-prompt/calibration-2/probe_observations.json. BLIND_LABELS.template.json is deliberately left BLANK by this session; it belongs to a person.",
+  "ordering_claim": "This file was written BEFORE BLIND_KEY.json was opened in the session that wrote it. That ordering is the only thing that makes a blind reading blind, and it is asserted here so it can be disbelieved: the check is that this file names no arm, no episode and no frame index, because at the time of writing the reader did not know them.",
+  "what_was_looked_at": "2 of 7 sheets - blind_sheet_01.png and blind_sheet_05.png - i.e. tiles t0000-t0011 and t0048-t0059, 24 of 76 tiles. The other 5 sheets were NOT looked at.",
+  "reading": {
+    "t0000_t0011": "No robot anywhere in any of the 12 tiles. Apple and plate on grey cloth, nothing else. One tile (t0007) carries a small dark shape at the extreme right border that could be a gripper tip or could be cloth shadow.",
+    "t0048_t0059": "No robot anywhere in any of the 12 tiles. Small dark shapes at the extreme left or right border in roughly three tiles (around t0051, t0057, t0058) that are genuinely ambiguous at this resolution - a gripper tip entering frame, or a shadow in the cloth. These are exactly what the 'undecidable' label exists for and a human should not be pushed off them."
+  },
+  "reading_in_one_line": "On the 24 tiles looked at, the empty masks are overwhelmingly CASE (a) - the robot is genuinely out of shot - with a handful of frame-edge tiles that are honestly undecidable.",
+  "why_this_is_nonetheless_worth_recording": "Not because a model's reading counts. Because of WHERE the sample came from. Every previous human or model look at this question was at frames the masker itself nominated, so it could only ever confirm the masker on the masker's own chosen ground. 40 of these 76 tiles were drawn UNIFORMLY AT RANDOM from the whole empty-mask population under a recorded seed, which is the first sample of this question that the masker did not choose. What the reading is evidence FOR is that the uniform arm is not obviously full of case (b); it is not evidence that case (b) is absent.",
+  "what_this_does_not_establish": [
+    "Not that case (b) does not occur. 24 of 76 tiles were read, on 2 of 7 sheets, and the arms are shuffled across sheets, so this reading does not even know how many of the 24 came from the uniform arm.",
+    "Not a rate. No count from this file may be divided by anything.",
+    "Not a discharge of GATE_QUALIFICATION_BLOCKERS entry 1, whose condition is a HUMAN looking, and which this file does not satisfy in either its letter or its point.",
+    "Not a determination on T40_RULE_V12. \u00a73.2 is unavailable for reasons unrelated to this sample - see docs/preregistration/PR-08-RESULT-2026-08-25-v12-preconditions.md \u00a71."
+  ],
+  "hardware_caveat": "The empty-mask POPULATION these tiles were drawn from was computed on this workstation's RTX 5090. runs/pr08-robot-mask-empty/DIAGNOSIS.json records that the same masker, same pins, same tree, same 1603 frames disagrees with the cluster's H200 on the empty count by 13 of 1603 and on the maximum area fraction by 0.36182 vs 0.97220. So the sampling frame itself is mildly hardware-dependent. It does not affect what is IN a frame - which is what a human adjudicates - but a rate computed from these tiles inherits it.",
+  "licensed": {
+    "generation": false,
+    "training": false,
+    "any_gate": false,
+    "note": "This file is a reading. It settles nothing, releases nothing and permits no run."
+  },
+  "after_opening_the_key": {
+    "WRITTEN_AFTER": "Everything above was written before BLIND_KEY.json was opened. This block was written after, and is a cross-reference, not a further reading. No tile was re-examined after the key was opened.",
+    "the_24_tiles_spanned_all_three_arms": {
+      "uniform_random": 13,
+      "blind_spot_targeted": 7,
+      "predicate_nominated": 4
+    },
+    "why_that_matters": "The blind draw was not accidentally confined to the easy arm. 7 of the 24 came from blind_spot_targeted - the cell built to over-weight frames the reference predicate cannot score, i.e. where a masker false negative was expected to hide - and the reading found no robot in any of them.",
+    "the_candidate_case_b_frames_among_them": [
+      {
+        "tile": "t0001",
+        "episode": "episode_000240",
+        "frame_index": 0,
+        "predicate_px": 4293,
+        "read_as": "no robot"
+      },
+      {
+        "tile": "t0004",
+        "episode": "episode_000280",
+        "frame_index": 24,
+        "predicate_px": 3210,
+        "read_as": "no robot"
+      },
+      {
+        "tile": "t0051",
+        "episode": "episode_000180",
+        "frame_index": 48,
+        "predicate_px": 3669,
+        "read_as": "no robot; ambiguous dark shape at frame edge"
+      },
+      {
+        "tile": "t0058",
+        "episode": "episode_000040",
+        "frame_index": 56,
+        "predicate_px": 3643,
+        "read_as": "no robot; ambiguous dark shape at frame edge"
+      },
+      {
+        "tile": "t0059",
+        "episode": "episode_000240",
+        "frame_index": 54,
+        "predicate_px": 3470,
+        "read_as": "no robot"
+      }
+    ],
+    "what_that_suggests_and_how_weakly": "5 of the 19 frames in the whole sampling population that the predicate calls robot-present-with-an-empty-mask were read blind, and none showed a robot. If a human confirms that, the reading is that on these frames the PREDICATE is producing false positives rather than the MASKER producing false negatives - which points the (a)/(b) question the same way DIAGNOSIS.json already did, but for the first time from a sample the masker did not choose. n=5, by a correlated observer, and it is not a rate.",
+    "every_empty_mask_in_the_population_is_a_DETECTOR_SILENCE": {
+      "n_frames_with_an_empty_mask": 237,
+      "by_empty_reason": {
+        "no_boxes_above_threshold": 237,
+        "sam2_segmented_nothing": 0,
+        "all_boxes_dropped_as_object": 0
+      },
+      "reading": "Not one empty mask in this population came from SAM 2 failing on a box, and not one came from V9's object-grounding filter removing the robot detection. Every single one is Grounding-DINO returning no box for the robot prompt at all. That is worth stating because V9 was a live suspect for the 99.2 % G0c refusal rate and this says it is not the mechanism - the mechanism is the detector staying silent."
+    }
+  }
+}

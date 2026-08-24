@@ -1,0 +1,331 @@
+{
+  "schema": "wam.robot_mask_blind_adjudication_labels/1",
+  "produced_by": "scripts/diagnose_robot_mask_empty.py blind-sheet",
+  "established_by": "",
+  "established_by_note": "A MODEL FILLING THIS IN IS NOT THE MEASUREMENT. Copied verbatim from scripts/audit_apple_masks.py's CORRELATED_OBSERVER (audit_apple_masks.py:245-251), which copies runs/t040-identity-prompt/calibration-2/probe_observations.json's seed pass: \"If the `observed` fields below were written by a model rather than a person, say so in `established_by` and leave `looked_at` alone. A model looking at masks produced by a pipeline another model wired up is a CORRELATED OBSERVER: it is capable of reproducing the same misreading on both sides, and blocker 1 asks for a human.\" AND ONE MORE, WHICH IS THIS SHEET'S OWN: these tiles are blind so that the answer is written down before the pipeline's answer is known. A model with the repository in front of it can recover the pipeline's answer and would be unblinding itself, which costs this instrument the one property it has that the existing labels do not. Set `established_by` to whoever looked; leave `looked_at` false unless that was a person.",
+  "how_to_use": "Open the sheets. For each tile id, look at the picture and decide ONE thing: is any part of the robot - arm, wrist, hand, a fingertip at the border - visible in it? Write arm_present, arm_absent or undecidable in `label`, and what you saw in `note`. undecidable is a real answer and is worth more than a guess. Rename this file to BLIND_LABELS.json when every row is filled, then run `blind-score`.",
+  "label_values": [
+    "arm_present",
+    "arm_absent",
+    "undecidable"
+  ],
+  "sheets": [
+    "blind_sheet_01.png",
+    "blind_sheet_02.png",
+    "blind_sheet_03.png",
+    "blind_sheet_04.png",
+    "blind_sheet_05.png",
+    "blind_sheet_06.png",
+    "blind_sheet_07.png"
+  ],
+  "human_review": {
+    "looked_at": false,
+    "established_by": ""
+  },
+  "tiles": {
+    "t0000": {
+      "label": null,
+      "note": ""
+    },
+    "t0001": {
+      "label": null,
+      "note": ""
+    },
+    "t0002": {
+      "label": null,
+      "note": ""
+    },
+    "t0003": {
+      "label": null,
+      "note": ""
+    },
+    "t0004": {
+      "label": null,
+      "note": ""
+    },
+    "t0005": {
+      "label": null,
+      "note": ""
+    },
+    "t0006": {
+      "label": null,
+      "note": ""
+    },
+    "t0007": {
+      "label": null,
+      "note": ""
+    },
+    "t0008": {
+      "label": null,
+      "note": ""
+    },
+    "t0009": {
+      "label": null,
+      "note": ""
+    },
+    "t0010": {
+      "label": null,
+      "note": ""
+    },
+    "t0011": {
+      "label": null,
+      "note": ""
+    },
+    "t0012": {
+      "label": null,
+      "note": ""
+    },
+    "t0013": {
+      "label": null,
+      "note": ""
+    },
+    "t0014": {
+      "label": null,
+      "note": ""
+    },
+    "t0015": {
+      "label": null,
+      "note": ""
+    },
+    "t0016": {
+      "label": null,
+      "note": ""
+    },
+    "t0017": {
+      "label": null,
+      "note": ""
+    },
+    "t0018": {
+      "label": null,
+      "note": ""
+    },
+    "t0019": {
+      "label": null,
+      "note": ""
+    },
+    "t0020": {
+      "label": null,
+      "note": ""
+    },
+    "t0021": {
+      "label": null,
+      "note": ""
+    },
+    "t0022": {
+      "label": null,
+      "note": ""
+    },
+    "t0023": {
+      "label": null,
+      "note": ""
+    },
+    "t0024": {
+      "label": null,
+      "note": ""
+    },
+    "t0025": {
+      "label": null,
+      "note": ""
+    },
+    "t0026": {
+      "label": null,
+      "note": ""
+    },
+    "t0027": {
+      "label": null,
+      "note": ""
+    },
+    "t0028": {
+      "label": null,
+      "note": ""
+    },
+    "t0029": {
+      "label": null,
+      "note": ""
+    },
+    "t0030": {
+      "label": null,
+      "note": ""
+    },
+    "t0031": {
+      "label": null,
+      "note": ""
+    },
+    "t0032": {
+      "label": null,
+      "note": ""
+    },
+    "t0033": {
+      "label": null,
+      "note": ""
+    },
+    "t0034": {
+      "label": null,
+      "note": ""
+    },
+    "t0035": {
+      "label": null,
+      "note": ""
+    },
+    "t0036": {
+      "label": null,
+      "note": ""
+    },
+    "t0037": {
+      "label": null,
+      "note": ""
+    },
+    "t0038": {
+      "label": null,
+      "note": ""
+    },
+    "t0039": {
+      "label": null,
+      "note": ""
+    },
+    "t0040": {
+      "label": null,
+      "note": ""
+    },
+    "t0041": {
+      "label": null,
+      "note": ""
+    },
+    "t0042": {
+      "label": null,
+      "note": ""
+    },
+    "t0043": {
+      "label": null,
+      "note": ""
+    },
+    "t0044": {
+      "label": null,
+      "note": ""
+    },
+    "t0045": {
+      "label": null,
+      "note": ""
+    },
+    "t0046": {
+      "label": null,
+      "note": ""
+    },
+    "t0047": {
+      "label": null,
+      "note": ""
+    },
+    "t0048": {
+      "label": null,
+      "note": ""
+    },
+    "t0049": {
+      "label": null,
+      "note": ""
+    },
+    "t0050": {
+      "label": null,
+      "note": ""
+    },
+    "t0051": {
+      "label": null,
+      "note": ""
+    },
+    "t0052": {
+      "label": null,
+      "note": ""
+    },
+    "t0053": {
+      "label": null,
+      "note": ""
+    },
+    "t0054": {
+      "label": null,
+      "note": ""
+    },
+    "t0055": {
+      "label": null,
+      "note": ""
+    },
+    "t0056": {
+      "label": null,
+      "note": ""
+    },
+    "t0057": {
+      "label": null,
+      "note": ""
+    },
+    "t0058": {
+      "label": null,
+      "note": ""
+    },
+    "t0059": {
+      "label": null,
+      "note": ""
+    },
+    "t0060": {
+      "label": null,
+      "note": ""
+    },
+    "t0061": {
+      "label": null,
+      "note": ""
+    },
+    "t0062": {
+      "label": null,
+      "note": ""
+    },
+    "t0063": {
+      "label": null,
+      "note": ""
+    },
+    "t0064": {
+      "label": null,
+      "note": ""
+    },
+    "t0065": {
+      "label": null,
+      "note": ""
+    },
+    "t0066": {
+      "label": null,
+      "note": ""
+    },
+    "t0067": {
+      "label": null,
+      "note": ""
+    },
+    "t0068": {
+      "label": null,
+      "note": ""
+    },
+    "t0069": {
+      "label": null,
+      "note": ""
+    },
+    "t0070": {
+      "label": null,
+      "note": ""
+    },
+    "t0071": {
+      "label": null,
+      "note": ""
+    },
+    "t0072": {
+      "label": null,
+      "note": ""
+    },
+    "t0073": {
+      "label": null,
+      "note": ""
+    },
+    "t0074": {
+      "label": null,
+      "note": ""
+    },
+    "t0075": {
+      "label": null,
+      "note": ""
+    }
+  }
+}
