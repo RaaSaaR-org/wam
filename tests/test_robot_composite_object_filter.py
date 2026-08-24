@@ -548,3 +548,108 @@ def test_the_recorded_counts_are_the_source_pass_and_say_so() -> None:
     after = body.index("after_filter = dict(getattr(context.masker, \"filter_counters\", {}) or {})")
     loop = body.index("for index in range(src.shape[0]):")
     assert before < after < loop, "the delta must close before the generated frames are masked"
+
+
+# -- the rule has exactly one implementation, and it is callable ------------------------------------
+#
+# ``scripts/diagnose_robot_mask_empty.py`` reimplements the mask path so that it can report WHY a
+# mask was empty (the masker returns all-False for "no boxes" and for "SAM 2 segmented nothing"
+# alike). That reimplementation predates V9, so it now disagrees with :meth:`Sam2RobotMasker.mask`
+# and the diagnose module's own ``--verify`` guard would fire. The repair is NOT a second copy of
+# the V9 rule over there — two implementations of one rule is the drift these gates exist to catch,
+# and ``test_the_discriminator_is_the_adapter_s_and_is_not_restated_here`` above already refuses it
+# one level down. So the rule is factored into :meth:`Sam2RobotMasker.object_grounding_keep` and
+# both callers reach it. The tests below pin that the extraction changed nothing.
+
+
+def test_object_grounding_keep_is_the_rule_and_mask_is_its_union(masker, monkeypatch):
+    """The extracted unit decides, and :meth:`mask` only ORs what it kept.
+
+    Checked on the frame that has both — filtering the union could not produce this answer and
+    neither could a mask that re-derived the keep flags differently.
+    """
+    frame = _paint_robot(_paint_apple(_blank(), APPLE_BOX), ROBOT_BOX)
+    stacked = np.zeros((2, CANVAS, CANVAS), dtype=bool)
+    stacked[0, APPLE_BOX[1]:APPLE_BOX[3], APPLE_BOX[0]:APPLE_BOX[2]] = True
+    stacked[1, ROBOT_BOX[1]:ROBOT_BOX[3], ROBOT_BOX[0]:ROBOT_BOX[2]] = True
+
+    keep = masker.object_grounding_keep(frame, stacked)
+
+    assert keep.tolist() == [False, True], "the apple is dropped, the robot is kept, per candidate"
+    _boxes(masker, monkeypatch, [APPLE_BOX, ROBOT_BOX])
+    fresh = rc.Sam2RobotMasker()
+    fresh._module = masker._module
+    assert np.array_equal(fresh.mask(frame), np.any(stacked[keep], axis=0))
+
+
+@pytest.mark.parametrize(
+    "boxes,painted,expected_boxes,dropped,emptied",
+    [
+        ([APPLE_BOX], [APPLE_BOX], [], 1, 1),
+        ([ROBOT_BOX], [ROBOT_BOX], [ROBOT_BOX], 0, 0),
+        ([APPLE_BOX, ROBOT_BOX], [APPLE_BOX, ROBOT_BOX], [ROBOT_BOX], 1, 0),
+        ([], [], [], 0, 0),
+    ],
+)
+def test_extracting_the_filter_changed_nothing_mask_returns(
+    masker, monkeypatch, boxes, painted, expected_boxes, dropped, emptied
+):
+    """The behaviour :meth:`mask` had before the extraction, enumerated rather than asserted.
+
+    Four cases and their counters, written down independently of the implementation: every
+    detection dropped, none dropped, one of two dropped, and nothing detected at all. A refactor
+    that moved a counter increment across the ``if dropped:`` boundary, or that returned the union
+    of an all-False keep instead of a fresh zeros array, breaks one of these rows.
+    """
+    frame = _blank()
+    for box in painted:
+        (_paint_apple if box == APPLE_BOX else _paint_robot)(frame, box)
+    _boxes(masker, monkeypatch, np.asarray(boxes, dtype=np.float64).reshape(-1, 4))
+
+    mask = masker.mask(frame)
+
+    expected = np.zeros((CANVAS, CANVAS), dtype=bool)
+    for x0, y0, x1, y1 in expected_boxes:
+        expected[y0:y1, x0:x1] = True
+    assert np.array_equal(mask, expected)
+    assert mask.dtype == np.dtype(bool) and mask.shape == (CANVAS, CANVAS)
+    assert masker.filter_counters["detections_dropped_as_object"] == dropped
+    assert masker.filter_counters["frames_emptied_by_the_filter"] == emptied
+    assert masker.filter_counters["frames_with_a_dropped_detection"] == (1 if dropped else 0)
+    assert masker.filter_counters["frames_masked"] == 1
+
+
+def test_the_threshold_comparison_appears_exactly_once_in_the_repository() -> None:
+    """One implementation of the V9 rule, reachable by every caller that needs it.
+
+    ``scripts/diagnose_robot_mask_empty.py`` must reach it rather than grow its own
+    ``<= ROBOT_MASK_OBJECT_MAX_IOU``, which is what this refuses. ``provenance`` and
+    ``filter_record`` quote the constant into a STRING and are excluded by that spelling.
+    """
+    hits = []
+    for path in sorted((_REPO / "scripts").rglob("*.py")):
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"[<>=]=?\s*ROBOT_MASK_OBJECT_MAX_IOU|ROBOT_MASK_OBJECT_MAX_IOU\s*[<>]", line):
+                hits.append((str(path.relative_to(_REPO)), i, line.strip()))
+    assert len(hits) == 1, hits
+    assert hits[0][0] == "scripts/robot_composite.py"
+
+    body = _method_body("object_grounding_keep")
+    assert any("ROBOT_MASK_OBJECT_MAX_IOU" in line for line in body), (
+        "the one comparison must live in the unit both callers reach")
+
+    diagnose = (_REPO / "scripts" / "diagnose_robot_mask_empty.py").read_text(encoding="utf-8")
+    assert "object_grounding_keep" in diagnose, (
+        "the diagnosis must call the masker's filter, not re-type its rule")
+
+
+def _method_body(name: str) -> list[str]:
+    source = (_REPO / "scripts" / "robot_composite.py").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(source) if line.strip().startswith(f"def {name}("))
+    indent = len(source[start]) - len(source[start].lstrip())
+    end = next(
+        (i for i in range(start + 1, len(source))
+         if source[i].strip() and (len(source[i]) - len(source[i].lstrip())) <= indent),
+        len(source),
+    )
+    return [line.strip() for line in source[start:end]]

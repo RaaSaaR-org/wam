@@ -843,6 +843,34 @@ class Sam2RobotMasker:
             [float(module.mask_validity_iou(m, reference)) for m in masks], dtype=np.float64
         )
 
+    def object_grounding_keep(self, frame: np.ndarray, masks: np.ndarray) -> np.ndarray:
+        """``(N,)`` bool: which candidate masks are NOT the object and therefore survive. PR-08 V9.
+
+        **THE ONLY PLACE THE V9 RULE IS SPELLED, AND IT IS CALLABLE ON PURPOSE.** Two callers need
+        the same answer: :meth:`mask`, which ORs what survives; and
+        ``scripts/diagnose_robot_mask_empty.py``'s ``detector_readout``, which reimplements the
+        surrounding mask path — the two forwards, the raw pre-threshold scores — precisely because
+        the masker cannot say WHY a mask was empty, and which must nevertheless agree with
+        :meth:`mask` pixel for pixel or its own ``--verify`` guard refuses the diagnosis. That
+        second caller re-typing this method's threshold comparison would be a second implementation
+        of one rule, drifting silently because the two never compare their answers — the failure
+        :meth:`object_grounding_iou` already refuses one level down, and the failure PR-13 is about.
+
+        The counters move HERE rather than in :meth:`mask` because they count filter decisions, not
+        masks: a caller that asks the filter a question has asked it, and ``filter_record`` reporting
+        otherwise would understate how often the rule fired. ``frames_masked`` stays in :meth:`mask`,
+        which is what it counts.
+        """
+        overlaps = self.object_grounding_iou(frame, masks)
+        keep = np.asarray(overlaps <= ROBOT_MASK_OBJECT_MAX_IOU)
+        dropped = int(keep.size - np.count_nonzero(keep))
+        if dropped:
+            self.filter_counters["detections_dropped_as_object"] += dropped
+            self.filter_counters["frames_with_a_dropped_detection"] += 1
+            if not keep.any():
+                self.filter_counters["frames_emptied_by_the_filter"] += 1
+        return keep
+
     def mask(self, rgb: np.ndarray) -> np.ndarray:
         """``(H, W)`` bool: every pixel this frame's robot occupies. All-False when nothing grounds.
 
@@ -877,19 +905,12 @@ class Sam2RobotMasker:
         stacked = np.asarray(masks).reshape(-1, h, w) > 0
         self.filter_counters["detections_segmented"] += int(stacked.shape[0])
 
-        overlaps = self.object_grounding_iou(frame, stacked)
-        keep = overlaps <= ROBOT_MASK_OBJECT_MAX_IOU
-        dropped = int(stacked.shape[0] - np.count_nonzero(keep))
-        if dropped:
-            self.filter_counters["detections_dropped_as_object"] += dropped
-            self.filter_counters["frames_with_a_dropped_detection"] += 1
-            if not keep.any():
-                # Every candidate was the apple, so this frame has no robot detection left and the
-                # mask is empty. check_mask refuses the clip on it, by name and with no threshold —
-                # which is the intended outcome and the whole reason nothing weaker is admitted
-                # here to avoid it.
-                self.filter_counters["frames_emptied_by_the_filter"] += 1
-                return np.zeros((h, w), dtype=bool)
+        keep = self.object_grounding_keep(frame, stacked)
+        if not keep.any():
+            # Every candidate was the apple, so this frame has no robot detection left and the mask
+            # is empty. check_mask refuses the clip on it, by name and with no threshold — which is
+            # the intended outcome and the whole reason nothing weaker is admitted here to avoid it.
+            return np.zeros((h, w), dtype=bool)
         return np.ascontiguousarray(np.any(stacked[keep], axis=0))
 
 

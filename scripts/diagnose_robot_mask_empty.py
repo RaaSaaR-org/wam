@@ -26,8 +26,10 @@ It answers the question with two independent instruments and joins them frame by
 
 ``detect``   The REAL masker — ``robot_composite.build_masker()``, the committed prompt, the pinned
              checkpoints, the adapter's own thresholds — on a sample of frames, recording not just
-             the mask area but WHY an empty mask was empty: no boxes at all, or boxes that SAM 2
-             segmented to nothing. On the empty frames it additionally reads the detector's raw
+             the mask area but WHY an empty mask was empty: no boxes at all, boxes that SAM 2
+             segmented to nothing, or boxes that PR-08 V9's object-grounding filter dropped as the
+             apple — three different findings behind one all-False array, and the masker returns
+             the same array for all three. On the empty frames it additionally reads the detector's raw
              per-phrase scores back at threshold 0, which is what separates "nothing matched" from
              "matched weakly and got filtered". That readout is an EXTRA post-processing pass over
              an already-computed forward; it changes no threshold and feeds nothing back into the
@@ -38,6 +40,16 @@ It answers the question with two independent instruments and joins them frame by
              the reference predicate calls the robot visible; whether the empty frames cluster by
              episode and within an episode by time; the detector's score distribution on empty
              frames; and the 2x2 agreement table that is the actual verdict.
+
+``blind``    ``blind-sheet`` / ``blind-score``: the one thing the three instruments above cannot
+             produce between them — a human label written down BEFORE the masker's answer is known.
+             Every other sheet here, and every human inspection this project holds, shows frames
+             NOMINATED by a disagreement with the masker; such a sample can describe the
+             disagreements and cannot bound the cell where both instruments are quiet together.
+             Three labelled arms drawn from the empty-mask population, one of them uniform and
+             therefore the only one that estimates anything; tiles that show pixels and an opaque
+             id and nothing else; a sealed key; and a scorer that refuses a half-filled sheet. The
+             section above :func:`blind_spot_score` states the problem in full.
 
 **IT CHANGES NOTHING AND RECOMMENDS NOTHING IN CODE.** ``ROBOT_TEXT_PROMPT`` is a committed
 constant with no override and this module does not set one; it imports the prompt to record it.
@@ -61,6 +73,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import random
 import sys
 from typing import Any
 
@@ -453,9 +466,23 @@ def detector_readout(masker: Any, frame: np.ndarray) -> dict:
     the only thing that can tell "nothing matched" apart from "matched weakly and got filtered".
 
     Reimplemented here rather than called through the masker because the masker cannot report WHY
-    a mask was empty — it returns all-False for "no boxes" and for "SAM 2 segmented to nothing"
-    alike, and those are different findings. ``--verify`` asserts this path and
-    ``Sam2RobotMasker.mask`` agree pixel for pixel on real frames.
+    a mask was empty — it returns all-False for "no boxes", for "SAM 2 segmented to nothing" and
+    for "V9 dropped every box as the apple" alike, and those are three different findings.
+    ``--verify`` asserts this path and ``Sam2RobotMasker.mask`` agree pixel for pixel on real
+    frames.
+
+    **WHAT IS NOT REIMPLEMENTED: THE OBJECT-GROUNDING FILTER.** PR-08 V9 drops a candidate whose
+    SAM 2 mask IS the apple before the union (``ROBOT_MASK_OBJECT_MAX_IOU``), and this module
+    predates it, which is exactly why the ``--verify`` guard below would have started firing on
+    2026-08-23 (``docs/preregistration/PR-08-RESULT-2026-08-25-v12-preconditions.md`` §2 item 2).
+    The repair calls ``Sam2RobotMasker.object_grounding_keep`` — the masker's own rule, the masker's
+    own counters, the masker's own second opinion from ``apple_sam2`` — rather than re-typing its
+    comparison here. Two implementations of one rule that never compare their answers is the drift
+    PR-13 is about, and it is what this whole diagnosis is trying to detect one level up.
+
+    Calling the masker's filter ADVANCES THE MASKER'S FILTER COUNTERS. Nothing in this module reads
+    them and no artifact here reports them; a caller that differences ``filter_counters`` around a
+    composite must not also run this readout on the same masker.
     """
     import torch  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
@@ -499,6 +526,8 @@ def detector_readout(masker: Any, frame: np.ndarray) -> dict:
         "raw_top5": [round(float(s), 5) for s in np.sort(raw_scores)[::-1][:5]],
     }
     if boxes.shape[0] == 0:
+        record["n_detections_segmented"] = 0
+        record["n_dropped_as_object"] = 0
         record["mask_px"] = 0
         record["empty_reason"] = "no_boxes_above_threshold"
         return record
@@ -508,7 +537,29 @@ def detector_readout(masker: Any, frame: np.ndarray) -> dict:
         predictor.set_image(rgb)
         masks, _scores, _logits = predictor.predict(box=boxes, multimask_output=False)
     stacked = np.asarray(masks).reshape(-1, height, width) > 0
-    mask = np.ascontiguousarray(np.any(stacked, axis=0))
+
+    # PR-08 V9, asked of the masker rather than answered here. ``object_grounding_keep`` scores each
+    # candidate against the frame's own colour reference and returns the survivors; the union below
+    # is the same one ``Sam2RobotMasker.mask`` performs on the same array.
+    #
+    # Asked ONCE. ``object_grounding_iou`` counts the frames whose colour reference was empty, so a
+    # second call here to log the scores beside the decision would double that count and cost a
+    # second pass over every candidate mask. The decision and its two counts are what this records.
+    keep = np.asarray(masker.object_grounding_keep(rgb, stacked), dtype=bool)
+    record["n_detections_segmented"] = int(stacked.shape[0])
+    record["n_dropped_as_object"] = int(keep.size - np.count_nonzero(keep))
+
+    if not keep.any():
+        # The mask is empty because the filter emptied it — NOT because the detector found nothing.
+        # Those are opposite findings about the same all-False array and the masker cannot tell
+        # them apart, which is the reason this function exists at all.
+        mask = np.zeros((height, width), dtype=bool)
+        record["mask_px"] = 0
+        record["empty_reason"] = "all_boxes_dropped_as_object"
+        record["_mask"] = mask
+        return record
+
+    mask = np.ascontiguousarray(np.any(stacked[keep], axis=0))
     record["mask_px"] = int(np.count_nonzero(mask))
     record["empty_reason"] = None if record["mask_px"] else "sam2_segmented_nothing"
     record["_mask"] = mask
@@ -867,6 +918,554 @@ def cmd_sheet(args: argparse.Namespace) -> int:
     return 0 if written else 1
 
 
+# --------------------------------------------------------------------------------------------
+# `blind-sheet` / `blind-score` — a label assigned BEFORE the masker's answer is seen
+# --------------------------------------------------------------------------------------------
+#
+# WHAT IS WRONG WITH EVERY HUMAN LABEL THIS PROJECT HOLDS, stated by
+# ``docs/preregistration/PR-08-RESULT-2026-08-25-v12-preconditions.md`` §2:
+#
+#   "No frame anywhere carries a human label assigned BEFORE seeing the masker's answer. Every
+#    human inspection on record was of frames nominated by a disagreement with the masker. And the
+#    ``absent_empty`` cell — where a masker failure would hide — has had 12 of ~190 frames
+#    adjudicated, by a predicate whose own docstring says it 'scores none of' the white/silver
+#    forearm and therefore 'UNDERSTATES robot presence'."
+#
+# A sample nominated by a disagreement can only ever describe the disagreements. It cannot bound the
+# cell where BOTH instruments are wrong in the same direction — the robot in shot, the masker empty,
+# and the reference predicate quiet because the only thing in frame is the bright wrist it scores at
+# zero. Three arms, drawn from the SAME empty-mask population, with the reason each exists:
+#
+#   uniform_random        the only one that estimates anything about the population. Drawn without
+#                         consulting either instrument, so its (a)/(b) split is an unbiased estimate
+#                         and its interval is a real bound on the blind spot.
+#   predicate_nominated   what the existing sheets already show: the reference predicate says the
+#                         robot is in shot and the committed masker returned nothing. Kept because
+#                         it is where a failure is densest, and marked BIASED because it is.
+#   blind_spot_targeted   deliberately over-weights frames the reference predicate CANNOT score —
+#                         moving, near-neutral, and too bright for its dark clause. Also biased, in
+#                         the opposite direction from the arm above, and by construction.
+#
+# The tiles are blind: pixels and an opaque id. If a reviewer can tell which arm a tile came from,
+# or what the masker said about it, the label is conditioned on the answer again and the instrument
+# is the one V12 §2 already refuses.
+
+SCHEMA_BLIND_KEY = "wam.robot_mask_blind_adjudication_key/1"
+SCHEMA_BLIND_LABELS = "wam.robot_mask_blind_adjudication_labels/1"
+SCHEMA_BLIND_SCORE = "wam.robot_mask_blind_adjudication_score/1"
+
+#: The only three answers a reviewer may give. ``undecidable`` is a REAL answer on a frame whose
+#: corner might be a gripper or might be a fold shadow, and it is more useful than a guess — the
+#: same rule ``audit_apple_masks``'s template states for its own verdicts.
+BLIND_LABEL_VALUES = ("arm_present", "arm_absent", "undecidable")
+
+BLIND_ARMS = ("uniform_random", "predicate_nominated", "blind_spot_targeted")
+
+#: Defaults, and what they buy. 40 uniform tiles is the smallest draw whose 95 % Wilson upper bound
+#: on an all-``arm_absent`` outcome lands under 9 % — i.e. the smallest draw that can say "if the
+#: masker is missing robots in this population it is missing them in under a tenth of it" rather
+#: than "we saw none". 12 predicate-nominated matches the count already adjudicated by hand so the
+#: two are comparable; 24 blind-spot tiles is a deliberate over-sample of ~190 frames' worst tail.
+DEFAULT_BLIND_N_UNIFORM = 40
+DEFAULT_BLIND_N_PREDICATE = 12
+DEFAULT_BLIND_N_BLIND_SPOT = 24
+DEFAULT_BLIND_PER_SHEET = 12
+
+#: Copied, not paraphrased, from ``scripts/audit_apple_masks.py``'s ``CORRELATED_OBSERVER``
+#: (``audit_apple_masks.py:245-251``), which itself copies
+#: ``runs/t040-identity-prompt/calibration-2/probe_observations.json``'s seed pass. The same
+#: weakness in the same words, because it is the same weakness — plus one that belongs to this
+#: instrument alone and is stated after the quotation.
+BLIND_CORRELATED_OBSERVER = (
+    "A MODEL FILLING THIS IN IS NOT THE MEASUREMENT. Copied verbatim from "
+    "scripts/audit_apple_masks.py's CORRELATED_OBSERVER (audit_apple_masks.py:245-251), which "
+    "copies runs/t040-identity-prompt/calibration-2/probe_observations.json's seed pass: \"If the "
+    "`observed` fields below were written by a model rather than a person, say so in "
+    "`established_by` and leave `looked_at` alone. A model looking at masks produced by a pipeline "
+    "another model wired up is a CORRELATED OBSERVER: it is capable of reproducing the same "
+    "misreading on both sides, and blocker 1 asks for a human.\" AND ONE MORE, WHICH IS THIS "
+    "SHEET'S OWN: these tiles are blind so that the answer is written down before the pipeline's "
+    "answer is known. A model with the repository in front of it can recover the pipeline's answer "
+    "and would be unblinding itself, which costs this instrument the one property it has that the "
+    "existing labels do not. Set `established_by` to whoever looked; leave `looked_at` false "
+    "unless that was a person."
+)
+
+
+def blind_spot_score(
+    fields: dict[str, Any],
+    *,
+    dark_offset: int = DARK_OFFSETS[0],
+    sat_max: float = SAT_MAXES[0],
+    change_min: int = CHANGE_MINS[0],
+) -> int:
+    """Pixels that MOVED and are near-neutral but are NOT dark — the reference predicate's blind spot.
+
+    NOT A NEW DETECTOR, and deliberately not: it is :func:`apply_setting`'s own three clauses with
+    the dark one complemented, over the same :func:`frame_fields`. So this and
+    :func:`robot_dark_mask` partition the moving near-neutral pixels of a frame between them, which
+    is asserted in the tests rather than claimed here. A frame scoring high is a frame where
+    something entered the scene that the reference predicate scores at zero — the white/silver
+    forearm cuff named at :func:`robot_dark_mask`'s docstring's first blind spot, and also, being a
+    pixel predicate, anything else bright that moved. It ranks candidates for a human to LOOK at;
+    it decides nothing and no gate may read it.
+    """
+    not_dark = fields["luma"] >= (fields["cloth_level"] - float(dark_offset))
+    neutral = fields["saturation"] < float(sat_max)
+    changed = fields["change"] > float(change_min)
+    return int(np.count_nonzero(not_dark & neutral & changed))
+
+
+def blind_population(
+    visible: dict,
+    detect: dict,
+    *,
+    absent_below: int,
+    present_above: int,
+) -> list[dict]:
+    """Every frame in ``detect`` whose committed-masker mask was EMPTY, in a deterministic order.
+
+    Frames the reference pass never measured are KEPT, with ``predicate_verdict`` ``"unmeasured"``.
+    Dropping them would make the uniform arm a sample of "empty-mask frames the reference predicate
+    also saw", which is a population defined by the instrument the arm exists to be independent of.
+    """
+    primary = visible.get("primary_setting")
+    rows: list[dict] = []
+    for key, records in detect["per_episode"].items():
+        record = visible["per_episode"].get(key) if primary else None
+        index_of = {f: i for i, f in enumerate(record["frame_indices"])} if record else {}
+        areas = record["areas"][primary] if record else []
+        for row in records:
+            if int(row.get("mask_px", 0)) != 0:
+                continue
+            slot = index_of.get(row["frame_index"])
+            rows.append({
+                "episode": str(key),
+                "frame_index": int(row["frame_index"]),
+                "mask_px": int(row.get("mask_px", 0)),
+                "empty_reason": row.get("empty_reason"),
+                "predicate_verdict": (
+                    classify(areas[slot], absent_below=absent_below, present_above=present_above)
+                    if slot is not None else "unmeasured"
+                ),
+                "predicate_px": int(areas[slot]) if slot is not None else None,
+            })
+    return sorted(rows, key=lambda r: (r["episode"], r["frame_index"]))
+
+
+def draw_blind_arms(
+    population: list[dict],
+    *,
+    seed: int,
+    n_uniform: int = DEFAULT_BLIND_N_UNIFORM,
+    n_predicate: int = DEFAULT_BLIND_N_PREDICATE,
+    n_blind_spot: int = DEFAULT_BLIND_N_BLIND_SPOT,
+) -> list[dict]:
+    """The three arms, drawn under ``seed``, shuffled together, and given opaque tile ids.
+
+    ORDER MATTERS AND IS NOT ARBITRARY. The uniform arm is drawn FIRST, from the untouched
+    population, so nothing conditions it — it is the only arm that estimates a rate and the only one
+    an exclusion could bias. The other two then draw from what is left, so no frame is tiled twice
+    and a reviewer cannot notice a duplicate; both are already biased samples by construction and
+    are labelled as such wherever they are reported.
+
+    The tile ids are assigned AFTER the shuffle, so their order carries no arm and no episode.
+    """
+    missing = [r for r in population if r.get("blind_spot_px") is None]
+    if missing:
+        raise DiagnosisError(
+            f"{len(missing)} of {len(population)} candidate frames carry no blind_spot_px. The "
+            "blind-spot arm cannot be drawn without it, and drawing the other two alone would "
+            "leave the reference predicate's own blind spot unsampled — which is the cell this "
+            "instrument exists to reach."
+        )
+    rng = random.Random(int(seed))
+    ordered = sorted(population, key=lambda r: (r["episode"], r["frame_index"]))
+    taken: set[tuple[str, int]] = set()
+
+    def ident(row: dict) -> tuple[str, int]:
+        return (row["episode"], int(row["frame_index"]))
+
+    drawn: list[dict] = []
+
+    def take(rows: list[dict], k: int, arm: str) -> None:
+        picked = rng.sample(rows, min(max(int(k), 0), len(rows)))
+        for row in picked:
+            drawn.append(dict(row, arm=arm))
+            taken.add(ident(row))
+
+    take(list(ordered), n_uniform, "uniform_random")
+    take([r for r in ordered if r["predicate_verdict"] == "present" and ident(r) not in taken],
+         n_predicate, "predicate_nominated")
+    # Deliberately NOT random: the point of this arm is the extreme of the ranking, and a random
+    # draw from a "high enough" subset would need a second coined threshold to define the subset.
+    ranked = sorted(
+        (r for r in ordered if ident(r) not in taken and int(r["blind_spot_px"]) > 0),
+        key=lambda r: (-int(r["blind_spot_px"]), r["episode"], r["frame_index"]),
+    )[: max(int(n_blind_spot), 0)]
+    for row in ranked:
+        drawn.append(dict(row, arm="blind_spot_targeted"))
+        taken.add(ident(row))
+
+    rng.shuffle(drawn)
+    for i, row in enumerate(drawn):
+        row["tile"] = f"t{i:04d}"
+    return drawn
+
+
+def blind_sheet_title(page: int, pages: int) -> str:
+    """The header a reviewer reads. It must not carry one bit about any tile on the sheet."""
+    # Kept to one line and short on purpose: the header is drawn once across the sheet, so a long
+    # one runs off the right edge of a narrow sheet and takes the instruction with it. The full
+    # instruction lives in BLIND_LABELS.template.json, which the reviewer has open anyway.
+    return (
+        f"BLIND ADJUDICATION - sheet {page} of {pages} - per tile id write "
+        "arm_present / arm_absent / undecidable. Nothing here says what any instrument answered."
+    )
+
+
+def blind_labels_template(tiles: list[str], sheets: list[str]) -> dict:
+    """One blank row per tile. It carries no episode, no id of any kind but the tile's, no number.
+
+    Everything a reviewer could condition an answer on lives in ``BLIND_KEY.json``, which is the
+    sealed half of the pair and is not needed to fill this in.
+    """
+    return {
+        "schema": SCHEMA_BLIND_LABELS,
+        "produced_by": "scripts/diagnose_robot_mask_empty.py blind-sheet",
+        "established_by": "",
+        "established_by_note": BLIND_CORRELATED_OBSERVER,
+        "how_to_use": (
+            "Open the sheets. For each tile id, look at the picture and decide ONE thing: is any "
+            "part of the robot - arm, wrist, hand, a fingertip at the border - visible in it? "
+            "Write arm_present, arm_absent or undecidable in `label`, and what you saw in `note`. "
+            "undecidable is a real answer and is worth more than a guess. Rename this file to "
+            "BLIND_LABELS.json when every row is filled, then run `blind-score`."
+        ),
+        "label_values": list(BLIND_LABEL_VALUES),
+        "sheets": list(sheets),
+        "human_review": {"looked_at": False, "established_by": ""},
+        "tiles": {tile: {"label": None, "note": ""} for tile in tiles},
+    }
+
+
+def blind_key_payload(
+    drawn: list[dict],
+    population: list[dict],
+    *,
+    seed: int,
+    corpus: str,
+    absent_below: int,
+    present_above: int,
+    requested: dict[str, int],
+    sheets: list[str],
+) -> dict:
+    """The sealed half: what the tiles must not reveal, kept so the labels can be joined afterwards."""
+    by_arm: dict[str, int] = {arm: 0 for arm in BLIND_ARMS}
+    for row in drawn:
+        by_arm[row["arm"]] += 1
+    reasons: dict[str, int] = {}
+    verdicts: dict[str, int] = {}
+    for row in population:
+        reasons[row["empty_reason"] or "?"] = reasons.get(row["empty_reason"] or "?", 0) + 1
+        verdicts[row["predicate_verdict"]] = verdicts.get(row["predicate_verdict"], 0) + 1
+    return {
+        "schema": SCHEMA_BLIND_KEY,
+        "produced_by": "scripts/diagnose_robot_mask_empty.py blind-sheet",
+        "seal": (
+            "THIS FILE IS THE ANSWER SHEET. Reading it before filling BLIND_LABELS.json in destroys "
+            "the one property this instrument has that every existing label lacks: the label was "
+            "written before the pipeline's answer was known."
+        ),
+        "seed": int(seed),
+        "corpus": str(corpus),
+        "band": {"absent_below_px": int(absent_below), "present_above_px": int(present_above)},
+        "population": {
+            "n_frames_with_an_empty_mask": len(population),
+            "by_empty_reason": reasons,
+            "by_reference_predicate": verdicts,
+            "note": (
+                "the sampling frame for all three arms: every frame in the detect artifact whose "
+                "committed-masker mask was empty, including frames the reference pass never "
+                "measured. It is NOT the corpus: the detect plan is stratified."
+            ),
+        },
+        "arms": {
+            arm: {
+                "requested": int(requested.get(arm, 0)),
+                "drawn": by_arm[arm],
+                "sampling": _BLIND_ARM_SAMPLING[arm],
+                "reporting": _BLIND_ARM_REPORTING[arm],
+            }
+            for arm in BLIND_ARMS
+        },
+        "sheets": list(sheets),
+        "instrument_note": (
+            "blind_spot_px is scripts/diagnose_robot_mask_empty.py's own pixel score, not a "
+            "detector and not ground truth; it ranks frames for a person to look at. See "
+            "blind_spot_score."
+        ),
+        "tiles": {
+            row["tile"]: {
+                "episode": row["episode"],
+                "frame_index": int(row["frame_index"]),
+                "arm": row["arm"],
+                "mask_px": int(row["mask_px"]),
+                "empty_reason": row["empty_reason"],
+                "predicate_verdict": row["predicate_verdict"],
+                "predicate_px": row["predicate_px"],
+                "blind_spot_px": int(row["blind_spot_px"]),
+            }
+            for row in drawn
+        },
+    }
+
+
+_BLIND_ARM_SAMPLING = {
+    "uniform_random": (
+        "uniformly at random, without replacement, from every frame of the population, consulting "
+        "neither the reference predicate nor the blind-spot score. Drawn FIRST, so no exclusion "
+        "touches it."
+    ),
+    "predicate_nominated": (
+        "at random from the frames the reference predicate calls robot-PRESENT, minus anything the "
+        "uniform arm already took. This is the cell the existing contact sheets already show."
+    ),
+    "blind_spot_targeted": (
+        "the highest blind_spot_score frames remaining: moving, near-neutral and too BRIGHT for "
+        "the reference predicate's dark clause. Ranked, not sampled, so the arm reaches the "
+        "extreme rather than a random draw from a second coined threshold."
+    ),
+}
+
+_BLIND_ARM_REPORTING = {
+    "uniform_random": (
+        "UNBIASED over the population above. This is the only arm whose split may be read as an "
+        "estimate, and the only one whose interval bounds anything."
+    ),
+    "predicate_nominated": (
+        "BIASED, deliberately and upward: conditioned on one instrument already disagreeing with "
+        "the masker. Its split is not a rate over anything."
+    ),
+    "blind_spot_targeted": (
+        "BIASED, deliberately: an over-sample of the frames the reference predicate cannot score. "
+        "Its split is not a rate over anything."
+    ),
+}
+
+
+def cmd_blind_sheet(args: argparse.Namespace) -> int:
+    """Blind contact sheets, a sealed key and a blank labels template. Renders pixels ONLY.
+
+    The masker is never loaded here: every mask this reads was already measured by ``detect``, and
+    a sheet that recomputed one would be a sheet whose tiles could differ from the key it ships
+    with.
+    """
+    from audit_apple_masks import captioned, contact_sheet  # noqa: PLC0415
+
+    manifest = pathlib.Path(args.manifest)
+    episodes = {str(e.get("id")): e for e in read_manifest(manifest)}
+    visible = json.loads(pathlib.Path(args.visible).read_text(encoding="utf-8"))
+    detect = json.loads(pathlib.Path(args.detect).read_text(encoding="utf-8"))
+    population = blind_population(
+        visible, detect,
+        absent_below=int(args.absent_below), present_above=int(args.present_above),
+    )
+    if not population:
+        raise DiagnosisError(
+            f"{args.detect} records no frame whose mask was empty, so there is nothing to "
+            "adjudicate. That is a finding about the detect artifact, not about the corpus."
+        )
+
+    frames: dict[tuple[str, int], np.ndarray] = {}
+    for key in sorted({row["episode"] for row in population}):
+        entry = episodes.get(key)
+        if entry is None:
+            raise DiagnosisError(f"{key} is not in {manifest}.")
+        decoded = decode(manifest.parent / str(entry["video"]))
+        background = background_median(decoded)
+        for row in population:
+            if row["episode"] != key:
+                continue
+            frame = np.asarray(decoded[row["frame_index"]], dtype=np.uint8)
+            row["blind_spot_px"] = blind_spot_score(frame_fields(frame, background))
+            frames[(key, row["frame_index"])] = frame
+        del decoded
+
+    requested = {
+        "uniform_random": int(args.n_uniform),
+        "predicate_nominated": int(args.n_predicate),
+        "blind_spot_targeted": int(args.n_blind_spot),
+    }
+    drawn = draw_blind_arms(
+        population,
+        seed=int(args.seed),
+        n_uniform=requested["uniform_random"],
+        n_predicate=requested["predicate_nominated"],
+        n_blind_spot=requested["blind_spot_targeted"],
+    )
+
+    out_dir = pathlib.Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    per_sheet = max(1, int(args.per_sheet))
+    pages = (len(drawn) + per_sheet - 1) // per_sheet
+    sheets: list[str] = []
+    for page in range(pages):
+        chunk = drawn[page * per_sheet:(page + 1) * per_sheet]
+        tiles = [
+            captioned(frames[(row["episode"], int(row["frame_index"]))], [row["tile"]])
+            for row in chunk
+        ]
+        name = f"blind_sheet_{page + 1:02d}.png"
+        contact_sheet(tiles, blind_sheet_title(page + 1, pages), cols=int(args.cols)).save(
+            out_dir / name)
+        sheets.append(name)
+
+    key_payload = blind_key_payload(
+        drawn, population,
+        seed=int(args.seed), corpus=str(manifest.parent),
+        absent_below=int(args.absent_below), present_above=int(args.present_above),
+        requested=requested, sheets=sheets,
+    )
+    (out_dir / "BLIND_KEY.json").write_text(json.dumps(key_payload, indent=2) + "\n", encoding="utf-8")
+    (out_dir / "BLIND_LABELS.template.json").write_text(
+        json.dumps(blind_labels_template([row["tile"] for row in drawn], sheets), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    counts = {arm: key_payload["arms"][arm]["drawn"] for arm in BLIND_ARMS}
+    print(f"{len(population)} frame(s) with an empty mask -> {len(drawn)} blind tile(s) {counts}")
+    print(f"{pages} sheet(s), BLIND_KEY.json and BLIND_LABELS.template.json -> {out_dir}")
+    return 0
+
+
+def wilson_interval(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95 % Wilson score interval for ``k`` of ``n``. ``(0.0, 1.0)`` when ``n`` is 0.
+
+    Wilson rather than normal-approximation because every interesting outcome here is at or near
+    zero, where the normal interval is a point at zero and would read as a proof.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    k, n = int(k), int(n)
+    denom = n + z * z
+    centre = (k + z * z / 2.0) / denom
+    half = (z / denom) * float(np.sqrt(k * (n - k) / n + z * z / 4.0))
+    return (round(max(0.0, centre - half), 6), round(min(1.0, centre + half), 6))
+
+
+def join_blind_labels(key: dict, labels: dict) -> list[dict]:
+    """Key rows joined to their labels, or a refusal naming what is wrong. Never a partial score.
+
+    Three refusals, all of them the same principle: a number computed over the tiles that happen to
+    be filled in is a number over a sample selected by whoever stopped filling it in, and that is
+    the exact defect this whole instrument exists to remove.
+    """
+    key_tiles = dict(key.get("tiles") or {})
+    label_tiles = dict(labels.get("tiles") or {})
+    only_key = sorted(set(key_tiles) - set(label_tiles))
+    only_labels = sorted(set(label_tiles) - set(key_tiles))
+    if only_key or only_labels:
+        raise DiagnosisError(
+            "the key and the labels file do not describe the same tiles: "
+            f"{len(only_key)} in the key only ({only_key[:5]}), {len(only_labels)} in the labels "
+            f"only ({only_labels[:5]}). They are halves of one draw and joining them by "
+            "intersection would score a subset chosen after the fact."
+        )
+    blank = sorted(t for t, row in label_tiles.items() if not (row or {}).get("label"))
+    if blank:
+        raise DiagnosisError(
+            f"{len(blank)} of {len(label_tiles)} tiles are still blank ({blank[:8]}). Scoring the "
+            "filled ones would report a rate over the tiles a reviewer chose to answer, which is a "
+            "nominated sample again."
+        )
+    bad = sorted(
+        t for t, row in label_tiles.items() if row["label"] not in BLIND_LABEL_VALUES)
+    if bad:
+        raise DiagnosisError(
+            f"{len(bad)} tiles carry a label outside {list(BLIND_LABEL_VALUES)} ({bad[:8]})."
+        )
+    return [
+        dict(key_tiles[tile], tile=tile, label=label_tiles[tile]["label"],
+             note=label_tiles[tile].get("note", ""))
+        for tile in sorted(key_tiles)
+    ]
+
+
+def blind_score_report(key: dict, labels: dict) -> dict:
+    """The (a)/(b) contingency per arm. A MEASUREMENT — it settles nothing and licenses nothing.
+
+    (a) and (b) are V12 §2's own two cases for an empty mask: (a) the robot is genuinely out of
+    shot, so the empty mask is the correct answer; (b) the robot is in shot and the masker returned
+    nothing. Only the uniform arm's split is an estimate of anything; the other two are marked as
+    the biased samples they are, in the artifact and not only here.
+    """
+    rows = join_blind_labels(key, labels)
+    per_arm: dict[str, Any] = {}
+    for arm in BLIND_ARMS:
+        mine = [r for r in rows if r["arm"] == arm]
+        a = sum(1 for r in mine if r["label"] == "arm_absent")
+        b = sum(1 for r in mine if r["label"] == "arm_present")
+        undecided = sum(1 for r in mine if r["label"] == "undecidable")
+        reasons: dict[str, int] = {}
+        for r in mine:
+            if r["label"] == "arm_present":
+                name = r.get("empty_reason") or "?"
+                reasons[name] = reasons.get(name, 0) + 1
+        per_arm[arm] = {
+            "n": len(mine),
+            "a_robot_absent": a,
+            "b_robot_present_mask_empty": b,
+            "undecidable": undecided,
+            "b_rate_of_decided": (b / (a + b)) if (a + b) else None,
+            "b_rate_ci95_wilson": list(wilson_interval(b, a + b)),
+            "b_rate_upper_bound_counting_undecidable_as_b": (
+                (b + undecided) / len(mine) if mine else None),
+            "b_by_empty_reason": reasons,
+            "sampling": (key.get("arms", {}).get(arm, {}) or {}).get("sampling"),
+            "estimate": (key.get("arms", {}).get(arm, {}) or {}).get(
+                "reporting", _BLIND_ARM_REPORTING[arm]),
+        }
+    return {
+        "schema": SCHEMA_BLIND_SCORE,
+        "produced_by": "scripts/diagnose_robot_mask_empty.py blind-score",
+        "this_is_a_measurement": (
+            "This file reports what a reviewer wrote down against a draw taken before they saw any "
+            "instrument's answer. It settles no open question, releases no gate and permits no "
+            "run. What it is FOR is the one thing the existing labels cannot do: put an interval "
+            "on the cell where the masker and the reference predicate could be wrong together."
+        ),
+        "cells": {
+            "a": "the robot is genuinely out of shot; an empty mask is the correct answer",
+            "b": "the robot is in shot and the committed masker returned nothing",
+            "undecidable": "the reviewer could not tell from the picture; counted, never assigned",
+        },
+        "seed": key.get("seed"),
+        "corpus": key.get("corpus"),
+        "population": key.get("population"),
+        "n_tiles": len(rows),
+        "labels_established_by": (
+            labels.get("human_review", {}).get("established_by") or labels.get("established_by")),
+        "labels_looked_at_by_a_person": bool(
+            labels.get("human_review", {}).get("looked_at", False)),
+        "correlated_observer_warning": BLIND_CORRELATED_OBSERVER,
+        "per_arm": per_arm,
+    }
+
+
+def cmd_blind_score(args: argparse.Namespace) -> int:
+    key = json.loads(pathlib.Path(args.key).read_text(encoding="utf-8"))
+    labels = json.loads(pathlib.Path(args.labels).read_text(encoding="utf-8"))
+    report = blind_score_report(key, labels)
+    if args.out:
+        pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(args.out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    if args.out:
+        print(f"\nwrote {args.out}")
+    return 0
+
+
 def _quantiles(values: list[float]) -> dict[str, float]:
     if not values:
         return {"n": 0}
@@ -937,6 +1536,43 @@ def build_parser() -> argparse.ArgumentParser:
     sheet.add_argument("--absent-below", type=int, required=True)
     sheet.add_argument("--present-above", type=int, required=True)
     sheet.set_defaults(func=cmd_sheet)
+
+    blind = sub.add_parser(
+        "blind-sheet",
+        help="BLIND contact sheets of empty-mask frames, drawn in three labelled arms, plus a "
+             "sealed key and a blank labels template",
+    )
+    blind.add_argument("--manifest", required=True)
+    blind.add_argument("--visible", required=True)
+    blind.add_argument("--detect", required=True)
+    blind.add_argument("--out-dir", required=True)
+    blind.add_argument("--seed", type=int, required=True,
+                       help="REQUIRED and recorded in BLIND_KEY.json: it decides the uniform draw "
+                            "and the tile shuffle, so the whole sheet is reproducible from it")
+    blind.add_argument("--absent-below", type=int, required=True)
+    blind.add_argument("--present-above", type=int, required=True)
+    blind.add_argument("--n-uniform", type=int, default=DEFAULT_BLIND_N_UNIFORM,
+                       help="tiles drawn uniformly at random from ALL empty-mask frames — the only "
+                            "arm that estimates a rate (default: %(default)s)")
+    blind.add_argument("--n-predicate", type=int, default=DEFAULT_BLIND_N_PREDICATE,
+                       help="tiles the reference predicate calls robot-present; a BIASED sample "
+                            "(default: %(default)s)")
+    blind.add_argument("--n-blind-spot", type=int, default=DEFAULT_BLIND_N_BLIND_SPOT,
+                       help="tiles over-weighting the frames the reference predicate cannot score, "
+                            "i.e. bright and near-neutral; also BIASED (default: %(default)s)")
+    blind.add_argument("--per-sheet", type=int, default=DEFAULT_BLIND_PER_SHEET)
+    blind.add_argument("--cols", type=int, default=4)
+    blind.set_defaults(func=cmd_blind_sheet)
+
+    score = sub.add_parser(
+        "blind-score",
+        help="join a filled-in labels file against its key and report the (a)/(b) split per arm",
+    )
+    score.add_argument("--key", required=True, help="BLIND_KEY.json from blind-sheet")
+    score.add_argument("--labels", required=True,
+                       help="BLIND_LABELS.template.json with every `label` filled in")
+    score.add_argument("--out", default=None)
+    score.set_defaults(func=cmd_blind_score)
     return parser
 
 
