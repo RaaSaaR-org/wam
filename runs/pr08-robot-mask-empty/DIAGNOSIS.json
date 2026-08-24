@@ -1,0 +1,414 @@
+{
+  "schema": "wam.robot_mask_empty_diagnosis_summary/1",
+  "question": "Is the robot absent from the empty-mask frames, or is detection failing?",
+  "verdict": "ABSENT. The empty masks are correct answers on frames the robot is not in.",
+  "produced_by": "scripts/diagnose_robot_mask_empty.py (visible / plan / detect / report / sheet)",
+  "instrument": {
+    "detector": {
+      "name": "grounding-dino+sam2 (estimators.apple_sam2 pins, robot prompt)",
+      "version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;prompt='robot arm. robotic hand. robotic gripper.';box_thr=0.15;text_thr=0.25;retry=none(upstream=0.1/0.1)",
+      "adapter": "estimators.apple_sam2",
+      "adapter_version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;depth=depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf@d2fc6a93601aabb1139a3bf0ebfcb4e89c67817f;prompt='apple.';box_thr=0.15;text_thr=0.25;retry_box_thr=0.1;retry_text_thr=0.1;box_sel=highest_score;prop=per_frame;mask_val_min_iou=0.1",
+      "adapter_version_note": "the adapter's own version string, whose prompt= field is its APPLE prompt because that is what GEOM_TOL and EST_DRIFT_P95 segment. The robot mask's prompt is the 'prompt' field above.",
+      "prompt": "robot arm. robotic hand. robotic gripper.",
+      "box_threshold": 0.15,
+      "text_threshold": 0.25,
+      "box_rule": "union of every detection above threshold (see robot_composite docstring)",
+      "upstream_retry_not_run": "upstream retries once at (0.1, 0.1) when the first pass grounds nothing; THIS masker does not. apple_sam2's callers DROP an ungrounded frame, so the retry recovers data there; G0c REFUSES the clip, so here it would only suppress a refusal by accepting a weak box that can land on something other than the robot \u2014 a confident wrong mask in place of a loud refusal."
+    },
+    "verified_against_Sam2RobotMasker_mask_frames": 77,
+    "reference_predicate": "diagnose_robot_mask_empty.robot_dark_mask \u2014 dark relative to the frame's own modal luminance, near-neutral, and different from the episode's per-pixel temporal median. NOT ground truth; over-calls presence on the arm's off-frame shadow and under-calls it on the bright wrist.",
+    "band_px": {
+      "absent_below": 800,
+      "present_above": 3000
+    }
+  },
+  "q1_robot_visibility": {
+    "corpus_sample": "101 of 402 episodes (every 4th), every 2nd frame, 21639 frames",
+    "by_setting": {
+      "d45_s0.25_c25": {
+        "absent": 7833,
+        "ambiguous": 1590,
+        "present": 12216,
+        "n": 21639,
+        "present_fraction": 0.5645362539858588,
+        "absent_fraction": 0.3619853043116595
+      },
+      "d35_s0.25_c25": {
+        "absent": 7185,
+        "ambiguous": 1667,
+        "present": 12787,
+        "n": 21639,
+        "present_fraction": 0.5909237949997689,
+        "absent_fraction": 0.332039373353667
+      },
+      "d55_s0.25_c25": {
+        "absent": 8670,
+        "ambiguous": 2697,
+        "present": 10272,
+        "n": 21639,
+        "present_fraction": 0.4746984611118813,
+        "absent_fraction": 0.4006654651323998
+      },
+      "d45_s0.25_c15": {
+        "absent": 6750,
+        "ambiguous": 1868,
+        "present": 13021,
+        "n": 21639,
+        "present_fraction": 0.6017376034012663,
+        "absent_fraction": 0.31193678081242204
+      },
+      "d45_s0.25_c40": {
+        "absent": 8860,
+        "ambiguous": 2060,
+        "present": 10719,
+        "n": 21639,
+        "present_fraction": 0.4953556079301262,
+        "absent_fraction": 0.4094459078515643
+      }
+    },
+    "headline": "36.2 % of frames robot-absent, 56.5 % present, 7.3 % in the band; the absent share ranges 31.2-40.9 % over the predicate's own constants.",
+    "per_episode_absent_fraction": {
+      "median": 0.387,
+      "p10": 0.208,
+      "p90": 0.511,
+      "max": 0.587,
+      "episodes_with_at_least_one_absent_frame": "100 of 101"
+    }
+  },
+  "q2_clustering": {
+    "absent_by_decile_corpus": [
+      {
+        "decile": 0,
+        "absent": 1451,
+        "frames": 2211,
+        "fraction": 0.6562641338760742
+      },
+      {
+        "decile": 1,
+        "absent": 499,
+        "frames": 2156,
+        "fraction": 0.23144712430426717
+      },
+      {
+        "decile": 2,
+        "absent": 29,
+        "frames": 2169,
+        "fraction": 0.013370216689718764
+      },
+      {
+        "decile": 3,
+        "absent": 5,
+        "frames": 2159,
+        "fraction": 0.002315886984715146
+      },
+      {
+        "decile": 4,
+        "absent": 4,
+        "frames": 2149,
+        "fraction": 0.0018613308515588647
+      },
+      {
+        "decile": 5,
+        "absent": 45,
+        "frames": 2177,
+        "fraction": 0.02067064768029398
+      },
+      {
+        "decile": 6,
+        "absent": 445,
+        "frames": 2172,
+        "fraction": 0.2048802946593002
+      },
+      {
+        "decile": 7,
+        "absent": 1387,
+        "frames": 2156,
+        "fraction": 0.6433209647495362
+      },
+      {
+        "decile": 8,
+        "absent": 1958,
+        "frames": 2169,
+        "fraction": 0.9027201475334256
+      },
+      {
+        "decile": 9,
+        "absent": 2010,
+        "frames": 2121,
+        "fraction": 0.9476661951909476
+      }
+    ],
+    "absent_by_decile_pilot3": [
+      {
+        "decile": 0,
+        "absent": 161,
+        "frames": 161,
+        "fraction": 1.0
+      },
+      {
+        "decile": 1,
+        "absent": 75,
+        "frames": 160,
+        "fraction": 0.46875
+      },
+      {
+        "decile": 2,
+        "absent": 0,
+        "frames": 161,
+        "fraction": 0.0
+      },
+      {
+        "decile": 3,
+        "absent": 0,
+        "frames": 160,
+        "fraction": 0.0
+      },
+      {
+        "decile": 4,
+        "absent": 0,
+        "frames": 160,
+        "fraction": 0.0
+      },
+      {
+        "decile": 5,
+        "absent": 0,
+        "frames": 160,
+        "fraction": 0.0
+      },
+      {
+        "decile": 6,
+        "absent": 0,
+        "frames": 161,
+        "fraction": 0.0
+      },
+      {
+        "decile": 7,
+        "absent": 59,
+        "frames": 160,
+        "fraction": 0.36875
+      },
+      {
+        "decile": 8,
+        "absent": 153,
+        "frames": 161,
+        "fraction": 0.9503105590062112
+      },
+      {
+        "decile": 9,
+        "absent": 159,
+        "frames": 159,
+        "fraction": 1.0
+      }
+    ],
+    "runs_corpus": {
+      "n_runs": 294,
+      "median": 18.0,
+      "max": 102
+    },
+    "runs_pilot3": {
+      "n_runs": 6,
+      "median": 95.5,
+      "max": 175
+    },
+    "headline": "U-shaped and blockwise, not spread. Corpus deciles 3-4 are 0.2 % absent while decile 0 is 65.6 % and decile 9 is 94.8 %. 98 of 101 episodes end inside an absent run and 76 begin inside one; 50 of 101 have exactly two runs. On the pilot's own three episodes it is exact: deciles 2-6 contain zero absent frames and every episode has exactly two runs, one starting at frame 0 and one ending at the last frame."
+  },
+  "q3_what_the_detector_returns": {
+    "pilot3": {
+      "n_frames": 1603,
+      "frames_without_a_reference_measurement": 0,
+      "contingency": {
+        "present_empty": 0,
+        "present_nonempty": 917,
+        "absent_empty": 520,
+        "absent_nonempty": 87,
+        "ambiguous_empty": 32,
+        "ambiguous_nonempty": 47
+      },
+      "empty_reasons": {
+        "no_boxes_above_threshold": 552
+      },
+      "raw_max_score_on_empty_frames": {
+        "n": 552,
+        "min": 0.0917762964963913,
+        "p05": 0.0974297009408474,
+        "median": 0.11534580960869789,
+        "p95": 0.14375068694353102,
+        "max": 0.1496702879667282
+      },
+      "raw_max_score_on_nonempty_frames": {
+        "n": 1051,
+        "min": 0.15018951892852783,
+        "p05": 0.1640237346291542,
+        "median": 0.43841370940208435,
+        "p95": 0.6108846068382263,
+        "max": 0.6476391553878784
+      },
+      "box_threshold": 0.15,
+      "text_threshold": 0.25,
+      "prompt": "robot arm. robotic hand. robotic gripper."
+    },
+    "corpus": {
+      "n_frames": 710,
+      "frames_without_a_reference_measurement": 0,
+      "contingency": {
+        "present_empty": 19,
+        "present_nonempty": 221,
+        "absent_empty": 142,
+        "absent_nonempty": 98,
+        "ambiguous_empty": 76,
+        "ambiguous_nonempty": 154
+      },
+      "empty_reasons": {
+        "no_boxes_above_threshold": 237
+      },
+      "raw_max_score_on_empty_frames": {
+        "n": 237,
+        "min": 0.08485309034585953,
+        "p05": 0.09582712203264236,
+        "median": 0.12611991167068481,
+        "p95": 0.14688171446323395,
+        "max": 0.14993371069431305
+      },
+      "raw_max_score_on_nonempty_frames": {
+        "n": 473,
+        "min": 0.15025000274181366,
+        "p05": 0.15658415853977203,
+        "median": 0.36864185333251953,
+        "p95": 0.5153478503227233,
+        "max": 0.622621476650238
+      },
+      "box_threshold": 0.15,
+      "text_threshold": 0.25,
+      "prompt": "robot arm. robotic hand. robotic gripper."
+    },
+    "headline": "Every empty mask in both samples (552 of 1603 and 237 of 710) is no_boxes_above_threshold. SAM 2 never segmented a box to nothing. On empty frames the best raw score is 0.126 median / 0.150 max against a 0.15 threshold; on grounded frames 0.369 median. 91.7 % of the pilot's empty frames still score above upstream's 0.10 retry threshold, so the retry robot_composite deliberately does not run would have manufactured a box on nearly all of them."
+  },
+  "q4_agreement": {
+    "pilot3_contingency": {
+      "present_empty": 0,
+      "present_nonempty": 917,
+      "absent_empty": 520,
+      "absent_nonempty": 87,
+      "ambiguous_empty": 32,
+      "ambiguous_nonempty": 47
+    },
+    "corpus_contingency": {
+      "present_empty": 19,
+      "present_nonempty": 221,
+      "absent_empty": 142,
+      "absent_nonempty": 98,
+      "ambiguous_empty": 76,
+      "ambiguous_nonempty": 154
+    },
+    "present_empty_inspected": "all 19 corpus present_empty frames were rendered and looked at; every one contains NO robot \u2014 the reference predicate had scored the arm's off-frame shadow, the plate rim or the top-band edge. Detector failures found: 0.",
+    "headline": "0 of 917 (pilot) and 0 of 240 (corpus, after inspecting all 19 apparent disagreements) confidently-robot-present frames returned an empty mask."
+  },
+  "secondary_finding_false_positives": {
+    "pilot3": {
+      "absent": {
+        "n": 607,
+        "empty": 520,
+        "empty_fraction": 0.85667215815486,
+        "nonempty": 87,
+        "nonempty_area_fraction": {
+          "median": 0.15328125,
+          "p95": 0.155900390625,
+          "max": 0.9496126302083333,
+          "above_0.40": 2
+        }
+      },
+      "ambiguous": {
+        "n": 79,
+        "empty": 32,
+        "empty_fraction": 0.4050632911392405,
+        "nonempty": 47,
+        "nonempty_area_fraction": {
+          "median": 0.13722330729166668,
+          "p95": 0.9509156901041667,
+          "max": 0.9722005208333333,
+          "above_0.40": 7
+        }
+      },
+      "present": {
+        "n": 917,
+        "empty": 0,
+        "empty_fraction": 0.0,
+        "nonempty": 917,
+        "nonempty_area_fraction": {
+          "median": 0.10743489583333334,
+          "p95": 0.32385416666666667,
+          "max": 0.9694075520833333,
+          "above_0.40": 2
+        }
+      }
+    },
+    "corpus": {
+      "absent": {
+        "n": 240,
+        "empty": 142,
+        "empty_fraction": 0.5916666666666667,
+        "nonempty": 98,
+        "nonempty_area_fraction": {
+          "median": 0.020729166666666667,
+          "p95": 0.24252555338541076,
+          "max": 0.94548828125,
+          "above_0.40": 5
+        }
+      },
+      "ambiguous": {
+        "n": 230,
+        "empty": 76,
+        "empty_fraction": 0.33043478260869563,
+        "nonempty": 154,
+        "nonempty_area_fraction": {
+          "median": 0.07501139322916667,
+          "p95": 0.9395032552083333,
+          "max": 0.9869986979166666,
+          "above_0.40": 16
+        }
+      },
+      "present": {
+        "n": 240,
+        "empty": 19,
+        "empty_fraction": 0.07916666666666666,
+        "nonempty": 221,
+        "nonempty_area_fraction": {
+          "median": 0.126142578125,
+          "p95": 0.2769856770833333,
+          "max": 0.9831705729166667,
+          "above_0.40": 8
+        }
+      }
+    },
+    "headline": "On robot-ABSENT frames the masker returns a non-empty mask 14 % of the time on the pilot's three episodes and 41 % of the time corpus-wide. Inspected, those masks are the APPLE (~6-7 k px), the PLATE (~40-48 k px) or the whole TABLECLOTH (>0.9 of frame). Their detector scores (0.150-0.414) overlap the range of true robot detections (0.165-0.623), so no score threshold separates them."
+  },
+  "secondary_finding_oversized_masks": {
+    "pilot3": "11 of 1603 frames (0.7 %) carry a mask above 0.40 of the frame; the largest is 0.972 and 10 of the 11 contain no robot at all. See runs/pr08-robot-mask-empty/oversized_masks.png.",
+    "corpus": "29 of 710 sampled frames (4.1 %).",
+    "cluster_pilot_disagreement": "The cluster PILOT (job 189707) reported max area fraction 0.36182 over exactly these three episodes at stride 1. This run, same pins, same H.264 tree, same 1603 frames, measures 0.97220. min/median/p95/p99 agree to three decimals (0.0611 vs 0.0654, 0.3059 vs 0.3048, 0.3518 vs 0.3513) and the empty count differs by 13 of 1603, so this is the same masker differing on a handful of borderline detections across hardware (RTX 5090 here, H200 there) \u2014 but the MAXIMUM is exactly the statistic 106's header says a committed bound must sit above, and it is not reproducible."
+  },
+  "not_changed": [
+    "ROBOT_TEXT_PROMPT \u2014 untouched, and no environment override was set.",
+    "check_mask, GATE_QUALIFIED, GATE_QUALIFICATION_BLOCKERS, the blocker tuples \u2014 untouched.",
+    "every detection threshold \u2014 read from the adapter, never written; WAM_PR08_* were not set.",
+    "no Slurm job was submitted."
+  ],
+  "practical_consequence": {
+    "rule": "restyle_transfer25 turns any CompositeError into a per-unit error and quarantines the clip; check_mask raises on the first empty frame of the clip.",
+    "robot_absent_frames_per_episode": {
+      "median": 152,
+      "min": 0,
+      "max": 304,
+      "note": "estimated from the stride-2 visibility pass over 101 episodes, doubled."
+    },
+    "per_episode_empty_rate_on_robot_absent_frames": {
+      "median": 0.67,
+      "min": 0.0,
+      "max": 1.0,
+      "note": "40 episodes, 6 sampled robot-absent frames each. 8 of 40 scored 0.0, i.e. the masker found SOMETHING (apple, plate, cloth) on all six \u2014 a false positive rather than a pass."
+    },
+    "episodes_with_at_least_one_empty_mask_in_18_sampled_frames": "33 of 40",
+    "headline": "With a median of 152 robot-absent frames per episode and a median 67 % empty rate on them, every clip refuses. G0c as written cannot produce a single composited clip on this corpus."
+  }
+}

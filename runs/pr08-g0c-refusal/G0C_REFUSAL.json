@@ -1,0 +1,1349 @@
+{
+ "schema": "wam.pr08_g0c_refusal_scan/1",
+ "question": "After T40_RULE_V9, on what fraction of SOURCE clips does PR-08 6 G0c refuse?",
+ "produced_by": "a scratchpad instrument driving scripts/robot_composite.Sam2RobotMasker UNMODIFIED; not a repo script",
+ "produced_at": "2026-08-23",
+ "device": "workstation RTX 5090. NO Slurm job was submitted and no ssh was used.",
+ "corpus": "/home/humanoid/wam-t041/pr08-apple-640x480-h264-lossless (402 episodes, 171625 frames)",
+ "method": "each clip decoded lazily in manifest order and masked frame by frame until the FIRST empty robot mask, which is the frame check_mask refuses on. A clip that refuses is established by ONE frame; a clip that does NOT refuse required every frame, and only episode_000243 reached that state. NOT a random sample: two contiguous blocks.",
+ "instrument": {
+  "name": "grounding-dino+sam2 (estimators.apple_sam2 pins, robot prompt)",
+  "version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;prompt='robot arm. robotic hand. robotic gripper.';box_thr=0.15;text_thr=0.25;retry=none(upstream=0.1/0.1)",
+  "adapter": "estimators.apple_sam2",
+  "adapter_version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;depth=depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf@d2fc6a93601aabb1139a3bf0ebfcb4e89c67817f;prompt='apple.';box_thr=0.15;text_thr=0.25;retry_box_thr=0.1;retry_text_thr=0.1;box_sel=highest_score;prop=per_frame;mask_val_min_iou=0.1",
+  "adapter_version_note": "the adapter's own version string, whose prompt= field is its APPLE prompt because that is what GEOM_TOL and EST_DRIFT_P95 segment. The robot mask's prompt is the 'prompt' field above.",
+  "prompt": "robot arm. robotic hand. robotic gripper.",
+  "box_threshold": 0.15,
+  "text_threshold": 0.25,
+  "box_rule": "union of every detection above threshold (see robot_composite docstring)",
+  "upstream_retry_not_run": "upstream retries once at (0.1, 0.1) when the first pass grounds nothing; THIS masker does not. apple_sam2's callers DROP an ungrounded frame, so the retry recovers data there; G0c REFUSES the clip, so here it would only suppress a refusal by accepting a weak box that can land on something other than the robot \u2014 a confident wrong mask in place of a loud refusal.",
+  "object_grounding_filter": "a detection whose SAM 2 mask has IoU > 0.7 against warm_saturated_rgb(r>90, r-b>50, saturation>0.35) is the OBJECT, not the robot, and is dropped before the union; if that empties the mask, check_mask refuses the clip. PR-08 V9. The detection operating point, the prompt and the union rule are unchanged and no mask is altered."
+ },
+ "caveat_concurrent_edit": "scripts/estimators/apple_sam2.py was being modified by another agent in this shared working tree while this ran. The module was imported once at process start, so this scan used the version on disk at ~16:30 2026-08-23. The 87 refusals whose first empty mask the V9 filter did NOT produce are unaffected by any apple_sam2 change: those frames grounded no box at all, upstream of the filter.",
+ "clips_scanned": 129,
+ "blocks": [
+  "episode_000000..episode_000085 (86)",
+  "episode_000201..episode_000243 (43)"
+ ],
+ "frames_masked": 2653,
+ "clips_that_refuse": 128,
+ "refusal_fraction": 0.992248,
+ "clips_that_do_not_refuse": [
+  "episode_000243"
+ ],
+ "clips_that_do_not_refuse_note": "episode_000243 carries a NON-EMPTY robot mask on all 417 of its frames. It does not refuse on the EMPTY-mask rule. Whether it clears the AREA half of check_mask is unknowable: configs/transfer25/pr08_robot_mask_area.json does not exist and load_area_bound refuses.",
+ "first_empty_frame": {
+  "at_0": 106,
+  "le_5": 112,
+  "median": 0,
+  "max": 377
+ },
+ "refusals_not_caused_by_the_v9_filter": 87,
+ "refusals_not_caused_by_the_v9_filter_note": "the first empty mask on these clips was empty before V9 too \u2014 the counter frames_emptied_by_the_filter did not tick on that frame \u2014 so the pre-V9 masker refused the same clip on the same frame. V9 is not what makes G0c refuse on this corpus.",
+ "filter_counters": {
+  "detections_segmented": 16070,
+  "frames_masked": 2653,
+  "frames_with_a_dropped_detection": 849,
+  "frames_emptied_by_the_filter": 41,
+  "detections_dropped_as_object": 860,
+  "frames_with_no_object_reference": 0
+ },
+ "licensed": {
+  "generation": false,
+  "training": false,
+  "a_g0c_area_bound": false,
+  "note": "T40_RULE_V1 1 is unchanged. This is a measurement of a refusal rate and licenses nothing."
+ },
+ "records": [
+  {
+   "episode": "episode_000000",
+   "frames_in_manifest": 590,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.41
+  },
+  {
+   "episode": "episode_000001",
+   "frames_in_manifest": 535,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.1
+  },
+  {
+   "episode": "episode_000002",
+   "frames_in_manifest": 478,
+   "frames_scanned": 5,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 4,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.96
+  },
+  {
+   "episode": "episode_000003",
+   "frames_in_manifest": 385,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.08
+  },
+  {
+   "episode": "episode_000004",
+   "frames_in_manifest": 488,
+   "frames_scanned": 5,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 4,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.88
+  },
+  {
+   "episode": "episode_000005",
+   "frames_in_manifest": 350,
+   "frames_scanned": 7,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 6,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 1.33
+  },
+  {
+   "episode": "episode_000006",
+   "frames_in_manifest": 476,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.1
+  },
+  {
+   "episode": "episode_000007",
+   "frames_in_manifest": 483,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.18
+  },
+  {
+   "episode": "episode_000008",
+   "frames_in_manifest": 439,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.08
+  },
+  {
+   "episode": "episode_000009",
+   "frames_in_manifest": 484,
+   "frames_scanned": 367,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 366,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 162.29
+  },
+  {
+   "episode": "episode_000010",
+   "frames_in_manifest": 418,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.32
+  },
+  {
+   "episode": "episode_000011",
+   "frames_in_manifest": 466,
+   "frames_scanned": 3,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 2,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 2.0
+  },
+  {
+   "episode": "episode_000012",
+   "frames_in_manifest": 469,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.27
+  },
+  {
+   "episode": "episode_000013",
+   "frames_in_manifest": 385,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.43
+  },
+  {
+   "episode": "episode_000014",
+   "frames_in_manifest": 402,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.27
+  },
+  {
+   "episode": "episode_000015",
+   "frames_in_manifest": 399,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.38
+  },
+  {
+   "episode": "episode_000016",
+   "frames_in_manifest": 270,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.8
+  },
+  {
+   "episode": "episode_000017",
+   "frames_in_manifest": 330,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.32
+  },
+  {
+   "episode": "episode_000018",
+   "frames_in_manifest": 398,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.68
+  },
+  {
+   "episode": "episode_000019",
+   "frames_in_manifest": 406,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.32
+  },
+  {
+   "episode": "episode_000020",
+   "frames_in_manifest": 386,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.43
+  },
+  {
+   "episode": "episode_000021",
+   "frames_in_manifest": 402,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.35
+  },
+  {
+   "episode": "episode_000022",
+   "frames_in_manifest": 425,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.4
+  },
+  {
+   "episode": "episode_000023",
+   "frames_in_manifest": 353,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.43
+  },
+  {
+   "episode": "episode_000024",
+   "frames_in_manifest": 308,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.36
+  },
+  {
+   "episode": "episode_000025",
+   "frames_in_manifest": 355,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.31
+  },
+  {
+   "episode": "episode_000026",
+   "frames_in_manifest": 381,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.36
+  },
+  {
+   "episode": "episode_000027",
+   "frames_in_manifest": 371,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.64
+  },
+  {
+   "episode": "episode_000028",
+   "frames_in_manifest": 409,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.3
+  },
+  {
+   "episode": "episode_000029",
+   "frames_in_manifest": 467,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.55
+  },
+  {
+   "episode": "episode_000030",
+   "frames_in_manifest": 375,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.66
+  },
+  {
+   "episode": "episode_000031",
+   "frames_in_manifest": 374,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.65
+  },
+  {
+   "episode": "episode_000032",
+   "frames_in_manifest": 393,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.6
+  },
+  {
+   "episode": "episode_000033",
+   "frames_in_manifest": 389,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.2
+  },
+  {
+   "episode": "episode_000034",
+   "frames_in_manifest": 303,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.39
+  },
+  {
+   "episode": "episode_000035",
+   "frames_in_manifest": 424,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.28
+  },
+  {
+   "episode": "episode_000036",
+   "frames_in_manifest": 393,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.56
+  },
+  {
+   "episode": "episode_000037",
+   "frames_in_manifest": 394,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.86
+  },
+  {
+   "episode": "episode_000038",
+   "frames_in_manifest": 361,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.82
+  },
+  {
+   "episode": "episode_000039",
+   "frames_in_manifest": 373,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.39
+  },
+  {
+   "episode": "episode_000040",
+   "frames_in_manifest": 409,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.3
+  },
+  {
+   "episode": "episode_000041",
+   "frames_in_manifest": 371,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.54
+  },
+  {
+   "episode": "episode_000042",
+   "frames_in_manifest": 391,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.27
+  },
+  {
+   "episode": "episode_000043",
+   "frames_in_manifest": 387,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.86
+  },
+  {
+   "episode": "episode_000044",
+   "frames_in_manifest": 412,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.34
+  },
+  {
+   "episode": "episode_000045",
+   "frames_in_manifest": 406,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.26
+  },
+  {
+   "episode": "episode_000046",
+   "frames_in_manifest": 428,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.76
+  },
+  {
+   "episode": "episode_000047",
+   "frames_in_manifest": 404,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.55
+  },
+  {
+   "episode": "episode_000048",
+   "frames_in_manifest": 421,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.83
+  },
+  {
+   "episode": "episode_000049",
+   "frames_in_manifest": 384,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.32
+  },
+  {
+   "episode": "episode_000050",
+   "frames_in_manifest": 366,
+   "frames_scanned": 286,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 285,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 193.13
+  },
+  {
+   "episode": "episode_000051",
+   "frames_in_manifest": 429,
+   "frames_scanned": 3,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 2,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 1.68
+  },
+  {
+   "episode": "episode_000052",
+   "frames_in_manifest": 400,
+   "frames_scanned": 313,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 312,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 180.15
+  },
+  {
+   "episode": "episode_000053",
+   "frames_in_manifest": 478,
+   "frames_scanned": 378,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 377,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 253.69
+  },
+  {
+   "episode": "episode_000054",
+   "frames_in_manifest": 448,
+   "frames_scanned": 5,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 4,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 3.01
+  },
+  {
+   "episode": "episode_000055",
+   "frames_in_manifest": 401,
+   "frames_scanned": 277,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 276,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 240.97
+  },
+  {
+   "episode": "episode_000056",
+   "frames_in_manifest": 366,
+   "frames_scanned": 51,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 50,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 39.76
+  },
+  {
+   "episode": "episode_000057",
+   "frames_in_manifest": 470,
+   "frames_scanned": 24,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 23,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 19.07
+  },
+  {
+   "episode": "episode_000058",
+   "frames_in_manifest": 427,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.85
+  },
+  {
+   "episode": "episode_000059",
+   "frames_in_manifest": 400,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.9
+  },
+  {
+   "episode": "episode_000060",
+   "frames_in_manifest": 424,
+   "frames_scanned": 9,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 8,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 6.8
+  },
+  {
+   "episode": "episode_000061",
+   "frames_in_manifest": 446,
+   "frames_scanned": 13,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 12,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 10.24
+  },
+  {
+   "episode": "episode_000062",
+   "frames_in_manifest": 458,
+   "frames_scanned": 11,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 10,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 8.13
+  },
+  {
+   "episode": "episode_000063",
+   "frames_in_manifest": 471,
+   "frames_scanned": 42,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 41,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 32.05
+  },
+  {
+   "episode": "episode_000064",
+   "frames_in_manifest": 387,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.36
+  },
+  {
+   "episode": "episode_000065",
+   "frames_in_manifest": 421,
+   "frames_scanned": 3,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 2,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 2.45
+  },
+  {
+   "episode": "episode_000066",
+   "frames_in_manifest": 430,
+   "frames_scanned": 7,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 6,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 5.55
+  },
+  {
+   "episode": "episode_000067",
+   "frames_in_manifest": 396,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.77
+  },
+  {
+   "episode": "episode_000068",
+   "frames_in_manifest": 391,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.98
+  },
+  {
+   "episode": "episode_000069",
+   "frames_in_manifest": 439,
+   "frames_scanned": 15,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 14,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 11.54
+  },
+  {
+   "episode": "episode_000070",
+   "frames_in_manifest": 460,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.92
+  },
+  {
+   "episode": "episode_000071",
+   "frames_in_manifest": 453,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.45
+  },
+  {
+   "episode": "episode_000072",
+   "frames_in_manifest": 382,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.88
+  },
+  {
+   "episode": "episode_000073",
+   "frames_in_manifest": 498,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.28
+  },
+  {
+   "episode": "episode_000074",
+   "frames_in_manifest": 502,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.25
+  },
+  {
+   "episode": "episode_000075",
+   "frames_in_manifest": 427,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.36
+  },
+  {
+   "episode": "episode_000076",
+   "frames_in_manifest": 450,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.32
+  },
+  {
+   "episode": "episode_000077",
+   "frames_in_manifest": 483,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.27
+  },
+  {
+   "episode": "episode_000078",
+   "frames_in_manifest": 479,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.46
+  },
+  {
+   "episode": "episode_000079",
+   "frames_in_manifest": 360,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.46
+  },
+  {
+   "episode": "episode_000080",
+   "frames_in_manifest": 486,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.44
+  },
+  {
+   "episode": "episode_000081",
+   "frames_in_manifest": 497,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.49
+  },
+  {
+   "episode": "episode_000082",
+   "frames_in_manifest": 407,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.39
+  },
+  {
+   "episode": "episode_000083",
+   "frames_in_manifest": 422,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.7
+  },
+  {
+   "episode": "episode_000084",
+   "frames_in_manifest": 509,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.59
+  },
+  {
+   "episode": "episode_000085",
+   "frames_in_manifest": 446,
+   "frames_scanned": 9,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 8,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 6.37
+  },
+  {
+   "episode": "episode_000201",
+   "frames_in_manifest": 374,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.71
+  },
+  {
+   "episode": "episode_000202",
+   "frames_in_manifest": 398,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.43
+  },
+  {
+   "episode": "episode_000203",
+   "frames_in_manifest": 410,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.36
+  },
+  {
+   "episode": "episode_000204",
+   "frames_in_manifest": 394,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.38
+  },
+  {
+   "episode": "episode_000205",
+   "frames_in_manifest": 406,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.4
+  },
+  {
+   "episode": "episode_000206",
+   "frames_in_manifest": 454,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.33
+  },
+  {
+   "episode": "episode_000207",
+   "frames_in_manifest": 372,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.4
+  },
+  {
+   "episode": "episode_000208",
+   "frames_in_manifest": 375,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.38
+  },
+  {
+   "episode": "episode_000209",
+   "frames_in_manifest": 369,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.41
+  },
+  {
+   "episode": "episode_000210",
+   "frames_in_manifest": 390,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.41
+  },
+  {
+   "episode": "episode_000211",
+   "frames_in_manifest": 407,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.38
+  },
+  {
+   "episode": "episode_000212",
+   "frames_in_manifest": 431,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.39
+  },
+  {
+   "episode": "episode_000213",
+   "frames_in_manifest": 413,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.39
+  },
+  {
+   "episode": "episode_000214",
+   "frames_in_manifest": 366,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.37
+  },
+  {
+   "episode": "episode_000215",
+   "frames_in_manifest": 350,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.3
+  },
+  {
+   "episode": "episode_000216",
+   "frames_in_manifest": 406,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.4
+  },
+  {
+   "episode": "episode_000217",
+   "frames_in_manifest": 370,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.37
+  },
+  {
+   "episode": "episode_000218",
+   "frames_in_manifest": 396,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.84
+  },
+  {
+   "episode": "episode_000219",
+   "frames_in_manifest": 385,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.37
+  },
+  {
+   "episode": "episode_000220",
+   "frames_in_manifest": 380,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.24
+  },
+  {
+   "episode": "episode_000221",
+   "frames_in_manifest": 350,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.32
+  },
+  {
+   "episode": "episode_000222",
+   "frames_in_manifest": 417,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.36
+  },
+  {
+   "episode": "episode_000223",
+   "frames_in_manifest": 378,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.27
+  },
+  {
+   "episode": "episode_000224",
+   "frames_in_manifest": 371,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.22
+  },
+  {
+   "episode": "episode_000225",
+   "frames_in_manifest": 401,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.31
+  },
+  {
+   "episode": "episode_000226",
+   "frames_in_manifest": 370,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.32
+  },
+  {
+   "episode": "episode_000227",
+   "frames_in_manifest": 404,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.35
+  },
+  {
+   "episode": "episode_000228",
+   "frames_in_manifest": 371,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.41
+  },
+  {
+   "episode": "episode_000229",
+   "frames_in_manifest": 433,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.37
+  },
+  {
+   "episode": "episode_000230",
+   "frames_in_manifest": 355,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.4
+  },
+  {
+   "episode": "episode_000231",
+   "frames_in_manifest": 433,
+   "frames_scanned": 297,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 296,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 206.76
+  },
+  {
+   "episode": "episode_000232",
+   "frames_in_manifest": 522,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.38
+  },
+  {
+   "episode": "episode_000233",
+   "frames_in_manifest": 448,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.43
+  },
+  {
+   "episode": "episode_000234",
+   "frames_in_manifest": 437,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.29
+  },
+  {
+   "episode": "episode_000235",
+   "frames_in_manifest": 531,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.33
+  },
+  {
+   "episode": "episode_000236",
+   "frames_in_manifest": 494,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.36
+  },
+  {
+   "episode": "episode_000237",
+   "frames_in_manifest": 448,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.38
+  },
+  {
+   "episode": "episode_000238",
+   "frames_in_manifest": 468,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.47
+  },
+  {
+   "episode": "episode_000239",
+   "frames_in_manifest": 393,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.35
+  },
+  {
+   "episode": "episode_000240",
+   "frames_in_manifest": 423,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.42
+  },
+  {
+   "episode": "episode_000241",
+   "frames_in_manifest": 476,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": false,
+   "seconds": 0.43
+  },
+  {
+   "episode": "episode_000242",
+   "frames_in_manifest": 436,
+   "frames_scanned": 1,
+   "scan_reached_end_of_clip": false,
+   "first_empty_frame": 0,
+   "refuses": true,
+   "first_empty_emptied_by_v9_filter": true,
+   "seconds": 0.5
+  },
+  {
+   "episode": "episode_000243",
+   "frames_in_manifest": 417,
+   "frames_scanned": 417,
+   "scan_reached_end_of_clip": true,
+   "first_empty_frame": null,
+   "refuses": false,
+   "first_empty_emptied_by_v9_filter": null,
+   "seconds": 350.15
+  }
+ ]
+}
