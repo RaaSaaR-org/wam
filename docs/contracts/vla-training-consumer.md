@@ -506,13 +506,54 @@ Written as gaps, not papered over.
    dimension — so the restyle must re-derive from the HF source at full resolution
    (`subprojects/data-factory/README.md:82-85`, `PR-08:101-103`). That re-derivation pipeline is not
    written.
-2. **Depth and segmentation are not wired.** Transfer2.5 consumes depth + segmentation + Canny;
-   AppleToPlate ships one RGB camera, so only Canny is computable, and `isaac_binding.py` makes
-   exactly one `AnnotatorRegistry.get_annotator` call (`"rgb"`). `distance_to_camera` and
-   `semantic_segmentation` are unwired, which blocks §4 of PR-08 entirely and therefore blocks
-   `EST_DRIFT_P95`, and therefore blocks G0b. — `PR-08:104-112`, `PR-08` §8 item 5,
-   `.mc/tasks/todo/T-040-…md` Notes (correction of 2026-08-06).
-3. **`GEOM_TOL` and `EST_DRIFT_P95` are unmeasured and uncommitted.** — `PR-08` §8 item 4.
+2. **Depth and segmentation for the *corpus* are still not available; the *annotators* are no
+   longer the reason.** Transfer2.5 consumes depth + segmentation + Canny; AppleToPlate ships one
+   RGB camera, so on the real corpus only Canny is computable. That half of this item stands.
+
+   > **Corrected 2026-08-25.** The clause this item used to carry — *"`isaac_binding.py` makes
+   > exactly one `AnnotatorRegistry.get_annotator` call (`"rgb"`) [and] `distance_to_camera` and
+   > `semantic_segmentation` are unwired, which blocks §4 of PR-08 entirely and therefore blocks
+   > `EST_DRIFT_P95`, and therefore blocks G0b"* — **is no longer true of this branch, and it was
+   > superseded twice over.** (i) Both annotators are wired at
+   > `src/wam/robot/isaac_binding.py:188-191` and `:952-962`, opt-in via the `ground_truth=` ctor
+   > arg, with tests in `tests/test_isaac_binding.py`; `PR-08` §8 item 5 is **closed**. (ii) It
+   > would not have mattered either way, because `T40_RULE_V5`
+   > (`docs/preregistration/PR-08-V5-ground-truth-route.md`, signed 2026-08-22) re-routed §4's
+   > calibration off Isaac and onto MuJoCo, and `EST_DRIFT_P95` was in fact measured on that route
+   > at **0.2361 px** (`runs/pr08-est-drift/EST_DRIFT-mujoco-s60-f720.json`, 2026-08-23).
+   >
+   > **The stale sentence is preserved above rather than deleted**, because it is still an accurate
+   > statement about `main` — the annotator work landed on `edge-wam-e01-e05` only — and because
+   > the dated note it cited (`.mc/tasks/todo/T-040-…md` Notes, 2026-08-06) is a historical
+   > record that is correct as of its own date and must not be rewritten.
+   >
+   > **What actually blocks G0b today is item 3 below, not this item.** `EST_DRIFT_P95` and
+   > `GEOM_TOL` are both *measured* but both carry `gate_qualified: false`, so **nothing was
+   > written into `configs/`**: `configs/transfer25/pr08_geom_tol.json` still has `geom_tol_px`,
+   > `est_drift_p95_px` and `gate_margin_px` all `null`, and G0b cannot form its error budget from
+   > nulls. Do not read this correction as item 3 having moved.
+3. **`GEOM_TOL` and `EST_DRIFT_P95` are measured but NOT committed, and the distinction is the
+   whole of the item.** — `PR-08` §8 item 4.
+
+   > **Corrected 2026-08-25.** This item previously read *"unmeasured and uncommitted"*. The first
+   > word is now wrong and the second is still right, which is the state worth naming precisely:
+   >
+   > - `GEOM_TOL` = **0.4786 px** over 402/402 episodes, 171 625 frames
+   >   (`docs/preregistration/PR-08-RESULT-2026-08-24-geom-tol-full-corpus.md`).
+   > - `EST_DRIFT_P95` = **0.2361 px** on the MuJoCo route
+   >   (`runs/pr08-est-drift/EST_DRIFT-mujoco-s60-f720.json`), margin **+0.2425 px**.
+   >
+   > **Both carry `gate_qualified: false`**, because the mask method
+   > (`grounding-dino+sam2+depth-anything-v2`) is not gate-qualified — `scripts/estimators/apple_sam2.py`
+   > sets `GATE_QUALIFIED = False` with named blockers, and that one flag stamps every artifact
+   > produced on either route. **So nothing was written into `configs/`.**
+   > `configs/transfer25/pr08_geom_tol.json` carries `geom_tol_px`, `est_drift_p95_px`,
+   > `gate_margin_px` and `est_drift_source` as `null` to this day, and **G0b cannot form an error
+   > budget out of nulls** — which is why item 4 is open and why G0b has never returned a verdict.
+   >
+   > **Measuring harder does not close this.** The blockers ask for evidence about the masks
+   > themselves — a comparison against ground truth, and a per-frame-vs-propagation capture that
+   > does not exist — not for another pass over the corpus. A signature is not that evidence.
 4. **A restyled corpus violates the benchmark's own invariant.** `../vla-training/docs/vla-benchmark.md:61-62`,
    rule 1 of "what must stay identical between all candidates": *exactly the 402 episodes /
    171 625 frames (`info.json` byte-identical); no re-split, **no additional augmenting for
