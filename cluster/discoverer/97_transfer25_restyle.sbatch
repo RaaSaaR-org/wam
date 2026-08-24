@@ -643,7 +643,22 @@ PREREG=${WAM}/docs/preregistration/PR-08-photoreal-augmentation.md
 # independently of the geometry work, so requiring it on this path would block the one measurement
 # the document explicitly permits.
 # ------------------------------------------------------------------------------------------------
-SOURCE=${SOURCE:-${PROJ}/data/pr08-apple-640x480}
+# THE H.264 TREE, NOT THE AV1 ONE, FOR TWO INDEPENDENT REASONS — either alone decides it.
+# (1) DECODABILITY. The corpus ships AV1 and the cv2 4.11.0 in 98's generation venv is built
+#     against avcodec 59.37.100, which has no AV1 decoder and DOES NOT RAISE about it:
+#     VideoCapture opens the container, believes the header, reports the frame count and fails
+#     every read. Three jobs have died on that shape (186357 wrote 0 captions; 189585 died at 7 s;
+#     189584 watched upstream's own SAM 2 helper extract 0 of 590 frames). Job 189613 verified all
+#     402 clips of the H.264 tree decode under the generation venv's own cv2.
+# (2) THE AREA BOUND IS A CLAIM ABOUT A CORPUS. 106 measures the robot-mask area distribution on
+#     the H.264 tree, and robot_composite.load_area_bound compares the bound's
+#     source_manifest_sha256 against THIS run's SOURCE manifest. The two trees have different
+#     manifests, so pointing this at the AV1 tree makes the composite refuse at G0c — correctly,
+#     and after Slurm has handed out a GPU.
+# The transcode is proven BIT-EXACT per clip (scripts/transcode_corpus_lossless.py,
+# TRANSCODE_PROOF.json: frame count and max abs channel delta 0 in yuv420p AND rgb24 on every
+# clip), so this is the same pixels by a decodable route and not a different corpus.
+SOURCE=${SOURCE:-${PROJ}/data/pr08-apple-640x480-h264-lossless}
 STYLE_PARTITION=${STYLE_PARTITION:-${WAM}/configs/transfer25/pr08_style_partition.json}
 # The SOURCE of the rendering above, and the verifier that relates the two. Both are read (never
 # written) by the pre-commitment check below — see FIX 3's block. styles.toml is the file PR-08 §6's
@@ -702,6 +717,22 @@ case "${SOURCE}" in
     echo "FATAL: SOURCE=${SOURCE} is the converted 120x160 corpus. PR-08 §3 explicitly forbids"
     echo "       reusing datasets/gr00t-apple-full/ — this path re-derives from the HF source at"
     echo "       full resolution. Restyling 120x160 produces frames a 640x480 VLA cannot use."
+    exit 1 ;;
+esac
+
+# The AV1 tree, by name, for the same reason and in the same place: it exists, it has a
+# manifest.json at the right resolution, and it would sail through every generic check. What it
+# would NOT do is decode under the generation venv's cv2, and the failure is SILENT — the reader
+# returns no frames rather than raising. Caught here so that pointing at it costs a second and a
+# named diagnosis instead of a GPU allocation and a puzzle. See the SOURCE default above.
+case "${SOURCE%/}" in
+  *pr08-apple-640x480)
+    echo "FATAL: SOURCE=${SOURCE} is the AV1 tree. The cv2 in 98's generation venv has no AV1"
+    echo "       decoder and does not raise about it — it reports the frame count and reads"
+    echo "       nothing (186357, 189585, 189584 all died on that shape)."
+    echo "       Use the bit-exact H.264 transcode instead, which is also the tree 106 measures"
+    echo "       the G0c area bound over, so it is the only one load_area_bound will accept:"
+    echo "         SOURCE=${PROJ}/data/pr08-apple-640x480-h264-lossless"
     exit 1 ;;
 esac
 

@@ -23,6 +23,7 @@ corresponds to a decision recorded in the two headers rather than to an implemen
 
 from __future__ import annotations
 
+import pathlib
 import re
 from pathlib import Path
 
@@ -248,15 +249,52 @@ def test_100_pins_the_source_corpus_revision() -> None:
         assert pointer in case_block, f"{pointer!r} is not refused as a source revision"
 
 
-def test_100_writes_the_path_97_reads_by_default() -> None:
-    """Two files naming the same tree by two different literals is a bug waiting for a rename."""
-    source = _text(_SOURCE)
-    restyle = _text(_RESTYLE)
-    match = re.search(r"SOURCE=\$\{SOURCE:-\$\{PROJ\}/([^}]*)\}", restyle)
-    assert match, "97 no longer defaults SOURCE under ${PROJ}"
-    assert match.group(1) in source, (
-        f"97 reads ${{PROJ}}/{match.group(1)} and 100 does not write it"
+def _default_source(job: pathlib.Path) -> str:
+    """The tree a job defaults SOURCE to, as the literal it writes."""
+    match = re.search(r"SOURCE=\$\{SOURCE:-\$\{PROJ\}/([^}]*)\}", _text(job))
+    assert match, f"{job.name} no longer defaults SOURCE under ${{PROJ}}"
+    return match.group(1)
+
+
+def test_97_and_106_default_to_the_same_tree() -> None:
+    """The area bound is a claim about a corpus, so the two jobs must mean the same one.
+
+    106 measures the robot-mask area distribution and stamps the SOURCE manifest's sha256 into the
+    artifact; ``robot_composite.load_area_bound`` then compares that against the sha256 of the tree
+    the RUN is restyling, and refuses when they differ — "holding corpus A's distribution over
+    corpus B is the same drift by another route". The AV1 and H.264 trees are bit-exact in pixels
+    and have DIFFERENT manifests, so two jobs disagreeing here is not a cosmetic mismatch: it is a
+    G0c refusal that arrives after Slurm has handed out a GPU. 97 pointed at the AV1 tree while 106
+    and 107 pointed at the H.264 one until 2026-08-24.
+    """
+    assert _default_source(_RESTYLE) == _default_source(_JOBS / "106_measure_robot_mask_area.sbatch")
+
+
+def test_the_tree_97_reads_by_default_is_one_something_in_the_repo_produces() -> None:
+    """Two files naming the same tree by two different literals is a bug waiting for a rename.
+
+    100 builds the AV1 tree from the HF source; ``scripts/transcode_corpus_lossless.py`` builds the
+    bit-exact H.264 transcode of it, which is what the generation venv's cv2 can actually decode.
+    Whichever 97 defaults to, its PRODUCER has to name it by the same literal.
+    """
+    # On the BASENAME: the producers write the tree under their own parent (100 under ${PROJ}/data,
+    # the transcode wherever it is pointed), so the directory name is the shared literal and the
+    # thing a rename would break.
+    default = _default_source(_RESTYLE).rstrip("/").rsplit("/", 1)[-1]
+    producers = [_text(_SOURCE),
+                 (_REPO_ROOT / "scripts" / "transcode_corpus_lossless.py").read_text(encoding="utf-8")]
+    assert any(default in text for text in producers), (
+        f"97 defaults SOURCE to .../{default} and nothing in the repo writes that name"
     )
+
+
+def test_97_refuses_the_av1_tree_by_name_rather_than_failing_to_decode_it() -> None:
+    """The AV1 failure is SILENT — cv2 opens the container, reports the frame count and reads
+    nothing — so three jobs died on it before anyone knew why (186357, 189585, 189584). A job that
+    can only discover this on a GPU should refuse it on the login node instead."""
+    restyle = _text(_RESTYLE)
+    assert "*pr08-apple-640x480)" in restyle, "97 no longer refuses the AV1 tree by name"
+    assert "AV1" in restyle
 
 
 def test_97_passes_control_to_every_driver_invocation() -> None:
