@@ -910,6 +910,49 @@ def build_masker() -> Sam2RobotMasker:
 # --------------------------------------------------------------------------------------------
 
 
+#: Which of :func:`_git_commit`'s two sources answered. Recorded beside the hash, never inferred
+#: from it: "this is what the tree IS" and "this is what an operator PUSHED" are different claims.
+_GIT_COMMIT_SOURCE: str | None = None
+
+
+def _git_commit() -> str | None:
+    """The commit this run's code came from, or ``None`` when nothing on disk can say.
+
+    TWO SOURCES, BECAUSE THE CLUSTER COPY IS NOT A GIT REPOSITORY. ``cluster/discoverer/sync.sh``
+    rsyncs the tree to ``${PROJ}/wam`` and writes the pushed commit to ``${PROJ}/wam/GIT_COMMIT`` in
+    the same invocation; there is no ``.git`` beside it, so ``git rev-parse`` fails there.
+
+    THIS IS NOT A COSMETIC FIELD AND IT IS HERE BECAUSE OF A MEASURED FAILURE. Every one of the
+    sixteen GEOM_TOL shards of 2026-08-23/24 recorded ``git_commit: null`` for exactly that reason,
+    and six of them ran HOURS after the adapter they used had been superseded — the cluster copy
+    had simply not been re-synced, and nothing in the artifact could say so. The area distribution
+    this file measures is the one a human signs ``max_frame_fraction`` above, so it has to be able
+    to name the code that produced it. The ``-dirty`` suffix ``sync.sh`` appends is kept verbatim.
+    """
+    global _GIT_COMMIT_SOURCE
+    import subprocess  # noqa: PLC0415 — only reached on the workstation path
+
+    try:
+        out = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True, timeout=10)
+        commit = out.stdout.strip()
+        if commit:
+            _GIT_COMMIT_SOURCE = "git rev-parse HEAD"
+            return commit
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        text = (REPO_ROOT / "GIT_COMMIT").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        _GIT_COMMIT_SOURCE = None
+        return None
+    if not text or len(text) > 80 or any(c.isspace() for c in text):
+        _GIT_COMMIT_SOURCE = None
+        return None
+    _GIT_COMMIT_SOURCE = "GIT_COMMIT file written by cluster/discoverer/sync.sh"
+    return text
+
+
 def _file_sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -1996,6 +2039,10 @@ def measure_source_mask_area(
             "measured": measured,
             "estimator": estimator,
             "prompt": ROBOT_TEXT_PROMPT,
+            "git_commit": _git_commit(),
+            # Below the line above: _git_commit() sets _GIT_COMMIT_SOURCE as it decides, and a dict
+            # literal evaluates its values in source order.
+            "git_commit_source": _GIT_COMMIT_SOURCE,
             "source_manifest": str(manifest),
             "source_manifest_sha256": source_manifest_sha256,
         }
@@ -2023,6 +2070,8 @@ def measure_source_mask_area(
         "measured": measured,
         "estimator": estimator,
         "prompt": ROBOT_TEXT_PROMPT,
+        "git_commit": _git_commit(),
+        "git_commit_source": _GIT_COMMIT_SOURCE,
         "source_manifest": str(manifest),
         "source_manifest_sha256": source_manifest_sha256,
     }
@@ -2353,6 +2402,19 @@ def merge_shard_records(
         ("shards_agree_on_prompt", "prompt", lambda r: r.get("prompt"),
          "The prompt decides which pixels are protected from the generator, so it decides the area "
          "distribution. A narrower prompt yields a smaller mask and a smaller distribution."),
+        # ADDED 2026-08-24, AFTER THIS EXACT FAILURE HAPPENED ONE DIRECTORY OVER. The GEOM_TOL array
+        # of 2026-08-23/24 ran sixteen shards over four waves; the cluster copy is an rsync target
+        # with no .git, so it silently lagged HEAD, and six shards measured with an adapter that had
+        # already been superseded. Nothing refused, because nothing compared. The estimator block
+        # above catches a changed checkpoint or threshold, and would NOT have caught that: the
+        # change was in the module, not in what the module reports about itself. A commit is the
+        # only field that covers the whole of the code. Shards that all say null still AGREE, so
+        # this adds no refusal on a workstation run where neither source can answer.
+        ("shards_agree_on_git_commit", "git_commit", lambda r: r.get("git_commit"),
+         "Two shards measured by different code did not measure one quantity, and pooling them is "
+         "a distribution with no single instrument behind it. This is not hypothetical: it is what "
+         "happened to the GEOM_TOL array on 2026-08-23/24 and went unnoticed until the artifacts "
+         "were read by hand. Re-run the shards that disagree; the list above names them."),
     )
     disagreements: dict[str, list] = {}
     agreed: dict[str, Any] = {}
@@ -2416,6 +2478,16 @@ def merge_shard_records(
         # carries what each shard actually said.
         "estimator": _agreed_estimator(records, conditions),
         "prompt": agreed.get("prompt"),
+        # The AGREED commit, not this merge process's own: the merge does arithmetic over shards and
+        # the question the artifact has to answer is what measured the DISTRIBUTION. None when the
+        # shards disagreed, which also stamps measurement_qualified false.
+        "git_commit": agreed.get("git_commit"),
+        # NOT an agreement condition, deliberately. Once the shards agree on the commit, whether one
+        # of them learned it from a live repository and another from a synced file says nothing
+        # about what was measured — refusing on it would refuse a correct pooling. It is still
+        # recorded, and it is recorded as a LIST when the shards differ rather than as a plausible
+        # single value, so the artifact never claims a provenance route no shard actually took.
+        "git_commit_source": _agreed_git_commit_source(records),
         "source_manifest": _agreed_source_manifest(records, conditions),
         "source_manifest_sha256": agreed.get("source_manifest_sha256"),
         "merged_from": {
@@ -2467,6 +2539,13 @@ def merge_shard_records(
         },
     }
     return record, reasons, conditions
+
+
+def _agreed_git_commit_source(records: list[dict]) -> Any:
+    """The shards' ``git_commit_source``: the single value when they share one, else all of them."""
+    seen = [r.get("git_commit_source") for r in records]
+    distinct = {json.dumps(v, sort_keys=True) for v in seen}
+    return seen[0] if len(distinct) == 1 and seen else sorted(distinct)
 
 
 def _agreed_estimator(records: list[dict], conditions: dict) -> Any:

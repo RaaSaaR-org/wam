@@ -745,7 +745,11 @@ def test_sharding_changed_no_number_a_whole_corpus_run_already_produced(
     before = old.measure_source_mask_area(corpus, masker=masker)
     after = rc.measure_source_mask_area(corpus, masker=masker)
 
-    assert set(after) - set(before) == {"schema"}, "a key appeared that was not declared"
+    assert set(after) - set(before) == {"schema", "git_commit", "git_commit_source"}, (
+        # git_commit/_source were added 2026-08-24 after the GEOM_TOL array was found to have
+        # measured six of its sixteen shards with a superseded adapter, unnoticed, because the
+        # cluster copy is an rsync target with no .git and nothing in the artifact could say so.
+        "a key appeared that was not declared")
     assert set(before) - set(after) == set(), "a key the previous version wrote went missing"
     differing = sorted(k for k in before if before[k] != after[k])
     assert differing == [], f"sharding changed {differing}"
@@ -753,7 +757,7 @@ def test_sharding_changed_no_number_a_whole_corpus_run_already_produced(
     # And on the truncated path, where the disqualification is what a reader depends on.
     before = old.measure_source_mask_area(corpus, masker=masker, limit=3, stride=2)
     after = rc.measure_source_mask_area(corpus, masker=masker, limit=3, stride=2)
-    assert set(after) - set(before) == {"schema"}
+    assert set(after) - set(before) == {"schema", "git_commit", "git_commit_source"}
     assert sorted(k for k in before if before[k] != after[k]) == []
 
 
@@ -772,7 +776,8 @@ def test_the_merged_artifact_is_what_the_previous_version_would_have_written(
     assert _merge(_sharded(corpus, tmp_path, 4), out) == rc.EXIT_OK
     after = _load(out)
 
-    assert set(after) - set(before) == {"schema", "merged_from"}
+    assert set(after) - set(before) == {"schema", "merged_from",
+                                       "git_commit", "git_commit_source"}
     differing = sorted(k for k in before if before[k] != after[k])
     assert differing == [], f"the merge changed {differing}"
 
