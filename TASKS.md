@@ -83,6 +83,50 @@ mc show T-16     # the whole T-16 record
 > timeouts, 0 deadline misses**, hitting a `REACH_TARGET_RAD` that was frozen from the *original*
 > checkpoint's measured behaviour (`scripts/rollout.py:169`) — which is also what proves the
 > regenerated artifact is the genuine one and not a file-existence stub.
+>
+> **Correction to the correction, 2026-08-25.** The T-48 entry above names the wrong limit, and the
+> direction it is wrong in **strengthens** its own conclusion. It says the ground-truth chunks peak
+> at 1.47 rad/s² "against `ddq_max: 4.0` (`configs/safety/default.yaml`)". That array never reaches
+> this rollout: `build_safety_config` (`scripts/rollout.py:232-262`) takes `q_min/q_max/dq_max/
+> ddq_max` from **the robot's declared envelope whenever the robot declares one**, and
+> `configs/robot/mock.yaml:27` declares **`ddq_max: 8.0`**. So the limit in force is **8.0**, twice
+> as permissive as recorded — and the model overshoots it anyway, by **2.3×**. Re-measured
+> 2026-08-25 on both E2 probes: max demanded |ddq| **18.29** and **17.76** rad/s², with `accel_limit`
+> firing on 4-5 of the 8 steps of each probe. Velocity is clean (max |v| 0.85 against `dq_max` 2.0),
+> and `velocity_limit`, `joint_limit`, `nan_reject`, `schema_reject`, `state_reject` and the gripper
+> gates never fire. **`accel_limit` is the only rule involved**, at `src/wam/safety/layer.py:226-233`.
+> At `dt = 0.05` the limit means adjacent per-step joint deltas may differ by at most 0.02 rad.
+>
+> Two further things that were not in the T-48 record:
+>
+> - **The failure predates the tests.** Both were re-run in a throwaway worktree at `c59000e`, the
+>   commit that introduced them (2026-08-01), and fail **identically**. There is no code regression.
+>   Whether the *original* checkpoint passed is **not determinable** — `runs/` is gitignored
+>   (`.gitignore:19`), so that artifact was never in git. T-48's `REACH_TARGET_RAD` argument is
+>   suggestive, not conclusive.
+> - **`safety_intervention_rate` is one gate name over two different metrics**, both against the
+>   same 0.1 threshold: the static gate scores *fraction of probes touched at all*, bounded ≤ 1.0
+>   (`src/wam/evaluation/e2_checks.py:313`), while the sim gate scores *events per cycle*, unbounded
+>   (`:487`). A sim rollout measured 13 events over 12 cycles = **1.08**. That is a spec wart
+>   independent of this bug, and `e2_sim_rollout_checks` is currently called from nowhere but
+>   `tests/test_acceptance.py`, so nothing in-tree gates a rollout on it.
+>
+> **The closed loop still works** — `--skip-e2 --rollouts 2 --max-cycles 6`: 2/2 success, 0 estops,
+> 0 watchdog timeouts, 0 deadline misses, min rate 4.3 Hz. The Safety Layer clamping jerk out of a
+> noisy chunk and the task completing anyway is FR-07 behaving as designed.
+>
+> **What was changed in response, and what deliberately was not.** The two `tests/test_runtime.py`
+> failures were tests *named for the `PolicyContract` record* that asserted `rc == 0` and so made
+> the E2 release gate a silent precondition of a contract test. They now pass `--skip-e2` and assert
+> what they are about; the four `--policy checkpoint` tests also gained the
+> `skipif(not D1_CHECKPOINT.exists())` guard `tests/test_executor.py:561` already had, so a fresh
+> clone skips instead of erroring. `tests/test_runtime.py` is **36 passed**. **No gate value moved:**
+> `max_intervention_rate` is still 0.1, `ddq_max` is still the robot's 8.0, and the recipe gap is
+> still open. Fixing the gap means turning on the zero `smoothness` weight at
+> `scripts/overfit_d1.py:239` and/or retraining the head at `dt = 0.1` (which would also clear the
+> sub-0.5 s FR-05 chunk warning) — **that is a training run and a shared gitignored artifact, so it
+> is the owner's call, not a session's.** Relaxing `max_intervention_rate` or `ddq_max` to make a
+> jerky model pass is the exact failure FR-07 exists to prevent and is not on the table.
 
 ## M0 · Architecture & Safety Baseline (2–4 weeks)
 

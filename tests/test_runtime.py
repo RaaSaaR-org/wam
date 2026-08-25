@@ -53,6 +53,10 @@ from wam.runtime.mock_loop import DEFAULT_INSTRUCTION
 from wam.safety import SafetyConfig, SafetyLayer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+D1_CHECKPOINT = REPO_ROOT / "runs" / "d1-overfit-seed0" / "checkpoint.safetensors"
+needs_d1_checkpoint = pytest.mark.skipif(
+    not D1_CHECKPOINT.exists(), reason="d1-overfit-seed0 checkpoint not present (gitignored)"
+)
 
 N_JOINTS = 6
 SPEC = CanonicalSpaceSpec(joint_names=tuple(f"joint_{i}" for i in range(N_JOINTS)))
@@ -648,6 +652,7 @@ def rollout_cli():
     return module
 
 
+@needs_d1_checkpoint
 def test_rollout_cli_refuses_a_trained_checkpoint_that_carries_no_contract(
     rollout_cli, tmp_path: Path
 ) -> None:
@@ -662,13 +667,19 @@ def test_rollout_cli_refuses_a_trained_checkpoint_that_carries_no_contract(
         )
 
 
+@needs_d1_checkpoint
 def test_rollout_cli_runs_a_trained_checkpoint_once_a_contract_is_derived_from_its_dataset(
     rollout_cli, tmp_path: Path
 ) -> None:
+    """--skip-e2 on purpose: this test is about the PolicyContract record, and asserting
+    rc == 0 without it silently makes the E2 release gate a precondition of a contract
+    test. The checkpoint does not clear that gate (T-48: accel_limit, jerk from a
+    smoothness weight of 0.0), which is a recipe gap recorded in TASKS.md, not a
+    contract defect. The gate itself is untouched."""
     rc = rollout_cli.main(
         [
             "--robot", "mock", "--policy", "checkpoint", "--rollouts", "1",
-            "--max-cycles", "2", "--e2-probes", "2",
+            "--max-cycles", "2", "--e2-probes", "2", "--skip-e2",
             "--contract-from-dataset", str(REPO_ROOT / "datasets" / "mock-d1"),
             "--run-id", "contract-ok", "--out-dir", str(tmp_path),
         ]
@@ -680,13 +691,19 @@ def test_rollout_cli_runs_a_trained_checkpoint_once_a_contract_is_derived_from_i
     assert DEFAULT_INSTRUCTION in declared["instructions"]
 
 
+@needs_d1_checkpoint
 def test_rollout_cli_only_skips_the_contract_when_told_to_in_so_many_words(
     rollout_cli, tmp_path: Path
 ) -> None:
+    """--skip-e2 on purpose: this test is about the PolicyContract record, and asserting
+    rc == 0 without it silently makes the E2 release gate a precondition of a contract
+    test. The checkpoint does not clear that gate (T-48: accel_limit, jerk from a
+    smoothness weight of 0.0), which is a recipe gap recorded in TASKS.md, not a
+    contract defect. The gate itself is untouched."""
     rc = rollout_cli.main(
         [
             "--robot", "mock", "--policy", "checkpoint", "--rollouts", "1",
-            "--max-cycles", "2", "--e2-probes", "2", "--no-policy-contract",
+            "--max-cycles", "2", "--e2-probes", "2", "--no-policy-contract", "--skip-e2",
             "--run-id", "contract-off", "--out-dir", str(tmp_path),
         ]
     )
@@ -699,6 +716,7 @@ def test_rollout_cli_only_skips_the_contract_when_told_to_in_so_many_words(
     assert unchecked["instruction_seen"] is None
 
 
+@needs_d1_checkpoint
 def test_rollout_cli_refuses_a_contract_bound_to_a_different_checkpoint(
     rollout_cli, tmp_path: Path
 ) -> None:
