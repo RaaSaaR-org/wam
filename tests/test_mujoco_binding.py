@@ -18,6 +18,7 @@ depends on ``~/IsaacLab-Arena`` existing is a test that passes on one machine.
 from __future__ import annotations
 
 import json
+import math
 import os
 import pathlib
 import subprocess
@@ -248,6 +249,122 @@ def test_the_schedule_saturates_at_sixty_configurations_and_then_repeats_exactly
 def test_a_schedule_of_no_states_is_refused():
     with pytest.raises(ValueError, match="n_states"):
         mb.default_scene_schedule(0)
+
+
+# -- the trajectory schedule (what makes a propagation arm POSSIBLE, and nothing more) -----------
+#
+# The lattice above is a sweep of DISTINCT configurations and is exactly right for a per-frame
+# percentile. It is exactly wrong for anything that propagates from frame 0: consecutive entries
+# teleport the object, so a video predictor asked to track across one is being asked to track
+# across a cut. These tests pin the property the lattice does not have — continuity — and pin that
+# the lattice itself did not move when it landed.
+
+
+def test_the_trajectory_schedule_is_deterministic_and_has_the_requested_length():
+    assert mb.trajectory_scene_schedule(48) == mb.trajectory_scene_schedule(48)
+    assert len(mb.trajectory_scene_schedule(7)) == 7
+
+
+def test_a_trajectory_of_no_frames_is_refused():
+    with pytest.raises(ValueError, match="n_frames"):
+        mb.trajectory_scene_schedule(0)
+
+
+def test_every_trajectory_state_is_distinct_so_no_frame_is_a_duplicate():
+    """The lattice saturates at 60 configurations however many are asked for. The trajectory is
+    a continuous curve sampled once per frame, so N frames are N configurations for every N —
+    which is the whole reason it can carry a propagation arm at all."""
+    for n in (60, 120, 480):
+        states = mb.trajectory_scene_schedule(n)
+        assert len({(s.object_xy, s.object_yaw_rad, s.arm_pitch_offset_rad) for s in states}) == n
+
+
+def test_the_trajectory_has_no_jump_cuts_where_the_lattice_does():
+    """The measurable difference, in metres, before any pixel is rendered.
+
+    The lattice's neighbours are up to a whole lattice pitch apart (0.06 m in x, and the wrap
+    from y=+0.20 back to y=-0.20 is 0.40 m). The trajectory's step is O(1/n) by construction, so
+    asking for more frames makes it SMOOTHER rather than longer-with-the-same-cuts.
+    """
+    def steps(states):
+        return [
+            math.hypot(b.object_xy[0] - a.object_xy[0], b.object_xy[1] - a.object_xy[1])
+            for a, b in zip(states, states[1:])
+        ]
+
+    lattice = max(steps(mb.default_scene_schedule(60)))
+    coarse = max(steps(mb.trajectory_scene_schedule(60)))
+    fine = max(steps(mb.trajectory_scene_schedule(480)))
+    assert lattice > 0.3, "the committed lattice really does teleport the object"
+    assert coarse < 0.03, "60 frames of trajectory already move in small increments"
+    assert fine < coarse / 4.0, "and 8x the frames is ~8x smoother, not the same cuts more often"
+
+
+def test_the_trajectory_yaw_and_arm_are_continuous_too():
+    """A smooth path with a yaw that snaps 72 degrees between frames is still a cut in the
+    picture. Both of the lattice's other axes advance on ``i % k`` strides; both of these are
+    continuous functions of the frame index."""
+    states = mb.trajectory_scene_schedule(240)
+    yaw = max(abs(b.object_yaw_rad - a.object_yaw_rad) for a, b in zip(states, states[1:]))
+    arm = max(
+        abs(b.arm_pitch_offset_rad - a.arm_pitch_offset_rad)
+        for a, b in zip(states, states[1:])
+    )
+    assert yaw < math.radians(5.0)
+    assert arm < math.radians(2.0)
+
+
+def test_the_trajectory_never_leaves_the_lattices_own_envelope():
+    """PR-08-V5 §4.5 registers that *"any change to the capture scene that raises the object's
+    visibility is a change that must be argued in a further V-document, not made in a commit"*.
+
+    So the trajectory is confined to the bounding box of the placements V5 already registers,
+    the arm sweep to the amplitude the lattice already uses, and the envelope is DERIVED from
+    those tuples rather than typed a second time — a copy is how the two come to disagree.
+    """
+    states = mb.trajectory_scene_schedule(720)
+    assert min(s.object_xy[0] for s in states) >= min(mb._SCHEDULE_X) - 1e-12
+    assert max(s.object_xy[0] for s in states) <= max(mb._SCHEDULE_X) + 1e-12
+    assert min(s.object_xy[1] for s in states) >= min(mb._SCHEDULE_Y) - 1e-12
+    assert max(s.object_xy[1] for s in states) <= max(mb._SCHEDULE_Y) + 1e-12
+    amplitude = max(abs(v) for v in mb._SCHEDULE_ARM)
+    assert max(abs(s.arm_pitch_offset_rad) for s in states) <= amplitude + 1e-12
+
+
+def test_the_trajectory_object_is_never_parked():
+    """"It moves" has to mean every frame, not on average: a trajectory that stalled for a run
+    of frames would hand the propagation arm exactly the duplicate frames the lattice hands it,
+    only without the jump that makes them visible."""
+    states = mb.trajectory_scene_schedule(240)
+    steps = [
+        math.hypot(b.object_xy[0] - a.object_xy[0], b.object_xy[1] - a.object_xy[1])
+        for a, b in zip(states, states[1:])
+    ]
+    assert min(steps) > 1e-4, f"smallest step was {min(steps)} m"
+
+
+def test_the_committed_lattice_did_not_move_when_the_trajectory_landed():
+    """``--schedule`` defaults to ``lattice`` so that no capture anybody has already run changes
+    meaning. That default is only worth anything if the lattice itself is byte-for-byte what it
+    was, so the first four states are pinned here rather than described."""
+    assert mb.default_scene_schedule(4) == (
+        mb.SceneState(object_xy=(0.30, -0.20), object_yaw_rad=0.0, arm_pitch_offset_rad=-0.15),
+        mb.SceneState(
+            object_xy=(0.30, -0.10),
+            object_yaw_rad=2.0 * math.pi / 5.0,
+            arm_pitch_offset_rad=0.0,
+        ),
+        mb.SceneState(
+            object_xy=(0.30, 0.0),
+            object_yaw_rad=4.0 * math.pi / 5.0,
+            arm_pitch_offset_rad=0.15,
+        ),
+        mb.SceneState(
+            object_xy=(0.30, 0.10),
+            object_yaw_rad=6.0 * math.pi / 5.0,
+            arm_pitch_offset_rad=-0.15,
+        ),
+    )
 
 
 def test_the_binding_visits_one_state_per_steps_per_state(mesh):
@@ -649,6 +766,106 @@ def test_rendering_never_advances_physics(rendered):
     assert rendered["tick_unchanged_by_render"] is True
 
 
+# -- the same two schedules, in pixels ------------------------------------------------------------
+#
+# The metre-space tests above are the design; this is the thing a propagation arm would actually
+# see. Rendered because "small in metres" and "small in the picture" are not the same claim — the
+# head camera's scale is roughly 900 px/m and neither number can be derived from the other without
+# it.
+
+_SCHEDULE_PROBE = textwrap.dedent(
+    """
+    import json, sys
+    import numpy as np
+    sys.path.insert(0, {src!r})
+    from wam.robot.mujoco_binding import (
+        MuJoCoGroundTruthBinding, default_scene_schedule, trajectory_scene_schedule,
+    )
+
+    def centroids(schedule, n):
+        try:
+            b = MuJoCoGroundTruthBinding(
+                object_mesh={mesh!r},
+                cameras=("head",),
+                render_hw=(240, 320),
+                ground_truth=("segmentation",),
+                schedule=schedule,
+                steps_per_state=1,
+            )
+        except Exception as exc:
+            print(json.dumps({{"no_gl": type(exc).__name__ + ": " + str(exc)[:200]}}))
+            raise SystemExit(0)
+        out = []
+        for _ in range(n):
+            b.step(1)
+            seg = b.render_segmentation("head")
+            apple = [k for k, v in seg.id_to_labels.items() if v["class"] == "apple"][0]
+            ys, xs = np.nonzero(seg.ids == apple)
+            out.append(None if xs.size == 0 else (float(xs.mean()), float(ys.mean())))
+        b.close()
+        return out
+
+    def steps(cs):
+        return [
+            float(np.hypot(b[0] - a[0], b[1] - a[1]))
+            for a, b in zip(cs, cs[1:]) if a is not None and b is not None
+        ]
+
+    n = 48
+    lat = steps(centroids(default_scene_schedule(n), n))
+    tra = steps(centroids(trajectory_scene_schedule(n), n))
+    print(json.dumps({{
+        "lattice_max_px": max(lat), "lattice_min_px": min(lat),
+        "trajectory_max_px": max(tra), "trajectory_min_px": min(tra),
+        "n_steps": len(tra),
+    }}))
+    """
+)
+
+
+@pytest.fixture(scope="module")
+def schedule_pixels(tmp_path_factory):
+    mesh = _two_group_obj(tmp_path_factory.mktemp("sched") / "blob.obj")
+    proc = subprocess.run(
+        [sys.executable, "-c", _SCHEDULE_PROBE.format(src=str(REPO_ROOT / "src"), mesh=str(mesh))],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, MUJOCO_GL="egl"),
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"MuJoCo render subprocess failed: {proc.stderr[-400:]}")
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    if "no_gl" in payload:
+        pytest.skip(f"no usable MuJoCo GL backend here: {payload['no_gl']}")
+    return payload
+
+
+def test_the_lattice_really_does_jump_cut_in_the_picture(schedule_pixels):
+    """Stated as a test and not as a claim in a commit message, because it is the reason the
+    trajectory schedule exists: a mask that moves tens of pixels between neighbouring frames is
+    not something a video predictor propagating from frame 0 can follow."""
+    assert schedule_pixels["lattice_max_px"] > 40.0
+
+
+def test_the_trajectory_moves_the_mask_by_a_few_pixels_a_frame(schedule_pixels):
+    """Small AND non-zero, in that order of importance. Zero would mean a static prop dressed up
+    as a trajectory, which is the failure ``object_moved_during_capture`` exists to catch.
+
+    The threshold is tied to this probe's 48 frames and not to the schedule in general: the step
+    is O(1/n_frames), so the same assertion at 12 frames would fail (measured: ~36.8 px) and at
+    480 would pass with three times the margin. That is the design working, not a tolerance."""
+    assert schedule_pixels["trajectory_min_px"] > 0.0
+    assert schedule_pixels["trajectory_max_px"] < 15.0
+    assert schedule_pixels["trajectory_max_px"] < schedule_pixels["lattice_max_px"] / 4.0
+
+
+def test_the_object_stays_in_frame_for_the_whole_trajectory(schedule_pixels):
+    """Every step measurable means every frame carried a mask. A trajectory that swept the apple
+    behind the hands and left it there would be smooth and useless."""
+    assert schedule_pixels["n_steps"] == 47
+
+
 @pytest.fixture(scope="module")
 def cli_capture(tmp_path_factory):
     """`measure_est_drift.py capture --backend mujoco`, for real, in a subprocess with EGL.
@@ -714,3 +931,127 @@ def test_every_captured_frame_carries_a_true_mask_of_the_object(cli_capture):
         matched, vocab = ed.object_ids({int(k): v for k, v in labels.items()}, "apple")
         assert matched, f"frame {i} has no apple label; vocabulary was {vocab}"
         assert int(np.isin(ids, matched).sum()) > 0, f"frame {i} has an empty apple mask"
+
+
+# -- the CLI's --schedule, and what the header says about the capture it made ---------------------
+
+
+@pytest.fixture(scope="module")
+def cli_trajectory_capture(tmp_path_factory):
+    """`measure_est_drift.py capture --backend mujoco --schedule trajectory`, for real, on EGL.
+
+    Short — the point is the header, and the per-frame increment is O(1/frames) so a short run is
+    the WORST case for the smoothness assertion below, not the best one.
+    """
+    work = tmp_path_factory.mktemp("cli_traj")
+    mesh = _two_group_obj(work / "blob.obj")
+    out = work / "cap"
+    proc = subprocess.run(
+        [
+            sys.executable, str(REPO_ROOT / "scripts/measure_est_drift.py"), "capture",
+            "--backend", "mujoco", "--schedule", "trajectory", "--out", str(out),
+            "--frames", "48", "--object-mesh", str(mesh), "--render-hw", "480", "640",
+        ],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, MUJOCO_GL="egl"),
+        timeout=900,
+    )
+    if proc.returncode != 0:
+        if "OpenGL" in proc.stderr or "GLFW" in proc.stderr or "EGL" in proc.stderr:
+            pytest.skip(f"no usable MuJoCo GL backend here: {proc.stderr[-300:]}")
+        pytest.fail(
+            f"capture failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
+    return out
+
+
+def test_the_capture_header_records_which_schedule_produced_it(cli_trajectory_capture):
+    """A budget measured on a smooth capture and one measured on the committed lattice are
+    different measurements, and telling them apart from the frames alone means re-rendering."""
+    header = json.loads((cli_trajectory_capture / "capture.json").read_text())
+    assert header["scene_schedule"] == "trajectory"
+    assert header["scene_schedule_source"] == "--schedule"
+    assert header["scene_schedule_is_temporally_coherent_by_design"] is True
+
+
+def test_a_trajectory_capture_puts_one_configuration_on_every_frame(cli_trajectory_capture):
+    header = json.loads((cli_trajectory_capture / "capture.json").read_text())
+    assert header["n_scene_states_scheduled"] == 48
+    assert header["n_scene_states_visited"] == 48
+    assert header["steps_per_state"] == 1
+
+
+def test_the_header_measures_the_motion_rather_than_asserting_the_schedules_name(
+    cli_trajectory_capture,
+):
+    """THE FIELD THE WHOLE CAPTURE IS FOR. `--schedule trajectory` is a string; this is the
+    number that makes "temporally coherent" checkable without re-rendering 48 frames."""
+    block = json.loads((cli_trajectory_capture / "capture.json").read_text())["temporal_coherence"]
+    assert block["measured"] is True
+    assert block["object_class"] == "apple"
+    assert block["object_moved_during_capture"] is True
+    assert block["n_interframe_steps"] == 47
+    assert block["n_interframe_steps_unmeasurable"] == 0
+    assert block["median_interframe_motion_px"] < 25.0, (
+        "THE MEDIAN IS THE SCHEDULE'S OWN STEP and is what temporal coherence means here. "
+        "48 frames is one whole ellipse in 48 steps, far coarser than this schedule is ever "
+        "driven for real — the increment is O(1/frames), so 480 frames is ten times smoother. "
+        f"Measured: {block['median_interframe_motion_px']} px"
+    )
+    assert block["min_interframe_motion_px"] > 0.0, "no frame is a duplicate of its neighbour"
+    assert block["max_interframe_motion_px"] >= block["median_interframe_motion_px"]
+
+
+def test_the_max_is_an_occlusion_event_and_the_block_says_which_statistic_to_read(
+    cli_trajectory_capture,
+):
+    """The one place this measurement could be read backwards.
+
+    The max on a trajectory capture is dominated by the frames where the object passes behind a
+    Dex3 hand: the centroid of the VISIBLE part of the mask jumps tens of pixels while the object
+    moved a few. Measured 2026-08-25 over 48 frames of the real apple mesh at 480x640 — median
+    13.7 px, max 46.3 px, and exactly two of the 47 steps above 25 px. Those hands are required to
+    stay (PR-08-V5 §4.5), so this is not a defect to be tuned out; it is the field's own note that
+    stops a reader concluding the schedule cuts.
+    """
+    block = json.loads((cli_trajectory_capture / "capture.json").read_text())["temporal_coherence"]
+    note = block["read_the_median_for_smoothness_and_the_max_for_events"]
+    assert "OCCLUSION" in note and "MEDIAN" in note
+    assert block["max_interframe_motion_px"] > block["median_interframe_motion_px"]
+
+
+def test_the_coherence_block_does_not_contradict_the_registered_static_prop_field(
+    cli_trajectory_capture,
+):
+    """PR-08-V5 §4.4 registers `object_is_static_prop: true` to mean the object is teleported
+    rather than dropped or grasped. That is still true on a trajectory capture — it is a pose
+    schedule, not physics — so the registered field is unchanged and the measured block says
+    in its own text that it is answering a different question."""
+    header = json.loads((cli_trajectory_capture / "capture.json").read_text())
+    assert header["object_limitations"]["object_is_static_prop"] is True
+    assert "object_is_static_prop" in header["temporal_coherence"]["not_the_same_claim_as"]
+
+
+def test_the_lattice_capture_is_byte_for_byte_the_schedule_it_always_was(cli_capture):
+    """The default did not move. This is the same fixture every PR-08-V5 test above uses, run
+    without --schedule, and it must still name the lattice and still divide --frames into
+    --scene-states configurations exactly as it did before the flag existed."""
+    header = json.loads((cli_capture / "capture.json").read_text())
+    assert header["scene_schedule"] == "lattice"
+    assert header["scene_schedule_source"] == "default (lattice)"
+    assert header["scene_schedule_is_temporally_coherent_by_design"] is False
+    assert header["n_scene_states_scheduled"] == 2
+    assert header["steps_per_state"] == 4
+
+
+def test_the_committed_lattice_capture_is_the_one_that_cannot_carry_a_propagation_arm(cli_capture):
+    """The measurement that makes `--schedule trajectory` necessary rather than nice.
+
+    ``apple_sam2``'s third blocker asks for the same capture measured per-frame and by a video
+    predictor propagating from frame 0. Propagation across a mask that jumps most of the object's
+    own width between neighbouring frames measures the jump. This asserts the jump is there.
+    """
+    block = json.loads((cli_capture / "capture.json").read_text())["temporal_coherence"]
+    assert block["measured"] is True
+    assert block["max_interframe_motion_px"] > 40.0

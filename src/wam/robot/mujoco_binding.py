@@ -414,6 +414,121 @@ def default_scene_schedule(n_states: int = 20) -> tuple[SceneState, ...]:
     return tuple(states)
 
 
+#: The trajectory schedule's envelope, DERIVED from the lattice above rather than typed again.
+#:
+#: PR-08-V5 §4.5 registers that *"any change to the capture scene that raises the object's
+#: visibility is a change that must be argued in a further V-document, not made in a commit"*. The
+#: placements the lattice sweeps are what that clause was registered over, so the trajectory is
+#: confined to their bounding box and the arm to their amplitude: every pose the smooth schedule
+#: visits is inside the region the committed one already reaches, and no pose is nearer the camera,
+#: further from the hands or otherwise easier than the lattice already goes. Deriving it is the
+#: point — a second copy of ``0.30..0.48`` here is how the two would come to disagree, and the one
+#: that disagreed upward would be the one that quietly widened the envelope.
+_TRAJECTORY_CENTER_XY: tuple[float, float] = (
+    0.5 * (min(_SCHEDULE_X) + max(_SCHEDULE_X)),
+    0.5 * (min(_SCHEDULE_Y) + max(_SCHEDULE_Y)),
+)
+_TRAJECTORY_RADII_XY: tuple[float, float] = (
+    0.5 * (max(_SCHEDULE_X) - min(_SCHEDULE_X)),
+    0.5 * (max(_SCHEDULE_Y) - min(_SCHEDULE_Y)),
+)
+_TRAJECTORY_ARM_AMPLITUDE_RAD: float = max(abs(v) for v in _SCHEDULE_ARM)
+
+
+def trajectory_scene_schedule(
+    n_frames: int,
+    *,
+    turns: float = 1.0,
+    yaw_turns: float = 1.0,
+    arm_cycles: float = 2.0,
+) -> tuple[SceneState, ...]:
+    """``n_frames`` states on a SMOOTH, continuous path — one state per FRAME, no jump cuts.
+
+    WHAT THIS IS FOR, AND WHAT IT IS NOT FOR
+
+    :func:`default_scene_schedule` is a sweep of *distinct configurations* and is exactly right for
+    the quantity ``EST_DRIFT_P95`` names: a per-frame percentile wants independent viewpoints, and
+    PR-08 §4.6's *"N counted in configurations, not frames"* is that requirement. It is exactly
+    wrong for anything that PROPAGATES. ``apple_sam2``'s third gate-qualification blocker names its
+    own discharge condition — measure *"the same capture BOTH ways — this adapter per frame, and
+    the video predictor propagating from frame 0 — and recording the two p95s"* — and that
+    experiment is not merely unrun against the lattice, it is **unrunnable**: the lattice teleports
+    the object between neighbouring frames (measured on the head camera at 240x320: up to ~64 px,
+    and 55.9 / 65.3 / 290.1 px at 480x640), so propagating from frame 0 crosses a cut on frame 1
+    and every number after it is a measurement of the cut.
+
+    **This function builds the capture that makes that experiment possible. It does not run it, it
+    is not the propagation arm, and producing a temporally coherent capture discharges nothing.**
+
+    THE DESIGN, AND WHY EACH PART OF IT
+
+    * **One state per frame, not per configuration.** Continuity is the product here, so the
+      caller drives ``steps_per_state == steps_per_frame`` and the state index advances once per
+      rendered frame. ``n_frames`` is therefore the count of *both*, and unlike the lattice — which
+      saturates at 60 distinct tuples and repeats — asking for more frames buys more configurations
+      forever, because a curve sampled more finely is still a curve.
+    * **A closed ellipse in the table plane**, centred and sized by
+      :data:`_TRAJECTORY_CENTER_XY` / :data:`_TRAJECTORY_RADII_XY`, which are the lattice's own
+      bounding box (see there for the V5 §4.5 reason). The per-frame increment is
+      ``2*pi*turns*r/n_frames`` — **O(1/n)**, so more frames make the capture *smoother* rather
+      than longer with the same cuts, which is the property a propagation arm actually needs. The
+      path is closed so that the last frame is a neighbour of the first: a run that wraps has no
+      seam either.
+    * **The object MOVES, and it moves on every frame.** An ellipse has no stationary point, so
+      there is no run of duplicate frames anywhere in the capture — which matters because a static
+      prop dressed up as a trajectory would hand the propagation arm the lattice's duplicates
+      without the jump that makes them visible. The capture rig measures this rather than trusting
+      it (``measure_est_drift``'s ``temporal_coherence`` block); the name of this function is not
+      evidence.
+    * **The arm sweeps, on its own rate.** ``arm_cycles`` defaults to 2 so the shoulder-pitch
+      offset is not a function of the object's y — two axes that advance in lockstep are one axis.
+      The amplitude is the lattice's own (:data:`_TRAJECTORY_ARM_AMPLITUDE_RAD`), which keeps the
+      sweep inside the clearances the ``ready`` keyframe was measured at *and* keeps the Dex3 hands
+      passing in front of the object exactly as V5 §4.5 requires them to.
+    * **Yaw is monotone, not wrapped.** ``_apply_state`` turns it into a quaternion, so magnitude
+      is irrelevant to the render; leaving it unwrapped means the *state values* are continuous
+      too, and a reader diffing consecutive entries sees no 2*pi discontinuity that is not in the
+      picture.
+    * **No RNG, and no envelope override.** Determinism is the repo convention (AC-04). There is
+      deliberately no parameter for the centre or the radii: widening the envelope is the change
+      V5 §4.5 says must be argued in a document, and a keyword argument is how it would instead be
+      made in a commit.
+
+    ``turns``, ``yaw_turns`` and ``arm_cycles`` count *complete cycles over the whole capture*, so
+    every one of them is scale-free in ``n_frames`` and none of them can reintroduce a cut.
+    """
+    if n_frames < 1:
+        raise ValueError(f"n_frames must be >= 1, got {n_frames}")
+    cx, cy = _TRAJECTORY_CENTER_XY
+    rx, ry = _TRAJECTORY_RADII_XY
+    states: list[SceneState] = []
+    for i in range(n_frames):
+        # i / n_frames and NOT i / (n_frames - 1): a uniform increment and a CLOSED loop, so the
+        # step between the last frame and a wrap back to the first is the same size as every other
+        # step. Dividing by n-1 would land the final frame exactly on the first one, which is a
+        # duplicate configuration at the one place nobody looks.
+        s = i / float(n_frames)
+        theta = 2.0 * math.pi * float(turns) * s
+        states.append(
+            SceneState(
+                object_xy=(cx + rx * math.cos(theta), cy + ry * math.sin(theta)),
+                object_yaw_rad=2.0 * math.pi * float(yaw_turns) * s,
+                arm_pitch_offset_rad=_TRAJECTORY_ARM_AMPLITUDE_RAD
+                * math.sin(2.0 * math.pi * float(arm_cycles) * s),
+            )
+        )
+    return tuple(states)
+
+
+#: The schedules ``measure_est_drift.py --schedule`` may name, so the CLI's choices and the
+#: functions behind them cannot drift apart. ``lattice`` is first and is the default everywhere:
+#: every capture in ``runs/pr08-est-drift/`` was made with it and none of them may change meaning.
+SCENE_SCHEDULES: dict[str, Any] = {
+    "lattice": default_scene_schedule,
+    "trajectory": trajectory_scene_schedule,
+}
+
+
 # -- the binding -----------------------------------------------------------------------------
 
 

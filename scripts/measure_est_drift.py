@@ -163,6 +163,17 @@ from wam.robot.isaac_binding import DEFAULT_CAMERA_PRIMS  # noqa: E402
 SCHEMA = "wam.est_drift/1"
 WRITEUP = "docs/preregistration/PR-08-photoreal-augmentation.md"
 
+#: The ``--schedule`` choices, restated here so that ``--help`` and an argparse error work on a box
+#: with no MuJoCo installed — this module must stay importable and refusable without the optional
+#: `sim` extra, which is why every ``wam.robot.mujoco_binding`` import in it is inside ``main``.
+#: **Restated, not forked**: the mujoco branch checks this tuple against that module's own
+#: ``SCENE_SCHEDULES`` and REFUSES the run if they have drifted, so a schedule added in one place
+#: and not the other is a loud failure rather than a choice argparse silently rejects. ``lattice``
+#: is first and is the default everywhere.
+SCENE_SCHEDULE_NAMES: tuple[str, ...] = ("lattice", "trajectory")
+DEFAULT_SCENE_SCHEDULE = "lattice"
+DEFAULT_SCENE_STATES = 20
+
 #: The COMMITTED gate artifact, beside GEOM_TOL's and for the same reason: §8 item 4 wants both
 #: measured *and committed* before generation, and a path under gitignored ``runs/`` cannot be that.
 DEFAULT_OUT_REL = "configs/transfer25/pr08_est_drift.json"
@@ -364,6 +375,245 @@ def paired_displacements(
     return np.asarray(out, dtype=float), dropped
 
 
+def mask_iou(estimated: np.ndarray, true: np.ndarray) -> float | None:
+    """Intersection over union of two binary masks of the same frame, or ``None`` if undefined.
+
+    ``None`` for exactly one case — **both masks empty** — and it is not a rounding decision.
+    ``0/0`` there would have to be picked, and either pick is a claim: ``0.0`` says the estimator
+    was wrong on a frame where the truth agrees there is nothing to find, and ``1.0`` says a
+    detector that returns nothing on every frame of an occluded run scores perfectly. The frame is
+    counted instead (``n_frames_both_masks_empty``).
+
+    An estimator that found NOTHING where the truth has an object scores ``0.0`` and stays in the
+    distribution. That is the difference between this number and ``est_drift_p95_px``: a missed
+    detection has no displacement in pixels — the centroid does not exist — so
+    :func:`paired_displacements` drops it into ``coverage``, and the tail of the p95 is computed
+    over the frames the estimator got approximately right. The IoU of a missed detection is
+    defined, it is zero, and dropping it would be reporting the error only where there was one.
+    """
+    a = np.asarray(estimated)
+    b = np.asarray(true)
+    if a.dtype != bool:
+        a = a > 0
+    if b.dtype != bool:
+        b = b > 0
+    union = int(np.logical_or(a, b).sum())
+    if union == 0:
+        return None
+    return float(int(np.logical_and(a, b).sum()) / union)
+
+
+#: What ``mask_vs_ground_truth_iou`` says about itself, in the artifact, beside the number.
+#:
+#: Prose in a JSON document is usually a smell; here it is the point. This block is the second limb
+#: of ``apple_sam2``'s FIRST gate-qualification blocker — *"a mask-vs-ground-truth IoU distribution
+#: from the Isaac capture recorded beside the centroid displacement"* — and a number that satisfies
+#: the letter of a discharge condition is exactly the number somebody will read as the discharge.
+#: The three sentences below are the three ways that reading is wrong, and they travel with the
+#: value rather than living in a commit message nobody will find.
+_IOU_DISCHARGES = (
+    "NOTHING. This block RECORDS evidence; accepting it is a separate act and a human's. "
+    "scripts/estimators/apple_sam2.py's GATE_QUALIFIED and GATE_QUALIFICATION_BLOCKERS are "
+    "untouched by the run that wrote this file, estimator_not_gate_qualified is still stamped "
+    "into gate_disqualified_reasons above, and the first blocker's discharge condition has a "
+    "second limb this does not supply — 'a human looking at a sample of overlaid masks spanning "
+    "the corpus (occluded frames, apple-out-of-frame frames, and the grasp)'."
+)
+_IOU_SIMULATOR_CAVEAT = (
+    "THIS IS A SIMULATOR CAPTURE. The masks compared here are a detector's output on MuJoCo "
+    "rasteriser frames of configs/sim/g1_scene.xml against that renderer's exact geom-id "
+    "segmentation. It establishes NOTHING on its own about the real AppleToPlate corpus, which is "
+    "a real apple on a real tablecloth through a D435 — see capture.object_limitations for the "
+    "four named ways the rendered object is not that apple (PR-08-V5 §4.4), all of which travel "
+    "with this number too."
+)
+_IOU_OPEN_RULE_QUESTION = (
+    "OPEN, and deliberately not resolved here. The third gate-qualification blocker names 'the "
+    "same Isaac capture' in its own words; PR-08-V5 (T40_RULE_V5) rerouted §4 step 1's ground "
+    "truth from Isaac to any simulator with exact per-pixel segmentation, for a different "
+    "purpose and without addressing that blocker. Whether a MuJoCo capture may stand where the "
+    "blocker says Isaac is a rule question for the project owner. No session may answer it by "
+    "writing a capture and pointing at it."
+)
+
+
+def iou_distribution(values: Sequence[float], n_both_masks_empty: int) -> dict[str, Any]:
+    """The full IoU distribution — dimensionless, so none of these keys carries a ``_px`` suffix.
+
+    Deliberately NOT ``distribution()``: that helper's keys are ``min_px``/``max_px``/
+    ``percentiles_px`` and it bins a histogram in pixels. An overlap fraction in a field called
+    ``min_px`` is the units error this repository keeps naming, and it would sit two keys away from
+    ``centroid_displacement``, which really is in pixels.
+
+    ``p1``/``p5`` are carried beside the percentiles the blocker asks for because IoU runs the
+    other way from a displacement: the interesting tail of "how badly can this mask be wrong" is
+    the LOW end, and a p95 of an IoU is the *ninety-fifth best* frame.
+    """
+    block: dict[str, Any] = {
+        "meaning": (
+            "Per-frame intersection-over-union between the ESTIMATED object mask and the "
+            "renderer's EXACT ground-truth mask (geom ids from the same rasteriser that drew the "
+            "RGB — no annotation, no threshold, no model in that path). 1.0 is perfect agreement. "
+            "Scored on every frame whose ground truth carries the object label, INCLUDING frames "
+            "the estimator missed entirely, which score 0.0."
+        ),
+        "not_to_be_confused_with": (
+            "estimator_stats' mask_validity_iou (scripts/estimators/apple_sam2.py, "
+            "MASK_VALIDITY_IOU). That one is the adapter's own check of its mask against a warm-"
+            "and-saturated COLOUR predicate — a second non-learned opinion about where the fruit "
+            "is, used to REFUSE a mask below MASK_VALIDITY_MIN_IOU. It is not ground truth and "
+            "cannot be: it is a predicate for one object under one appearance. This block is "
+            "against the simulator's own per-pixel truth."
+        ),
+        "discharges": _IOU_DISCHARGES,
+        "simulator_caveat": _IOU_SIMULATOR_CAVEAT,
+        "open_rule_question": _IOU_OPEN_RULE_QUESTION,
+        "units": "dimensionless overlap fraction in [0, 1]; higher is better",
+        "n_frames_both_masks_empty": int(n_both_masks_empty),
+    }
+    arr = np.asarray(list(values), dtype=float)
+    if arr.size == 0:
+        block.update({"recorded": False, "n": 0, "values": []})
+        return block
+    pcts = [0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100]
+    q = np.percentile(arr, pcts)
+    block.update(
+        {
+            "recorded": True,
+            "n": int(arr.size),
+            "min": float(arr.min()),
+            "median": float(np.median(arr)),
+            "mean": float(arr.mean()),
+            "std": float(arr.std(ddof=0)),
+            "max": float(arr.max()),
+            "percentiles": {f"p{p}": float(v) for p, v in zip(pcts, q)},
+            "n_frames_zero_iou": int((arr == 0.0).sum()),
+            "n_frames_below_half": int((arr < 0.5).sum()),
+            # Raw, because a few hundred frames is small enough to keep and because a
+            # distribution nobody can re-derive is a distribution nobody can check.
+            "values": [float(v) for v in arr],
+        }
+    )
+    return block
+
+
+#: Why the measured motion is NOT the registered ``object_is_static_prop`` field, spelled out in
+#: the block itself. The two are one word apart and answer different questions, and a reader who
+#: conflates them concludes either "V5 §4.4 was quietly amended" or "the trajectory capture is a
+#: still life" — both wrong, both plausible from the field names alone.
+_COHERENCE_NOT_THE_SAME_CLAIM = (
+    "capture.object_limitations.object_is_static_prop is a DIFFERENT claim and stays true here. "
+    "PR-08-V5 §4.4 registers it to mean the object is teleported between scene states rather than "
+    "dropped or grasped — it carries no contacts and no physics, on either schedule. This block "
+    "answers the other question: did the object's mask actually MOVE in the picture, and by how "
+    "much per frame. A trajectory capture is still a static prop in V5's sense."
+)
+
+
+def temporal_coherence_block(
+    centroids: Sequence[tuple[float, float] | None],
+    *,
+    object_class: str | None,
+    absent_because: str | None = None,
+) -> dict[str, Any]:
+    """MEASURED interframe motion of the ground-truth object mask. Additive, read-only, no gate.
+
+    **Why this is measured and not derived from the schedule's name.** ``--schedule trajectory``
+    is a string in a header. A capture whose prop never moved — a schedule bug, a mesh that failed
+    to place, an object parked behind the hands for the whole run — would carry that string just
+    as convincingly, and nobody reading the artifact six months later can re-render 480 frames to
+    check. ``max_interframe_motion_px`` is the number that makes "temporally coherent" falsifiable:
+    it must be small (no jump cuts) **and** non-zero (the object actually moved).
+
+    On the committed lattice this block is the evidence for the opposite conclusion, which is why
+    it is computed on both schedules and not only on the new one: measured 2026-08-25 at 480x640,
+    neighbouring lattice frames move the mask **55.9 / 65.3 / 290.1 px**, so a video predictor
+    propagating from frame 0 is being asked to track across a cut.
+
+    ``(None, reason)`` — ``measured: false`` — for a capture whose object label is unknown, e.g.
+    the Isaac route, which declares none. An absence with a reason, never a zero: "the object did
+    not move" and "nobody could tell" are different facts and one of them reads as a still life.
+    """
+    block: dict[str, Any] = {
+        "meaning": (
+            "Euclidean distance in pixels between the GROUND-TRUTH object centroid on frame i and "
+            "on frame i+1, over the capture as written to disk. Small AND non-zero is what makes "
+            "this capture propagatable from frame 0; either failure alone makes it not."
+        ),
+        "read_the_median_for_smoothness_and_the_max_for_events": (
+            "The MEDIAN is the schedule's own step and is O(1/n_frames) on the trajectory "
+            "schedule, so a longer capture is a smoother one. The MAX is not: it is dominated by "
+            "OCCLUSION TRANSITIONS, where the object passes behind a Dex3 hand and the centroid "
+            "of the VISIBLE part of its mask jumps although the object itself moved a few pixels. "
+            "That is a real event this capture is required to contain — PR-08-V5 §4.5 registers "
+            "that the occluding hands may not be moved out of the way to improve a number — and "
+            "it is exactly the kind of frame a propagation arm would be measured on. A max well "
+            "above the median is therefore evidence of occlusion, NOT of a jump cut; a MEDIAN "
+            "that is tens of pixels is the jump cut."
+        ),
+        "not_the_same_claim_as": _COHERENCE_NOT_THE_SAME_CLAIM,
+        "what_this_makes_possible_and_what_it_is_not": (
+            "A capture whose median interframe motion is a few pixels can be handed to a video "
+            "predictor propagating one mask from frame 0; the committed lattice cannot, because "
+            "its neighbours teleport the object. THAT EXPERIMENT IS NOT IN THIS FILE. "
+            "scripts/estimators/apple_sam2.py's third gate-qualification blocker asks for the "
+            "same capture measured BOTH ways and for the two p95s recorded side by side; only the "
+            "per-frame arm exists here, no SAM2VideoPredictor was run, and no comparison is made "
+            "or implied. Making an experiment runnable is not running it."
+        ),
+        "discharges": _IOU_DISCHARGES,
+        "units": "pixels at the capture resolution",
+        "object_class": object_class,
+        "n_frames": len(centroids),
+    }
+    if absent_because is not None or object_class is None:
+        block.update(
+            {
+                "measured": False,
+                "absent_because": absent_because
+                or (
+                    "the capture names no object class, so which ground-truth label to follow is "
+                    "unknown. The Isaac route declares none; the mujoco binding declares "
+                    "object_limitations.object_label."
+                ),
+                "object_moved_during_capture": None,
+                "max_interframe_motion_px": None,
+                "median_interframe_motion_px": None,
+                "n_frames_with_object": None,
+                "n_interframe_steps": None,
+                "interframe_motion_px": [],
+            }
+        )
+        return block
+
+    steps: list[float] = []
+    unmeasurable = 0
+    for a, b in zip(centroids, centroids[1:]):
+        if a is None or b is None:
+            unmeasurable += 1
+            continue
+        steps.append(float(np.hypot(b[0] - a[0], b[1] - a[1])))
+    arr = np.asarray(steps, dtype=float)
+    block.update(
+        {
+            "measured": True,
+            "absent_because": None,
+            "n_frames_with_object": int(sum(c is not None for c in centroids)),
+            "n_interframe_steps": int(arr.size),
+            # A step whose either end had no visible object. Counted rather than treated as zero:
+            # an occlusion is not a stationary object.
+            "n_interframe_steps_unmeasurable": int(unmeasurable),
+            "object_moved_during_capture": bool(arr.size and float(arr.max()) > 0.0),
+            "max_interframe_motion_px": float(arr.max()) if arr.size else None,
+            "median_interframe_motion_px": float(np.median(arr)) if arr.size else None,
+            "mean_interframe_motion_px": float(arr.mean()) if arr.size else None,
+            "min_interframe_motion_px": float(arr.min()) if arr.size else None,
+            "interframe_motion_px": [float(v) for v in arr],
+        }
+    )
+    return block
+
+
 def scene_state_per_frame(header: Mapping[str, Any]) -> tuple[list[int] | None, str | None]:
     """Which scene configuration each captured frame belongs to, or why that is unknowable.
 
@@ -513,6 +763,7 @@ def capture_frames(
     out: Path,
     steps_per_frame: int,
     provenance: Mapping[str, Any] | None = None,
+    object_class: str | None = None,
 ) -> dict:
     """Drive an already-constructed binding and write ground truth to ``out``. Returns the header.
 
@@ -530,6 +781,13 @@ def capture_frames(
     Warmup is a real state, not an error: ``render_*`` returns ``None`` until the renderer settles,
     and a frame is written only when ALL THREE channels are present. A partially-written frame would
     be a frame whose depth belongs to one tick and whose segmentation belongs to another.
+
+    ``object_class`` names the ground-truth label whose centroid is tracked frame to frame, which
+    is what makes ``temporal_coherence`` a MEASUREMENT of this capture rather than a restatement of
+    the schedule it was asked for. It is computed here, while the segmentation is already in
+    memory, and not by re-reading the frames later: a coherence block written by a different pass
+    over a different directory is a block that can disagree with the frames it names. ``None`` —
+    the Isaac route, which declares no label — records an absence with a reason.
     """
     attached = tuple(binding.ground_truth_channels)
     for needed in ("depth", "segmentation"):
@@ -545,6 +803,8 @@ def capture_frames(
     written = 0
     ticks: list[int] = []
     warmups = 0
+    true_centroids: list[tuple[float, float] | None] = []
+    coherence_absent: str | None = None
     while written < n_frames:
         for _ in range(steps_per_frame):
             binding.step()
@@ -569,6 +829,20 @@ def capture_frames(
             encoding="utf-8",
         )
         ticks.append(int(binding.get_physics_step_count()))
+        if object_class is not None:
+            wanted, seen = object_ids(dict(seg.id_to_labels), object_class)
+            if not wanted and coherence_absent is None:
+                # Not a crash and not a silent zero: the label the caller named is not in this
+                # scene's vocabulary, which is §4.2's failure — a full run that measures nothing.
+                # `measure` reports the same thing again from the frames on disk; this is the
+                # earlier, cheaper copy of it.
+                coherence_absent = (
+                    f"no ground-truth label matched {object_class!r} on frame {written}; the "
+                    f"scene's vocabulary there was {seen}"
+                )
+            true_centroids.append(
+                centroid_of_mask(mask_from_ids(seg.ids, wanted), True, 1) if wanted else None
+            )
         written += 1
 
     header = {
@@ -592,6 +866,12 @@ def capture_frames(
         # about the number's error direction — a route whose direction is argued conservative
         # must not inherit the Isaac route's "lower bound" sentence, and vice versa.
         "ground_truth_route": (ground_truth_route(type(binding).__name__) or {}).get("route"),
+        # WHETHER THE OBJECT ACTUALLY MOVED, AND BY HOW MUCH PER FRAME — measured from the masks
+        # that were just written, never inferred from the schedule's name. Additive and read-only:
+        # nothing downstream gates on it and no disqualification reason depends on it.
+        "temporal_coherence": temporal_coherence_block(
+            true_centroids, object_class=object_class, absent_because=coherence_absent
+        ),
     }
     for key, value in dict(provenance or {}).items():
         header.setdefault(key, value)
@@ -1105,11 +1385,27 @@ def main(argv: list[str] | None = None) -> int:
     cap.add_argument(
         "--scene-states",
         type=int,
-        default=20,
-        help="mujoco backend only: how many DISTINCT scene configurations the capture spans "
-        "(default: %(default)s). PR-08 §4.6: a p95 over N frames of one pose is a percentile "
-        "over one viewpoint, so N is counted in configurations and not in frames. The frames "
-        "are divided evenly across them and the count lands in the capture header.",
+        default=None,
+        help="mujoco backend only, --schedule lattice only: how many DISTINCT scene "
+        "configurations the capture spans (default: 20). PR-08 §4.6: a p95 over N frames of one "
+        "pose is a percentile over one viewpoint, so N is counted in configurations and not in "
+        "frames. The frames are divided evenly across them and the count lands in the capture "
+        "header. `--schedule trajectory` puts one configuration on every frame by construction "
+        "and REFUSES this flag rather than accepting a number it would have to ignore.",
+    )
+    cap.add_argument(
+        "--schedule",
+        choices=tuple(SCENE_SCHEDULE_NAMES),
+        default=None,
+        help="mujoco backend only: which scene schedule drives the capture (default: lattice). "
+        "`lattice` is the committed sweep of distinct configurations PR-08-V5 registered and is "
+        "what every capture under runs/pr08-est-drift/ was made with — passing nothing changes "
+        "nothing. `trajectory` renders a SMOOTH, continuous path instead, one configuration per "
+        "frame, so the object moves a few pixels between neighbouring frames rather than "
+        "teleporting tens of them. That is the capture a mask PROPAGATED from frame 0 could be "
+        "measured on; the lattice's jump cuts make that experiment unrunnable, not merely unrun. "
+        "IT BUILDS NO PROPAGATION ARM AND DISCHARGES NOTHING. The name lands in the capture "
+        "header beside a MEASURED max_interframe_motion_px, because the name is not evidence.",
     )
     cap.add_argument(
         "--camera-prim",
@@ -1199,6 +1495,17 @@ def main(argv: list[str] | None = None) -> int:
                         "(`head`, `wrist_left` in configs/sim/g1_scene.xml); select one with "
                         "--camera NAME."
                     )
+            elif args.schedule is not None:
+                # The isaac path is unchanged in every flag and refusal (PR-08-V5 §0). A schedule
+                # it cannot honour is refused rather than accepted and ignored, because "accepted
+                # and ignored" is how a capture header comes to carry a scene_schedule field that
+                # names a schedule nothing drove.
+                raise EstimatorUnavailable(
+                    f"--schedule {args.schedule} names a MuJoCo scene schedule and this run is "
+                    f"--backend {args.backend}, which drives no schedule at all: an Isaac capture "
+                    "steps a loaded USD stage and this harness never places its objects. Pass "
+                    "--backend mujoco, or drop the flag."
+                )
             camera = args.camera or ("head" if args.backend == "mujoco" else
                                      next(iter(DEFAULT_CAMERA_PRIMS)))
             # `persp` and its prim path are an Isaac concept. On the mujoco backend the camera
@@ -1226,22 +1533,55 @@ def main(argv: list[str] | None = None) -> int:
             }
             if args.backend == "mujoco":
                 from wam.robot.mujoco_binding import (  # noqa: PLC0415
+                    SCENE_SCHEDULES,
                     MuJoCoGroundTruthBinding,
-                    default_scene_schedule,
                 )
 
-                if args.scene_states < 1:
+                if tuple(SCENE_SCHEDULES) != SCENE_SCHEDULE_NAMES:
                     raise EstimatorUnavailable(
-                        f"--scene-states must be >= 1, got {args.scene_states}"
+                        f"--schedule offers {list(SCENE_SCHEDULE_NAMES)} and "
+                        f"wam.robot.mujoco_binding.SCENE_SCHEDULES defines "
+                        f"{list(SCENE_SCHEDULES)}. One of the two grew a schedule the other does "
+                        "not have; the CLI restates that table so --help works without MuJoCo "
+                        "installed, and a silent disagreement is a schedule nobody can select."
                     )
-                # THE CALLER OWNS THIS DIVISION, not the binding: `frames` and
-                # `steps_per_frame` live here and the binding only ever sees steps. Spelling it
-                # out means the header can record how many configurations were SCHEDULED beside
-                # how many were VISITED, and a run that ends early cannot be read as if it had
-                # covered the sweep.
-                total_steps = max(1, int(args.frames) * int(args.steps_per_frame))
-                steps_per_state = max(1, total_steps // int(args.scene_states))
-                schedule = default_scene_schedule(int(args.scene_states))
+                schedule_name = args.schedule or DEFAULT_SCENE_SCHEDULE
+
+                if schedule_name == "trajectory":
+                    if args.scene_states is not None:
+                        raise EstimatorUnavailable(
+                            "--schedule trajectory puts ONE configuration on every frame — that "
+                            "is what makes the capture continuous — so --scene-states has "
+                            "nothing to divide and would have to be ignored. Use --frames to say "
+                            "how long the capture is; the path gets SMOOTHER as that grows, "
+                            "because the per-frame increment is O(1/frames). For a capture split "
+                            "into N distinct configurations, that is --schedule lattice."
+                        )
+                    n_states = int(args.frames)
+                    steps_per_state = max(1, int(args.steps_per_frame))
+                else:
+                    n_states = (
+                        DEFAULT_SCENE_STATES if args.scene_states is None else int(args.scene_states)
+                    )
+                    if n_states < 1:
+                        raise EstimatorUnavailable(
+                            f"--scene-states must be >= 1, got {args.scene_states}"
+                        )
+                    # THE CALLER OWNS THIS DIVISION, not the binding: `frames` and
+                    # `steps_per_frame` live here and the binding only ever sees steps. Spelling
+                    # it out means the header can record how many configurations were SCHEDULED
+                    # beside how many were VISITED, and a run that ends early cannot be read as
+                    # if it had covered the sweep.
+                    total_steps = max(1, int(args.frames) * int(args.steps_per_frame))
+                    steps_per_state = max(1, total_steps // n_states)
+                schedule = SCENE_SCHEDULES[schedule_name](n_states)
+                provenance["scene_schedule"] = schedule_name
+                provenance["scene_schedule_source"] = (
+                    "--schedule" if args.schedule else f"default ({DEFAULT_SCENE_SCHEDULE})"
+                )
+                provenance["scene_schedule_is_temporally_coherent_by_design"] = (
+                    schedule_name == "trajectory"
+                )
                 try:
                     binding = MuJoCoGroundTruthBinding(
                         scene=asset,
@@ -1276,9 +1616,24 @@ def main(argv: list[str] | None = None) -> int:
                     render_hw=render_hw,
                     ground_truth=("depth", "segmentation"),
                 )
+            # WHICH LABEL `temporal_coherence` FOLLOWS, asked of the binding rather than typed
+            # here. The mujoco binding declares it (`object_limitations.object_label`) and the
+            # Isaac seam declares nothing, which is exactly the case that has to record an
+            # absence with a reason instead of a zero — so this is a lookup with no fallback and
+            # no default object name.
+            capture_object_class = None
+            limitations = getattr(binding, "limitations", None)
+            if callable(limitations):
+                capture_object_class = dict(limitations()).get("object_label")
             try:
                 header = capture_frames(
-                    binding, camera, args.frames, args.out, args.steps_per_frame, provenance
+                    binding,
+                    camera,
+                    args.frames,
+                    args.out,
+                    args.steps_per_frame,
+                    provenance,
+                    object_class=capture_object_class,
                 )
                 if args.backend == "mujoco":
                     # PR-08 §4.6's missing field, filled from the binding rather than from
@@ -1382,6 +1737,13 @@ def main(argv: list[str] | None = None) -> int:
     vocab: set[str] = set()
     frames_without_label = 0
     shapes: set[tuple[int, int]] = set()
+    # THE OTHER HALF OF "IS THE MASK RIGHT", collected in the same pass as the centroids because
+    # both masks are already in hand. A displacement of 0.2 px between two centroids says the two
+    # masks are centred on the same place; it says nothing about whether they are the same SHAPE,
+    # and a mask covering the whole tabletop shares its centroid with the apple sitting in the
+    # middle of it. See iou_distribution for what this is and, at length, for what it is not.
+    gt_ious: list[float] = []
+    frames_both_masks_empty = 0
 
     for d in frames:
         rgb = np.load(d / "rgb.npy")
@@ -1408,6 +1770,12 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+
+        iou = mask_iou(est_mask, true_mask)
+        if iou is None:
+            frames_both_masks_empty += 1
+        else:
+            gt_ious.append(iou)
 
         pairs.append(
             (
@@ -1506,6 +1874,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "geom_tol_cross_check": geom_compare,
         "centroid_displacement": distribution(values, args.hist_bin_px),
+        # ADDITIVE AND READ-ONLY, in the same class as estimator_stats and independent_samples:
+        # est_drift_p95_px above is the budget PR-08 §6 names and is unchanged by this block
+        # existing, no gate_disqualified_reasons entry depends on it, and run_g0_gates never reads
+        # it. It is here because a centroid displacement cannot see the failure this adapter's
+        # first blocker is actually about — "a plausible mask on the wrong object (the plate, the
+        # hand, the whole tabletop) which produces a centroid, a displacement and a p95 that all
+        # look like measurements". An IoU against the renderer's exact geom-id mask can.
+        "mask_vs_ground_truth_iou": iou_distribution(gt_ious, frames_both_masks_empty),
         # HOW MANY INDEPENDENT OBSERVATIONS ARE UNDER THAT p95. Additive and read-only, in the
         # same class as estimator_stats: nothing reads it back and no disqualification reason
         # depends on it. See independent_sample_block for why a frame count is not a sample size
@@ -1547,6 +1923,13 @@ def main(argv: list[str] | None = None) -> int:
             "n_scene_states_scheduled": header.get("n_scene_states_scheduled"),
             # PR-08 §4.6's "N counted in distinct configurations, not frames".
             "n_scene_states_visited": header.get("n_scene_states_visited"),
+            # WHICH SCHEDULE, AND WHETHER THE OBJECT ACTUALLY MOVED. The name is provenance; the
+            # block beside it is the measurement, and only one of the two can be wrong quietly.
+            # `null` on every capture made before these fields existed, which is itself the
+            # answer to "was it recorded".
+            "scene_schedule": header.get("scene_schedule"),
+            "scene_schedule_source": header.get("scene_schedule_source"),
+            "temporal_coherence": header.get("temporal_coherence"),
             "render_hw_requested": header.get("render_hw_requested"),
             "render_hw_source": header.get("render_hw_source"),
             "captured_utc": header.get("captured_utc"),

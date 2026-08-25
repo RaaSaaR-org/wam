@@ -712,12 +712,18 @@ def test_recording_the_estimator_stats_changed_no_number_this_script_already_pro
     # scene configurations the measured frames came from, and it is read by nothing. Over a
     # FakeIsaacBinding capture the header carries no `steps_per_state`, so it records an absence
     # with a reason — which is itself the check that it invents no grouping.
+    # `mask_vs_ground_truth_iou` (2026-08-25) is additive in the same sense once more: it is the
+    # per-frame overlap between the estimated mask and the renderer's exact one, recorded beside
+    # the centroid displacement because a displacement cannot see a plausible mask on the wrong
+    # object. Nothing reads it, no disqualification reason depends on it, and the block says in
+    # its own text that it discharges nothing.
     assert set(after) - set(before) == {
         "estimator_stats",
         "error_direction",
         "error_direction_measured",
         "ground_truth_route",
         "independent_samples",
+        "mask_vs_ground_truth_iou",
     }
     assert after["independent_samples"]["recorded"] is False
     assert set(before) - set(after) == set()
@@ -736,8 +742,16 @@ def test_recording_the_estimator_stats_changed_no_number_this_script_already_pro
         "object_limitations",
         "n_scene_states_scheduled",
         "n_scene_states_visited",
+        "scene_schedule",
+        "scene_schedule_source",
+        "temporal_coherence",
     }
-    assert all(after["capture"][k] is None for k in added)
+    # Every one of them null over a fake capture EXCEPT the coherence block, which is written by
+    # `capture_frames` for every binding and which — over this capture, made with no object class
+    # — records an absence with a reason rather than the zero that would read as "still life".
+    assert all(after["capture"][k] is None for k in added - {"temporal_coherence"})
+    assert after["capture"]["temporal_coherence"]["measured"] is False
+    assert after["capture"]["temporal_coherence"]["object_moved_during_capture"] is None
     assert {k: after["capture"][k] for k in before["capture"]} == before["capture"]
 
 
@@ -1083,3 +1097,284 @@ def test_the_block_is_additive_and_moves_no_gate(capture, tmp_path):
     # The gated number is still the frame-wise percentile of centroid_displacement, untouched.
     assert doc["est_drift_p95_px"] == doc["centroid_displacement"]["percentiles_px"]["p95"]
     assert rc in (0, 3)
+
+
+# -- what makes a propagation arm POSSIBLE, and the two fields that keep it honest ---------------
+#
+# `apple_sam2`'s third gate-qualification blocker names its own discharge condition: measure "the
+# same capture BOTH ways - this adapter per frame, and the video predictor propagating from frame
+# 0 - and recording the two p95s". Against the committed lattice that experiment is not merely
+# unrun, it is UNRUNNABLE: consecutive frames teleport the object, so propagating from frame 0
+# crosses a jump cut and measures the cut. `--schedule trajectory` renders a temporally coherent
+# capture instead.
+#
+# NOTHING BELOW DISCHARGES ANYTHING. The propagation arm is out of scope here and the capture is a
+# SIMULATOR capture; both facts are fields in the artifact, asserted as such.
+
+
+class _MovingMaskBinding(FakeIsaacBinding):
+    """A ground-truth binding whose object mask marches a fixed number of pixels per frame.
+
+    The stock fake paints a square whose centre depends on ``sum(|q|)``, and with the default zero
+    gains ``q`` never moves - so its capture is genuinely static, which is what the sibling test
+    uses it for. This one is the other half: a capture that really is temporally coherent, so
+    "the harness measured motion" and "the harness reported the number it was told" can be told
+    apart.
+    """
+
+    #: px per frame. Small and constant on purpose: the assertion is on the MEASUREMENT, so a
+    #: value the test can predict exactly is worth more than a plausible one.
+    STEP_PX = 3
+
+    def render_segmentation(self, camera):  # noqa: D102 - contract documented on the base class
+        frame = super().render_segmentation(camera)
+        if frame is None:
+            return None
+        height, width = frame.ids.shape
+        ids = np.zeros_like(frame.ids)
+        x = 8 + (self.get_physics_step_count() - 1) * self.STEP_PX
+        ids[height // 4 : height // 4 + 6, x : x + 6] = 2
+        return type(frame)(ids=ids, id_to_labels=dict(frame.id_to_labels))
+
+
+def _gt_binding(**kw):
+    kw.setdefault("cameras", ("persp",))
+    kw.setdefault("ground_truth", ("depth", "segmentation"))
+    kw.setdefault("render_hw", (64, 128))
+    return kw
+
+
+def test_a_capture_measures_whether_the_object_moved_rather_than_trusting_the_schedules_name(
+    tmp_path,
+):
+    """The point of the field. `--schedule trajectory` is a NAME; a capture whose prop never
+    moved would carry that name just as well, and a reader six months later cannot re-render it
+    to check. The stock fake's square is static, and the header says so in a number."""
+    out = tmp_path / "cap"
+    binding = FakeIsaacBinding(**_gt_binding())
+    ed.capture_frames(binding, "persp", 5, out, steps_per_frame=1, object_class="apple")
+    block = json.loads((out / "capture.json").read_text())["temporal_coherence"]
+    assert block["measured"] is True
+    assert block["object_moved_during_capture"] is False
+    assert block["max_interframe_motion_px"] == 0.0
+    assert block["n_interframe_steps"] == 4
+
+
+def test_a_moving_object_is_measured_as_moving_and_its_step_size_recorded(tmp_path):
+    out = tmp_path / "cap"
+    ed.capture_frames(
+        _MovingMaskBinding(**_gt_binding()), "persp", 5, out, steps_per_frame=1,
+        object_class="apple",
+    )
+    block = json.loads((out / "capture.json").read_text())["temporal_coherence"]
+    assert block["object_moved_during_capture"] is True
+    assert block["max_interframe_motion_px"] == pytest.approx(_MovingMaskBinding.STEP_PX)
+    assert block["interframe_motion_px"] == pytest.approx([3.0, 3.0, 3.0, 3.0])
+
+
+def test_a_capture_that_cannot_name_its_object_records_an_absence_and_not_a_zero(tmp_path):
+    """Zero motion and unknown motion are different facts, and one of them would read as "this
+    capture is a still life" in an artifact nobody can re-render."""
+    out = tmp_path / "cap"
+    ed.capture_frames(FakeIsaacBinding(**_gt_binding()), "persp", 3, out, steps_per_frame=1)
+    block = json.loads((out / "capture.json").read_text())["temporal_coherence"]
+    assert block["measured"] is False
+    assert block["object_moved_during_capture"] is None
+    assert block["max_interframe_motion_px"] is None
+    assert block["absent_because"]
+
+
+def test_the_coherence_block_does_not_overload_the_registered_static_prop_field(tmp_path):
+    """`object_limitations.object_is_static_prop` is registered by PR-08-V5 §4.4 and means
+    "teleported, not dropped or grasped" - which stays true on a trajectory capture. The measured
+    field answers a different question and must not be read as a correction to it."""
+    out = tmp_path / "cap"
+    ed.capture_frames(
+        _MovingMaskBinding(**_gt_binding()), "persp", 3, out, steps_per_frame=1,
+        object_class="apple",
+    )
+    block = json.loads((out / "capture.json").read_text())["temporal_coherence"]
+    assert "object_is_static_prop" in block["not_the_same_claim_as"]
+    assert "grasp" in block["not_the_same_claim_as"] or "drop" in block["not_the_same_claim_as"]
+
+
+def test_the_schedule_flag_is_refused_on_a_backend_that_drives_no_schedule(
+    contract, tmp_path, capsys
+):
+    """The isaac path is unchanged in every flag and refusal (PR-08-V5 §0). A schedule name it
+    cannot honour is refused rather than accepted and ignored, which is how a capture comes to
+    carry a header field that is a lie."""
+    contract(grid=(12, 20))
+    assert ed.main(_capture_argv(tmp_path, "--schedule", "trajectory")) == 2
+    err = capsys.readouterr().err
+    assert "--schedule" in err and "mujoco" in err
+    assert not (tmp_path / "cap").exists()
+
+
+def test_the_default_schedule_is_the_lattice_so_every_existing_capture_still_means_what_it_meant(
+    contract, tmp_path
+):
+    """Not a claim about the mujoco branch - a claim about the DEFAULT. With no --schedule the
+    isaac/fake path must not refuse, because the flag it never passed still has its old value."""
+    contract(grid=(12, 20))
+    assert ed.main(_capture_argv(tmp_path)) == 0
+
+
+# -- the mask against the ground truth, which is the half nobody has measured --------------------
+
+
+def _iou_capture(tmp_path, ids_per_frame) -> pathlib.Path:
+    """A hand-built capture whose true mask is exactly what the test says it is."""
+    root = tmp_path / "iou_cap"
+    (root / "frames").mkdir(parents=True)
+    for i, ids in enumerate(ids_per_frame):
+        d = root / "frames" / f"{i:06d}"
+        d.mkdir()
+        rgb = np.zeros((*ids.shape, 3), dtype=np.uint8)
+        rgb[..., 0] = (ids == 2) * 255
+        np.save(d / "rgb.npy", rgb)
+        np.save(d / "depth.npy", np.ones(ids.shape, dtype="float32"))
+        np.save(d / "seg_ids.npy", ids.astype("uint32"))
+        (d / "seg_labels.json").write_text(
+            json.dumps({"1": {"class": "table"}, "2": {"class": "apple"}}), encoding="utf-8"
+        )
+    (root / "capture.json").write_text(
+        json.dumps(
+            {
+                "schema": "wam.est_drift_capture/1",
+                "binding": "MuJoCoGroundTruthBinding",
+                "camera": "head",
+                "n_frames": len(ids_per_frame),
+                "steps_per_frame": 1,
+                "resolution_hw": list(ids_per_frame[0].shape),
+                "ticks": list(range(1, len(ids_per_frame) + 1)),
+                "steps_per_state": 1,
+                "is_simulated_binding": False,
+                "ground_truth_route": "mujoco",
+                "scene_schedule": "trajectory",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+def _square(shape, x, y, half=4):
+    ids = np.zeros(shape, dtype="uint32")
+    ids[y - half : y + half, x - half : x + half] = 2
+    return ids
+
+
+def test_the_ground_truth_iou_is_recorded_and_is_not_the_colour_reference_check(tmp_path):
+    """THE SECOND LIMB OF BLOCKER 1's DISCHARGE CONDITION - *"a mask-vs-ground-truth IoU
+    distribution from the Isaac capture recorded beside the centroid displacement"*.
+
+    Named apart from `mask_validity_iou` deliberately: that one is the adapter's own check of a
+    mask against a warm-and-saturated COLOUR predicate, which is a second opinion and not the
+    truth. Two things called "the IoU" in one artifact is how one gets read as the other."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(6)])
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    block = doc["mask_vs_ground_truth_iou"]
+    assert block["recorded"] is True
+    assert block["n"] == 6
+    # The stub segments `rgb[:, :, 0] > 0`, which is painted from the true mask, so the two agree
+    # exactly. A perfect score is the right assertion for a rig test: it says the two masks were
+    # compared frame for frame rather than that the estimator is good.
+    assert block["min"] == pytest.approx(1.0)
+    assert block["percentiles"]["p95"] == pytest.approx(1.0)
+    assert len(block["values"]) == 6
+    assert "mask_validity_iou" in block["not_to_be_confused_with"]
+    assert "colour" in block["not_to_be_confused_with"].lower()
+
+
+def test_an_estimator_that_found_nothing_scores_zero_iou_rather_than_being_dropped(tmp_path):
+    """A missed detection is a real event and `coverage` already counts it. It is also an IoU of
+    exactly zero against a ground truth that HAS the object, and folding it out of this
+    distribution instead would report the estimator's error only on the frames it got right."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(4)])
+    blind = _stub_module(
+        tmp_path,
+        "blind_estimator",
+        "import numpy as np\n"
+        "ESTIMATOR_NAME = 'finds-nothing'\n"
+        "ESTIMATOR_VERSION = '0'\n"
+        "def segment(rgb):\n"
+        "    return np.zeros(np.asarray(rgb).shape[:2], dtype=bool)\n"
+        "def estimate_depth(rgb):\n"
+        "    return np.zeros(np.asarray(rgb).shape[:2], dtype='float32')\n",
+    )
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", blind, "--object-class", "apple",
+         "--min-area-px", "1", "--min-coverage", "0.0", "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    assert doc["centroid_displacement"]["n"] == 0, "no centroid pairs at all - every frame dropped"
+    assert doc["mask_vs_ground_truth_iou"]["n"] == 4, "and yet four frames of measured error"
+    assert doc["mask_vs_ground_truth_iou"]["max"] == 0.0
+    assert doc["mask_vs_ground_truth_iou"]["n_frames_zero_iou"] == 4
+
+
+def test_the_ground_truth_iou_block_refuses_to_be_read_as_a_discharge(tmp_path):
+    """Producing evidence and accepting it are two different acts (the same rule
+    `estimator_stats` is written under). `GATE_QUALIFIED` is untouched by this measurement and
+    the artifact has to say so where the number is, not in a commit message."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12, 16) for _ in range(3)])
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    block = doc["mask_vs_ground_truth_iou"]
+    assert "NOTHING" in block["discharges"]
+    assert "GATE_QUALIFICATION_BLOCKERS" in block["discharges"]
+    assert doc["gate_qualified"] is False
+    assert "estimator_not_gate_qualified" in doc["gate_disqualified_reasons"]
+
+
+def test_the_iou_block_says_this_was_a_simulator_and_leaves_the_isaac_question_open(tmp_path):
+    """Blocker 3 says "the same **Isaac** capture" in its own words; PR-08-V5 rerouted §4 to
+    MuJoCo for a different purpose. Whether MuJoCo may stand where the blocker says Isaac is an
+    OPEN RULE QUESTION for the project owner, and this artifact states it rather than deciding
+    it - and states, unconditionally, that a simulator capture says nothing on its own about the
+    real AppleToPlate corpus."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12, 16) for _ in range(3)])
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    block = json.loads(out.read_text())["mask_vs_ground_truth_iou"]
+    assert "AppleToPlate" in block["simulator_caveat"]
+    assert "Isaac" in block["open_rule_question"]
+    assert "owner" in block["open_rule_question"]
+
+
+def test_the_measured_artifact_carries_the_schedule_and_the_coherence_the_capture_recorded(
+    tmp_path,
+):
+    """The schedule name and the measured motion are properties of the CAPTURE, so they are
+    copied into the budget artifact the same way the stage and the object limitations are: a
+    reader of the number must not have to go and find the capture directory."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(4)])
+    header = json.loads((cap / "capture.json").read_text())
+    header["temporal_coherence"] = {"measured": True, "max_interframe_motion_px": 1.0}
+    (cap / "capture.json").write_text(json.dumps(header), encoding="utf-8")
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    assert doc["capture"]["scene_schedule"] == "trajectory"
+    assert doc["capture"]["temporal_coherence"]["max_interframe_motion_px"] == 1.0
