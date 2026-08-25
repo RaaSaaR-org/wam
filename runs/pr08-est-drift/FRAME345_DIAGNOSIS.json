@@ -1,0 +1,31 @@
+{
+  "schema": "wam.pr08_est_drift_frame_diagnosis/1",
+  "question": "EST_DRIFT-mujoco-trajectory-f480.json records exactly one frame of 480 at mask-vs-ground-truth IoU 0.0. What failed there?",
+  "frame": 345,
+  "capture": "runs/pr08-est-drift/capture-mujoco-trajectory-f480",
+  "verdict": "FALSE NEGATIVE, not a wrong-object mask. The estimator returned an EMPTY mask on a frame where the renderer's exact ground truth carries 1100 px of visible apple.",
+  "measured": {
+    "ground_truth_apple_px": 1100,
+    "estimated_mask_px": 0,
+    "iou_vs_ground_truth_apple": 0.0,
+    "iou_vs_ground_truth_cube": 0.0,
+    "fraction_of_estimated_mask_on_cube": 0.0,
+    "how": "scripts/estimators/apple_sam2.segment() re-run UNMODIFIED on frames/000345/rgb.npy, compared against seg_ids.npy geom ids for class 'apple' and class 'cube'."
+  },
+  "the_hypothesis_this_refutes": {
+    "hypothesis": "configs/sim/g1_scene.xml contains a `cube` geom (1688 px visible on this frame) alongside the `apple` (1100 px). The obvious reading of an IoU of 0.0 under an 'apple.' prompt is that the estimator segmented the CUBE - a plausible mask on the wrong object, which is precisely the failure mode GATE_QUALIFICATION_BLOCKERS entry 1 names.",
+    "refuted_by": "The estimated mask is EMPTY. Its overlap with the cube is also 0.0. The estimator did not pick the wrong object; it picked nothing.",
+    "why_recorded": "The distractor is real and the hypothesis was reasonable, so a later reader looking at a scene containing both an apple and an orange cube will re-derive it. The refutation belongs beside it."
+  },
+  "what_it_means": {
+    "on_this_capture": "When the estimator fails here it fails SILENTLY AND HONESTLY - it returns nothing rather than something wrong. A downstream consumer sees a dropped frame, not a confident false measurement. That is the benign direction of the two.",
+    "and_the_limit_on_that": "This is a SIMULATOR capture, and the real corpus behaves DIFFERENTLY in exactly this respect. runs/pr08-mask-audit-local-cpu/MODEL_OBSERVATIONS.json records the same adapter producing confident full-PLATE masks at scores 0.155-0.259 on occluded frames of episode_000094 - i.e. on the real corpus the observed failure IS the wrong-object mask that this sim frame is not. The two failure modes do not match, which is a reason to be careful about how much this capture transfers, and it is an argument that belongs to whoever adjudicates the open rule question in the parent artifact.",
+    "occlusion": "The apple is partially occluded by the Dex3 fingers on this frame. Ground truth still sees 1100 px of it. Neighbouring frames 343/344/346/347 carry 1243/1172/1035/976 px and are scored normally, so this is not a visibility cliff - it is a single-frame miss inside a run of comparable frames."
+  },
+  "licensed": {
+    "generation": false,
+    "training": false,
+    "any_gate": false,
+    "discharges": "NOTHING. GATE_QUALIFIED and GATE_QUALIFICATION_BLOCKERS are untouched. This is one frame of one simulator capture."
+  }
+}
