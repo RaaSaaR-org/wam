@@ -30,6 +30,13 @@ not make, so the failures worth pinning are not "it crashed":
   the comparison           re-render. A caption carrying only one of the two fractions would look
                            identical and prove nothing, so the caption is asserted to carry both.
 
+  the band silently        --max-fraction closes the top of the selection window. If it were
+  becomes a bound          recorded as anything other than a selection window, or if the artifact
+                           named only the lower edge, a reader would be looking at a band and
+                           reading a threshold. The band is asserted to appear in the artifact with
+                           BOTH edges and with the statement that neither is a bound, and the
+                           default is asserted to leave the open upper tail exactly as it was.
+
 Nothing here loads a model, decodes a video or needs the AppleToPlate corpus: the masker is a stub
 whose masks are the answer key and the "clips" are drawn with numpy.
 """
@@ -373,7 +380,7 @@ def test_overlay_paints_the_mask_and_leaves_the_rest_alone():
 # --------------------------------------------------------------------------------------------
 
 
-def _run_end_to_end(tmp_path, monkeypatch, *, max_frames=6, tiles=4):
+def _run_end_to_end(tmp_path, monkeypatch, *, max_frames=6, tiles=4, max_fraction=None):
     fractions = {f"episode_{i:06d}": [0.1, 0.9, 0.95, 0.2] for i in range(5)}
     pooled = _pooled(fractions)
     pooled_path = _write_pooled(tmp_path, pooled)
@@ -392,9 +399,12 @@ def _run_end_to_end(tmp_path, monkeypatch, *, max_frames=6, tiles=4):
     monkeypatch.setitem(sys.modules, "robot_composite", _RC)
 
     out = tmp_path / "out"
-    code = rats.main(["--pooled", str(pooled_path), "--corpus", str(corpus), "--out", str(out),
-                      "--threshold", "0.7", "--max-frames", str(max_frames),
-                      "--sheet-tiles", str(tiles), "--sheet-cols", "2"])
+    argv = ["--pooled", str(pooled_path), "--corpus", str(corpus), "--out", str(out),
+            "--threshold", "0.7", "--max-frames", str(max_frames),
+            "--sheet-tiles", str(tiles), "--sheet-cols", "2"]
+    if max_fraction is not None:
+        argv += ["--max-fraction", str(max_fraction)]
+    code = rats.main(argv)
     return code, out, json.loads((out / "TAIL_SAMPLE.json").read_text(encoding="utf-8"))
 
 
@@ -505,3 +515,154 @@ def test_the_decode_path_is_the_measurement_s_own():
                     r"\biio\.", r"\bimageio\.v3\b"):
         assert not re.search(pattern, SOURCE), (
             f"{pattern}: a second decoder here would make the tile a picture of a different frame")
+
+
+# --------------------------------------------------------------------------------------------
+# 7. --max-fraction: the band, its default, and what the artifact has to say about it
+# --------------------------------------------------------------------------------------------
+
+
+def _band_pooled() -> dict:
+    """Two episodes straddling a band whose edges land exactly on measured values."""
+    return _pooled({
+        "episode_000001": [0.10, 0.36, 0.50, 0.6015462239583333, 0.68, 0.95],
+        "episode_000002": [0.35, 0.42, 0.7469694010416666, 0.99],
+    })
+
+
+def test_the_band_excludes_frames_above_max_fraction():
+    """The whole point: a frame above the upper edge is not a candidate, however large it is."""
+    candidates = rats.tail_candidates(_band_pooled(), 0.36, 0.6015462239583333)
+    assert candidates["episode_000001"] == [
+        (1, 0.36), (2, 0.50), (3, 0.6015462239583333)]
+    assert candidates["episode_000002"] == [(1, 0.42)]
+    every = [f for hits in candidates.values() for _, f in hits]
+    assert max(every) <= 0.6015462239583333
+    assert min(every) >= 0.36
+
+
+def test_both_edges_of_the_band_are_inclusive():
+    pooled = _pooled({"episode_000000": [0.359999, 0.36, 0.5, 0.6015462239583333, 0.6015463]})
+    candidates = rats.tail_candidates(pooled, 0.36, 0.6015462239583333)
+    assert candidates["episode_000000"] == [(1, 0.36), (2, 0.5), (3, 0.6015462239583333)]
+
+
+def test_the_default_is_no_upper_limit_and_keeps_todays_open_tail():
+    """Omitted, None, and DEFAULT_MAX_FRACTION are the same thing: the open upper tail."""
+    pooled = _band_pooled()
+    assert rats.DEFAULT_MAX_FRACTION is None
+    omitted = rats.tail_candidates(pooled, 0.36)
+    explicit_none = rats.tail_candidates(pooled, 0.36, None)
+    defaulted = rats.tail_candidates(pooled, 0.36, rats.DEFAULT_MAX_FRACTION)
+    assert omitted == explicit_none == defaulted
+    every = [f for hits in omitted.values() for _, f in hits]
+    assert max(every) == 0.99                       # nothing at the top was dropped
+    assert len(every) == 8
+
+
+def test_the_default_argparse_value_is_none():
+    args = rats.build_argparser().parse_args([])
+    assert args.max_fraction is None
+    assert args.threshold == rats.DEFAULT_TAIL_EDGE
+
+
+def test_a_band_narrower_than_a_single_value_is_still_honoured():
+    pooled = _pooled({"episode_000000": [0.4, 0.5, 0.6]})
+    assert rats.tail_candidates(pooled, 0.5, 0.5)["episode_000000"] == [(1, 0.5)]
+
+
+def test_an_upper_edge_below_the_lower_edge_is_refused():
+    """An empty-by-construction band is a typo, and neither number is a bound either way."""
+    with pytest.raises(rats.TailLookError) as excinfo:
+        rats.tail_candidates(_band_pooled(), 0.6, 0.36)
+    assert "max-fraction" in str(excinfo.value)
+
+
+def test_main_exits_non_zero_when_the_band_holds_no_frame(tmp_path, monkeypatch, capsys):
+    pooled = _pooled({"episode_000000": [0.1, 0.9]})
+    path = _write_pooled(tmp_path, pooled)
+    corpus = _corpus(tmp_path, pooled)
+    code = rats.main(["--pooled", str(path), "--corpus", str(corpus),
+                      "--out", str(tmp_path / "out"),
+                      "--threshold", "0.3", "--max-fraction", "0.4"])
+    assert code != 0
+    assert "band" in capsys.readouterr().err.lower()
+    assert not (tmp_path / "out" / "TAIL_SAMPLE.json").exists()
+
+
+def test_the_band_is_deterministic_like_the_open_tail():
+    pooled = _band_pooled()
+    first = rats.select_frames(rats.tail_candidates(pooled, 0.36, 0.6015462239583333), 3)
+    second = rats.select_frames(
+        rats.tail_candidates(json.loads(json.dumps(pooled)), 0.36, 0.6015462239583333), 3)
+    assert first == second
+
+
+def test_the_sheet_header_carries_both_edges_of_the_band():
+    closed = rats.sheet_title(0, 0.36, 12, 0.6015462239583333)
+    assert "0.360000" in closed and "0.601546" in closed
+    assert "<=" in closed
+    open_tail = rats.sheet_title(0, 0.36, 12)
+    assert ">=" in open_tail and "0.360000" in open_tail
+    assert rats.band_text(0.36, None) == "fraction >= 0.360000"
+
+
+def test_the_artifact_records_the_band_and_not_only_the_threshold(tmp_path, monkeypatch):
+    _, _, artifact = _run_end_to_end(tmp_path, monkeypatch, max_fraction=0.9)
+    band = artifact["band"]
+    assert band["lower_inclusive"] == 0.7
+    assert band["upper_inclusive"] == 0.9
+    assert band["open_at_the_top"] is False
+    assert "0.700000" in band["selection"] and "0.900000" in band["selection"]
+    # ...and it keeps saying, plainly, that neither number is a bound.
+    text = " ".join(str(v) for v in band.values()).lower()
+    assert "not a bound" in text or "neither edge is a bound" in text
+    assert "candidate bound" in text
+    assert "selection window" in band["note"].lower()
+    assert artifact["threshold"]["max_fraction"] == 0.9
+    assert artifact["selection_rule"]["band"] == band["selection"]
+    assert artifact["population"]["max_fraction"] == 0.9
+
+
+def test_the_artifact_says_a_look_below_the_gap_is_the_control_for_a_look_above(
+        tmp_path, monkeypatch):
+    _, _, artifact = _run_end_to_end(tmp_path, monkeypatch, max_fraction=0.9)
+    why = artifact["band"]["why_a_band"].lower()
+    assert "control" in why
+    assert "separable only when read from above" in why
+
+
+def test_the_artifact_records_an_open_band_as_open(tmp_path, monkeypatch):
+    _, _, artifact = _run_end_to_end(tmp_path, monkeypatch)
+    band = artifact["band"]
+    assert band["upper_inclusive"] is None
+    assert band["open_at_the_top"] is True
+    assert band["selection"] == "fraction >= 0.700000"
+    assert artifact["population"]["max_fraction"] is None
+
+
+def test_the_band_run_renders_only_frames_inside_the_band(tmp_path, monkeypatch):
+    code, _, artifact = _run_end_to_end(tmp_path, monkeypatch, max_frames=10, max_fraction=0.9)
+    assert code == 0
+    # Five episodes of [0.1, 0.9, 0.95, 0.2]: ten frames are >= 0.7, five are inside [0.7, 0.9].
+    assert artifact["population"]["frames_in_band"] == 5
+    assert artifact["population"]["frames_at_or_above_threshold"] == 10
+    assert len(artifact["frames"]) == 5
+    for record in artifact["frames"]:
+        assert 0.7 <= record["recorded_fraction"] <= 0.9
+
+
+def test_the_open_tail_run_still_reports_the_same_population(tmp_path, monkeypatch):
+    """The default's population block is byte-for-byte the statement it made before the band."""
+    _, _, artifact = _run_end_to_end(tmp_path, monkeypatch)
+    assert artifact["population"]["frames_at_or_above_threshold"] == 10
+    assert artifact["population"]["frames_in_band"] == 10
+
+
+def test_the_band_still_writes_no_bound(tmp_path, monkeypatch):
+    _, _, artifact = _run_end_to_end(tmp_path, monkeypatch, max_fraction=0.9)
+    assert artifact["writes_a_bound"] is False
+    for _, key, value in _walk(artifact):
+        assert key != "max_frame_fraction"
+        if isinstance(value, str):
+            assert not re.search(r"max_frame_fraction\s*[=:]\s*[-+0-9]", value), value
