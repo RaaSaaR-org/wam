@@ -106,6 +106,37 @@ It is additive: nothing reads it back, no disqualification reason depends on it,
 evidence the adapter's second gate-qualification blocker asks for is not the same act as accepting
 it. That one is a human's.
 
+TWO ARMS, ONE CAPTURE, AND THE CONFOUND BETWEEN THEM
+-----------------------------------------------------
+``apple_sam2``'s THIRD gate-qualification blocker is the last difference between this adapter and
+the segmenter Cosmos-Transfer2.5 actually runs: upstream drives
+``SAM2VideoPredictor.init_state(video_path=...)`` and PROPAGATES one mask across the clip, while
+``segment(rgb)`` re-detects and re-segments every frame independently. The blocker names its own
+discharge condition — *the same capture measured BOTH ways, the two p95s recorded side by side* —
+and ``measure --arm both`` is that measurement. ``--arm`` DEFAULTS to ``per_frame``: a run that
+does not pass it is the run this script has always performed, in every number and every field, and
+no artifact already on disk means anything different.
+
+**The confound that would have made it worthless.** ``SAM2VideoPredictor`` conventionally ingests a
+directory of **JPEG** frames and this project's captures are lossless ``rgb.npy``. Had the
+propagation arm been driven from a transcode, the difference between the two p95s would have been
+the codec plus propagation — reported as propagation, with nothing in the artifact looking wrong.
+So both arms are handed the SAME in-memory array, the propagation module ingests arrays rather than
+files (bitwise upstream's own ingest, asserted in
+``tests/test_apple_sam2_video_propagation.py``), and every run RECORDS a per-frame digest of what
+each arm was shown: ``arm_comparison.identical_input_pixels``.
+
+**And the statistic that is the actual point.** The two p95s answer the blocker's limb (a). Its
+limb (b) — propagation drifting off the object and STAYING off for a run of frames — does not show
+up in a p95 at all, because a per-frame arm scattering the same count of bad frames across a
+capture and a propagation arm losing the object for a contiguous stretch produce the same
+distribution. They produce different RUNS, so each arm's longest run of consecutive frames below
+``LOW_IOU_THRESHOLD`` ground-truth IoU, and the count of such runs, are recorded beside them.
+
+**It discharges nothing.** ``GATE_QUALIFIED`` and ``GATE_QUALIFICATION_BLOCKERS`` are untouched by
+any run of this script, ``estimator_not_gate_qualified`` is still stamped, and the artifact says so
+in the block itself. Producing the evidence a blocker names is not the act of closing it.
+
 EXIT STATUS
 -----------
 0   measured with a gate-qualified estimator pair, coverage above ``--min-coverage``.
@@ -119,6 +150,7 @@ EXIT STATUS
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -181,6 +213,28 @@ DEFAULT_OUT = _REPO_ROOT / DEFAULT_OUT_REL
 
 #: GEOM_TOL's artifact. Read to cross-check the segmenter and the pixel grid, never written.
 GEOM_TOL_ARTIFACT = _REPO_ROOT / "configs/transfer25/pr08_geom_tol.json"
+
+#: THE TWO ARMS OF ``apple_sam2``'s THIRD GATE-QUALIFICATION BLOCKER.
+#:
+#: The blocker names its own discharge condition: *"measuring the same Isaac capture BOTH ways —
+#: this adapter per frame, and the video predictor propagating from frame 0 — and recording the two
+#: p95s"*. ``per_frame`` is what this script has always done and is the DEFAULT, so a run that
+#: passes no ``--arm`` is byte-for-byte the run it was before the flag existed and no artifact
+#: already on disk means anything different. ``propagation`` drives a clip-level video predictor,
+#: which ``segment(rgb)`` cannot host, so it lives in its own module behind
+#: ``--propagation-module``. ``both`` is the comparison the blocker asks for.
+ARM_CHOICES: tuple[str, ...] = ("per_frame", "propagation", "both")
+DEFAULT_ARM = "per_frame"
+
+#: The propagation arm's module. Named rather than imported, exactly as ``--estimators`` is: this
+#: script must stay importable and testable on a box with no ``sam2`` and no weights.
+DEFAULT_PROPAGATION_MODULE = "estimators.apple_sam2_video"
+
+#: What counts as "the mask is off the object" for the RUN statistic below. Half the pixels wrong
+#: is not a borderline mask; on the trajectory capture the per-frame arm's median GT-IoU is 0.988
+#: and its p1 is 0.926, so 0.5 is nowhere near the body of the distribution and a run of frames
+#: under it is a qualitatively different event rather than a tail.
+LOW_IOU_THRESHOLD = 0.5
 
 #: Fraction of captured frames that must yield BOTH centroids before the p95 is called a
 #: measurement. As in ``measure_geom_tol``: a threshold on how much the estimator could see, not on
@@ -497,6 +551,172 @@ def iou_distribution(values: Sequence[float], n_both_masks_empty: int) -> dict[s
     return block
 
 
+# -- the two arms, and the confound that would void the comparison between them --------------------
+#
+# ``apple_sam2``'s THIRD gate-qualification blocker, in its own words: upstream drives
+# ``SAM2VideoPredictor.init_state(video_path=...)`` and PROPAGATES one mask across the clip, while
+# this adapter re-detects and re-segments every frame independently. The bias is TWO-SIDED — (a)
+# per-frame jitter inflates our p95, which subtracts more from GEOM_TOL and is safe; (b)
+# propagation's characteristic failure, drifting off the object and STAYING off for a run of
+# frames, is invisible to a per-frame estimator that recovers on the next frame, which is unsafe.
+# The blocker's discharge condition is the same capture measured BOTH ways with the two p95s
+# recorded side by side. Everything below is that measurement and NOTHING below is that discharge.
+#
+# THE CONFOUND, NAMED HERE BECAUSE IT IS THE REASON THIS IS NOT TEN LINES OF CODE.
+# ``SAM2VideoPredictor`` conventionally ingests a directory of JPEG files; our captures are
+# lossless ``rgb.npy``. An arm that saw a transcode of the other arm's frames would make the
+# difference between the two p95s "the codec plus propagation", reported as propagation — void
+# rather than weak, and not visibly wrong in any field of the artifact. So the harness hands both
+# arms THE SAME in-memory array object, and records a per-frame digest of what each one was shown.
+# :class:`PixelWitness` is that record and :func:`identical_input_pixels` is the verdict, which
+# lands in the artifact as a checkable fact rather than as a promise in this comment.
+
+
+class PixelWitness:
+    """Per-frame sha256 of the exact pixels one arm was handed.
+
+    Not a debugging aid. "Both arms saw the same pixels" is the premise the entire comparison rests
+    on, and a premise that lives only in the control flow is a premise nobody can check six months
+    later from the artifact. :meth:`show` returns the array it was given, so the call site reads as
+    the handover it is recording and there is no way to segment a frame that was not witnessed.
+    """
+
+    def __init__(self, arm: str) -> None:
+        self.arm = arm
+        self.digests: dict[int, str] = {}
+
+    def show(self, frame_index: int, rgb: np.ndarray) -> np.ndarray:
+        self.digests[int(frame_index)] = hashlib.sha256(
+            np.ascontiguousarray(rgb).tobytes()
+        ).hexdigest()
+        return rgb
+
+    def combined(self, indices: Sequence[int]) -> str:
+        """One digest over ``indices`` in order — the whole of what this arm saw, in one string."""
+        rolling = hashlib.sha256()
+        for i in indices:
+            rolling.update(bytes.fromhex(self.digests[int(i)]))
+        return rolling.hexdigest()
+
+
+#: What ``identical_input_pixels`` says about itself. Prose in JSON again, and for the same reason
+#: the IoU block carries it: this field is the answer to "was the comparison confounded", and a
+#: reader who does not know what the confound WAS cannot tell whether ``equal: true`` is reassuring.
+_PIXEL_MECHANISM = (
+    "Both arms are handed the SAME in-memory uint8 array read from the capture's rgb.npy — no "
+    "file is written between them and no image is encoded. This matters because "
+    "SAM2VideoPredictor.init_state conventionally ingests a directory of JPEG frames "
+    "(sam2.utils.misc.load_video_frames takes a JPEG folder or an MP4); had the propagation arm "
+    "been driven that way while the per-frame arm read the raw arrays, the difference between the "
+    "two p95s would have been the codec plus propagation, reported as propagation. The "
+    "propagation module replaces load_video_frames for the duration of exactly one init_state "
+    "call with an ingest that performs upstream's own _load_img_as_tensor arithmetic on the "
+    "arrays; tests/test_apple_sam2_video_propagation.py asserts that ingest is BITWISE upstream's "
+    "ingest of a lossless file of the same frames, and separately that a JPEG round trip would "
+    "NOT have been. The digests below are the per-run evidence that it happened."
+)
+
+
+def identical_input_pixels(per_frame: PixelWitness, propagation: PixelWitness) -> dict[str, Any]:
+    """Did the two arms see the same bytes? The recorded answer, not the assumption.
+
+    Compared over the frames BOTH arms were shown, because the two populations legitimately
+    differ: the per-frame arm is not asked to segment a frame whose ground truth carries no object
+    label, while the propagation arm must be handed every frame of the clip or it is not
+    propagating across the capture at all. The frames that decide the comparison are the ones both
+    scored, and those are the ones digested here.
+    """
+    common = sorted(set(per_frame.digests) & set(propagation.digests))
+    block: dict[str, Any] = {
+        "mechanism": _PIXEL_MECHANISM,
+        "n_common_frames": len(common),
+        "n_frames_shown_to_per_frame_arm": len(per_frame.digests),
+        "n_frames_shown_to_propagation_arm": len(propagation.digests),
+    }
+    if not common:
+        block.update({
+            "equal": None,
+            "absent_because": (
+                "only one arm ran, so there are no frames both arms were shown and nothing to "
+                "compare. This is an absence, not an agreement."
+            ),
+            "frames_that_differ": [],
+            "per_frame_arm_sha256": None,
+            "propagation_arm_sha256": None,
+        })
+        return block
+    differ = [i for i in common if per_frame.digests[i] != propagation.digests[i]]
+    block.update({
+        "equal": not differ,
+        "absent_because": None,
+        "frames_that_differ": differ,
+        "per_frame_arm_sha256": per_frame.combined(common),
+        "propagation_arm_sha256": propagation.combined(common),
+        "digest": (
+            "per frame: sha256 of that frame's C-contiguous bytes. Combined: sha256 over those "
+            "32-byte digests concatenated in capture frame order — chained rather than taken over "
+            "the raw pixels so that a 480-frame capture needs no second copy of itself in memory "
+            "to be witnessed. Re-derivable from the capture with six lines and no other input."
+        ),
+    })
+    return block
+
+
+#: Why the RUN is the statistic and the p95 is not, stated in the block itself.
+_LOW_IOU_RUN_MEANING = (
+    "The number blocker 3's failure mode (b) is actually about. 'Propagation drifts off the "
+    "object and STAYS off for a run of frames' does not show up in a mean, does not reliably show "
+    "up in a p95, and cannot show up at all in a per-frame estimator that recovers on the next "
+    "frame — a per-frame arm scattering the same count of bad frames across the capture and a "
+    "propagation arm losing the object for a contiguous stretch produce the SAME IoU "
+    "distribution. They produce different runs. Indices are into the capture's frame order."
+)
+
+
+def low_iou_runs(
+    iou_per_frame: Sequence[float | None], threshold: float = LOW_IOU_THRESHOLD
+) -> dict[str, Any]:
+    """Longest and count of CONSECUTIVE frames whose ground-truth IoU is below ``threshold``.
+
+    A frame nobody could score — no object in the ground truth, or both masks empty — is ``None``
+    and BREAKS a run rather than extending it. That errs SHORT, i.e. toward understating failure
+    mode (b), which is the unsafe direction, so the count of such frames is recorded beside the
+    runs instead of being left for a reader to assume was zero. The alternative (splicing them out
+    and joining the two halves) would claim the tracker was off the object during a frame on which
+    nothing observed it, which is a claim this harness has no evidence for.
+    """
+    runs: list[list[int]] = []
+    start: int | None = None
+    unscored = 0
+    for i, value in enumerate(iou_per_frame):
+        if value is None:
+            unscored += 1
+            if start is not None:
+                runs.append([start, i - 1])
+                start = None
+            continue
+        if float(value) < threshold:
+            if start is None:
+                start = i
+        elif start is not None:
+            runs.append([start, i - 1])
+            start = None
+    if start is not None:
+        runs.append([start, len(iou_per_frame) - 1])
+    lengths = [b - a + 1 for a, b in runs]
+    return {
+        "meaning": _LOW_IOU_RUN_MEANING,
+        "threshold": float(threshold),
+        "n_frames": len(iou_per_frame),
+        "n_unscored_frames": unscored,
+        "unscored_frames_break_a_run": True,
+        "longest_run": max(lengths) if lengths else 0,
+        "n_runs": len(runs),
+        "n_frames_in_runs": sum(lengths),
+        "runs": runs,
+    }
+
+
 #: Why the measured motion is NOT the registered ``object_is_static_prop`` field, spelled out in
 #: the block itself. The two are one word apart and answer different questions, and a reader who
 #: conflates them concludes either "V5 §4.4 was quietly amended" or "the trajectory capture is a
@@ -555,11 +775,14 @@ def temporal_coherence_block(
         "what_this_makes_possible_and_what_it_is_not": (
             "A capture whose median interframe motion is a few pixels can be handed to a video "
             "predictor propagating one mask from frame 0; the committed lattice cannot, because "
-            "its neighbours teleport the object. THAT EXPERIMENT IS NOT IN THIS FILE. "
-            "scripts/estimators/apple_sam2.py's third gate-qualification blocker asks for the "
-            "same capture measured BOTH ways and for the two p95s recorded side by side; only the "
-            "per-frame arm exists here, no SAM2VideoPredictor was run, and no comparison is made "
-            "or implied. Making an experiment runnable is not running it."
+            "its neighbours teleport the object. THIS BLOCK IS A PROPERTY OF THE CAPTURE AND NOT "
+            "A RESULT. It says the propagation experiment is RUNNABLE on these frames; it does "
+            "not say it was run, and it carries no p95 from either arm. Since 2026-08-25 "
+            "measure_est_drift can run it — `measure --arm both` drives this adapter per frame "
+            "and a SAM2VideoPredictor propagating from frame 0 over the same frames, and writes "
+            "an arm_comparison block — but only a measure artifact from such a run carries that "
+            "comparison, and running the experiment is still not discharging the blocker that "
+            "asked for it."
         ),
         "discharges": _IOU_DISCHARGES,
         "units": "pixels at the capture resolution",
@@ -724,6 +947,149 @@ def independent_sample_block(
         "scene_state_median_displacement_px": {
             str(k): float(np.median(v)) for k, v in sorted(by_state.items())
         },
+    }
+
+
+#: What the comparison block refuses to be read as. The third blocker's discharge condition and
+#: this block are the same sentence, which is exactly why the block has to say that satisfying a
+#: condition's LETTER is not the act of closing it. That act is a person's.
+_ARM_COMPARISON_DISCHARGES = (
+    "NOTHING. This block is the measurement apple_sam2's THIRD gate-qualification blocker names — "
+    "the same capture measured both ways, the two p95s side by side — and producing the evidence "
+    "a blocker asks for is not the same act as accepting it. "
+    "scripts/estimators/apple_sam2.py's GATE_QUALIFIED and GATE_QUALIFICATION_BLOCKERS are "
+    "untouched by the run that wrote this file, GATE_QUALIFIED is still False, all three blockers "
+    "are still in the tuple, and estimator_not_gate_qualified is still stamped into "
+    "gate_disqualified_reasons above. Two further reasons this cannot be read as a discharge on "
+    "its own: the blocker says 'the same ISAAC capture' and this is MuJoCo (see "
+    "open_rule_question), and blockers 1 and 2 are untouched by anything measured here."
+)
+
+_ARM_COMPARISON_MEANING = (
+    "THE TWO ARMS, OVER ONE CAPTURE. per_frame is this repository's adapter: GroundingDINO plus "
+    "SAM 2 re-run independently on every frame, which is what segment(rgb) can host and what "
+    "produces est_drift_p95_px above. propagation is Cosmos-Transfer2.5's topology: one detection "
+    "on frame 0, one SAM2VideoPredictor seed, and the mask tracked forward across the clip. "
+    "Blocker 3 argues the bias between them is TWO-SIDED — (a) per-frame jitter INFLATES our tail, "
+    "which subtracts more from GEOM_TOL and is safe; (b) propagation drifting off the object and "
+    "STAYING off is invisible to a per-frame estimator that recovers on the next frame, which is "
+    "unsafe. The p95s answer (a). low_iou_runs answers (b), and it is the reason this block exists "
+    "rather than two numbers."
+)
+
+
+def arm_block(
+    arm: str,
+    *,
+    measured: bool,
+    pairs: Sequence[tuple[tuple[float, float] | None, tuple[float, float] | None]],
+    iou_per_frame: Sequence[float | None],
+    n_both_masks_empty: int,
+    hist_bin_px: float,
+    absent_because: str | None = None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One arm's whole result: its p95, its displacement distribution, its IoU, its runs.
+
+    Built by ONE function for both arms on purpose. Two arms whose numbers are computed by two
+    code paths differ in their code paths as well as in their segmenters, and the difference
+    between the two p95s is then not attributable to the thing under test.
+    """
+    if not measured:
+        return {
+            "arm": arm,
+            "measured": False,
+            "absent_because": absent_because or f"--arm did not include {arm}",
+            "est_drift_p95_px": None,
+            "n_frames": len(iou_per_frame),
+            "n_measured": 0,
+            "n_dropped": 0,
+            "coverage": None,
+            "centroid_displacement": None,
+            "mask_vs_ground_truth_iou": None,
+            "low_iou_runs": None,
+        }
+    values, dropped = paired_displacements(list(pairs))
+    ious = [float(v) for v in iou_per_frame if v is not None]
+    block: dict[str, Any] = {
+        "arm": arm,
+        "measured": True,
+        "absent_because": None,
+        "est_drift_p95_px": float(np.percentile(values, 95)) if values.size else None,
+        "n_frames": len(pairs),
+        "n_measured": int(values.size),
+        "n_dropped": int(dropped),
+        "coverage": (float(values.size) / len(pairs)) if len(pairs) else 0.0,
+        "centroid_displacement": distribution(values, hist_bin_px),
+        "mask_vs_ground_truth_iou": iou_distribution(ious, n_both_masks_empty),
+        "low_iou_runs": low_iou_runs(list(iou_per_frame)),
+    }
+    if extra:
+        block.update(dict(extra))
+    return block
+
+
+def arm_comparison_block(
+    per_frame: Mapping[str, Any],
+    propagation: Mapping[str, Any],
+    *,
+    arms: Sequence[str],
+    pixels: Mapping[str, Any],
+    propagator: "Propagator | None",
+) -> dict[str, Any]:
+    """The two arms side by side, with the premise of the comparison recorded beside the result."""
+    both = bool(per_frame.get("measured")) and bool(propagation.get("measured"))
+    pf_p95 = per_frame.get("est_drift_p95_px")
+    pr_p95 = propagation.get("est_drift_p95_px")
+    delta: dict[str, Any] = {
+        "computed": bool(both and pf_p95 is not None and pr_p95 is not None),
+        "propagation_minus_per_frame_px": None,
+        "reading": None,
+    }
+    if delta["computed"]:
+        difference = float(pr_p95) - float(pf_p95)
+        delta["propagation_minus_per_frame_px"] = difference
+        delta["reading"] = (
+            "POSITIVE means the propagated mask's centroid sits FURTHER from ground truth at the "
+            "95th percentile than the per-frame adapter's, i.e. blocker 3's limb (a) — 'our tail "
+            "is inflated relative to the generator's' — does not hold on this capture in that "
+            "direction. NEGATIVE means it does. Neither reading settles limb (b), which is what "
+            "low_iou_runs is for, and neither is a statement about the real corpus."
+            if difference > 0
+            else
+            "NEGATIVE means the propagated mask's centroid sits CLOSER to ground truth at the "
+            "95th percentile than the per-frame adapter's, which is the direction blocker 3's "
+            "limb (a) predicts: independent re-detection jitters where propagation is temporally "
+            "smooth, so EST_DRIFT_P95 is inflated relative to the generator's mask error and "
+            "subtracts more from GEOM_TOL. That is the SAFE side of the two-sided bias and it "
+            "says nothing about limb (b), which is what low_iou_runs is for."
+        )
+    return {
+        "meaning": _ARM_COMPARISON_MEANING,
+        "blocker": (
+            "scripts/estimators/apple_sam2.py GATE_QUALIFICATION_BLOCKERS, third entry — 'PER-"
+            "FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION'"
+        ),
+        "arms": list(arms),
+        "discharges": _ARM_COMPARISON_DISCHARGES,
+        "simulator_caveat": _IOU_SIMULATOR_CAVEAT,
+        "open_rule_question": _IOU_OPEN_RULE_QUESTION,
+        "identical_input_pixels": dict(pixels),
+        "low_iou_threshold": LOW_IOU_THRESHOLD,
+        "per_frame": dict(per_frame),
+        "propagation": dict(propagation),
+        "delta": delta,
+        "propagator": (
+            None
+            if propagator is None
+            else {
+                "spec": propagator.spec,
+                "name": propagator.name,
+                "version": propagator.version,
+                "contract": propagator.contract,
+                "stats": propagator.stats(),
+            }
+        ),
     }
 
 
@@ -957,6 +1323,57 @@ def resolve_estimators(spec: str) -> Estimators:
     except ImportError as exc:
         raise EstimatorUnavailable(f"cannot import estimator module {spec!r}: {exc}") from exc
     return Estimators(module, spec)
+
+
+class Propagator:
+    """The PROPAGATION arm: a whole clip in, one mask per frame out.
+
+    A separate object from :class:`Estimators` because it is a separate CONTRACT, not a variant of
+    one. ``segment(rgb)`` is per-frame by construction and a video predictor is clip-level; folding
+    the second into the first is what makes the difference between the two arms unmeasurable, which
+    is the state ``apple_sam2``'s third blocker describes. So this harness drives two contracts and
+    the artifact says which number came from which.
+    """
+
+    def __init__(self, module: Any, spec: str) -> None:
+        self.spec = spec
+        self.module = module
+        if not callable(getattr(module, "propagate", None)):
+            raise EstimatorUnavailable(
+                f"{spec}: a propagation module must define propagate(rgbs) -> list of masks — "
+                "this one does not."
+            )
+        self.name = str(getattr(module, "PROPAGATION_NAME", spec))
+        self.version = str(getattr(module, "PROPAGATION_VERSION", "unversioned"))
+        contract = getattr(module, "PROPAGATION_CONTRACT", None)
+        self.contract = dict(contract) if isinstance(contract, Mapping) else None
+
+    def propagate(self, rgbs: Sequence[np.ndarray]) -> list[np.ndarray]:
+        return [np.asarray(m) for m in self.module.propagate(rgbs)]
+
+    def stats(self) -> dict[str, Any] | None:
+        fn = getattr(self.module, "stats", None)
+        if not callable(fn):
+            return None
+        try:
+            return dict(fn())
+        except Exception:  # noqa: BLE001 - a stats block is never worth losing a run over
+            return None
+
+
+def resolve_propagator(spec: str) -> Propagator:
+    """Import the propagation module named by ``--propagation-module``, or fail loudly."""
+    import importlib
+
+    try:
+        module = importlib.import_module(spec)
+    except ImportError as exc:
+        raise EstimatorUnavailable(
+            f"cannot import propagation module {spec!r}: {exc}\n"
+            "       The propagation arm needs a clip-level video predictor and the weights the "
+            "per-frame arm uses. Nothing was written."
+        ) from exc
+    return Propagator(module, spec)
 
 
 def _normalise_object(text: str) -> str:
@@ -1463,6 +1880,26 @@ def main(argv: list[str] | None = None) -> int:
         f"Falls back to {DEFAULT_OBJECT_CLASS!r} only for an estimator that declares no prompt, and "
         "that run is disqualified.",
     )
+    mea.add_argument(
+        "--arm",
+        choices=ARM_CHOICES,
+        default=DEFAULT_ARM,
+        help="which segmenter topology is measured (default: %(default)s). `per_frame` is this "
+        "adapter's segment(rgb), unchanged in every number and every field — passing nothing "
+        "changes nothing and no artifact already on disk means anything different. `propagation` "
+        "seeds a SAM2VideoPredictor from frame 0 and tracks the mask forward, which is "
+        "Cosmos-Transfer2.5's own topology. `both` measures the SAME frames both ways and records "
+        "the two p95s side by side, which is the discharge condition apple_sam2's third "
+        "gate-qualification blocker names. IT DISCHARGES NOTHING: this produces evidence, and "
+        "accepting evidence is a separate act and a person's.",
+    )
+    mea.add_argument(
+        "--propagation-module",
+        default=None,
+        help="importable module defining propagate(rgbs) -> one mask per frame, used by --arm "
+        f"propagation/both (default: {DEFAULT_PROPAGATION_MODULE}). Refused with --arm per_frame "
+        "rather than accepted and ignored.",
+    )
     mea.add_argument("--min-area-px", type=int, default=40)
     mea.add_argument("--largest-component", action="store_true", default=True)
     mea.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
@@ -1732,6 +2169,39 @@ def main(argv: list[str] | None = None) -> int:
     )
     disqualified += geom_reasons
 
+    # WHICH ARMS RUN. `per_frame` is the default and is this script's whole previous behaviour;
+    # everything below that is conditional on `run_propagation` is code a default run never
+    # reaches. A propagation module named alongside `--arm per_frame` is REFUSED rather than
+    # accepted and ignored — "accepted and ignored" is how an artifact comes to carry the name of
+    # a module that never ran.
+    run_per_frame = args.arm in ("per_frame", "both")
+    run_propagation = args.arm in ("propagation", "both")
+    if args.propagation_module and not run_propagation:
+        print(
+            f"FATAL: --propagation-module {args.propagation_module!r} names the second arm and "
+            f"--arm is {args.arm!r}, which does not drive it. Nothing was written.",
+            file=sys.stderr,
+        )
+        return 2
+    propagator: Propagator | None = None
+    if run_propagation:
+        try:
+            propagator = resolve_propagator(
+                args.propagation_module or DEFAULT_PROPAGATION_MODULE
+            )
+        except EstimatorUnavailable as exc:
+            print(f"FATAL: {exc}", file=sys.stderr)
+            return 2
+    if not run_per_frame:
+        # est_drift_p95_px is the per-frame adapter's number by definition — PR-08 §6 subtracts
+        # THAT from GEOM_TOL. A run that never measured it must not leave a propagation p95 in
+        # the field, and must say why the field is null.
+        disqualified.append("per_frame_arm_not_measured")
+
+    # THE PREMISE OF THE COMPARISON, RECORDED RATHER THAN ASSUMED. See PixelWitness.
+    per_frame_pixels = PixelWitness("per_frame")
+    propagation_pixels = PixelWitness("propagation")
+
     pairs: list[tuple[tuple[float, float] | None, tuple[float, float] | None]] = []
     depth_stats: list[dict] = []
     vocab: set[str] = set()
@@ -1744,8 +2214,18 @@ def main(argv: list[str] | None = None) -> int:
     # middle of it. See iou_distribution for what this is and, at length, for what it is not.
     gt_ious: list[float] = []
     frames_both_masks_empty = 0
+    # PER-FRAME-INDEXED, aligned to the capture's own frame order and carrying None where the
+    # frame could not be scored at all. `gt_ious` above is the same values with the gaps closed up,
+    # which is what a distribution wants and is exactly what a RUN statistic must not be given:
+    # closing the gaps would join two runs that were never adjacent.
+    iou_per_frame: list[float | None] = []
+    # The propagation arm needs the WHOLE clip — including frames whose ground truth carries no
+    # object label, which the per-frame arm is not asked to segment. Skipping them would be
+    # propagating across a cut, which is the thing the trajectory capture exists to avoid.
+    propagation_rgbs: list[np.ndarray] = []
+    propagation_true_masks: list[np.ndarray | None] = []
 
-    for d in frames:
+    for frame_index, d in enumerate(frames):
         rgb = np.load(d / "rgb.npy")
         true_depth = np.load(d / "depth.npy")
         true_ids = np.load(d / "seg_ids.npy")
@@ -1753,15 +2233,33 @@ def main(argv: list[str] | None = None) -> int:
         id_to_labels = {int(k): v for k, v in labels_raw.items()}
         shapes.add((int(true_ids.shape[0]), int(true_ids.shape[1])))
 
+        if run_propagation:
+            # THE SAME ARRAY OBJECT the per-frame arm is handed below — not a copy, not a re-read,
+            # and emphatically not a re-encode. `show` records the digest that proves it.
+            propagation_rgbs.append(propagation_pixels.show(frame_index, rgb))
+
         wanted, seen = object_ids(id_to_labels, object_class)
         vocab.update(seen)
         if not wanted:
             frames_without_label += 1
             pairs.append((None, None))
+            iou_per_frame.append(None)
+            if run_propagation:
+                propagation_true_masks.append(None)
             continue
 
         true_mask = mask_from_ids(true_ids, wanted)
-        est_mask = est.segment(rgb)
+        if run_propagation:
+            # Held only for the second pass. A default run keeps nothing it did not keep before.
+            propagation_true_masks.append(true_mask)
+        if not run_per_frame:
+            # No estimated mask on this arm, so no pair and no IoU. Recorded as the absence it is
+            # rather than skipped, so every list stays aligned to the capture's frame order.
+            pairs.append((None, None))
+            iou_per_frame.append(None)
+            continue
+
+        est_mask = est.segment(per_frame_pixels.show(frame_index, rgb))
         if est_mask.shape[:2] != true_mask.shape[:2]:
             print(
                 f"FATAL: {d.name}: the estimator returned a {est_mask.shape[:2]} mask for a "
@@ -1772,6 +2270,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         iou = mask_iou(est_mask, true_mask)
+        iou_per_frame.append(iou)
         if iou is None:
             frames_both_masks_empty += 1
         else:
@@ -1794,6 +2293,72 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # WHAT THE PER-FRAME ARM DID, SNAPSHOTTED HERE AND NOT AT ARTIFACT-WRITING TIME. The
+    # propagation arm reaches apple_sam2._best_box for its frame-0 seed — deliberately, so that the
+    # two arms share a detector rather than two copies of one — which moves this adapter's
+    # counters. Closing the bracket before that happens keeps `estimator_stats` a description of
+    # segment(rgb) alone, comparable field for field with every artifact written before --arm
+    # existed. The propagation arm's own detection is recorded in arm_comparison.propagator.stats.
+    estimator_stats_block = stats_probe.block(
+        stats_probe.since(scores_at_run_start), include_raw=True
+    )
+
+    # -- the propagation arm ---------------------------------------------------------------------
+    #
+    # AFTER the per-frame pass and after the geometry refusal, on purpose: it is the expensive half
+    # (one clip-level model load and a forward track over every frame), and a capture that is going
+    # to be refused should be refused before the GPU is asked for anything.
+    propagation_pairs: list[tuple[tuple[float, float] | None, tuple[float, float] | None]] = []
+    propagation_iou_per_frame: list[float | None] = []
+    propagation_gt_ious: list[float] = []
+    propagation_both_empty = 0
+    if run_propagation:
+        assert propagator is not None
+        try:
+            propagated = propagator.propagate(propagation_rgbs)
+        except Exception as exc:  # noqa: BLE001 - every refusal in that module is deliberate
+            print(
+                f"FATAL: the propagation arm refused: {exc}\n"
+                "       Nothing was written. A propagation arm that cannot be seeded, or that "
+                "cannot ingest the clip, is a refusal and not a p95.",
+                file=sys.stderr,
+            )
+            return 2
+        if len(propagated) != len(propagation_rgbs):
+            print(
+                f"FATAL: the propagation arm returned {len(propagated)} masks for "
+                f"{len(propagation_rgbs)} frames. A mask list that is not frame-for-frame with "
+                "the capture cannot be compared against it.",
+                file=sys.stderr,
+            )
+            return 2
+        for mask, true_mask in zip(propagated, propagation_true_masks):
+            if true_mask is None:
+                propagation_pairs.append((None, None))
+                propagation_iou_per_frame.append(None)
+                continue
+            mask = np.asarray(mask)
+            if mask.shape[:2] != true_mask.shape[:2]:
+                print(
+                    f"FATAL: the propagation arm returned a {mask.shape[:2]} mask for a "
+                    f"{true_mask.shape[:2]} frame. A centroid compared across grids is not a "
+                    "displacement.",
+                    file=sys.stderr,
+                )
+                return 2
+            iou = mask_iou(mask, true_mask)
+            propagation_iou_per_frame.append(iou)
+            if iou is None:
+                propagation_both_empty += 1
+            else:
+                propagation_gt_ious.append(iou)
+            propagation_pairs.append(
+                (
+                    centroid_of_mask(mask, args.largest_component, args.min_area_px),
+                    centroid_of_mask(true_mask, args.largest_component, args.min_area_px),
+                )
+            )
 
     values, dropped = paired_displacements(pairs)
     n_steps = len(pairs)
@@ -1869,9 +2434,7 @@ def main(argv: list[str] | None = None) -> int:
         # to do. `include_raw` is true because this capture is a few hundred frames, not the 171 600
         # of a GEOM_TOL pass: the raw values are what make the distribution re-derivable, and they
         # are small enough here to keep beside it.
-        "estimator_stats": stats_probe.block(
-            stats_probe.since(scores_at_run_start), include_raw=True
-        ),
+        "estimator_stats": estimator_stats_block,
         "geom_tol_cross_check": geom_compare,
         "centroid_displacement": distribution(values, args.hist_bin_px),
         # ADDITIVE AND READ-ONLY, in the same class as estimator_stats and independent_samples:
@@ -1935,6 +2498,54 @@ def main(argv: list[str] | None = None) -> int:
             "captured_utc": header.get("captured_utc"),
         },
     }
+    # THE TWO ARMS, SIDE BY SIDE — and only when a second arm actually ran. A default `--arm
+    # per_frame` run writes exactly the document it wrote before this block existed; adding a key
+    # whose value is "we did not do that" to every artifact on disk would be a change to every
+    # artifact on disk.
+    if run_propagation:
+        artifact["arm_comparison"] = arm_comparison_block(
+            arm_block(
+                "per_frame",
+                measured=run_per_frame,
+                pairs=pairs,
+                iou_per_frame=iou_per_frame,
+                n_both_masks_empty=frames_both_masks_empty,
+                hist_bin_px=args.hist_bin_px,
+                absent_because=(
+                    None if run_per_frame else f"--arm {args.arm} did not drive segment(rgb)"
+                ),
+                extra={
+                    "topology": (
+                        "GroundingDINO + SAM 2 re-run independently on every frame — "
+                        "estimator.segment(rgb), the contract both PR-08 §4 harnesses call"
+                    ),
+                    "estimator": {
+                        "spec": est.spec,
+                        "name": est.name,
+                        "version": est.version,
+                        "gate_qualified": est.gate_qualified,
+                    },
+                },
+            ),
+            arm_block(
+                "propagation",
+                measured=True,
+                pairs=propagation_pairs,
+                iou_per_frame=propagation_iou_per_frame,
+                n_both_masks_empty=propagation_both_empty,
+                hist_bin_px=args.hist_bin_px,
+                extra={
+                    "topology": (
+                        "one GroundingDINO detection on frame 0, one SAM2VideoPredictor seed, the "
+                        "mask propagated forward across the clip — Cosmos-Transfer2.5's topology"
+                    )
+                },
+            ),
+            arms=[a for a, on in (("per_frame", run_per_frame), ("propagation", True)) if on],
+            pixels=identical_input_pixels(per_frame_pixels, propagation_pixels),
+            propagator=propagator,
+        )
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
 

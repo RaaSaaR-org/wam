@@ -1378,3 +1378,284 @@ def test_the_measured_artifact_carries_the_schedule_and_the_coherence_the_captur
     doc = json.loads(out.read_text())
     assert doc["capture"]["scene_schedule"] == "trajectory"
     assert doc["capture"]["temporal_coherence"]["max_interframe_motion_px"] == 1.0
+
+
+# -- THE PROPAGATION ARM: blocker 3's own discharge condition, measured -----------------------------
+#
+# `apple_sam2`'s third gate-qualification blocker names what would settle it: measure "the same
+# Isaac capture BOTH ways - this adapter per frame, and the video predictor propagating from frame
+# 0 - and recording the two p95s". The `--arm` flag is that second path. NOTHING HERE DISCHARGES
+# ANYTHING: `GATE_QUALIFIED` and `GATE_QUALIFICATION_BLOCKERS` are untouched by every run below,
+# the capture is a SIMULATOR capture, and whether MuJoCo may stand where the blocker says Isaac is
+# an OPEN RULE QUESTION - all three asserted as fields.
+#
+# THE CONFOUND THIS SECTION EXISTS TO EXCLUDE. `SAM2VideoPredictor.init_state` conventionally
+# ingests a directory of JPEGs; our capture is lossless `rgb.npy`. An arm that saw JPEGs against an
+# arm that saw raw arrays would be measuring JPEG compression and calling it propagation. So the
+# harness hands BOTH arms the same in-memory array and RECORDS a per-frame digest of what each one
+# was shown; `identical_input_pixels` is that record, and the negative test below proves the check
+# can fail.
+
+
+def _stub_propagator(tmp_path, name="stub_propagator", body=None) -> str:
+    """A propagation module in the shape the harness drives: rgbs in, one mask per frame out."""
+    return _stub_module(
+        tmp_path,
+        name,
+        body
+        or (
+            "import numpy as np\n"
+            "PROPAGATION_NAME = 'stub-propagator'\n"
+            "PROPAGATION_VERSION = '0'\n"
+            "PROPAGATION_CONTRACT = {'frame_ingest': 'in-memory uint8 arrays', 'jpeg': False}\n"
+            "def propagate(rgbs):\n"
+            "    return [np.asarray(r)[:, :, 0] > 0 for r in rgbs]\n"
+        ),
+    )
+
+
+def _both_arms_argv(cap, out, tmp_path, *extra) -> list[str]:
+    return [
+        "measure", "--capture", str(cap),
+        "--estimators", _naive_estimator(tmp_path),
+        "--arm", "both",
+        "--propagation-module", _stub_propagator(tmp_path),
+        "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+        "--out", str(out), *extra,
+    ]
+
+
+def test_the_default_arm_is_the_per_frame_adapter_and_writes_no_comparison(tmp_path):
+    """"Defaulting to the CURRENT behaviour so nothing existing changes" is the whole licence for
+    adding a second arm to a script that produces a gate input. A run with no --arm must not grow
+    a comparison block, must not import a propagation module, and must not move the budget."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(5)])
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    assert "arm_comparison" not in doc
+    assert doc["est_drift_p95_px"] is not None
+
+
+def test_both_arms_are_measured_over_the_same_frames_and_both_p95s_are_recorded(tmp_path):
+    """The blocker asks for TWO p95s side by side. Side by side means in one document, over one
+    capture, with the frame count of each stated - not two files a reader has to align."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(6)])
+    out = tmp_path / "d.json"
+    assert ed.main(_both_arms_argv(cap, out, tmp_path)) == 3
+    doc = json.loads(out.read_text())
+    block = doc["arm_comparison"]
+    assert block["arms"] == ["per_frame", "propagation"]
+    for arm in ("per_frame", "propagation"):
+        assert block[arm]["est_drift_p95_px"] is not None
+        assert block[arm]["centroid_displacement"]["n"] == 6
+        assert block[arm]["mask_vs_ground_truth_iou"]["n"] == 6
+    # The headline stays the PER-FRAME adapter's number: that is the budget PR-08 §6 subtracts,
+    # and the propagation arm is evidence about it rather than a replacement for it.
+    assert doc["est_drift_p95_px"] == block["per_frame"]["est_drift_p95_px"]
+
+
+def test_both_arms_are_shown_byte_identical_pixels_and_the_artifact_records_it(tmp_path):
+    """THE CONFOUND. If one arm reads raw arrays and the other reads JPEGs, the comparison
+    measures the codec. The harness records a sha256 of the exact pixels each arm was handed, per
+    frame, and the artifact carries the verdict rather than a promise in a docstring."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(6)])
+    out = tmp_path / "d.json"
+    ed.main(_both_arms_argv(cap, out, tmp_path))
+    proof = json.loads(out.read_text())["arm_comparison"]["identical_input_pixels"]
+    assert proof["equal"] is True
+    assert proof["n_common_frames"] == 6
+    assert proof["per_frame_arm_sha256"] == proof["propagation_arm_sha256"]
+    # And the pixels both arms saw are the pixels on disk - not a re-encode of them.
+    import hashlib
+
+    digest = hashlib.sha256()
+    for i in range(6):
+        frame = np.load(cap / "frames" / f"{i:06d}" / "rgb.npy")
+        digest.update(hashlib.sha256(np.ascontiguousarray(frame).tobytes()).digest())
+    assert proof["per_frame_arm_sha256"] == digest.hexdigest()
+    assert "jpeg" in proof["mechanism"].lower()
+
+
+def test_the_identical_pixel_check_can_actually_fail(tmp_path):
+    """A check that cannot report a disagreement is not a check. Two witnesses fed different
+    bytes for the same frame must come back `equal: false` and name the frame."""
+    a = ed.PixelWitness("per_frame")
+    b = ed.PixelWitness("propagation")
+    same = np.zeros((4, 4, 3), dtype=np.uint8)
+    a.show(0, same)
+    b.show(0, same)
+    a.show(1, same)
+    b.show(1, same + 1)
+    proof = ed.identical_input_pixels(a, b)
+    assert proof["equal"] is False
+    assert proof["n_common_frames"] == 2
+    assert 1 in proof["frames_that_differ"]
+
+
+def test_a_run_of_consecutive_low_iou_frames_is_measured_and_not_averaged_away(tmp_path):
+    """FAILURE MODE (b), which is the point of the experiment. Propagation drifting off the object
+    and STAYING off is invisible in a mean, in a p95 and in a per-frame estimator that recovers on
+    the next frame. It is visible as a RUN, so the run is the statistic."""
+    ious = [0.9, 0.1, 0.1, 0.1, 0.9, 0.2, 0.9, 0.9]
+    runs = ed.low_iou_runs(ious, threshold=0.5)
+    assert runs["longest_run"] == 3
+    assert runs["n_runs"] == 2
+    assert runs["runs"] == [[1, 3], [5, 5]]
+    assert runs["threshold"] == 0.5
+
+
+def test_a_frame_nobody_could_score_breaks_a_run_rather_than_extending_it(tmp_path):
+    """A frame with no IoU is not evidence of drift and must not be counted as some. It breaks the
+    run, which errs SHORT - toward understating failure mode (b) - so the count of such frames is
+    recorded beside the run rather than left for a reader to assume was zero."""
+    runs = ed.low_iou_runs([0.1, None, 0.1], threshold=0.5)
+    assert runs["longest_run"] == 1
+    assert runs["n_runs"] == 2
+    assert runs["n_unscored_frames"] == 1
+
+
+def test_each_arm_carries_its_own_low_iou_run_statistic(tmp_path):
+    """Per arm, in the artifact: the blocker's failure mode (b) is a property of ONE arm and a
+    comparison that only reported a pooled number would hide exactly the asymmetry it exists to
+    show."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(6)])
+    out = tmp_path / "d.json"
+    # A propagator that goes blind from frame 2 onward: three consecutive frames of zero IoU.
+    blind_from_two = _stub_propagator(
+        tmp_path,
+        "drifting_propagator",
+        "import numpy as np\n"
+        "PROPAGATION_NAME = 'drifts-and-stays-off'\n"
+        "PROPAGATION_VERSION = '0'\n"
+        "PROPAGATION_CONTRACT = {'frame_ingest': 'in-memory uint8 arrays', 'jpeg': False}\n"
+        "def propagate(rgbs):\n"
+        "    out = []\n"
+        "    for i, r in enumerate(rgbs):\n"
+        "        m = np.asarray(r)[:, :, 0] > 0\n"
+        "        if 2 <= i <= 4:\n"
+        "            m = np.zeros_like(m)\n"
+        "        out.append(m)\n"
+        "    return out\n",
+    )
+    argv = [
+        "measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+        "--arm", "both", "--propagation-module", blind_from_two,
+        "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+        "--out", str(out),
+    ]
+    ed.main(argv)
+    block = json.loads(out.read_text())["arm_comparison"]
+    assert block["per_frame"]["low_iou_runs"]["longest_run"] == 0
+    assert block["per_frame"]["low_iou_runs"]["n_runs"] == 0
+    assert block["propagation"]["low_iou_runs"]["longest_run"] == 3
+    assert block["propagation"]["low_iou_runs"]["n_runs"] == 1
+
+
+def test_the_propagation_arm_alone_never_becomes_the_budget(tmp_path):
+    """`--arm propagation` measures the generator's segmenter, not this adapter's. Letting its
+    p95 land in `est_drift_p95_px` would put a number PR-08 §6 never defined into the field §6
+    subtracts."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(5)])
+    out = tmp_path / "d.json"
+    code = ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--arm", "propagation", "--propagation-module", _stub_propagator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    assert code == 3
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px"] is None
+    assert "per_frame_arm_not_measured" in doc["gate_disqualified_reasons"]
+    assert doc["arm_comparison"]["propagation"]["est_drift_p95_px"] is not None
+
+
+def test_the_comparison_block_refuses_to_be_read_as_a_discharge(tmp_path):
+    """Producing the evidence a blocker names and accepting it are two different acts, and only
+    one of them is a session's to perform."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(4)])
+    out = tmp_path / "d.json"
+    ed.main(_both_arms_argv(cap, out, tmp_path))
+    block = json.loads(out.read_text())["arm_comparison"]
+    assert "NOTHING" in block["discharges"]
+    assert "GATE_QUALIFICATION_BLOCKERS" in block["discharges"]
+    assert "AppleToPlate" in block["simulator_caveat"]
+    assert "Isaac" in block["open_rule_question"]
+    assert "owner" in block["open_rule_question"]
+    assert json.loads(out.read_text())["gate_qualified"] is False
+
+
+def test_naming_a_propagation_module_the_chosen_arm_does_not_drive_is_refused(tmp_path, capsys):
+    """Accepted-and-ignored is how an artifact comes to carry the name of a module that never
+    ran. The same rule --schedule follows on a backend that drives no schedule."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12, 16) for _ in range(3)])
+    out = tmp_path / "d.json"
+    code = ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--arm", "per_frame", "--propagation-module", _stub_propagator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    assert code == 2
+    assert "--propagation-module" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_the_propagation_arm_is_handed_every_frame_including_ones_with_no_ground_truth(tmp_path):
+    """Propagating across a clip means across the CLIP. Skipping the frames the per-frame arm is
+    not asked to segment would hand the tracker a cut, which is precisely what the trajectory
+    capture exists to avoid — and the scored populations would then differ for two reasons."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(5)])
+    # Frame 2's ground truth does not carry the object label at all - the apple is out of frame,
+    # which is a real event in this corpus. `measure` does not ask the per-frame arm to segment it.
+    (cap / "frames" / "000002" / "seg_labels.json").write_text(
+        json.dumps({"1": {"class": "table"}}), encoding="utf-8"
+    )
+    out = tmp_path / "d.json"
+    ed.main(_both_arms_argv(cap, out, tmp_path))
+    proof = json.loads(out.read_text())["arm_comparison"]["identical_input_pixels"]
+    assert proof["n_frames_shown_to_propagation_arm"] == 5
+    assert proof["n_frames_shown_to_per_frame_arm"] == 4
+    # And the verdict is over the frames BOTH saw, which is the population the p95s are compared on.
+    assert proof["n_common_frames"] == 4
+    assert proof["equal"] is True
+
+
+def test_the_propagation_arms_seed_detection_is_not_folded_into_the_per_frame_arms_stats(tmp_path):
+    """`estimator_stats` describes segment(rgb), and it has to keep describing segment(rgb) when a
+    second arm runs in the same process. The real propagation module reaches
+    `apple_sam2._best_box` for its frame-0 seed — deliberately, so both arms share ONE detector
+    rather than two copies of one — which moves this adapter's counters. If the block were read at
+    artifact-writing time it would silently gain that detection, and every artifact written before
+    --arm existed would stop being comparable with the ones written after."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(5)])
+    estimator = _counting_estimator(tmp_path)
+    # A propagator that bumps the estimator's counters the way the real one bumps apple_sam2's.
+    seeding = _stub_propagator(
+        tmp_path,
+        "seeding_propagator",
+        "import numpy as np\n"
+        "import counting_estimator as det\n"
+        "PROPAGATION_NAME = 'seeds-through-the-estimator'\n"
+        "PROPAGATION_VERSION = '0'\n"
+        "PROPAGATION_CONTRACT = {'frame_ingest': 'in-memory uint8 arrays', 'jpeg': False}\n"
+        "def propagate(rgbs):\n"
+        "    det.segment(rgbs[0])\n"  # the seed detection, on frame 0 only
+        "    return [np.asarray(r)[:, :, 0] > 0 for r in rgbs]\n",
+    )
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", estimator, "--arm", "both",
+         "--propagation-module", seeding, "--object-class", "apple", "--min-area-px", "1",
+         "--min-coverage", "0.0", "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    assert doc["estimator_stats"]["this_run"]["n_segment_calls"] == 5, (
+        "five frames, five per-frame segmentations - the seed detection is the other arm's"
+    )
+    assert doc["arm_comparison"]["propagation"]["measured"] is True
