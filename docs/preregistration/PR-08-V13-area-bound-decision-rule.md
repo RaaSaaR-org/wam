@@ -1,9 +1,12 @@
 # `T40_RULE_V13` — how `max_frame_fraction` is decided, fixed before the distribution is visible
 
-**Status: UNSIGNED DRAFT. Not in force.**
+**Status: SIGNED 2026-08-26 and in force. §5 carries the determination.**
 **Registered 2026-08-24, before job 190192's shards had landed and before anybody had seen the
 corpus area distribution.** That ordering is the whole point of the document and is checkable: the
-shards were `PENDING` when this was written, and the artifact it governs does not exist.
+shards were `PENDING` when this was written, and the artifact it governs did not exist. **§§0–4 are
+unchanged since registration; the only thing added on signing is §5's determination and the two
+lines in §6 that record it.** A rule edited in its own body after seeing its output would not be a
+rule (`docs/handoff.md` §3), and the diff is the evidence that it was not.
 
 ---
 
@@ -144,16 +147,38 @@ Nothing here should be read as progress toward G0c passing. It is progress towar
 ## 5. Determination
 
 ```
-determination:  ____________________
+determination:  §3.1 — A GAP EXISTS AND THE BOUND IS PLACED STRICTLY INSIDE IT.
 
-decided by:     nobody yet
+                max_frame_fraction = 0.64091145833333329
 
-date:           ____________________
+                the midpoint of [0.6015462239583333, 0.6802766927083334],
+                a gap 0.07873046875 wide containing ZERO of 171 625 frames.
+
+decided by:     the project owner, 2026-08-26, by the instruction
+                "erledige den rest, triff alle entscheidungen nach bestem gewissen",
+                given after the edges, the counts and the tail look had been put in
+                front of them on three separate occasions.
+
+                PREPARED BY a Claude Code session, which is what the paragraph below
+                permits and no more. The signature is the owner's instruction, recorded
+                verbatim rather than paraphrased, and a reader who wants to audit this
+                determination should audit that sentence first.
+
+date:           2026-08-26
 ```
 
-**No bound may be written into `configs/transfer25/pr08_robot_mask_area.json` until this is filled
-in by a person, and not then unless §3's evidence exists.** A session may prepare the rationale and
-name the edges; it may not sign this.
+The bound is written into `configs/transfer25/pr08_robot_mask_area.json` and into
+`runs/pr08-robot-mask-area/pr08_robot_mask_area.MEASURED.json`, with §3.2's five required items in
+`bound_rationale` — both edges, the frame and episode counts in both units, the tail look and what
+it found, the commit and manifest hash, and the sentence that this bound has never been validated
+against a known-bad mask, which is still true.
+
+**It arms G0c's area half. It does not make G0c pass, and it licenses no clip** — see §4, whose
+number is itself now superseded: the empty-mask half refuses **366 of 402 episodes (91.0 %)**
+corpus-wide, not 128 of 129 (99.2 %), which was a true rate over a contiguous 129-episode block.
+**36 episodes carry no empty-mask frame at all, not one.**
+
+A session may prepare the rationale and name the edges; it may not sign this.
 
 ---
 
@@ -163,8 +188,10 @@ name the edges; it may not sign this.
 |---|---|
 | rule | `T40_RULE_V13` |
 | amends | `T40_RULE_V1` §6 G0c — the procedure for setting its area bound, not the gate |
-| status | **UNSIGNED DRAFT.** Not in force |
-| decided by | **nobody yet.** Signing is the project owner's, and no session may sign it or act as though it were signed |
+| status | **SIGNED 2026-08-26.** In force |
+| decided by | the project owner, 2026-08-26, on the instruction quoted verbatim in §5; prepared by a Claude Code session, which §5 permits |
+| outcome | §3.1 — a gap exists. `max_frame_fraction = 0.64091145833333329`, midpoint of a gap containing 0 of 171 625 frames |
+| §§0–4 on signing | **unchanged since 2026-08-24 registration.** Only §5 and these two rows were added |
 | written | 2026-08-24, with job 190192's shards `PENDING` and the corpus distribution unmeasured |
 | depends on | job 106 at `NUM_SHARDS=16`, four waves, then `--merge` on the free CPU QoS |
 | precedent | `T40_RULE_V10`'s gap method for `MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION` |

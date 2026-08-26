@@ -583,11 +583,26 @@ def test_a_truncated_shard_artifact_is_named_rather_than_merged_around(
 
 
 def test_a_shard_refuses_to_write_the_tracked_artifact_path(corpus, capsys) -> None:
-    """N array tasks writing one path is a race whose winner is whichever finished last."""
+    """N array tasks writing one path is a race whose winner is whichever finished last.
+
+    This asserted ``not AREA_BOUND_ARTIFACT.exists()`` until 2026-08-26, when the bound was
+    decided under T40_RULE_V13 and that path became a committed file. The assertion was wrong
+    even before it failed: it conflated *the shard did not write this path* with *nothing has
+    ever written this path*, so it would have passed for the wrong reason on any tree where the
+    bound was simply undecided. What the refusal actually promises is that a shard run leaves
+    the tracked artifact BYTE-FOR-BYTE ALONE — including when it is already there, which is the
+    case that matters now and is the only case where a race could destroy anything.
+    """
+    before = (
+        rc.AREA_BOUND_ARTIFACT.read_bytes() if rc.AREA_BOUND_ARTIFACT.exists() else None
+    )
     assert rc.main(["measure", "--manifest", str(corpus),
                     "--shard", "0", "--num-shards", "4"]) == rc.EXIT_REFUSED
     assert "refuses to write the tracked default" in capsys.readouterr().err
-    assert not rc.AREA_BOUND_ARTIFACT.exists()
+    after = (
+        rc.AREA_BOUND_ARTIFACT.read_bytes() if rc.AREA_BOUND_ARTIFACT.exists() else None
+    )
+    assert after == before, "a refused shard run touched the tracked area-bound artifact"
 
 
 def test_shard_and_num_shards_go_together(corpus, tmp_path, capsys) -> None:

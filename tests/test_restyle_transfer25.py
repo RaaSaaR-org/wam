@@ -851,18 +851,46 @@ def test_the_cache_key_and_the_bound_cross_check_read_one_definition_of_the_segm
         )
 
 
-def test_the_committed_bound_artifact_is_not_in_the_repository_yet():
-    """A guard against this file's own premise going stale, not a wish.
+def test_the_committed_bound_is_decided_and_the_refusal_no_longer_says_otherwise():
+    """This tripwire fired on 2026-08-26, exactly as it was written to.
 
-    The refusal above is honest only while the distribution is genuinely unmeasured. The moment
-    somebody stages the checkpoints, runs the measure mode and commits a decided bound, this test
-    fails — and whoever made it fail should read the refusal's text and check it still describes
-    reality before deleting this.
+    It used to assert ``not AREA_BOUND_ARTIFACT.exists()``, and its docstring said: *the moment
+    somebody runs the measure mode and commits a decided bound, this test fails — and whoever made
+    it fail should read the refusal's text and check it still describes reality before deleting
+    this.* That happened. The refusal's text did NOT still describe reality — it said the
+    distribution *HAS NEVER BEEN MEASURED* — and it was repaired rather than the test being
+    deleted.
+
+    So the guard is inverted rather than removed, and it now watches the other direction: the
+    committed artifact must carry a decided bound WITH a rationale, and the refusal must not
+    re-acquire the claim that nothing has been measured. Both halves have failed in production
+    before, which is why neither is left to prose.
     """
-    assert not rc.AREA_BOUND_ARTIFACT.exists(), (
-        f"{rc.AREA_BOUND_ARTIFACT} now exists. If it carries a decided max_frame_fraction, "
-        "load_area_bound's refusal text is out of date — it still says the distribution has never "
-        "been measured."
+    assert rc.AREA_BOUND_ARTIFACT.exists(), f"{rc.AREA_BOUND_ARTIFACT} is gone"
+    payload = json.loads(rc.AREA_BOUND_ARTIFACT.read_text(encoding="utf-8"))
+    assert payload["measurement_qualified"] is True
+    assert isinstance(payload["max_frame_fraction"], float)
+    assert 0.0 < payload["max_frame_fraction"] < 1.0
+    assert payload["bound_rationale"].strip(), "a decided bound with no rationale is a default"
+
+    # Asserted as the POSITIVE claim, not as the absence of the retired phrase. The refusal quotes
+    # its own retired sentence in order to retire it out loud, so a `"HAS NEVER BEEN" not in ...`
+    # check matches the quotation and fails on a correctly repaired message — the same mistake as
+    # asserting `"accuracy" not in text` against a document that says "no accuracy is computed".
+    message = rc.area_bound_missing_message(rc.AREA_BOUND_ARTIFACT, "why")
+    assert "The distribution IS measured" in message, (
+        "the refusal must state that the distribution exists, or it sends the reader to redo it"
+    )
+    assert str(payload["max_frame_fraction"]) in message, (
+        "and it must name the decided bound, so a reader can tell a missing artifact from a "
+        "different one"
+    )
+
+    bound = rc.load_area_bound()
+    assert bound.max_frame_fraction == payload["max_frame_fraction"]
+    assert bound.cross_checked is False, (
+        "loaded bare, a bound must arrive un-cross-checked so 'forgot to cross-check' is a "
+        "refusal rather than a reachable state"
     )
 
 
