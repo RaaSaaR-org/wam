@@ -59,7 +59,10 @@ def main() -> None:
     parser.add_argument("--look", type=pathlib.Path, default=REPO_ROOT / "runs/pr08-empty-mask-look")
     parser.add_argument("--corpus", type=pathlib.Path,
                         default=pathlib.Path("/home/humanoid/wam-t041/pr08-apple-640x480-h264-lossless"))
-    parser.add_argument("--jpeg-quality", type=int, default=86)
+    # The hint is an aid to FINDING and the judgement is always made on the full-resolution raw
+    # tile, so it is written smaller. Both tiles together have to fit one 16 MB artifact page.
+    parser.add_argument("--jpeg-quality", type=int, default=72)
+    parser.add_argument("--hint-hw", type=int, nargs=2, default=(360, 480))
     args = parser.parse_args()
 
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -94,6 +97,8 @@ def main() -> None:
             canvas = np.clip(frames[index].astype(np.float32) * 1.9, 0, 255).astype(np.uint8)
             contours, _ = cv2.findContours(keep, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(canvas, contours, -1, OUTLINE_RGB, 2)
+            h, w = args.hint_hw
+            canvas = cv2.resize(canvas, (w, h), interpolation=cv2.INTER_AREA)
             cv2.imwrite(str(hints / f"hint-{record['tile']:03d}.jpg"),
                         canvas[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
         print(f"  [{done}/{len(by_episode)}] {episode}", flush=True)
