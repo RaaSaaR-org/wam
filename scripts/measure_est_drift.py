@@ -151,6 +151,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -205,6 +206,28 @@ WRITEUP = "docs/preregistration/PR-08-photoreal-augmentation.md"
 SCENE_SCHEDULE_NAMES: tuple[str, ...] = ("lattice", "trajectory")
 DEFAULT_SCENE_SCHEDULE = "lattice"
 DEFAULT_SCENE_STATES = 20
+
+#: ``trajectory_scene_schedule``'s three cycle counts, exposed on the command line as
+#: ``T40_RULE_V17`` §2 registers, with one line each saying what the axis does geometrically.
+#:
+#: **THEY ARE NOT ENVELOPE PARAMETERS AND THIS IS THE REASON THEY MAY BE FLAGS AT ALL.** V5 §4.5
+#: registers that any change raising the object's visibility — the placements it visits, the cube
+#: distractor, the occluding hands — must be argued in a V-document rather than made in a commit,
+#: and ``mujoco_binding`` withholds the centre and the radii from its own signature for exactly
+#: that reason. These three count cycles over a path whose centre, radii and arm amplitude are
+#: derived constants: every pose any value of them reaches is a pose the default also reaches, so
+#: they move WHEN the object is somewhere, never WHERE it can be. V17 §2 states the claim in the
+#: open so a reader who disagrees can reject it there instead of finding it in a docstring.
+#:
+#: The DEFAULTS ARE NEVER RESTATED HERE. They are read off the function's own signature by
+#: :func:`trajectory_schedule_params`, because a second copy of ``2.0`` is how the header would
+#: come to record a number the schedule did not use.
+TRAJECTORY_PARAM_FLAGS: dict[str, str] = {
+    "turns": "complete revolutions of the object around the closed ellipse in the table plane.",
+    "yaw_turns": "complete revolutions of the object's own yaw.",
+    "arm_cycles": "complete sweeps of the shoulder-pitch offset — i.e. how many times the Dex3 "
+    "hands cross in front of the object, which is the event a propagated mask is lost at.",
+}
 
 #: The COMMITTED gate artifact, beside GEOM_TOL's and for the same reason: §8 item 4 wants both
 #: measured *and committed* before generation, and a path under gitignored ``runs/`` cannot be that.
@@ -482,12 +505,25 @@ _IOU_SIMULATOR_CAVEAT = (
     "with this number too."
 )
 _IOU_OPEN_RULE_QUESTION = (
-    "OPEN, and deliberately not resolved here. The third gate-qualification blocker names 'the "
-    "same Isaac capture' in its own words; PR-08-V5 (T40_RULE_V5) rerouted §4 step 1's ground "
-    "truth from Isaac to any simulator with exact per-pixel segmentation, for a different "
-    "purpose and without addressing that blocker. Whether a MuJoCo capture may stand where the "
-    "blocker says Isaac is a rule question for the project owner. No session may answer it by "
-    "writing a capture and pointing at it."
+    "ANSWERED 2026-08-27, and the wording below is kept because a question that simply disappears "
+    "between two artifacts is indistinguishable from one somebody dropped. IT ASKED: 'OPEN, and "
+    "deliberately not resolved here. The third gate-qualification blocker names \"the same Isaac "
+    "capture\" in its own words; PR-08-V5 (T40_RULE_V5) rerouted §4 step 1's ground truth from "
+    "Isaac to any simulator with exact per-pixel segmentation, for a different purpose and without "
+    "addressing that blocker. Whether a MuJoCo capture may stand where the blocker says Isaac is a "
+    "rule question for the project owner. No session may answer it by writing a capture and "
+    "pointing at it.' IT WAS ANSWERED THE WAY IT ASKED TO BE — by the project owner, not by a "
+    "capture: PR-08-V14 (T40_RULE_V14, docs/preregistration/PR-08-V14-mujoco-stands-in-for-isaac.md), "
+    "signed 2026-08-27, licenses a MuJoCo capture to stand in for the named Isaac one FOR "
+    "EST_DRIFT_P95 AND THE ARM COMPARISON AND FOR NOTHING ELSE — not for GEOM_TOL, which is "
+    "measured on the real corpus, and not for quoting a MuJoCo number as an Isaac one, so every "
+    "artifact still records which simulator produced it and this one does. WHAT THAT DOES NOT DO, "
+    "in V14 §3.1's own words: it does not discharge the blocker. The blocker names TWO independent "
+    "sufficient reasons and V14 closes one; '480 frames of ONE trajectory is not a corpus' stands, "
+    "GATE_QUALIFIED stays False, and the tuple is not shortened on V14's strength alone. How the "
+    "second reason is being measured is registered as T40_RULE_V17 "
+    "(docs/preregistration/PR-08-V17-drift-rate-protocol.md), whose outcomes were fixed before its "
+    "first capture was rendered."
 )
 
 
@@ -958,11 +994,15 @@ _ARM_COMPARISON_DISCHARGES = (
     "the same capture measured both ways, the two p95s side by side — and producing the evidence "
     "a blocker asks for is not the same act as accepting it. "
     "scripts/estimators/apple_sam2.py's GATE_QUALIFIED and GATE_QUALIFICATION_BLOCKERS are "
-    "untouched by the run that wrote this file, GATE_QUALIFIED is still False, all three blockers "
-    "are still in the tuple, and estimator_not_gate_qualified is still stamped into "
-    "gate_disqualified_reasons above. Two further reasons this cannot be read as a discharge on "
-    "its own: the blocker says 'the same ISAAC capture' and this is MuJoCo (see "
-    "open_rule_question), and blockers 1 and 2 are untouched by anything measured here."
+    "untouched by the run that wrote this file, GATE_QUALIFIED is still False, and "
+    "estimator_not_gate_qualified is still stamped into gate_disqualified_reasons above. "
+    "THE 'ISAAC, NOT MUJOCO' HALF OF THIS PARAGRAPH IS SPENT and its retirement is recorded in "
+    "open_rule_question rather than deleted: T40_RULE_V14, signed by the project owner on "
+    "2026-08-27, lets a MuJoCo capture stand in for the named Isaac one for this measurement. What "
+    "remains is the blocker's SECOND and independently sufficient reason — 480 frames of one "
+    "trajectory is not a corpus — which no capture written by this script discharges either, and "
+    "which T40_RULE_V17 registers a design for. Blockers 1 and 2 remain untouched by anything "
+    "measured here."
 )
 
 _ARM_COMPARISON_MEANING = (
@@ -1755,6 +1795,52 @@ def resolve_stage(
     return None, "isaacsim.storage.native.get_assets_root_path() + DEFAULT_ASSET_SUBPATH"
 
 
+def trajectory_schedule_params(
+    factory: Any, requested: Mapping[str, float | None]
+) -> tuple[dict[str, float], str]:
+    """The three cycle counts a trajectory capture ran with, and where each came from.
+
+    The defaults are READ OFF ``factory``'s own signature and never restated in this module. That
+    is the whole point of the function: ``capture-mujoco-trajectory-f480`` was rendered before the
+    flags existed and its header records no parameters at all, so the only way to know what it ran
+    with is to read the defaults at the commit that produced it — precisely the inference V5 §5's
+    field list exists to make unnecessary. A second copy of ``2.0`` living here would let the header
+    state a number the schedule did not use, which is worse than recording nothing.
+
+    Refuses a parameter the factory does not have, rather than silently dropping it: that is what
+    would happen if ``trajectory_scene_schedule`` lost an axis while this table kept it.
+    """
+    signature = inspect.signature(factory)
+    missing = [name for name in requested if name not in signature.parameters]
+    if missing:
+        raise EstimatorUnavailable(
+            f"{sorted(missing)} is offered on the command line and "
+            f"{factory.__module__}.{factory.__name__} has no such parameter. The CLI table and the "
+            "schedule have drifted; a flag that is accepted and then dropped would land in the "
+            "capture header as a parameter the capture did not use."
+        )
+    params: dict[str, float] = {}
+    overridden: list[str] = []
+    for name in requested:
+        value = requested[name]
+        if value is None:
+            default = signature.parameters[name].default
+            if default is inspect.Parameter.empty:  # pragma: no cover — signature has defaults
+                raise EstimatorUnavailable(
+                    f"{name} has no default in {factory.__name__} and none was given."
+                )
+            params[name] = float(default)
+        else:
+            params[name] = float(value)
+            overridden.append(name)
+    source = (
+        "defaults (" + ", ".join(f"{k}={v!r}" for k, v in params.items()) + ")"
+        if not overridden
+        else ", ".join(f"--{name.replace('_', '-')}" for name in sorted(overridden))
+    )
+    return params, source
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1824,6 +1910,22 @@ def main(argv: list[str] | None = None) -> int:
         "IT BUILDS NO PROPAGATION ARM AND DISCHARGES NOTHING. The name lands in the capture "
         "header beside a MEASURED max_interframe_motion_px, because the name is not evidence.",
     )
+    for _flag, _what in TRAJECTORY_PARAM_FLAGS.items():
+        cap.add_argument(
+            f"--{_flag.replace('_', '-')}",
+            type=float,
+            default=None,
+            metavar="CYCLES",
+            help=f"mujoco backend only, --schedule trajectory only: {_what} Counted in COMPLETE "
+            "cycles over the whole capture, so it is scale-free in --frames and cannot turn a "
+            "smooth path into one with a cut on its own. It does NOT move PR-08-V5 §4.5's "
+            "envelope: the centre, the radii and the arm amplitude are derived constants with no "
+            "flag, the cube distractor stays and the hands still occlude, so every pose reachable "
+            "here is one the default already visits — only WHEN it is visited changes. Registered "
+            "as T40_RULE_V17 §2. The value and its source land in the capture header, which is "
+            "new: until this flag existed the three were recorded nowhere and were recoverable "
+            "only by reading the function defaults at the producing commit.",
+        )
     cap.add_argument(
         "--camera-prim",
         action="append",
@@ -1983,6 +2085,20 @@ def main(argv: list[str] | None = None) -> int:
                         "installed, and a silent disagreement is a schedule nobody can select."
                     )
                 schedule_name = args.schedule or DEFAULT_SCENE_SCHEDULE
+                requested_params = {
+                    name: getattr(args, name) for name in TRAJECTORY_PARAM_FLAGS
+                }
+                if schedule_name != "trajectory":
+                    given = sorted(k for k, v in requested_params.items() if v is not None)
+                    if given:
+                        raise EstimatorUnavailable(
+                            f"{', '.join('--' + g.replace('_', '-') for g in given)} counts cycles "
+                            f"along the smooth trajectory path and --schedule {schedule_name} has "
+                            "no such path: the lattice is a sweep of DISTINCT configurations that "
+                            "teleports the object between neighbours, so there is no revolution to "
+                            "count. Accepting the flag and ignoring it would put a parameter in "
+                            "the capture header that the capture did not use."
+                        )
 
                 if schedule_name == "trajectory":
                     if args.scene_states is not None:
@@ -2011,7 +2127,22 @@ def main(argv: list[str] | None = None) -> int:
                     # if it had covered the sweep.
                     total_steps = max(1, int(args.frames) * int(args.steps_per_frame))
                     steps_per_state = max(1, total_steps // n_states)
-                schedule = SCENE_SCHEDULES[schedule_name](n_states)
+                factory = SCENE_SCHEDULES[schedule_name]
+                if schedule_name == "trajectory":
+                    schedule_params, schedule_params_source = trajectory_schedule_params(
+                        factory, requested_params
+                    )
+                    schedule = factory(n_states, **schedule_params)
+                else:
+                    schedule_params, schedule_params_source = {}, "n/a (lattice takes none)"
+                    schedule = factory(n_states)
+                # RECORDED, not inferred. Until this landed, `turns`/`yaw_turns`/`arm_cycles` were
+                # written down in no capture header, no artifact and no document, and the only way
+                # to learn what a capture ran with was to read the function defaults at the commit
+                # that produced it. V5 §5 registers a field list against exactly that, and V17 §7
+                # requires this pair for every capture from here.
+                provenance["scene_schedule_params"] = schedule_params
+                provenance["scene_schedule_params_source"] = schedule_params_source
                 provenance["scene_schedule"] = schedule_name
                 provenance["scene_schedule_source"] = (
                     "--schedule" if args.schedule else f"default ({DEFAULT_SCENE_SCHEDULE})"

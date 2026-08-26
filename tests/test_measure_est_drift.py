@@ -9,6 +9,7 @@ getting it *wrong* is reachable here.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import pathlib
 import sys
@@ -1659,3 +1660,107 @@ def test_the_propagation_arms_seed_detection_is_not_folded_into_the_per_frame_ar
         "five frames, five per-frame segmentations - the seed detection is the other arm's"
     )
     assert doc["arm_comparison"]["propagation"]["measured"] is True
+
+
+# ---------------------------------------------------------------------------------------------
+# T40_RULE_V17 §2 and §7 — the three trajectory cycle counts on the command line, and the
+# provenance gap that exposing them closes.
+# ---------------------------------------------------------------------------------------------
+
+
+def _trajectory_factory():
+    from wam.robot.mujoco_binding import trajectory_scene_schedule
+
+    return trajectory_scene_schedule
+
+
+def test_the_registered_defaults_are_the_ones_the_existing_capture_ran_with():
+    """A TRIPWIRE, and the reason V17 §2 could name A1's triple at all.
+
+    `capture-mujoco-trajectory-f480` was rendered before any of these were flags, so its header
+    records no parameters and the ONLY way to know what it ran with is the function defaults at
+    that commit. V17 §2 writes them down as `turns=1.0, yaw_turns=1.0, arm_cycles=2.0`. If a later
+    edit moves a default, that document silently becomes wrong about a capture already on disk and
+    already quoted in a result — so the defaults are pinned here rather than trusted.
+    """
+    signature = inspect.signature(_trajectory_factory())
+    assert signature.parameters["turns"].default == 1.0
+    assert signature.parameters["yaw_turns"].default == 1.0
+    assert signature.parameters["arm_cycles"].default == 2.0
+
+
+def test_the_cli_offers_exactly_the_three_axes_the_schedule_has():
+    """The CLI table and the schedule may not drift: a flag accepted and dropped would land in a
+    capture header as a parameter the capture did not use."""
+    signature = inspect.signature(_trajectory_factory())
+    keyword_only = {
+        name
+        for name, p in signature.parameters.items()
+        if p.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+    assert set(ed.TRAJECTORY_PARAM_FLAGS) == keyword_only
+
+
+def test_unset_parameters_are_read_off_the_signature_and_named_as_defaults():
+    params, source = ed.trajectory_schedule_params(
+        _trajectory_factory(), {"turns": None, "yaw_turns": None, "arm_cycles": None}
+    )
+    assert params == {"turns": 1.0, "yaw_turns": 1.0, "arm_cycles": 2.0}
+    assert source.startswith("defaults (")
+    assert "arm_cycles=2.0" in source
+
+
+def test_a_given_parameter_is_used_and_the_source_names_the_flag_not_the_default():
+    params, source = ed.trajectory_schedule_params(
+        _trajectory_factory(), {"turns": 5, "yaw_turns": None, "arm_cycles": 13}
+    )
+    assert params == {"turns": 5.0, "yaw_turns": 1.0, "arm_cycles": 13.0}
+    assert source == "--arm-cycles, --turns"
+    assert "default" not in source
+
+
+def test_a_flag_the_schedule_does_not_have_is_refused_rather_than_dropped():
+    with pytest.raises(ed.EstimatorUnavailable, match="no such parameter"):
+        ed.trajectory_schedule_params(_trajectory_factory(), {"radius": 2.0})
+
+
+def test_the_cycle_counts_do_not_move_v5_4_5s_envelope():
+    """THE CLAIM V17 §2 MAKES IN THE OPEN, ASSERTED HERE RATHER THAN LEFT IN PROSE.
+
+    V5 §4.5 governs which placements the object visits. These three are cycle counts over a path
+    whose centre, radii and arm amplitude are derived constants, so every pose ANY of them reaches
+    is a pose the default schedule also reaches: they change WHEN the object is somewhere, never
+    WHERE it can be. If that ever stops being true, this test is what says so.
+    """
+    from wam.robot import mujoco_binding as mb
+
+    xs = [x for x in mb._SCHEDULE_X]
+    ys = [y for y in mb._SCHEDULE_Y]
+    arm_max = max(abs(v) for v in mb._SCHEDULE_ARM)
+    for turns, yaw_turns, arm_cycles in ((1, 1, 2), (5, 3, 13), (80, 7, 1), (0.5, 0.25, 0.5)):
+        states = mb.trajectory_scene_schedule(
+            240, turns=turns, yaw_turns=yaw_turns, arm_cycles=arm_cycles
+        )
+        assert min(s.object_xy[0] for s in states) >= min(xs) - 1e-12
+        assert max(s.object_xy[0] for s in states) <= max(xs) + 1e-12
+        assert min(s.object_xy[1] for s in states) >= min(ys) - 1e-12
+        assert max(s.object_xy[1] for s in states) <= max(ys) + 1e-12
+        assert max(abs(s.arm_pitch_offset_rad) for s in states) <= arm_max + 1e-12
+
+
+def test_more_turns_is_a_faster_pass_over_the_same_path_not_a_wider_one():
+    """The dose axis V17 §5's C2 ladder rides on. `turns` scales the per-frame step linearly while
+    leaving the visited set alone — which is what makes it a control for propagation loss and not
+    an envelope change."""
+    from wam.robot import mujoco_binding as mb
+
+    def median_step(turns):
+        states = mb.trajectory_scene_schedule(480, turns=turns)
+        steps = [
+            float(np.hypot(b.object_xy[0] - a.object_xy[0], b.object_xy[1] - a.object_xy[1]))
+            for a, b in zip(states, states[1:])
+        ]
+        return float(np.median(steps))
+
+    one, twenty = median_step(1), median_step(20)
+    assert twenty > one * 15, f"{twenty} vs {one}"
