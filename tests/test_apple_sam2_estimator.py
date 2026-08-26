@@ -1000,17 +1000,35 @@ def test_a_non_image_array_is_refused(loaded):
 # -- gate qualification is opt-in, and this module does not opt in --------------------------------------------
 
 
+def on_the_record(module) -> str:
+    """Everything the tuple pair says, open and closed.
+
+    Blockers 1 and 2 were discharged on 2026-08-26 and their wording moved into
+    ``GATE_QUALIFICATION_DISCHARGED`` VERBATIM between ``>>>`` and ``<<<`` markers, which is what
+    that tuple is for. So a test whose point is *this sentence is on the record* has to read both
+    tuples; one that reads only ``GATE_QUALIFICATION_BLOCKERS`` is asserting that the blocker is
+    still OPEN, which is a different and much stronger claim. The tests below are split on exactly
+    that line: this helper for the first kind, the tuple itself for the second.
+    """
+    return " ".join(module.GATE_QUALIFICATION_BLOCKERS) + " " + " ".join(
+        module.GATE_QUALIFICATION_DISCHARGED
+    )
+
+
 def test_it_does_not_claim_to_be_a_gate_estimator_and_says_why(loaded):
     module, _ = loaded
     assert module.GATE_QUALIFIED is False
     assert module.GATE_QUALIFICATION_BLOCKERS
-    joined = " ".join(module.GATE_QUALIFICATION_BLOCKERS)
-    assert "coverage" in joined
-    # The two that survive 2026-08-22 and are the reason the flag is still False: no human has
-    # looked at a mask this adapter produced, and it re-detects per frame where the generator
-    # propagates one mask across the clip.
-    assert "NOBODY HAS LOOKED AT A MASK" in joined
-    assert "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in joined
+    record = on_the_record(module)
+    assert "coverage" in record
+    # Both are still readable in full. The first was discharged on 2026-08-26 by the human look it
+    # named; the second is the one still open, and it is asserted against the OPEN tuple below.
+    assert "NOBODY HAS LOOKED AT A MASK" in record
+    assert "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in record
+    assert any(
+        "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in b
+        for b in module.GATE_QUALIFICATION_BLOCKERS
+    ), "the propagation blocker must still be OPEN, not merely on the record"
 
 
 def test_the_stale_never_executed_blocker_is_withdrawn_by_evidence_and_not_by_deletion(loaded):
@@ -1032,7 +1050,8 @@ def test_execution_is_not_confused_with_correctness(loaded):
     """The distinction the rewritten blocker 1 rests on, asserted so a later edit cannot blur it:
     coverage 1.0 says a box came back on every frame, not that it was the apple's box."""
     module, _ = loaded
-    blocker = next(b for b in module.GATE_QUALIFICATION_BLOCKERS if "LOOKED AT A MASK" in b)
+    blocker = on_the_record(module)
+    assert "LOOKED AT A MASK" in blocker
     assert "coverage 1.0" in blocker
     assert "not that it was the APPLE's box" in blocker
 
@@ -1048,7 +1067,11 @@ def test_the_pilot_job_the_withdrawal_rests_on_is_labelled_as_an_untracked_claim
     box_threshold 0.35 with no retry branch, which is a different segmenter from the one whose
     output the blocker is reasoning about."""
     module, _ = loaded
-    blocker = next(b for b in module.GATE_QUALIFICATION_BLOCKERS if "LOOKED AT A MASK" in b)
+    # Discharged 2026-08-26, so it lives in the other tuple now — but the LABEL has to survive the
+    # move, because a discharge that quietly drops "this citation is untracked" launders it.
+    blocker = next(
+        d for d in module.GATE_QUALIFICATION_DISCHARGED if "LOOKED AT A MASK" in d
+    )
     assert "189588" in blocker
     assert "NOT RECORDED ANYWHERE TRACKED" in blocker, (
         "the untracked citation must be labelled where it is used, not only in a report"
@@ -1613,14 +1636,23 @@ def test_the_counters_are_cumulative_and_the_module_says_so(loaded):
 
 
 def test_recording_the_scores_did_not_qualify_the_gate(loaded):
-    """Producing evidence and accepting it are two different acts. The blocker that asks for these
-    numbers stays in the tuple until a human reads them; nothing in this module may retire it."""
+    """Producing evidence and accepting it are two different acts.
+
+    Until 2026-08-26 this asserted the blocker was still OPEN, which was the right assertion while
+    nobody had read the numbers. On that date a person did, and the entry moved. **The act the test
+    exists to forbid is unchanged and still forbidden**: recording a distribution into an artifact
+    may not by itself qualify the gate. So what is checked now is that the discharge rests on a
+    READ of the full pass and on the human look — named, dated and cited — rather than on the
+    module having emitted the numbers, and that ``GATE_QUALIFIED`` did not move with it."""
     module, _ = loaded
     assert module.GATE_QUALIFIED is False
-    assert any("detection-score distribution and retry counts" in b
-               for b in module.GATE_QUALIFICATION_BLOCKERS)
-    assert not any("detection-score distribution" in d
-                   for d in module.GATE_QUALIFICATION_DISCHARGED)
+    entry = next(
+        d for d in module.GATE_QUALIFICATION_DISCHARGED
+        if "detection-score distribution and retry counts" in d
+    )
+    assert "n_frames_retry_fired = 0" in entry, "the discharge must quote the number that closed it"
+    assert "SAME EVIDENCE AS BLOCKER 1" in entry, "and it must rest on the human look, not on itself"
+    assert "runs/pr08-geom-tol/pr08_geom_tol.json" in entry, "and it must cite the artifact read"
 
 
 # -- PR-08 V6: the mask-validity filter --------------------------------------------------------------
@@ -1990,11 +2022,21 @@ def test_producing_the_fix_did_not_accept_it(loaded):
     and blocker 3 — per-frame segmentation vs upstream's propagation — is untouched by any of it."""
     module, _ = loaded
     assert module.GATE_QUALIFIED is False
-    assert any("NOBODY HAS LOOKED AT A MASK" in b for b in module.GATE_QUALIFICATION_BLOCKERS)
     assert any("PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in b
                for b in module.GATE_QUALIFICATION_BLOCKERS)
-    assert len(module.GATE_QUALIFICATION_BLOCKERS) == 3
-    assert not any("mask-validity" in d.lower() for d in module.GATE_QUALIFICATION_DISCHARGED)
+    # Blocker 1 was discharged on 2026-08-26 — BY THE HUMAN LOOK IT NAMED, which is its own first
+    # limb. The thing this test forbids is a different route: the validity filter making the
+    # masks unavailable and that counting as an answer. So the discharge must cite the look, and
+    # no entry may rest on the filter.
+    entry = next(
+        d for d in module.GATE_QUALIFICATION_DISCHARGED if "NOBODY HAS LOOKED AT A MASK" in d
+    )
+    assert "DISCHARGED BY ITS FIRST LIMB, THE HUMAN LOOK" in entry
+    assert "382/382 tiles" in entry
+    assert not any(
+        "DISCHARGED BY" in d and "mask-validity" in d.lower()
+        for d in module.GATE_QUALIFICATION_DISCHARGED
+    ), "no blocker may be discharged on the ground that the filter stopped producing the masks"
 
 
 # -- PR-08 V10: where that reference is DEFINED ------------------------------------------------------
@@ -2473,7 +2515,15 @@ def test_v10_discharged_nothing(loaded):
     """Producing a fix and accepting it are different acts, and V10 is UNSIGNED besides."""
     module, _ = loaded
     assert module.GATE_QUALIFIED is False
-    assert len(module.GATE_QUALIFICATION_BLOCKERS) == 3
-    assert not any("V10" in d for d in module.GATE_QUALIFICATION_DISCHARGED)
-    assert not any("reference" in d.lower() and "scope" in d.lower()
-                   for d in module.GATE_QUALIFICATION_DISCHARGED)
+    # ``len(...) == 3`` stood here until 2026-08-26 and was the wrong guard: a count has to be
+    # edited by every legitimate discharge, so it stops guarding the moment one happens. What V10
+    # may not do is be the GROUND of a discharge, and that is what is checked.
+    assert any("PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in b
+               for b in module.GATE_QUALIFICATION_BLOCKERS)
+    assert not any(
+        "DISCHARGED BY" in d and "V10" in d for d in module.GATE_QUALIFICATION_DISCHARGED
+    )
+    assert not any(
+        "DISCHARGED BY" in d and "reference" in d.lower() and "scope" in d.lower()
+        for d in module.GATE_QUALIFICATION_DISCHARGED
+    )

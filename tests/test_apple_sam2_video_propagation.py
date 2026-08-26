@@ -143,7 +143,21 @@ def test_the_source_contains_no_encode_path_at_all():
 
 def test_this_module_discharges_nothing():
     """The blockers are a person's to close. A propagation arm existing is evidence, and evidence
-    is not a verdict."""
+    is not a verdict.
+
+    This asserted ``len(...) == 3`` until 2026-08-26, when blockers 1 and 2 were discharged on
+    their own evidence and the count went stale — which is the wrong tripwire, because a count has
+    to be edited by every legitimate discharge and therefore stops guarding anything. The invariant
+    this test is actually about is narrower and does not decay: **the blocker THIS module is the
+    evidence for must still be open**, and this module must not be what closes it.
+    """
     assert apple_sam2.GATE_QUALIFIED is False
-    assert len(apple_sam2.GATE_QUALIFICATION_BLOCKERS) == 3
+    assert any(
+        b.startswith("PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION")
+        for b in apple_sam2.GATE_QUALIFICATION_BLOCKERS
+    ), "the propagation blocker is gone from GATE_QUALIFICATION_BLOCKERS"
+    assert not any(
+        "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in d
+        for d in apple_sam2.GATE_QUALIFICATION_DISCHARGED
+    ), "the propagation blocker was discharged; this module may not be the thing that did it"
     assert "NOTHING" in vid.PROPAGATION_CONTRACT["discharges"]

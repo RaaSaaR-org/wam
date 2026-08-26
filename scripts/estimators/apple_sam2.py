@@ -388,7 +388,9 @@ BOX_SELECTION = "highest_score"
 # are ~30 900 px against a median apple of 6 185, they sit at 0.97-0.98 plate overlap, they score
 # 0.167-0.309 where the correct masks score a median 0.829 — and they produce a centroid, a
 # displacement and a p95 that all look exactly like measurements. That is the failure mode
-# GATE_QUALIFICATION_BLOCKERS's first entry names in as many words. In episode_000094 the segmenter
+# GATE_QUALIFICATION_BLOCKERS's first entry named in as many words until 2026-08-26, when that entry
+# moved into GATE_QUALIFICATION_DISCHARGED — carrying this defect forward as residue (i), not
+# closing it. In episode_000094 the segmenter
 # OSCILLATES between the two objects (f00149 plate -> f00150 apple, 471 px -> f00151 apple, 670 px
 # -> f00152 plate), so the corruption hits both tails at once: near-zero displacements while it is
 # locked on the stationary plate, and a recorded 245.9 px step at every switch.
@@ -622,42 +624,15 @@ SEGMENTER_CONTRACT: dict[str, Any] = {
 #: Every condition that has to be true before this pair may set ``EST_DRIFT_P95`` or ``GEOM_TOL``.
 #: Written out rather than summarised because :data:`GATE_QUALIFIED` is a claim, and a claim whose
 #: grounds are not written down gets flipped by whoever is in a hurry.
+#:
+#: ONE entry, since 2026-08-26. The two that stood above it — the human look, and the operating
+#: point on this corpus — are in :data:`GATE_QUALIFICATION_DISCHARGED` VERBATIM between >>> and
+#: <<< markers, each with the evidence, the reviewer, the date and the tally beside it, and with
+#: the residue it carries forward stated in the same breath. **A SHORTER TUPLE IS NOT A SMALLER
+#: QUESTION**: read those two entries before reading this one as "almost clear", and in particular
+#: read blocker 2's residue (i), which records that the failure blocker 2 predicted DID occur on 92
+#: frames by a route blocker 2 did not predict.
 GATE_QUALIFICATION_BLOCKERS: tuple[str, ...] = (
-    "NOBODY HAS LOOKED AT A MASK. The 2026-08-21 wording of this blocker ('never executed, no "
-    "checkpoint staged') is withdrawn as stale: job 189583 staged all three checkpoints at the "
-    "pinned revisions and verified them, and job 189588 drove this adapter end to end over the "
-    "AppleToPlate corpus in the GEOM_TOL pilot — 720 frames, two passes, 480x640, coverage 1.0 on "
-    "both. CITATION CAVEAT, because a blocker tuple is the load-bearing record of what is and is "
-    "not established: 189583 is recorded in .mc/tasks/todo/T-040-*.md, but 189588 IS NOT RECORDED "
-    "ANYWHERE TRACKED IN THIS REPOSITORY — its artifact was not readable from the session that "
-    "wrote this line, and the job id is an untracked claim until GEOM_TOL_PILOT.json lands. It is "
-    "also evidence about a configuration THIS FILE HAS SINCE REPLACED: that pilot necessarily ran "
-    "at the old operating point (box_threshold 0.35, no retry branch), so it is weaker evidence "
-    "for the current adapter than its numbers suggest. So the module runs and produces output. "
-    "What that does NOT establish is that the output "
-    "is right: coverage 1.0 says a box was returned on every frame, not that it was the APPLE's "
-    "box, and this adapter's whole failure mode is a plausible mask on the wrong object (the "
-    "plate, the hand, the whole tabletop) which produces a centroid, a displacement and a p95 that "
-    "all look like measurements. Lowering BOX_THRESHOLD to upstream's 0.15 with a 0.10 retry — "
-    "correct, and required by §4 step 2 — makes coverage an even weaker witness than it was at "
-    "0.35, because more frames now get a box and none of them get checked. Discharged by: a human "
-    "looking at a sample of overlaid masks spanning the corpus (occluded frames, apple-out-of-frame "
-    "frames, and the grasp), and/or a mask-vs-ground-truth IoU distribution from the Isaac capture "
-    "recorded beside the centroid displacement. Neither exists.",
-    "BOX_THRESHOLD / TEXT_THRESHOLD / the retry are unmeasured on AppleToPlate, and after 2026-08-22 "
-    "that is a narrower objection than it was. They are no longer 'upstream demo defaults we "
-    "happened to copy' (0.35/0.25): they are Cosmos-Transfer2.5's own operating point, read off its "
-    "sam2_model.py, which is precisely what §4 step 2 asks for. The choice-defect half of this "
-    "blocker is therefore DISCHARGED and inverted — measuring these on our corpus and moving them "
-    "to whatever reads best would MAKE this a different segmenter from the generator's, and the "
-    "budget would then be a budget for an error nobody commits. What survives is not a choice, it "
-    "is an unknown: nothing has measured what this operating point does on THIS corpus, and the "
-    "retry at (0.10, 0.10) buys detections by accepting weak ones, which on an occluded frame can "
-    "replace an honest all-False mask with a confident box on the wrong object. That inflates "
-    "coverage while degrading the mask, i.e. it hides itself in the one number the harness gates "
-    "on. Discharged by the same evidence as blocker 1, plus the recorded detection-score "
-    "distribution and retry counts (n_frames_retry_fired / n_frames_retry_recovered) from a full "
-    "pass, so the retry's contribution is visible rather than assumed.",
     "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION, and it is the one difference left. "
     "Everything else in §4 step 2's 'the same segmenter' now matches Cosmos-Transfer2.5's "
     "sam2_model.py exactly — both checkpoints at pinned revisions, the 'apple.' phrase, "
@@ -676,7 +651,37 @@ GATE_QUALIFICATION_BLOCKERS: tuple[str, ...] = (
     "generator's mask error, and a G0b margin that clears only under it is not a pass. Discharged "
     "by: measuring the same Isaac capture BOTH ways — this adapter per frame, and the video "
     "predictor propagating from frame 0 — and recording the two p95s, so the direction and size of "
-    "the difference are a measurement rather than the argument above.",
+    "the difference are a measurement rather than the argument above. "
+    "STILL OPEN ON 2026-08-26, BUT NO LONGER FOR WANT OF THE MEASUREMENT. Both arms have now been "
+    "driven over the SAME 480-frame capture through scripts/estimators/apple_sam2_video.py, which "
+    "shares this module's detector, pins, prompt, thresholds, retry and box rule and differs only "
+    "in propagating from frame 0; the JPEG-transcode confound that would have made the delta "
+    "unattributable is excluded bitwise and its exclusion is asserted by test. "
+    "runs/pr08-est-drift/EST_DRIFT-ARMS-mujoco-trajectory-f480.json: per-frame p95 0.2908 px, "
+    "propagation p95 0.4701 px, delta +0.1793 px. WHAT THAT DOES TO THE TWO LIMBS ABOVE. Limb (a) "
+    "IS REFUTED AT p95, WHICH IS THE STATISTIC §6 SUBTRACTS: our tail is not inflated relative to "
+    "the generator's, it is SMALLER, so EST_DRIFT_P95 UNDERSTATES the generator's mask error and "
+    "the margin GEOM_TOL minus EST_DRIFT_P95 reads LARGER than it is. That is the unsafe direction, "
+    "and it is the opposite of what limb (a) assumed. But limb (a) IS CONFIRMED at p99 and p100 — "
+    "the two distributions cross between p95 and p99 (per-frame p99 1.0679 / p100 2.1837 against "
+    "propagation 0.5627 / 0.6487), because per-frame jitter is near zero with rare spikes while "
+    "propagation is a steady systematic offset. Both readings are recorded because reporting only "
+    "the headline would make this file's own argument look settled when the sign depends on which "
+    "percentile the gate uses. The delta also UNDERSTATES the understatement: the per-frame p95 is "
+    "over 479 frames because one frame was dropped, so that arm's own worst frame is not in its own "
+    "tail. Limb (b) WAS NOT OBSERVED: low_iou_runs at threshold 0.5 reports 0 runs and longest_run "
+    "0 for the propagation arm, against 1 run of length 1 for the per-frame arm — and low_iou_runs "
+    "is the statistic built precisely because a mean and even a p95 cannot see a contiguous drift. "
+    "That is evidence of absence ON THIS CAPTURE ONLY. WHY THIS IS NOT A DISCHARGE, in two "
+    "independent ways, either of which alone would suffice. FIRST, THE CAPTURE IS MUJOCO AND THIS "
+    "BLOCKER SAYS ISAAC. Whether a MuJoCo capture may stand in for the Isaac one is a rule question "
+    "for the project owner and is not settled by measuring more MuJoCo. SECOND, 480 frames of ONE "
+    "trajectory is not a corpus: the real one is 402 episodes and 171625 frames, and a single "
+    "trajectory can contain no drift event while the corpus contains many. Nothing is currently "
+    "mis-gated by this: configs/transfer25/pr08_geom_tol.json records geom_tol_px, est_drift_p95_px "
+    "and gate_margin_px all null, so run_g0_gates.gate_budget() refuses before subtracting anything. "
+    "Full reading: "
+    "docs/preregistration/PR-08-RESULT-2026-08-26-both-arms-measured-the-generator-is-the-worse-one.md.",
 )
 
 #: What used to be in the tuple above and is not any more, with the evidence that removed it. A
@@ -720,16 +725,132 @@ GATE_QUALIFICATION_DISCHARGED: tuple[str, ...] = (
     "nothing written) instead of being measured. measure_geom_tol has no such flag at all — its "
     "sam2 method takes the prompt from this module — so there is no longer a second place where the "
     "object is chosen. This module still cannot see the flag; it no longer has to.",
+    "2026-08-26 — blocker 1, 'NOBODY HAS LOOKED AT A MASK'. THE RETIRED WORDING FOLLOWS VERBATIM "
+    "AND UNPARAPHRASED BETWEEN THE MARKERS >>> and <<<, because a blocker summarised on its way "
+    "out is a blocker nobody can re-read. >>> "
+    "NOBODY HAS LOOKED AT A MASK. The 2026-08-21 wording of this blocker ('never executed, no "
+    "checkpoint staged') is withdrawn as stale: job 189583 staged all three checkpoints at the "
+    "pinned revisions and verified them, and job 189588 drove this adapter end to end over the "
+    "AppleToPlate corpus in the GEOM_TOL pilot — 720 frames, two passes, 480x640, coverage 1.0 on "
+    "both. CITATION CAVEAT, because a blocker tuple is the load-bearing record of what is and is "
+    "not established: 189583 is recorded in .mc/tasks/todo/T-040-*.md, but 189588 IS NOT RECORDED "
+    "ANYWHERE TRACKED IN THIS REPOSITORY — its artifact was not readable from the session that "
+    "wrote this line, and the job id is an untracked claim until GEOM_TOL_PILOT.json lands. It is "
+    "also evidence about a configuration THIS FILE HAS SINCE REPLACED: that pilot necessarily ran "
+    "at the old operating point (box_threshold 0.35, no retry branch), so it is weaker evidence "
+    "for the current adapter than its numbers suggest. So the module runs and produces output. "
+    "What that does NOT establish is that the output "
+    "is right: coverage 1.0 says a box was returned on every frame, not that it was the APPLE's "
+    "box, and this adapter's whole failure mode is a plausible mask on the wrong object (the "
+    "plate, the hand, the whole tabletop) which produces a centroid, a displacement and a p95 that "
+    "all look like measurements. Lowering BOX_THRESHOLD to upstream's 0.15 with a 0.10 retry — "
+    "correct, and required by §4 step 2 — makes coverage an even weaker witness than it was at "
+    "0.35, because more frames now get a box and none of them get checked. Discharged by: a human "
+    "looking at a sample of overlaid masks spanning the corpus (occluded frames, apple-out-of-frame "
+    "frames, and the grasp), and/or a mask-vs-ground-truth IoU distribution from the Isaac capture "
+    "recorded beside the centroid displacement. Neither exists."
+    " <<< DISCHARGED BY ITS FIRST LIMB, THE HUMAN LOOK. A person recorded as reviewer 'human' "
+    "opened all 382 overlaid apple-mask tiles of runs/pr08-mask-audit/MASK_AUDIT.json (job 189637, "
+    "24 of 402 episodes, 480x640) through a review page and recorded ONE VERDICT PER TILE. "
+    "Evidence: runs/pr08-mask-audit/MASK_AUDIT_VERDICTS.json (recorded_utc 2026-08-26T14:33:30Z, "
+    "established_by 'human', 382/382 tiles and 34/34 stratum sheets), derived through "
+    "runs/pr08-mask-audit/REVIEW_PAGE_INGEST.json, which carries the 382 per-tile verdicts the "
+    "per-sheet recording was compressed from, so the compression is recomputable. TALLY: apple "
+    "363, partial 7, wrong_object 12, no_mask 0. BY STRATUM: grasp 180/180 apple, spanning 92/92 "
+    "apple, border 4/4 apple — 276 of 276 on the grasp and the ordinary frames; min_visibility 87 "
+    "apple / 3 wrong_object / 2 partial; census 7 wrong_object / 1 partial; occluded 4 partial / 2 "
+    "wrong_object. The sample spans all three strata this blocker names by name, which "
+    "record_mask_audit_verdicts.py CHECKS rather than asserts "
+    "(blocker_1_named_strata.sample_spans_what_blocker_1_names). THE RECORD WAS CORRECTED ON "
+    "2026-08-26 AND THE CORRECTION IS PART OF THE EVIDENCE, not a footnote to it: the first "
+    "recording carried 13 no_mask verdicts on min_visibility-03 and -04. A blind re-read by eight "
+    "readers with disjoint sheet assignments disagreed on those 13 and on nothing else in 430 "
+    "tiles (runs/pr08-mask-audit/SECOND_OPINION.json), and this module's own per-frame counters "
+    "record a mask of 4355-6275 px at warm_apple_iou 0.92-0.97 on those same frames with "
+    "n_frames_with_empty_mask = 0 — so 'no mask' was arithmetically excluded by the instrument "
+    "that drew the tiles. Twelve identical values filling exactly one sheet with no exception is a "
+    "sheet default set wrong, not twelve judgements. The reviewer re-set both sheets; the "
+    "recomputed comparison reports 0 disagreements over 430 tiles. THAT AGREEMENT CORROBORATES "
+    "NOTHING — the second reader is the correlated observer MASK_AUDIT.json warns about — and is "
+    "recorded only because the contradiction it used to carry is gone. WHAT THIS ENTRY CARRIES "
+    "FORWARD RATHER THAN CLOSES, because a discharge that hides its residue is a deletion with "
+    "better manners: (i) 18 of the 19 non-apple verdicts are ONE episode, episode_000094 (18 of "
+    "its 24 tiles: 12 wrong_object, 6 partial) — the same episode the probe-scan census names as "
+    "the only one of 362 with an eligible occlusion frame, and the same episode that owns all 36 "
+    "mask refusals of the full GEOM_TOL pass, so this reads as one corpus event the masker fails "
+    "on rather than a masker that fails everywhere. Whether episode_000094 leaves the corpus is an "
+    "open dataset decision and is NOT decided by this discharge. (ii) The tiles were produced at "
+    "an ESTIMATOR_VERSION with no mask_val_min_iou / mask_val_ref_max_frac token, i.e. by this "
+    "adapter before the validity filter it now runs. Ten of the twelve version tokens are "
+    "character-identical and every differing one is a VALIDITY field: segment() draws the mask "
+    "from the box upstream's rule selected at upstream's thresholds and only then decides whether "
+    "to return it, so a validity field can replace a drawn mask with all-False and can never alter "
+    "one or accept a frame previously refused. The mask a reviewer saw is the mask this adapter "
+    "draws; WHICH FRAMES ARE MEASURED is not the same set, and that difference is unquantified on "
+    "the audit sample. (iii) The blocker's SECOND limb — a mask-vs-ground-truth IoU distribution "
+    "from the Isaac capture — was never satisfied and is not satisfied here; see "
+    "docs/preregistration/PR-08-NOTE-2026-08-25-the-mujoco-iou-cannot-discharge-blocker-1.md. The "
+    "blocker reads 'and/or', so the first limb suffices on its own wording. Recorded under "
+    "MASK_AUDIT.json's own rule: the wording is moved with its evidence, not deleted.",
+    "2026-08-26 — blocker 2, 'BOX_THRESHOLD / TEXT_THRESHOLD / the retry are unmeasured on "
+    "AppleToPlate'. THE RETIRED WORDING FOLLOWS VERBATIM AND UNPARAPHRASED BETWEEN THE MARKERS "
+    ">>> and <<<. >>> "
+    "BOX_THRESHOLD / TEXT_THRESHOLD / the retry are unmeasured on AppleToPlate, and after 2026-08-22 "
+    "that is a narrower objection than it was. They are no longer 'upstream demo defaults we "
+    "happened to copy' (0.35/0.25): they are Cosmos-Transfer2.5's own operating point, read off its "
+    "sam2_model.py, which is precisely what §4 step 2 asks for. The choice-defect half of this "
+    "blocker is therefore DISCHARGED and inverted — measuring these on our corpus and moving them "
+    "to whatever reads best would MAKE this a different segmenter from the generator's, and the "
+    "budget would then be a budget for an error nobody commits. What survives is not a choice, it "
+    "is an unknown: nothing has measured what this operating point does on THIS corpus, and the "
+    "retry at (0.10, 0.10) buys detections by accepting weak ones, which on an occluded frame can "
+    "replace an honest all-False mask with a confident box on the wrong object. That inflates "
+    "coverage while degrading the mask, i.e. it hides itself in the one number the harness gates "
+    "on. Discharged by the same evidence as blocker 1, plus the recorded detection-score "
+    "distribution and retry counts (n_frames_retry_fired / n_frames_retry_recovered) from a full "
+    "pass, so the retry's contribution is visible rather than assumed."
+    " <<< DISCHARGED BY THE SAME EVIDENCE AS BLOCKER 1 (the entry above), PLUS the full-pass "
+    "conjunct this blocker names by name, read off the merged 16-shard GEOM_TOL artifact "
+    "runs/pr08-geom-tol/pr08_geom_tol.json (measured 2026-08-24, 402 episodes, 171625 frames, "
+    "partial_measurement false) and reported in "
+    "docs/preregistration/PR-08-RESULT-2026-08-26-the-retry-blocker-2-named-never-fired.md: "
+    "n_frames_retry_fired = 0 and n_frames_retry_recovered = 0. THE (0.10, 0.10) RETRY NEVER FIRED "
+    "ON ANY FRAME OF THE CORPUS, so the mechanism this blocker predicts did not occur and cannot "
+    "have contributed to any number in this project. n_frames_without_detection = 0 says the first "
+    "pass grounded every frame at box_threshold 0.15, so coverage here was not bought at the lower "
+    "threshold. A second and independent witness from a different code path agrees: the score "
+    "distribution's n_below_box_threshold = 0. Detection-score distribution over all 171625 "
+    "frames: p1 0.5490, p25 0.8204, median 0.8497, p95 0.9002, p99 0.9117, mean 0.8371, std "
+    "0.0636. The 16 shard artifacts sum to the merged block on nine of nine counters. WHAT THIS "
+    "ENTRY CARRIES FORWARD: (i) A NEIGHBOURING MECHANISM DID OPERATE, BY AN UNPREDICTED ROUTE. The "
+    "move from 0.35 to 0.15 altered the outcome on 92 frames of 171625 (0.054 %), of which 52 are "
+    "episode_000094, and in that episode's f109-f144 region those are confident well-formed masks "
+    "of THE PLATE at scores 0.155-0.259, ~31000 px, plate overlap 0.985-0.992 — arriving by the "
+    "PRIMARY threshold rather than by the retry. This blocker's PREDICTED FAILURE THEREFORE "
+    "HAPPENED WHILE ITS NAMED MECHANISM DID NOT, which is a reason to read the count and not only "
+    "the discharge "
+    "(docs/preregistration/PR-08-RESULT-2026-08-25-operating-point-on-this-corpus.md). (ii) A "
+    "BRANCH THAT NEVER EXECUTED IS UNTESTED, NOT PROVEN. Nothing here licenses the retry on "
+    "another corpus, at another operating point, on restyled frames, or on generated clips. (iii) "
+    "The two conjuncts are measured on TWO DIFFERENT DECODES — the full pass on the AV1 tree, the "
+    "human look on the H.264-lossless tree — so their per-frame scores must not be quoted "
+    "interchangeably. (iv) git_commit is null on all 16 shards, so the code that produced the "
+    "full-pass half cannot be pinned to a revision. (v) n_frames_mask_refused = 36 is reported and "
+    "not analysed; whether those refusals were correct is a separate open question.",
 )
 
-#: Opt-IN, and this module still does not opt in. THREE conditions above are open, and the two that
-#: matter most are cheap to state: nobody has looked at a mask this adapter produced (the FIRST
-#: blocker), and it is not yet the same segmenter the generator runs — it re-detects per frame where
-#: Transfer2.5 propagates (the LAST). Counted rather than indexed on purpose: the tuple shrank on
-#: 2026-08-22 when the committed-contract blocker was discharged, and a comment that said "blocker
-#: 4" went on pointing at whatever had moved into that slot. :data:`GATE_QUALIFICATION_DISCHARGED`
-#: now carries four conditions closed by measurement rather than by deletion, and one of the three
-#: that remain is inverted — which is progress and is not permission. ``measure_est_drift`` reads this flag with a default of
+#: Opt-IN, and this module still does not opt in. ONE condition above is open, and it is the one
+#: this file has named from the start as the last difference from upstream: this adapter re-detects
+#: per frame where Transfer2.5 propagates. Counted rather than indexed on purpose: the tuple shrank
+#: on 2026-08-22 and again on 2026-08-26, and a comment that said "blocker 4" went on pointing at
+#: whatever had moved into that slot. :data:`GATE_QUALIFICATION_DISCHARGED` now carries SIX
+#: conditions closed by evidence rather than by deletion — which is progress and is not permission.
+#:
+#: **A SHORTER BLOCKER TUPLE DOES NOT FLIP THIS FLAG, AND NO EDIT THAT SHORTENS THE TUPLE MAY FLIP
+#: IT IN THE SAME COMMIT.** It stays ``False`` until the remaining entry is closed AND somebody
+#: decides, on the record, what to do with the residue the two 2026-08-26 entries carry forward —
+#: in particular blocker 2's residue (i), a failure the discharged blocker predicted, occurring by
+#: a route it did not predict, on 92 frames. ``measure_est_drift`` reads this flag with a default of
 #: False and stamps ``estimator_not_gate_qualified``; the artifact is still written, and exits 3.
 GATE_QUALIFIED = False
 
@@ -834,8 +955,9 @@ def _check_pins() -> None:
 #
 # Since 2026-08-22 both harnesses do record them (``estimator_stats`` in
 # ``configs/transfer25/pr08_geom_tol.json`` and in ``pr08_est_drift.json``), which is where the
-# full-pass half of ``GATE_QUALIFICATION_BLOCKERS``'s second entry lands. Recording it is not
-# discharging it: the blocker asks for the numbers AND for somebody to read them.
+# full-pass half of what was ``GATE_QUALIFICATION_BLOCKERS``'s second entry until 2026-08-26 lands;
+# that entry is now in ``GATE_QUALIFICATION_DISCHARGED``. Recording it was never discharging it: the
+# blocker asked for the numbers AND for somebody to read them, and both happened on separate days.
 
 #: ``"metric"``, ``"relative"``, or None before the depth model has been loaded. Read off the loaded
 #: config; absent from the config is treated as ``"relative"``, because that is what transformers'
@@ -927,13 +1049,14 @@ RETRY_RECOVERED_FRAMES = 0
 #: were binned identically, which is the same argument that makes the shards emit raw
 #: displacements. And a distribution recorded as a digest cannot answer a question nobody asked
 #: yet, which for this list is the whole point: it is the evidence
-#: ``GATE_QUALIFICATION_BLOCKERS``'s second entry asks for, and the question it is meant to answer
+#: ``GATE_QUALIFICATION_BLOCKERS``'s second entry asked for until 2026-08-26 (it is now in
+#: ``GATE_QUALIFICATION_DISCHARGED``), and the question it is meant to answer
 #: — how much of ``coverage`` was bought at the retry's lower threshold — is READ OFF THE VALUES.
 #: A score below :data:`BOX_THRESHOLD` can only have come from the ``(0.10, 0.10)`` retry, because
 #: the first pass discards everything under it; so ``[s for s in DETECTION_SCORES if s <
 #: BOX_THRESHOLD]`` is exactly the retry's contribution, and it is a measurement rather than the
-#: assumption the blocker objects to. Cumulative like the counters above, and snapshotted the same
-#: way.
+#: assumption the blocker objects to. On the 2026-08-24 full pass that list was EMPTY, which is what
+#: discharged the entry. Cumulative like the counters above, and snapshotted the same way.
 #:
 #: Cheap: a full GEOM_TOL pass is ~171 600 frames, i.e. ~1.4 MB of float in memory and ~215 kB of
 #: JSON per shard, beside the ~430 kB of displacements a shard already carries.
