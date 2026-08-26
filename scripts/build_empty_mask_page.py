@@ -37,7 +37,7 @@ STYLE = """
 :root{
   --ground:#0E1113; --surface:#171B1E; --raised:#1E2429; --line:#2A3238;
   --ink:#E6ECEF; --muted:#8B979E; --faint:#5C666C;
-  --yes:#B79CFF; --no:#3FC2D6; --unk:#C9A227; --accent:#3FC2D6;
+  --arm:#FF7A8A; --edge:#B79CFF; --none:#3FC2D6; --unk:#C9A227; --accent:#3FC2D6;
 }
 *{box-sizing:border-box}
 body{
@@ -63,13 +63,15 @@ h1{
   padding:12px 16px;font-size:16px;
 }
 .question b{color:var(--accent);font-weight:600}
+.question i{color:var(--muted);font-style:italic}
 .question p{margin:6px 0 0;font-size:13px;color:var(--muted)}
 
 .rail{display:flex;gap:1px;height:16px;border-radius:3px;overflow:hidden;background:var(--surface);border:1px solid var(--line)}
 .rail i{flex:1 1 0;background:var(--raised);cursor:pointer;transition:background .12s}
-.rail i[data-v="yes"]{background:var(--yes)}
-.rail i[data-v="no"]{background:var(--no)}
-.rail i[data-v="cannot_tell"]{background:var(--unk)}
+.rail i[data-v="arm"]{background:var(--arm)}
+.rail i[data-v="edge"]{background:var(--edge)}
+.rail i[data-v="none"]{background:var(--none)}
+.rail i[data-v="unclear"]{background:var(--unk)}
 .rail i.cur{outline:2px solid var(--ink);outline-offset:-2px;z-index:1}
 
 .stage{
@@ -102,8 +104,9 @@ kbd{
   font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;color:var(--muted);
   border:1px solid var(--line);border-radius:3px;padding:1px 5px;background:var(--surface);
 }
-.v--yes{border-color:#4A3E77}.v--yes:hover{border-color:var(--yes)}
-.v--no{border-color:#1E5560}.v--no:hover{border-color:var(--no)}
+.v--arm{border-color:#6E2E38}.v--arm:hover{border-color:var(--arm)}
+.v--edge{border-color:#4A3E77}.v--edge:hover{border-color:var(--edge)}
+.v--none{border-color:#1E5560}.v--none:hover{border-color:var(--none)}
 .v--unk{border-color:#5C4A12}.v--unk:hover{border-color:var(--unk)}
 .spacer{flex:1}
 
@@ -115,7 +118,7 @@ textarea{
   resize:vertical;
 }
 .status{font-size:12px;color:var(--muted);min-height:18px;font-family:"IBM Plex Mono",ui-monospace,monospace}
-.status.ok{color:var(--no)}
+.status.ok{color:var(--none)}
 .status.dirty{color:var(--unk)}
 .note{font-size:12px;color:var(--faint);border-top:1px solid var(--line);padding-top:12px}
 .note b{color:var(--muted);font-weight:600}
@@ -131,25 +134,27 @@ APP = r"""
     if (stored && typeof stored === "object") state = stored;
   } catch (e) {}
   try {
-    var local = JSON.parse(localStorage.getItem("v15-verdicts") || "null");
+    var local = JSON.parse(localStorage.getItem("v16-verdicts") || "null");
     if (local && Object.keys(local).length >= Object.keys(state).length) state = local;
   } catch (e) {}
 
-  var cur = 0, boost = false, zoom = false, dirty = false;
-  var LABEL = {yes:"ROBOTER SICHTBAR", no:"KEIN ROBOTER", cannot_tell:"UNKLAR"};
-  var TINT  = {yes:"var(--yes)", no:"var(--no)", cannot_tell:"var(--unk)"};
+  var cur = 0, boost = false, zoom = false, hint = false, dirty = false;
+  var LABEL = {arm:"DEUTLICHER ARM", edge:"NUR RANDSTUECK", none:"NICHTS", unclear:"UNKLAR"};
+  var TINT  = {arm:"var(--arm)", edge:"var(--edge)", none:"var(--none)", unclear:"var(--unk)"};
 
-  var app = document.getElementById("app");
-  app.innerHTML =
+  document.getElementById("app").innerHTML =
     '<div class="wrap">' +
       '<header>' +
         '<h1>Leere Roboter-Masken</h1>' +
-        '<span class="rule">T40_RULE_V15 &sect;3</span>' +
+        '<span class="rule">T40_RULE_V16 &sect;4</span>' +
         '<span class="count" id="count"></span>' +
       '</header>' +
       '<div class="question">' +
-        'Ist <b>irgendein Teil des Roboters</b> &mdash; Arm, Hand oder Greifer &mdash; irgendwo in diesem Bild sichtbar?' +
-        '<p>Auch ein Fingerspitzchen am Bildrand z&auml;hlt als sichtbar. Wenn du es nicht entscheiden kannst, sag das &mdash; geraten ist schlechter als unklar.</p>' +
+        'Was ist von <b>dem Roboter</b> in diesem Bild zu sehen?' +
+        '<p><b>Deutlicher Arm</b> hei&szlig;t: unverwechselbare Roboterstruktur, mehr als ein Randfetzen. ' +
+        '<b>Nur Randst&uuml;ck</b> hei&szlig;t: irgendwas Dunkles am Bildrand &mdash; Fingerspitze, Sliver oder Schatten. ' +
+        'Ob es davon welches ist, <b>musst du nicht entscheiden</b>: das ist eine eigene Antwort, keine Ausweichantwort. ' +
+        '<b>H</b> umrandet, was sich gegen&uuml;ber der ruhenden Szene ver&auml;ndert hat.</p>' +
       '</div>' +
       '<div class="rail" id="rail"></div>' +
       '<div class="stage" id="stage">' +
@@ -158,21 +163,24 @@ APP = r"""
         '<span class="mark" id="mark"></span>' +
       '</div>' +
       '<div class="bar">' +
-        '<button class="v--yes" data-v="yes"><kbd>1</kbd> Roboter sichtbar</button>' +
-        '<button class="v--no" data-v="no"><kbd>2</kbd> Kein Roboter</button>' +
-        '<button class="v--unk" data-v="cannot_tell"><kbd>3</kbd> Unklar</button>' +
-        '<span class="spacer"></span>' +
+        '<button class="v--arm"  data-v="arm"><kbd>1</kbd> Deutlicher Arm</button>' +
+        '<button class="v--edge" data-v="edge"><kbd>2</kbd> Nur Randst&uuml;ck / Schatten</button>' +
+        '<button class="v--none" data-v="none"><kbd>3</kbd> Nichts</button>' +
+        '<button class="v--unk"  data-v="unclear"><kbd>4</kbd> Unklar</button>' +
+      '</div>' +
+      '<div class="bar">' +
+        '<button id="bHint"><kbd>H</kbd> Ver&auml;nderung umranden</button>' +
         '<button id="bBoost"><kbd>B</kbd> Aufhellen</button>' +
         '<button id="bZoom"><kbd>Z</kbd> Lupe</button>' +
+        '<span class="spacer"></span>' +
         '<button id="bPrev"><kbd>&larr;</kbd></button>' +
         '<button id="bNext"><kbd>&rarr;</kbd></button>' +
+        '<button id="bNextOpen"><kbd>N</kbd> N&auml;chstes offenes</button>' +
       '</div>' +
       '<div class="status" id="status"></div>' +
       '<div class="bar">' +
         '<button id="bSave">Speichern</button>' +
         '<button id="bCopy">JSON kopieren</button>' +
-        '<span class="spacer"></span>' +
-        '<button id="bNextOpen">N&auml;chstes offenes</button>' +
       '</div>' +
       '<details class="out">' +
         '<summary>JSON zum Kopieren (falls Speichern nicht geht)</summary>' +
@@ -180,7 +188,7 @@ APP = r"""
       '</details>' +
       '<div class="note">' +
         '<b>Keine Maske wird gezeigt, und das ist Absicht.</b> Wer die Antwort der Pipeline sieht, bevor er seine eigene gibt, ist kein unabh&auml;ngiger Zeuge. ' +
-        'Die Kacheln tragen weder Episode noch Bildnummer noch Schicht &mdash; die stehen in SAMPLE.json und werden erst nach dem Urteil zugeordnet.' +
+        'Die Umrandung sagt <i>hier hat sich etwas ver&auml;ndert</i> &mdash; nicht <i>hier ist der Roboter</i>. Der Apfel ist aus ihr herausgerechnet, weil er gemessen der gr&ouml;&szlig;te St&ouml;rer war.' +
       '</div>' +
     '</div>';
 
@@ -191,49 +199,43 @@ APP = r"""
     rail.appendChild(seg);
   }
 
-  var stage  = document.getElementById("stage");
-  var shot   = document.getElementById("shot");
-  var badge  = document.getElementById("badge");
-  var mark   = document.getElementById("mark");
-  var count  = document.getElementById("count");
-  var status = document.getElementById("status");
-  var json   = document.getElementById("json");
+  var stage=document.getElementById("stage"), shot=document.getElementById("shot"),
+      badge=document.getElementById("badge"), mark=document.getElementById("mark"),
+      count=document.getElementById("count"), status=document.getElementById("status"),
+      json=document.getElementById("json");
 
   function done(){ var n=0; for (var k in state) if (state[k]) n++; return n; }
-
-  function say(text, cls){ status.textContent = text; status.className = "status" + (cls ? " " + cls : ""); }
+  function say(t,c){ status.textContent=t; status.className="status"+(c?" "+c:""); }
 
   function paint(){
     var t = TILES[cur];
-    shot.src = t.image;
-    badge.textContent = "Kachel " + (cur + 1) + " / " + TILES.length;
+    shot.src = (hint && t.hint) ? t.hint : t.image;
+    badge.textContent = "Kachel " + (cur+1) + " / " + TILES.length + (hint ? "  · Veränderung" : "");
     var v = state[t.tile];
     mark.textContent = v ? LABEL[v] : "";
     mark.style.background = v ? TINT[v] : "transparent";
     count.textContent = done() + " / " + TILES.length + " beurteilt";
     var segs = rail.children;
-    for (var i = 0; i < segs.length; i++) {
+    for (var i=0;i<segs.length;i++){
       var sv = state[TILES[i].tile];
       if (sv) segs[i].setAttribute("data-v", sv); else segs[i].removeAttribute("data-v");
-      segs[i].className = (i === cur) ? "cur" : "";
+      segs[i].className = (i===cur) ? "cur" : "";
     }
-    json.value = JSON.stringify({rule:"T40_RULE_V15", verdicts:state}, null, 1);
+    json.value = JSON.stringify({rule:"T40_RULE_V16", verdicts:state}, null, 1);
   }
-
-  function go(i){ cur = Math.max(0, Math.min(TILES.length - 1, i)); paint(); }
+  function go(i){ cur = Math.max(0, Math.min(TILES.length-1, i)); paint(); }
 
   function set(v){
     var key = TILES[cur].tile;
     if (state[key] === v) delete state[key]; else state[key] = v;
     dirty = true;
-    try { localStorage.setItem("v15-verdicts", JSON.stringify(state)); } catch (e) {}
+    try { localStorage.setItem("v16-verdicts", JSON.stringify(state)); } catch (e) {}
     say(done() + " Urteile lokal gesichert, noch nicht gespeichert.", "dirty");
-    if (state[key] && cur < TILES.length - 1) go(cur + 1); else paint();
+    if (state[key] && cur < TILES.length-1) go(cur+1); else paint();
   }
-
   function nextOpen(){
-    for (var d = 1; d <= TILES.length; d++) {
-      var i = (cur + d) % TILES.length;
+    for (var d=1; d<=TILES.length; d++){
+      var i=(cur+d)%TILES.length;
       if (!state[TILES[i].tile]) { go(i); return; }
     }
     say("Alle " + TILES.length + " Kacheln sind beurteilt.", "ok");
@@ -243,57 +245,54 @@ APP = r"""
     b.addEventListener("click", function(){ set(b.getAttribute("data-v")); });
   });
   rail.addEventListener("click", function(ev){
-    var seg = ev.target.closest("i[data-i]");
-    if (seg) go(parseInt(seg.getAttribute("data-i"), 10));
+    var s = ev.target.closest("i[data-i]"); if (s) go(parseInt(s.getAttribute("data-i"),10));
   });
-  document.getElementById("bPrev").addEventListener("click", function(){ go(cur - 1); });
-  document.getElementById("bNext").addEventListener("click", function(){ go(cur + 1); });
+  document.getElementById("bPrev").addEventListener("click", function(){ go(cur-1); });
+  document.getElementById("bNext").addEventListener("click", function(){ go(cur+1); });
   document.getElementById("bNextOpen").addEventListener("click", nextOpen);
-  document.getElementById("bBoost").addEventListener("click", function(){ boost = !boost; stage.classList.toggle("boost", boost); });
-  document.getElementById("bZoom").addEventListener("click", function(){ zoom = !zoom; stage.classList.toggle("zoom", zoom); });
+  document.getElementById("bHint").addEventListener("click", function(){ hint=!hint; paint(); });
+  document.getElementById("bBoost").addEventListener("click", function(){ boost=!boost; stage.classList.toggle("boost", boost); });
+  document.getElementById("bZoom").addEventListener("click", function(){ zoom=!zoom; stage.classList.toggle("zoom", zoom); });
   stage.addEventListener("mousemove", function(ev){
     if (!zoom) return;
     var r = stage.getBoundingClientRect();
-    stage.style.setProperty("--ox", ((ev.clientX - r.left) / r.width * 100) + "%");
-    stage.style.setProperty("--oy", ((ev.clientY - r.top) / r.height * 100) + "%");
+    stage.style.setProperty("--ox", ((ev.clientX-r.left)/r.width*100)+"%");
+    stage.style.setProperty("--oy", ((ev.clientY-r.top)/r.height*100)+"%");
   });
 
   document.addEventListener("keydown", function(ev){
-    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (ev.metaKey||ev.ctrlKey||ev.altKey) return;
     if (/^(INPUT|TEXTAREA)$/.test(ev.target.tagName)) return;
     var k = ev.key.toLowerCase();
-    if (k === "1" || k === "j") { set("yes"); }
-    else if (k === "2" || k === "k") { set("no"); }
-    else if (k === "3" || k === "l") { set("cannot_tell"); }
-    else if (k === "arrowleft")  { go(cur - 1); }
-    else if (k === "arrowright") { go(cur + 1); }
-    else if (k === "b") { boost = !boost; stage.classList.toggle("boost", boost); }
-    else if (k === "z") { zoom = !zoom; stage.classList.toggle("zoom", zoom); }
-    else if (k === "n") { nextOpen(); }
+    if (k==="1") set("arm");
+    else if (k==="2") set("edge");
+    else if (k==="3") set("none");
+    else if (k==="4") set("unclear");
+    else if (k==="arrowleft") go(cur-1);
+    else if (k==="arrowright") go(cur+1);
+    else if (k==="h") { hint=!hint; paint(); }
+    else if (k==="b") { boost=!boost; stage.classList.toggle("boost", boost); }
+    else if (k==="z") { zoom=!zoom; stage.classList.toggle("zoom", zoom); }
+    else if (k==="n") nextOpen();
     else return;
     ev.preventDefault();
   });
 
   document.getElementById("bCopy").addEventListener("click", function(){
     json.select();
-    var ok = false;
-    try { ok = document.execCommand("copy"); } catch (e) {}
+    var ok=false; try { ok = document.execCommand("copy"); } catch (e) {}
     if (navigator.clipboard && !ok) {
       navigator.clipboard.writeText(json.value).then(
-        function(){ say("JSON in der Zwischenablage. Fuege es Claude ein.", "ok"); },
-        function(){ say("Kopieren ging nicht. Oeffne das Feld unten und kopiere von Hand."); }
-      );
+        function(){ say("JSON in der Zwischenablage. Fuege es Claude ein.","ok"); },
+        function(){ say("Kopieren ging nicht. Oeffne das Feld unten."); });
       return;
     }
-    say(ok ? "JSON in der Zwischenablage. Fuege es Claude ein." : "Kopieren ging nicht. Oeffne das Feld unten.", ok ? "ok" : "");
+    say(ok ? "JSON in der Zwischenablage. Fuege es Claude ein." : "Kopieren ging nicht. Oeffne das Feld unten.", ok?"ok":"");
   });
 
   document.getElementById("bSave").addEventListener("click", function(){
     say("Speichere ...");
-    if (!(window.claude && window.claude.use)) {
-      say("Speichern ist hier nicht verfuegbar. Nimm 'JSON kopieren'.");
-      return;
-    }
+    if (!(window.claude && window.claude.use)) { say("Speichern ist hier nicht verfuegbar. Nimm 'JSON kopieren'."); return; }
     window.claude.use("artifact").then(function(artifact){
       if (!artifact) { say("Speichern ist hier nicht verfuegbar. Nimm 'JSON kopieren'."); return; }
       var head = '<!doctype html>\n<html lang="de"><head><meta charset="utf-8">' +
@@ -315,19 +314,16 @@ APP = r"""
       });
     }).catch(function(err){
       var code = (err && err.code) || "";
-      if (code === "conflict") { say("Jemand anders hat zwischendurch gespeichert. Seite neu laden und nochmal."); }
-      else { say("Speichern fehlgeschlagen (" + (code || "unbekannt") + "). Nimm 'JSON kopieren'."); }
+      say(code === "conflict"
+        ? "Jemand anders hat zwischendurch gespeichert. Seite neu laden und nochmal."
+        : "Speichern fehlgeschlagen (" + (code||"unbekannt") + "). Nimm 'JSON kopieren'.");
     });
   });
 
-  window.addEventListener("beforeunload", function(ev){
-    if (!dirty) return;
-    ev.preventDefault();
-    ev.returnValue = "";
-  });
+  window.addEventListener("beforeunload", function(ev){ if (dirty) { ev.preventDefault(); ev.returnValue=""; } });
 
   go(0);
-  say(done() ? done() + " Urteile wiederhergestellt." : "Taste 1 / 2 / 3 urteilt und springt weiter.", done() ? "ok" : "");
+  say(done() ? done()+" Urteile wiederhergestellt." : "Taste 1 / 2 / 3 / 4 urteilt und springt weiter.", done()?"ok":"");
 })();
 """
 
@@ -352,18 +348,32 @@ def main() -> None:
 
     sample = json.loads((args.look / "SAMPLE.json").read_text())
     payload = []
+    missing_hints = 0
     for record in sample["tiles"]:
         raw = (args.look / "frames" / record["file"]).read_bytes()
-        payload.append({
+        entry = {
             "tile": record["tile"],
             "image": "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii"),
-        })
+        }
+        # V16 §4's "what changed here" toggle. Optional on purpose: the page must still build and
+        # judge without it, because it is an aid to finding and never part of the verdict.
+        hint = args.look / "hints" / f"hint-{record['tile']:03d}.jpg"
+        if hint.is_file():
+            entry["hint"] = "data:image/jpeg;base64," + base64.b64encode(hint.read_bytes()).decode("ascii")
+        else:
+            missing_hints += 1
+        payload.append(entry)
+    if missing_hints:
+        print(f"note: {missing_hints} tiles carry no hint view; run render_empty_mask_hints.py")
     payload.sort(key=lambda r: r["tile"])
 
-    leaks = {"episode", "frame_index", "stratum", "file"}
+    # V16 §4 carries V15 §3's prohibition forward in full. The allowed keys are listed positively
+    # rather than the forbidden ones negatively, because a new leak is a key nobody thought to ban.
+    allowed = {"tile", "image", "hint"}
     for record in payload:
-        if leaks & set(record):
-            raise SystemExit(f"tile {record['tile']} would leak {sorted(leaks & set(record))}")
+        extra = set(record) - allowed
+        if extra:
+            raise SystemExit(f"tile {record['tile']} would leak {sorted(extra)}")
 
     out = args.out or (args.look / "page.html")
     out.write_text(PAGE.format(style=STYLE, app=APP, tiles=json.dumps(payload, separators=(",", ":"))))

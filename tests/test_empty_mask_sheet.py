@@ -1,4 +1,9 @@
-"""The empty-mask (a)/(b) instrument — `T40_RULE_V15` §§2-3.
+"""The empty-mask instrument — `T40_RULE_V15` §§1-2, carried forward by `T40_RULE_V16` §4.
+
+V15 §§3-6 were superseded on 2026-08-27 when two strata came back over V15 §4's undecidability cap.
+**The population, the strata, the seed and the allocation were NOT re-rolled** — re-drawing a sample
+after seeing a stratum fail is how a sample gets fitted — so everything ``stratify`` and ``draw`` do
+here is still the registered protocol, and the tests below still guard the rule they always did.
 
 Two things here are load-bearing and neither is obvious from reading the scripts.
 
@@ -176,7 +181,10 @@ def test_the_built_page_leaks_no_episode_stratum_or_frame_index():
     # The page is one long line of base64, so search the payload's KEYS rather than substrings that
     # base64 would produce by chance.
     tiles = json.loads(page.split('id="tiles">', 1)[1].split("</script>", 1)[0])
-    assert {k for tile in tiles for k in tile} == {"tile", "image"}
+    # "hint" joined the payload under T40_RULE_V16 §4. The assertion is a SUBSET check against a
+    # positive allow-list, because the failure to guard against is a key nobody thought to ban.
+    assert {k for tile in tiles for k in tile} <= {"tile", "image", "hint"}
+    assert all("image" in tile for tile in tiles)
     assert len(tiles) == len(sample["tiles"])
     for stratum in sheet.ALLOCATION:
         assert stratum not in page
