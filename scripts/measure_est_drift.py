@@ -1063,6 +1063,13 @@ def arm_block(
         "centroid_displacement": distribution(values, hist_bin_px),
         "mask_vs_ground_truth_iou": iou_distribution(ious, n_both_masks_empty),
         "low_iou_runs": low_iou_runs(list(iou_per_frame)),
+        # THE RAW PER-FRAME DISPLACEMENTS, and the reason they are here rather than only summarised.
+        # `distribution` records percentiles and a 0.5 px histogram, and NEITHER can be pooled: a
+        # p95 over the union of eight captures is not any function of eight p95s, and re-deriving
+        # it from histogram bins would quantise the answer to the bin width. V17 §2 pools eight
+        # captures, so the values it pools have to survive the artifact. Cheap — one float per
+        # measured frame, ~4 kB for 480.
+        "displacements_px": [float(v) for v in values],
     }
     if extra:
         block.update(dict(extra))
