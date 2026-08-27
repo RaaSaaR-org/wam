@@ -1,17 +1,31 @@
 # Handoff — resume here
 
-Last session: **2026-08-15**. Branch `t041-cosmos-super-finetune`, PR
-[#1](https://github.com/RaaSaaR-org/wam/pull/1) open. Live task: **T-041**, which has **run and
-returned VOID** (`docs/preregistration/PR-09-cosmos-super-finetune.md` §6, G0b).
+Last session: **2026-08-27**. Branch `edge-wam-e01-e05`, which as of `d96dc42` contains
+`origin/main` — the two had been running patch-equivalent-but-divergent since 2026-08-08 and that
+is now merged. Live task: **T-040**, the photoreal-augmentation corpus.
+
+**The sprint goal is generating that corpus, and what is left to do is one page:**
+[`SPRINT-2026-08-27-cosmos3-dataset-generation.md`](SPRINT-2026-08-27-cosmos3-dataset-generation.md).
+Two of PR-08 §8's seven items are open (3, throughput; 4, the two geometry numbers), plus one
+economic problem that is formally not a gate and practically decides whether the run is worth its
+budget. Read that page before this one; the rest of this file is context it does not repeat.
 
 This file is the cold-start entry point: what state the tree is in, what the next action is, which
 decisions are already made and must not be re-litigated, and which facts were expensive to
 establish so they are not re-derived. It is a working note, not a record — results go in the task
 files and the `PR-*-RESULT.md` documents, and this file gets rewritten.
 
-**One thing blocks everything, and it is not code and not the cluster:**
+**What blocks the sprint goal is not code and not the cluster — it is two owner signatures:**
 
-1. **T-041's VOID needs one decision**, and it is narrower than it looks — see §1.
+1. **`apple_sam2.GATE_QUALIFIED` has to flip**, and its blocker tuple being empty is explicitly not
+   why it may. The second precondition — a recorded decision on blocker 2's residue (i) — has its
+   evidence, with one unexplained five-frame gap inside it. The sprint page §3.1 has the detail and
+   names what closes it: the same census, run on the cluster.
+2. **`T40_RULE_V1` §1 has to be lifted on the record**, by a named signatory. It was proposed on
+   2026-08-24 and declined, on grounds that partly still hold.
+
+**Superseded but kept:** T-041's VOID (§1 below) was the live decision on 2026-08-15. It is no
+longer the blocking one — T-040 is — and §1 has not been rewritten around that.
 
 **The "lockout" is withdrawn (2026-08-15).** Earlier the same day this list opened with "Discoverer+
 is locked out — LDAP-side, needs a helpdesk ticket." That was a misdiagnosis and **no ticket should

@@ -30,7 +30,10 @@ mc show T-16     # the whole T-16 record
 > the VOID premise above is superseded by measurement, not by argument. The policy arm then ran for
 > the first time and scored **−239.69 %** on the holdout and **−186.73 %** on episodes it *trained
 > on*: it never fit. **N is a verdict, so `T40_RULE_V3` §5.3's "T-39 has reported" is satisfied and
-> PR-08 §8 item 7 is closed — items 2, 3 and 4 are still open, so T-040 is not open.** N licenses
+> PR-08 §8 item 7 is closed — items 2, 3 and 4 are still open, so T-040 is not open.** (Item 2 has
+> since closed too, 2026-08-22, `T40_RULE_V7`; **as of 2026-08-27 only items 3 and 4 remain** —
+> [`docs/SPRINT-2026-08-27-cosmos3-dataset-generation.md`](docs/SPRINT-2026-08-27-cosmos3-dataset-generation.md).)
+> N licenses
 > "the corpus is the finding, the next move is the *kind* of data", and forbids reading it as
 > refuting any WAM design. **It still does not license training: that remains the owner's call.**
 
