@@ -833,9 +833,20 @@ if (( SHARD_MODE )); then
   # measurement -- is data-dependent, means THIS shard measured the wrong thing, and is still
   # refused. headline_valid and the two truncating flags are checked directly rather than inferred
   # from the reason strings, so a reason this rule does not recognise cannot be waved through.
+  #
+  # AND THAT WHOLE PARAGRAPH IS TRUE ONLY WHILE THE WORLD AROUND THE SHARD HAS NOT MOVED, which is
+  # the defect the two staleness checks inside the heredoc repair. "The adapter's standing flag,
+  # not this shard" stops being a reason to reuse the moment the adapter's flag flips: re-measuring
+  # would then produce a QUALIFIED shard, so skipping is no longer free, it is the one action that
+  # keeps a permanently disqualified artifact in the partition. And nothing here ever compared the
+  # shard's own segmenter block against the committed pre-commitment, so a shard measured by a
+  # different adapter was silently reused -- which is exactly how sixteen artifacts missing
+  # mask_validity_reference_max_frame_fraction survived a resubmission and were discovered at the
+  # merge, an array and 13.6 GPU-h later. Both checks only ever cause MORE work to be done.
   shard_artifact_landed () {  # $1 path $2 index $3 num_shards $4 step -> 0 when it counts as landed
-    python - "$1" "$2" "$3" "$4" <<'PY'
-import json, re, sys
+    CONTRACT_FILE="${WAM}/configs/transfer25/pr08_geom_tol.json" \
+      python - "$1" "$2" "$3" "$4" <<'PY'
+import importlib, json, os, re, sys
 path, want_i, want_n, want_step = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 try:
     d = json.loads(open(path).read())
@@ -848,6 +859,86 @@ for label, got, want in (("schema", d.get("schema"), "wam.geom_tol_shard/1"),
                          ("step_frames", d.get("step_frames"), want_step)):
     if got != want:
         print(f"    not reusable: {label} is {got!r}, wanted {want!r}"); raise SystemExit(1)
+
+# -- WHAT THE FOUR CHECKS ABOVE CANNOT SEE -------------------------------------------------------
+#
+# Every one of them asks the artifact about itself, and a shard can be internally perfect and still
+# be one that could never be committed. Both of the ways that happens are properties of the WORLD
+# OUTSIDE the file -- the adapter's standing gate flag, and the committed pre-commitment the merge
+# will hold the artifact against -- so no field of the shard can answer either of them.
+#
+# BOTH CHECKS ARE FAIL-CLOSED, AND THAT DIRECTION IS THE WHOLE DESIGN: anything they cannot
+# establish is a refusal, so the most either can ever cost is one shard re-measured for nothing,
+# while what they prevent is a partition of permanently uncommittable artifacts pooled into a
+# median. A resume check that reuses too little is an inconvenience; one that reuses too much is
+# 13.6 GPU-h and a number nobody may commit.
+#
+# THE TWO NAMES ARE RESOLVED THE WAY THE PREFLIGHT BELOW RESOLVES THEM, deliberately and not
+# incidentally: measure_geom_tol off the PYTHONPATH this file exported, the adapter through THAT
+# module's own SAM2_ADAPTER_SPEC rather than a literal spelled here, and the committed document
+# through ${CONTRACT_FILE} on this heredoc's own invocation. One idiom in the file and not two. A
+# reader and a writer that each keep their own idea of where the segmenter block lives is precisely
+# how this repo has been burned before -- measure_est_drift.py carries the comments that say so.
+try:
+    mgt = importlib.import_module("measure_geom_tol")
+    SPEC = getattr(mgt, "SAM2_ADAPTER_SPEC", None)
+    if not isinstance(SPEC, str) or not SPEC:
+        raise ImportError("measure_geom_tol.py declares no SAM2_ADAPTER_SPEC to name the adapter")
+    adapter = importlib.import_module(SPEC)
+except Exception as exc:
+    print(f"    not reusable: the adapter and the committed contract CANNOT BE CHECKED from here"
+          f" ({type(exc).__name__}: {exc}).")
+    print("    That is a broken or half-synced cluster copy and not a verdict about this shard, but")
+    print("    an unchecked shard is not a checked one: it is re-measured rather than pooled.")
+    raise SystemExit(1)
+
+# CHECK 1 needs this and asks for it here, once, so that the branch below reads as the one sentence
+# it is about: is the adapter's flag STILL what it was when this artifact was written?
+adapter_gate_qualified = bool(getattr(adapter, "GATE_QUALIFIED", False))
+
+# -- CHECK 2: THE CONTRACT WENT STALE ------------------------------------------------------------
+#
+# The comparison is measure_geom_tol's own committed_segmenter_contract() and
+# contract_disagreements(), IMPORTED. Both sides are looked up by the same function, so this reader
+# cannot develop its own idea of where a segmenter block lives -- and absence counts as a
+# disagreement there, which is the entire reason this check catches the sixteen shards that carry
+# no mask_validity_reference_max_frame_fraction while the committed document does. That field is
+# not decoration: it is a frame-refusal predicate (apple_sam2.py reference_is_object_scale), so an
+# artifact that does not record it was measured by a segmenter that refused a different set of
+# frames than the committed one describes.
+CONTRACT_FILE = os.environ.get("CONTRACT_FILE") or ""
+try:
+    with open(CONTRACT_FILE, encoding="utf-8") as handle:
+        committed_doc = json.load(handle)
+except Exception as exc:
+    print(f"    not reusable: the committed pre-commitment at {CONTRACT_FILE!r} cannot be read"
+          f" ({type(exc).__name__}: {exc}), so there is nothing to hold this shard against.")
+    print("    Reusing a shard nothing can be compared to is how an unmergeable partition survives")
+    print("    to the merge; re-measuring one costs a shard.")
+    raise SystemExit(1)
+committed, committed_where = mgt.committed_segmenter_contract(committed_doc)
+recorded, recorded_where = mgt.committed_segmenter_contract(d)
+if committed is None:
+    print(f"    not reusable: {CONTRACT_FILE} carries no segmenter block, so PR-08 §4 step 2's")
+    print("    'the same segmenter' is uncheckable here -- and an uncheckable requirement reads")
+    print("    downstream exactly like a satisfied one.")
+    raise SystemExit(1)
+if recorded is None:
+    print("    not reusable: this shard records no segmenter block of its own, so nothing says")
+    print("    which segmenter produced it. The merge compares the same block and refuses.")
+    raise SystemExit(1)
+drift = mgt.contract_disagreements(recorded, committed)
+if drift:
+    print("    not reusable: THIS SHARD WAS MEASURED UNDER A DIFFERENT SEGMENTER CONTRACT than the")
+    print(f"    committed one ({recorded_where} here, {committed_where} in {CONTRACT_FILE}):")
+    for item in drift:
+        print(f"      {item['field']}: committed {item['geom_tol']!r},"
+              f" this shard {item['this_run']!r}")
+    print("    The merge holds every shard against that same document and refuses on the same")
+    print("    fields, so keeping this one buys an array of GPU-hours and then a refusal. It is")
+    print("    re-measured by the adapter this job actually runs.")
+    raise SystemExit(1)
+
 # The exact string measure_geom_tol.main() appends for an adapter that has not opted in. Anchored
 # at both ends so a longer sentence that merely starts this way is not swallowed.
 ADAPTER_BLOCKER = re.compile(r"^mask method .* is not gate-qualified$")
@@ -869,6 +960,25 @@ if not d.get("gate_qualified"):
         blockers.append("n_steps_measured is 0")
     if blockers:
         print("    not reusable: " + " | ".join(blockers))
+        raise SystemExit(1)
+    # -- CHECK 1: THE GATE FLAG WENT STALE ------------------------------------------------------
+    #
+    # "That is the adapter's standing flag and not this shard" is a reason to reuse ONLY while the
+    # flag still stands where it stood at measurement time. It was correct while apple_sam2 set
+    # GATE_QUALIFIED=False: re-measuring would have produced another unqualified shard, so the
+    # skip cost nothing. The moment the owner flips that flag the sentence inverts -- re-measuring
+    # now produces a QUALIFIED shard, and skipping is the one action that keeps a permanently
+    # disqualified artifact in the partition and pools it into a median that can never be
+    # committed as GEOM_TOL. gate_qualified is BAKED INTO EACH SHARD AT MEASUREMENT TIME and no
+    # merge re-derives it, so there is no later repair: the only way to get a qualified artifact
+    # for this index is to measure one.
+    if adapter_gate_qualified:
+        print("    not reusable: THE ADAPTER'S STANDING FLAG HAS MOVED SINCE THIS SHARD WAS")
+        print(f"    MEASURED. {SPEC}.GATE_QUALIFIED is True today, and this artifact permanently")
+        print("    records the opposite: " + "; ".join(reasons))
+        print("    gate_qualified is baked in at measurement time and no merge re-derives it, so")
+        print("    reusing this shard would pool a median that can never be committed as GEOM_TOL")
+        print("    -- while RE-MEASURING it now produces a qualified one. Re-measuring.")
         raise SystemExit(1)
     print("    LANDED BUT NOT GATE-QUALIFIED, and that is the adapter's standing flag and not this")
     print("    shard: " + "; ".join(reasons))

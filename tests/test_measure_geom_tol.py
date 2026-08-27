@@ -2700,6 +2700,7 @@ def test_carrying_a_budget_writes_the_number_the_name_and_the_margin(tmp_path: P
     """The number alone is not carryable: PR-08 §6 subtracts it and §4 step 2 asks which segmenter
     produced it, so the name travels with it mechanically instead of being retyped."""
     out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         gate_qualified=True,
                          mask_method={"name": "sam2-hiera-large+gdino-base"},
                          est_drift_p95_blocked_by="steps 1-4 have not been run here")
     est = _est_artifact(tmp_path / "pr08_est_drift.json")
@@ -2725,31 +2726,123 @@ def test_carrying_a_budget_declares_the_name_slot_for_the_next_measurement(tmp_p
     and is then refused for having dropped it."""
     out = write_contract(
         tmp_path / "pr08_geom_tol.json",
+        geom_tol_px=3.5, GEOM_TOL_px=3.5, gate_qualified=True,
         measurement_fields=["geom_tol_px", "geom_tol_source", "est_drift_p95_px",
                             "est_drift_source", "gate_margin_px"],
         mask_method={"name": "sam2-hiera-large+gdino-base"},
     )
     est = _est_artifact(tmp_path / "pr08_est_drift.json")
-    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_NOT_GATE_QUALIFIED
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_OK
     assert mgt.EST_DRIFT_NAME_FIELD in json.loads(out.read_text())["measurement_fields"]
 
 
-def test_carrying_a_budget_into_a_document_with_no_tolerance_is_not_a_gate(tmp_path: Path) -> None:
-    """Half of PR-08 §8 item 4 is not the gate. The number is recorded, gate_margin_px stays null,
-    and the exit status says so rather than reading as a finished commitment."""
+def test_carrying_a_budget_into_a_document_with_no_tolerance_writes_nothing_at_all(
+    tmp_path: Path, capsys
+) -> None:
+    """THE DEFECT, ON THE NARROW PATH NOTHING ELSE COVERED.
+
+    Until 2026-08-27 this case WROTE and then refused: `tol` was read four lines above
+    write_artifact(), so a gate-qualified EST_DRIFT artifact carried onto the pristine committed
+    contract — geom_tol_px null, which is exactly how PR-08 §4 step 2 requires that file to sit
+    until the corpus is measured — landed est_drift_p95_px, est_drift_estimator_name,
+    est_drift_source AND a fresh .sha256 sidecar in the TRACKED document, printed "gate_margin_px
+    is null" and exited. Three of four measured slots filled, a digest certifying the half-written
+    state, and no margin: a document that reads as a carry somebody performed rather than as one
+    that was refused, with the sidecar as the part that makes it look checked.
+
+    The sidecar is asserted separately and not as an afterthought. A .sha256 beside a document that
+    did not change is its own corruption — the next reader checks the digest, finds it matches, and
+    concludes the file was written by this tool.
+    """
+    out = write_contract(tmp_path / "pr08_geom_tol.json", gate_qualified=True,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    assert "states no GEOM_TOL" in capsys.readouterr().err
+    assert out.read_bytes() == before, "the half-written gate document is the defect"
+    assert not mgt.sidecar_path(out).exists(), "a digest certifying a document that did not change"
+
+
+def test_a_disqualified_est_drift_artifact_is_refused_before_the_target_is_even_read(
+    tmp_path: Path, capsys
+) -> None:
+    """The regression guard on the half that was ALREADY right, pinned at the one ordering that
+    matters. A disqualified EST_DRIFT artifact must stop the carry on its own reasons — not on the
+    target document's — so that an operator holding a bad measurement is told about the measurement
+    rather than sent to re-measure GEOM_TOL. Here the target is the pristine contract, which the
+    2026-08-27 refusals would also reject; the artifact's verdict has to be the one that speaks."""
     out = write_contract(tmp_path / "pr08_geom_tol.json",
                          mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _est_artifact(tmp_path / "pr08_est_drift.json", gate_qualified=False,
+                        gate_disqualified_reasons=["estimator_not_gate_qualified"])
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "estimator_not_gate_qualified" in err
+    assert "states no GEOM_TOL" not in err, "the artifact's own verdict is the reason to report"
+    assert out.read_bytes() == before
+    assert not mgt.sidecar_path(out).exists()
+
+
+@pytest.mark.parametrize("over", [{"gate_qualified": False}, {}])
+def test_carrying_onto_a_geom_tol_document_that_is_not_itself_qualified_refuses(
+    tmp_path: Path, over: dict, capsys
+) -> None:
+    """THE HALF THIS MODE NEVER CHECKED. est_drift_measurement refuses a disqualified EST_DRIFT
+    artifact, so an exit 0 from this command certified one side of GEOM_TOL - EST_DRIFT_P95 and
+    asserted nothing whatever about the side the document is named after. A merge that came back
+    gate_qualified: false — shards disagreeing about the pixel grid, a partial pool, an adapter
+    whose flag was down when the array ran — still carries a real-looking geom_tol_px, and the
+    carry would subtract from it, print a positive margin and exit 0. Both halves then sit in one
+    file under one gate_margin_px that a reader cannot attribute.
+
+    ABSENT REFUSES EXACTLY AS FALSE DOES, which is the second parameter. The committed contract
+    carries no gate_qualified because it is committed BEFORE the measurement; a document that has
+    not been measured is not a qualified one, and saying nothing has never been saying yes here."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"}, **over)
+    before = out.read_bytes()
     est = _est_artifact(tmp_path / "pr08_est_drift.json")
-    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_NOT_GATE_QUALIFIED
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "gate_qualified" in err, "the refusal must name the reason, not merely refuse"
+    assert out.read_bytes() == before
+    assert not mgt.sidecar_path(out).exists()
+
+
+def test_a_qualified_pair_carries_end_to_end_with_the_arm_named(tmp_path: Path) -> None:
+    """THE HAPPY PATH, ASSERTED AS ARITHMETIC. A gate-qualified EST_DRIFT artifact, a gate-qualified
+    GEOM_TOL document with a real tolerance, and an arm stated on the command line: all four
+    measured slots land together, the sidecar matches the bytes on disk, and gate_margin_px is the
+    subtraction PR-08 §6 asks for rather than merely a non-null number. Pinned as the arithmetic
+    because a margin field that is populated but wrong is the failure this whole file is built
+    against — two plausible pixel numbers subtracting to a plausible pixel number."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         gate_qualified=True,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json", per_frame=0.5, propagation=0.9)
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", "per_frame"]) == mgt.EXIT_OK
     doc = json.loads(out.read_text())
     assert doc["est_drift_p95_px"] == 0.5
-    assert doc["gate_margin_px"] is None
+    assert doc[mgt.EST_DRIFT_NAME_FIELD] == "sam2-hiera-large+gdino-base"
+    assert "arm='per_frame'" in doc["est_drift_source"]
+    assert doc["gate_margin_px"] == pytest.approx(3.5 - 0.5)
+    assert doc["gate_margin_px"] == pytest.approx(doc["geom_tol_px"] - doc["est_drift_p95_px"])
+    assert mgt.sidecar_path(out).read_text().strip() == hashlib.sha256(
+        out.read_bytes()).hexdigest()
 
 
 def test_a_non_positive_margin_is_carried_and_reported_rather_than_widened(tmp_path: Path) -> None:
     """PR-08 §6: a margin <= 0 is the FINDING. The number is written — that is the record — and the
     status refuses to call it a gate. The move is a better estimator, never a wider tolerance."""
     out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=0.4, GEOM_TOL_px=0.4,
+                         gate_qualified=True,
                          mask_method={"name": "sam2-hiera-large+gdino-base"})
     est = _est_artifact(tmp_path / "pr08_est_drift.json")
     assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_NOT_GATE_QUALIFIED
@@ -2915,7 +3008,7 @@ def test_naming_the_arm_carries_that_arms_number_and_records_that_it_was_named(
     and that a person said so, because a later reader has no other way to tell a decision from a
     default: both arms are the same adapter under the same segmenter contract."""
     out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
-                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+                         gate_qualified=True, mask_method={"name": "sam2-hiera-large+gdino-base"})
     est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json")
 
     assert run(["--carry-est-drift", str(est), "--out", str(out),
@@ -2943,6 +3036,7 @@ def test_the_arm_a_carry_recorded_survives_a_later_geom_tol_measurement(tmp_path
     number it describes survived — the number outliving what says which measurement it is, which is
     the failure refuse_unnamed_est_drift exists to prevent, one field over."""
     out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         gate_qualified=True,
                          mask_method={"name": "sam2-hiera-large+gdino-base"})
     est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json")
     assert run(["--carry-est-drift", str(est), "--out", str(out),
@@ -2972,6 +3066,7 @@ def test_a_single_arm_budget_still_carries_with_no_flag_and_says_why_no_decision
     would be refusing the case with no ambiguity in it. It still records the arm and how it was
     settled, so the two kinds of document are read the same way."""
     out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         gate_qualified=True,
                          mask_method={"name": "sam2-hiera-large+gdino-base"})
     est = _est_artifact(tmp_path / "pr08_est_drift.json")
 
@@ -3009,6 +3104,7 @@ def test_naming_the_one_arm_a_single_arm_artifact_did_measure_is_accepted(tmp_pa
     happened to have no alternative, and the artifact records it as stated rather than as inferred,
     which is the distinction the whole flag exists to keep."""
     out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         gate_qualified=True,
                          mask_method={"name": "sam2-hiera-large+gdino-base"})
     est = _est_artifact(tmp_path / "pr08_est_drift.json")
 
@@ -3678,14 +3774,51 @@ def _run_snippet(source: str, argv: list[str], env: dict[str, str]) -> subproces
 
 def _landed(tmp_path: Path, doc: dict, *, index: int = 0, num_shards: int = 16,
             step: int = 1) -> subprocess.CompletedProcess:
+    """Run the sbatch's ``shard_artifact_landed()`` against the REAL adapter and the REAL contract.
+
+    THE ENVIRONMENT IS PART OF THE CALL AND USED NOT TO BE. This helper used to pass ``{}``, which
+    was harmless only while the heredoc imported nothing: the function looked at the shard and at
+    nothing else. It now resolves ``measure_geom_tol`` and the adapter named by
+    ``SAM2_ADAPTER_SPEC``, and reads the committed document, because a shard measured under a
+    different contract or under a different standing gate flag is stale and must be re-measured
+    rather than reused. Those imports are FAIL-CLOSED — an empty environment does not mean "skip
+    the check", it means "cannot check, therefore not reusable" — so a helper that supplies no
+    ``PYTHONPATH`` and no ``CONTRACT_FILE`` stops testing the classification at all and starts
+    testing the refusal it falls back to.
+
+    The real ``scripts/`` and the real ``configs/transfer25/pr08_geom_tol.json`` are handed over
+    deliberately. The parametrised cases below are all about the shard's OWN fields, so pinning
+    them against the live adapter is what keeps them honest: if the adapter or the committed block
+    moves, these tests move with it rather than passing against a stub that froze in 2026.
+    ``tests/test_103_measure_geom_tol_sbatch.py`` is the file that varies the adapter and the
+    contract themselves, with a throwaway ``scripts/`` per case; this file does not duplicate that
+    machinery.
+    """
     path = tmp_path / "shard-0.json"
     path.write_text(json.dumps(doc))
     return _run_snippet(_heredoc_after("shard_artifact_landed () {"),
-                        [str(path), str(index), str(num_shards), str(step)], {})
+                        [str(path), str(index), str(num_shards), str(step)],
+                        {"PYTHONPATH": str(_REPO_ROOT / "scripts"),
+                         "CONTRACT_FILE": str(_REPO_ROOT / "configs/transfer25/pr08_geom_tol.json")})
+
+
+#: The committed segmenter block, read off the document rather than restated. A copy here would
+#: agree with the contract on the day it was written and silently stop agreeing afterwards, which
+#: is the exact failure ``contract_disagreements()`` exists to catch — so the fixture that has to
+#: AGREE with the contract takes it from the contract.
+COMMITTED_SEGMENTER = json.loads(
+    (_REPO_ROOT / "configs/transfer25/pr08_geom_tol.json").read_text(encoding="utf-8")
+)["segmenter"]
 
 
 def _shard_doc(**over) -> dict:
-    """A shard artifact in the shape main() writes for a complete, correctly measured shard."""
+    """A shard artifact in the shape main() writes for a complete, correctly measured shard.
+
+    It carries ``mask_method.params.segmenter`` because a real one does: that block is what the
+    shard actually ran with, and ``shard_artifact_landed()`` compares it field for field against
+    the committed document. A fixture without it is not a shard main() would write, and it would
+    be refused for a reason none of these tests is about.
+    """
     doc = {
         "schema": "wam.geom_tol_shard/1",
         "shard": {"index": 0, "num_shards": 16, "n_episodes_in_shard": 33},
@@ -3698,6 +3831,8 @@ def _shard_doc(**over) -> dict:
         "max_frames": 0,
         "n_steps_measured": 14129,
         "shard_median_px": 1.5,
+        "mask_method": {"name": "grounding-dino+sam2+depth-anything-v2",
+                        "params": {"segmenter": dict(COMMITTED_SEGMENTER)}},
     }
     doc.update(over)
     return doc
@@ -3724,17 +3859,36 @@ def test_the_adapter_blocker_sentence_is_the_one_main_actually_writes() -> None:
     assert pattern.match(ADAPTER_BLOCKER_REASON)
 
 
-def test_a_shard_disqualified_only_by_the_adapters_standing_flag_counts_as_landed(tmp_path) -> None:
-    """The defect that made sharding pointless: no shard could ever be reused.
+def test_a_shard_the_standing_flag_has_moved_past_is_re_measured(tmp_path) -> None:
+    """THE FORGIVENESS EXPIRES WHEN THE THING IT FORGAVE STOPS BEING TRUE.
 
-    ``GATE_QUALIFIED = False`` is a property of scripts/estimators/apple_sam2.py, identical across
-    every shard of the partition and re-derived by the merge from the same artifact. Refusing to
-    reuse a shard over it meant each re-submission re-measured the corpus from scratch.
+    This test used to assert the opposite, and it was right to. ``GATE_QUALIFIED = False`` was a
+    property of scripts/estimators/apple_sam2.py rather than of any shard: identical across every
+    shard of the partition, re-derived by the merge from the same artifact, and unchanged by
+    re-measuring. Refusing to reuse a shard over it meant each re-submission re-measured the whole
+    corpus, which made sharding pointless — so the sbatch forgave exactly that one reason.
+
+    THE FLAG MOVED ON 2026-08-27 (``13f0416``) AND THE FORGIVENESS INVERTED. Re-measuring such a
+    shard today does NOT reproduce it: it produces a gate-qualified one. Reusing it instead skips
+    exactly the work that has to be redone, and — because the resume check runs BEFORE the
+    contract-and-gate preflight — it does so without the preflight ever executing. Every task of a
+    default submission would have printed "already landed. Skipping.", exited 0 in seconds, and
+    left the merge pooling a permanently-disqualified median. That is what this test now pins.
+
+    The other half of the rule — that the shard IS still reusable while the flag is still False —
+    cannot be checked here, because this file runs against the LIVE adapter. It is covered against
+    a stub adapter in ``tests/test_103_measure_geom_tol_sbatch.py``, which is the file that owns
+    varying the flag.
     """
     r = _landed(tmp_path, _shard_doc())
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "LANDED BUT NOT GATE-QUALIFIED" in r.stdout
-    assert "MUST NOT be committed" in r.stdout or "must not be committed" in r.stdout.lower()
+    assert r.returncode == 1, (
+        "a shard disqualified only by a standing flag that has since moved was reused. The "
+        "re-measurement it skips is the one that would clear the disqualification.\n"
+        + r.stdout + r.stderr)
+    assert "not reusable" in r.stdout
+    assert "GATE_QUALIFIED" in r.stdout, (
+        "the refusal must name the flag that moved, or the operator reading the array's log "
+        "cannot tell this apart from a data-dependent refusal:\n" + r.stdout)
 
 
 def test_a_gate_qualified_shard_is_reusable_without_any_of_that(tmp_path) -> None:

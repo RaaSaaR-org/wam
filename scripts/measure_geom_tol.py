@@ -3753,6 +3753,12 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
     and this one is about ONE artifact holding two measurements that are both valid and that differ
     by 28.5 % of the tolerance. See the block at the top of the body for why it refuses instead of
     defaulting, and :data:`EST_DRIFT_ARM_CHOICES` for why it will not accept "both" as an answer.
+
+    AND IT ASKS THE SAME TWO QUESTIONS OF THE TARGET THAT IT HAS ALWAYS ASKED OF THE ARTIFACT:
+    does this document state a GEOM_TOL at all, and does it record ``gate_qualified``? Both are
+    checked with the rest of the preconditions, BEFORE the write, because the failure they replace
+    was writing three of the four measured slots and a ``.sha256`` sidecar into the committed gate
+    document and refusing afterwards. See the block above the write.
     """
     est = est_drift_measurement(args.carry_est_drift)
 
@@ -4065,12 +4071,74 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
     if "est_drift_p95_blocked_by" in record:
         record["est_drift_p95_blocked_by"] = None
 
+    # -- AND THE GEOM_TOL HALF HAS TO BE A MEASUREMENT BEFORE ANYTHING IS WRITTEN INTO IT ---------
+    #
+    # BOTH OF THESE USED TO BE CHECKED AFTER THE WRITE, AND ONE OF THEM STILL IS NOT A CHECK AT ALL.
+    # `tol` was read out of `record` four lines above write_artifact(), so a carry onto the pristine
+    # committed contract — geom_tol_px null, which is exactly how PR-08 §4 step 2 requires that file
+    # to sit until the corpus is measured — wrote est_drift_p95_px, est_drift_estimator_name,
+    # est_drift_source AND a fresh .sha256 sidecar into the TRACKED gate document, and only then
+    # printed "gate_margin_px is null" and exited. That leaves the committed pre-commitment holding
+    # three of its four measured slots, a digest that certifies the half-written state, and no
+    # margin — a document that reads as a carry somebody performed rather than as one that was
+    # refused, and the sidecar is the part that makes it look checked. Everything else in this
+    # function refuses with "Nothing was written."; this path wrote first and refused second.
+    #
+    # THE TARGET'S OWN gate_qualified IS THE SECOND HALF AND WAS NEVER READ. PR-08 §6 subtracts two
+    # numbers, and this mode has always checked the EST_DRIFT half's verdict (est_drift_measurement
+    # refuses a falsy gate_qualified) while taking the GEOM_TOL half's on trust. A merge that came
+    # back gate_qualified: false — one shard disagreeing about the pixel grid, a partial pool, an
+    # adapter whose flag was down when the array ran — still carries a real-looking geom_tol_px, so
+    # the carry would subtract it, print a positive margin and exit 0. An exit 0 that says nothing
+    # about the half the document was named after is worse than no check: run_g0_gates refuses such
+    # a document later, but by then the number is committed and a reader has one artifact stating a
+    # finished budget and another stating the tolerance under it was never fit to be quoted.
+    #
+    # So both are asked here, where the answer is still free, and both fail closed: an ABSENT
+    # gate_qualified refuses exactly as a false one does. The pristine contract has no such field —
+    # it is committed before any measurement — and that is the point: it is not a qualified GEOM_TOL
+    # document yet, and saying nothing has never been saying yes anywhere else in this file.
     tol_key, tol = None, None
     for key in ("geom_tol_px", "GEOM_TOL_px"):
-        if isinstance(record.get(key), (int, float)):
-            tol_key, tol = key, float(record[key])
+        if isinstance(doc.get(key), (int, float)):
+            tol_key, tol = key, float(doc[key])
             break
-    record["gate_margin_px"] = None if tol is None else tol - drift_px
+    if tol is None:
+        raise MethodUnavailable(
+            f"FATAL: {out} states no GEOM_TOL — geom_tol_px is "
+            f"{doc.get('geom_tol_px')!r} and GEOM_TOL_px is {doc.get('GEOM_TOL_px')!r}.\n"
+            "       There is nothing to subtract EST_DRIFT_P95 from, so gate_margin_px cannot be "
+            "computed and this\n       carry cannot produce the one number PR-08 §6 asks for. This "
+            "is half of PR-08 §8 item 4;\n       measure GEOM_TOL for the other half "
+            "(scripts/measure_geom_tol.py --corpus ... , then --merge) and\n       carry the "
+            "budget onto the merged document.\n"
+            "       Nothing was written, and no sidecar: a .sha256 beside a document that did not "
+            "change is a digest\n       certifying a half-written gate."
+        )
+    if not doc.get("gate_qualified"):
+        raise MethodUnavailable(
+            f"FATAL: {out} records gate_qualified = {doc.get('gate_qualified')!r}, so its "
+            f"{tol_key} {tol!r} MUST NOT\n       have an EST_DRIFT_P95 subtracted from it. "
+            "measure_geom_tol's own reasons: "
+            + "; ".join(doc.get("gate_disqualified_reasons") or ["(none recorded)"])
+            + "\n"
+            "       THIS MODE HAS ALWAYS CHECKED THE OTHER HALF AND NEVER THIS ONE. "
+            "est_drift_measurement refuses a\n       disqualified EST_DRIFT artifact, so an exit 0 "
+            "from this command used to certify one half of the\n       subtraction and assert "
+            "nothing whatever about the half the document is named after — and both\n       halves "
+            "land in one file, under one gate_margin_px, which a reader has no way to attribute.\n"
+            "       An ABSENT flag refuses exactly as a false one does: the committed contract "
+            "carries no\n       gate_qualified because it is committed BEFORE the measurement, and "
+            "a document that has not been\n       measured is not a qualified one. Merge a "
+            "qualified GEOM_TOL measurement over it first.\n"
+            "       Nothing was written."
+        )
+
+    # Unconditional arithmetic, because the refusal above has already established that there is a
+    # number to subtract from. It used to read `None if tol is None else tol - drift_px`, and that
+    # expression is what made a null GEOM_TOL look like an outcome of the carry instead of a reason
+    # to refuse it.
+    record["gate_margin_px"] = tol - drift_px
 
     side, digest = write_artifact(out, record)
     print(f"carried     EST_DRIFT_P95 {drift_px} px from "
@@ -4084,11 +4152,6 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
             print(f"            (not carried: {name} = {value} px)", file=sys.stderr)
     print(f"wrote       {out}", file=sys.stderr)
     print(f"sha256      {digest}  ({side})", file=sys.stderr)
-    if tol is None:
-        print("\nGEOM_TOL is still null in this document, so gate_margin_px is null and G0b has "
-              "no budget.\n  This carry is half of PR-08 §8 item 4; measure GEOM_TOL for the "
-              "other half.", file=sys.stderr)
-        return EXIT_NOT_GATE_QUALIFIED
     margin = record["gate_margin_px"]
     print(f"margin      {tol_key} {tol} - EST_DRIFT_P95 {drift_px} ({arm}) = "
           f"{margin:.6f} px", file=sys.stderr)

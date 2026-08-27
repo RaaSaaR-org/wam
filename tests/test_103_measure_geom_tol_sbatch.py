@@ -698,3 +698,227 @@ def test_the_actual_outstanding_precondition_is_named() -> None:
     assert "residue (i)" in TEXT
     assert "GATE_QUALIFIED = False" in TEXT or "GATE_QUALIFIED=False" in TEXT
     assert "empty tuple" in TEXT.lower()
+
+
+# -- the resume check: a shard that could never be committed is not a shard worth keeping ----------
+#
+# THE DEFECT THIS SECTION PINS, AND IT IS THE MOST EXPENSIVE KIND — a check that saves work by
+# skipping exactly the work that had to be redone. ``shard_artifact_landed()`` decides whether the
+# artifact already at ${SHARD_OUT} makes this array task unnecessary, and it is consulted BEFORE the
+# pre-GPU preflight above. The sixteen shards under runs/pr08-geom-tol/shards/ are permanently
+# uncommittable for two independent reasons — each records ``gate_qualified: false`` from an adapter
+# flag that has since been flipped, and each lacks mask_validity_reference_max_frame_fraction, which
+# the committed pre-commitment carries — and the function called every one of them REUSABLE. A
+# default submission therefore printed "already landed. Skipping." sixteen times, exited 0 in
+# seconds, never reached the preflight, and left the merge pooling a permanently disqualified
+# median. The two staleness checks below are both fail-closed: the most either can cost is a shard
+# re-measured for nothing.
+
+#: The line that opens the resume check's heredoc, spelled the way tests/test_measure_geom_tol.py
+#: spells it, so the two files cannot drift about which block they mean.
+LANDED = "shard_artifact_landed () {"
+
+REAL_SHARD = _REPO_ROOT / "runs/pr08-geom-tol/shards/shard-1.json"
+REAL_CONTRACT = _REPO_ROOT / "configs/transfer25/pr08_geom_tol.json"
+
+
+def _mgt():
+    """The REAL ``scripts/measure_geom_tol.py``, loaded by path.
+
+    Used only where a test needs to read the committed document the way the sbatch reads it — the
+    same argument as everywhere else in this file: a test that spelled the lookup itself would keep
+    passing over a resume check that had spelled it differently.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_mgt_for_103", _REPO_ROOT / "scripts" / "measure_geom_tol.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_mgt_for_103"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The exact sentence ``measure_geom_tol.main()`` appends when the adapter has not opted in — the
+#: one reason ``shard_artifact_landed()`` forgives. Built the way main() builds it.
+ADAPTER_BLOCKER_REASON = (
+    "mask method 'grounding-dino+sam2+depth-anything-v2' is not gate-qualified")
+
+
+def _shard_doc(*, segmenter=_UNSET, **over) -> dict:
+    """A shard artifact in the shape main() writes for a complete, correctly measured shard.
+
+    ``segmenter`` is the block the shard RECORDS as having produced it, written where
+    ``measure_geom_tol.sam2_method()`` writes it (mask_method.params.segmenter) rather than where a
+    test would find it convenient: the whole point of the contract check is that the reader and the
+    writer agree about where that block lives.
+    """
+    block = CONTRACT_NOW if segmenter is _UNSET else segmenter
+    doc = {
+        "schema": "wam.geom_tol_shard/1",
+        "shard": {"index": 0, "num_shards": 16, "n_episodes_in_shard": 33},
+        "step_frames": 1,
+        "gate_qualified": False,
+        "gate_disqualified_reasons": [ADAPTER_BLOCKER_REASON],
+        "headline_valid": True,
+        "partial_measurement": False,
+        "limit": 0,
+        "max_frames": 0,
+        "n_steps_measured": 14129,
+        "shard_median_px": 1.5,
+        "mask_method": {"name": "grounding-dino+sam2+depth-anything-v2",
+                        "params": {"segmenter": block} if block is not None else {}},
+    }
+    doc.update(over)
+    return doc
+
+
+def _landed(tmp_path: Path, doc, *, index: int = 0, num_shards: int = 16, step: int = 1,
+            gate: bool = True, committed=_UNSET, contract_file=None,
+            import_path: str | None = None) -> subprocess.CompletedProcess:
+    """Run the sbatch's OWN resume-check heredoc against a shard artifact.
+
+    ``gate`` is the adapter's CURRENT ``GATE_QUALIFIED`` — the world outside the artifact, which is
+    the whole subject of check 1 — and it is carried by the same stub adapter the preflight tests
+    use, on the same throwaway ``scripts/`` holding the real ``measure_geom_tol``. ``committed`` is
+    the segmenter block of the committed pre-commitment.
+    """
+    scripts = _scripts_dir(tmp_path, contract=CONTRACT_NOW, gate=gate)
+    if contract_file is None:
+        contract_file = tmp_path / "pr08_geom_tol.json"
+        block = CONTRACT_NOW if committed is _UNSET else committed
+        if block is not None:
+            contract_file.write_text(json.dumps({"segmenter": block}))
+    path = tmp_path / f"shard-{index}.json"
+    path.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+    return _run_snippet(_heredoc_after(LANDED), [str(path), str(index), str(num_shards), str(step)],
+                        {"PYTHONPATH": import_path if import_path is not None else str(scripts),
+                         "CONTRACT_FILE": str(contract_file)})
+
+
+def test_the_resume_check_uses_measure_geom_tols_own_comparator() -> None:
+    """Same guarantee as the preflight's, and for the same reason: a reader and a writer that each
+    keep their own idea of where the segmenter block lives is how this array was lost once."""
+    src = _heredoc_after(LANDED)
+    assert "mgt.contract_disagreements(" in src
+    assert "mgt.committed_segmenter_contract(" in src
+    assert "def contract_disagreements" not in src, (
+        "the resume check has grown its own copy of the comparison it is supposed to import")
+
+
+def test_a_shard_the_adapters_flag_has_moved_past_is_not_reusable(tmp_path) -> None:
+    """CHECK 1, AND THE INVERSION IT CATCHES. "That is the adapter's standing flag and not this
+    shard" was a correct reason to reuse while the flag was False — re-measuring would have produced
+    another unqualified shard, so the skip was free. With the flag True the same skip is the one
+    action that keeps a permanently disqualified artifact in the partition, because gate_qualified
+    is baked in at measurement time and no merge re-derives it."""
+    r = _landed(tmp_path, _shard_doc(), gate=True)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "not reusable" in r.stdout
+    assert "STANDING FLAG HAS MOVED" in r.stdout
+    assert "GATE_QUALIFIED is True today" in r.stdout
+
+
+def test_the_same_shard_is_still_reusable_while_the_flag_is_still_false(tmp_path) -> None:
+    """The other half, and it is load-bearing for a waived run: while the adapter is still not
+    gate-qualified the old branch is CORRECT and its wording is kept verbatim. A repair that refused
+    here would take resumability away from the partition again — every re-submission re-measuring
+    the whole corpus is the defect that branch was written to fix."""
+    r = _landed(tmp_path, _shard_doc(), gate=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LANDED BUT NOT GATE-QUALIFIED, and that is the adapter's standing flag and not this" \
+        in r.stdout
+    assert "It must not be committed as GEOM_TOL." in r.stdout
+    assert "reusable:" in r.stdout
+
+
+def test_a_shard_missing_a_contract_field_is_not_reusable_and_the_field_is_named(tmp_path) -> None:
+    """CHECK 2, in the exact shape blocker (b) has. mask_validity_reference_max_frame_fraction is
+    not metadata: it is a frame-refusal predicate, so a shard that does not record it was measured
+    by a segmenter that refused a different set of frames than the committed document describes.
+    Absence counts as a disagreement in contract_disagreements(), which is why importing it rather
+    than re-spelling it is what makes this check work at all."""
+    stale = {k: v for k, v in CONTRACT_NOW.items()
+             if k != "mask_validity_reference_max_frame_fraction"}
+    r = _landed(tmp_path, _shard_doc(segmenter=stale, gate_qualified=True,
+                                     gate_disqualified_reasons=[]), gate=True)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "not reusable" in r.stdout
+    assert "DIFFERENT SEGMENTER CONTRACT" in r.stdout
+    assert "mask_validity_reference_max_frame_fraction" in r.stdout
+    # Both values, not merely the field: "they disagree" is not an actionable message.
+    assert "committed 0.1" in r.stdout and "this shard None" in r.stdout
+
+
+@pytest.mark.skipif(not REAL_SHARD.exists() or not REAL_CONTRACT.exists(),
+                    reason="the previous array's shards are not in this working tree")
+def test_the_real_landed_shard_on_disk_today_is_refused(tmp_path) -> None:
+    """THE REGRESSION TEST FOR THE ACTUAL TRAP, run against the real artifact and the real
+    committed document, through the real measure_geom_tol and the real adapter.
+
+    runs/pr08-geom-tol/shards/shard-1.json is one of the sixteen a default submission resolves
+    ${SHARD_OUT} straight onto (RUN_ID defaults to pr08-geom-tol). Before the repair the function
+    answered LANDED=TRUE for it, the task exited 0 in seconds, the preflight below never ran, and
+    the merge pooled a permanently disqualified median. It must never answer that again.
+    """
+    doc = json.loads(REAL_SHARD.read_text())
+    r = _run_snippet(_heredoc_after(LANDED),
+                     [str(REAL_SHARD), str(doc["shard"]["index"]),
+                      str(doc["shard"]["num_shards"]), str(doc["step_frames"])],
+                     {"PYTHONPATH": str(_REPO_ROOT / "scripts"),
+                      "CONTRACT_FILE": str(REAL_CONTRACT)})
+    assert r.returncode == 1, (
+        "the resume check would still skip the shard that started this:\n" + r.stdout + r.stderr)
+    assert "not reusable" in r.stdout
+    # ...and refused for one of the two REAL reasons, not because the extraction fed it garbage.
+    assert ("mask_validity_reference_max_frame_fraction" in r.stdout
+            or "STANDING FLAG HAS MOVED" in r.stdout), r.stdout
+    for structural in ("schema is", "shard.index is", "shard.num_shards is", "step_frames is",
+                       "does not parse"):
+        assert structural not in r.stdout, f"refused for the wrong reason: {r.stdout}"
+
+
+@pytest.mark.skipif(not REAL_SHARD.exists() or not REAL_CONTRACT.exists(),
+                    reason="the previous array's shards are not in this working tree")
+def test_a_shard_with_both_defects_repaired_is_reusable_again(tmp_path) -> None:
+    """THE CHECK ON THE CHECK: the repair must refuse the sixteen shards on disk WITHOUT refusing
+    what a correct re-measurement will write, or the array loses resumability and every wave
+    re-measures the corpus. So the real artifact is copied, its two staleness defects are undone —
+    the gate flag it records and the contract field it lacks — and nothing else is touched.
+    """
+    doc = json.loads(REAL_SHARD.read_text())
+    doc["gate_qualified"] = True
+    doc["gate_disqualified_reasons"] = []
+    committed, _ = _mgt().committed_segmenter_contract(json.loads(REAL_CONTRACT.read_text()))
+    doc["mask_method"]["params"]["segmenter"] = dict(committed)
+    fixed = tmp_path / "shard-1.json"
+    fixed.write_text(json.dumps(doc))
+    r = _run_snippet(_heredoc_after(LANDED),
+                     [str(fixed), str(doc["shard"]["index"]), str(doc["shard"]["num_shards"]),
+                      str(doc["step_frames"])],
+                     {"PYTHONPATH": str(_REPO_ROOT / "scripts"),
+                      "CONTRACT_FILE": str(REAL_CONTRACT)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "reusable:" in r.stdout
+
+
+def test_an_unreadable_pre_commitment_is_not_a_licence_to_reuse(tmp_path) -> None:
+    """FAIL-CLOSED, AND IN THE ONLY DIRECTION THAT IS SAFE. A missing committed document means the
+    one comparison that would have caught blocker (b) cannot be made — and an unchecked shard is not
+    a checked one. The cost of being wrong here is one shard re-measured; the cost of the other
+    default is the whole partition pooled unmergeable."""
+    r = _landed(tmp_path, _shard_doc(gate_qualified=True, gate_disqualified_reasons=[]),
+                contract_file=tmp_path / "not-there.json")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "not reusable" in r.stdout
+    assert "not-there.json" in r.stdout
+
+
+def test_an_adapter_that_will_not_import_is_not_a_licence_to_reuse(tmp_path) -> None:
+    """The same rule for the other half of what check 1 and check 2 need. A cluster copy whose
+    measure_geom_tol.py or adapter will not import cannot answer either question, and it is also a
+    copy that cannot run the measurement — the preflight below says so in the same words."""
+    r = _landed(tmp_path, _shard_doc(gate_qualified=True, gate_disqualified_reasons=[]),
+                import_path=str(tmp_path / "empty"))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "not reusable" in r.stdout
+    assert "CANNOT BE CHECKED" in r.stdout
