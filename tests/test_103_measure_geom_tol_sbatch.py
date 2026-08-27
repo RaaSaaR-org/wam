@@ -692,9 +692,15 @@ def test_the_file_does_not_claim_the_human_look_is_still_the_blocker() -> None:
 
 
 def test_the_actual_outstanding_precondition_is_named() -> None:
-    """Not overstated in the other direction either: the flag is False, the second precondition is
-    a recorded owner decision on blocker 2's residue (i), and nothing here may read as though the
-    flag is about to flip."""
+    """The flag's second precondition — a recorded owner decision on blocker 2's residue (i) — is
+    still spelled out, and this test is why it survives the flip.
+
+    It was written on 2026-08-26 when the flag was False and the danger was overstating the
+    discharges. 13f0416 flipped the flag on 2026-08-27, and the sbatch now says so; what these
+    assertions keep is the ACCOUNT of the precondition, because apple_sam2's own "WHAT WOULD TAKE
+    IT BACK" paragraph can put the flag back and every consequence in this file is written against
+    that state. Deleting the account is how the next re-flip arrives undocumented.
+    """
     assert "residue (i)" in TEXT
     assert "GATE_QUALIFIED = False" in TEXT or "GATE_QUALIFIED=False" in TEXT
     assert "empty tuple" in TEXT.lower()
@@ -922,3 +928,248 @@ def test_an_adapter_that_will_not_import_is_not_a_licence_to_reuse(tmp_path) -> 
     assert r.returncode == 1, r.stdout + r.stderr
     assert "not reusable" in r.stdout
     assert "CANNOT BE CHECKED" in r.stdout
+
+
+# -- the commands this file prints have to be commands the operator can paste --------------------
+#
+# THREE DEFECTS, ONE SECTION, AND THEY COMPOUND. Every "NEXT" and every remedy in the sbatch prints
+# a recipe meant to be copy-pasted out of a Slurm log. Until 2026-08-27 each of them
+#
+#   * omitted RUN_ID, so a pasted line fell back to the default `pr08-geom-tol` rather than the run
+#     the operator was reading the log of. On the MERGE line that is the most expensive copy-paste
+#     available in the file: under a fresh RUN_ID it points --merge at the PREVIOUS partition's
+#     sixteen permanently uncommittable shards and pools THEM into the committed contract's own
+#     path, producing a complete, refusal-passing, wrong GEOM_TOL that nothing downstream
+#     re-derives; and
+#   * rendered $(basename "$0"), which under sbatch is the string "slurm_script" — Slurm execs a
+#     copy of the batch script out of the job spool directory. See
+#     runs/_slurm_logs/geom-tol.189935_1.out:277 for the line as it actually printed. Pasting it
+#     answers "sbatch: error: Unable to open file slurm_script".
+#
+# The scans below are deliberately over the WHOLE FILE rather than over a list of known sites: the
+# point is that a recipe added later cannot slip through, and there is no test worth writing that
+# only pins the seven that exist today.
+
+_SBATCH_INVOCATION = re.compile(r"\bsbatch\s+--")
+
+
+def _continues_into(line: str) -> bool:
+    """True when ``line`` ends in a line continuation, through whatever quoting encloses it.
+
+    The sbatch prints its multi-line recipes three ways — a bare comment ending ``\\``, an
+    ``echo "... \\\\"``, and a Python string ``"... \\\\",`` inside a heredoc — so the closing quote
+    and comma are stripped before the backslash is looked for.
+    """
+    stripped = line.rstrip()
+    for tail in ('",', '"', "',", "'"):
+        if stripped.endswith(tail):
+            stripped = stripped[: -len(tail)].rstrip()
+            break
+    return stripped.endswith("\\")
+
+
+def _sbatch_command_blocks() -> list[tuple[int, str]]:
+    """Every ``sbatch --...`` recipe in the file, joined with the continuation lines above it.
+
+    A recipe is identified by the invocation itself (``sbatch`` followed by an option) rather than
+    by which mechanism prints it, so comments, ``echo`` lines and heredoc strings are all in scope.
+    Bare mentions of a ``.sbatch`` FILENAME are not: they carry no options and are prose.
+    """
+    lines = TEXT.splitlines()
+    blocks: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        if not _SBATCH_INVOCATION.search(line):
+            continue
+        first = i
+        while first > 0 and i - first < 6 and _continues_into(lines[first - 1]):
+            first -= 1
+        blocks.append((i + 1, "\n".join(lines[first:i + 1])))
+    return blocks
+
+
+def test_every_sbatch_command_the_file_prints_carries_run_id() -> None:
+    """THE DEFECT: a printed command that omits RUN_ID reproduces the DEFAULT run, not this one.
+
+    RUN_ID selects ${PROJ}/runs/${RUN_ID} — the pilot artifact the walltime self-check reads, the
+    shard directory the array fills, and the directory --merge pools. Sixteen shards of a previous
+    partition sit under the default and are permanently uncommittable (they were measured before
+    apple_sam2.GATE_QUALIFIED flipped, and gate_qualified is baked in at measurement time), so a
+    merge that falls back to the default writes a wrong number over the pre-commitment and passes
+    every refusal on the way.
+
+    Scanned over the whole file rather than over the sites that exist today: the value of this test
+    is that the eighth recipe someone adds cannot omit it either.
+    """
+    blocks = _sbatch_command_blocks()
+    assert len(blocks) >= 7, (
+        f"only {len(blocks)} sbatch recipes found — the scan has stopped seeing them, which is "
+        "worse than a failure")
+    for line_no, block in blocks:
+        assert "RUN_ID" in block, (
+            f"the sbatch recipe at line {line_no} does not name RUN_ID, so pasting it runs against "
+            f"the default run and not the one it was printed from:\n{block}")
+
+
+def test_no_printed_command_renders_the_name_slurm_gave_the_script() -> None:
+    """THE DEFECT: under sbatch, ``$0`` is the spool copy and ``$(basename "$0")`` is the literal
+    string "slurm_script". The operator pastes it and gets "Unable to open file slurm_script".
+
+    The expression may still APPEAR in a comment — this file keeps its errors legible — but it may
+    not appear in anything that is printed, and no recipe may contain a ``basename`` at all.
+    """
+    for n, line in enumerate(TEXT.splitlines(), 1):
+        if 'basename "$0"' not in line:
+            continue
+        assert line.lstrip().startswith("#"), (
+            f'line {n} still renders $(basename "$0") outside a comment:\n{line}')
+    for line_no, block in _sbatch_command_blocks():
+        assert "basename" not in block, (
+            f"the sbatch recipe at line {line_no} still names the script through basename:\n{block}")
+        assert "slurm_script" not in block, (
+            f"the sbatch recipe at line {line_no} names the spool copy:\n{block}")
+
+
+def _script_name_block() -> str:
+    """The sbatch's own THIS_SCRIPT resolution, extracted rather than copied."""
+    m = re.search(r"^THIS_SCRIPT=\$0\n(?:.*\n)*?^fi\n", TEXT, re.M)
+    assert m, "the sbatch no longer resolves a printable name for itself"
+    return m.group(0)
+
+
+def _this_script(argv0: str) -> str:
+    r = subprocess.run(["bash", "-c", _script_name_block() + 'printf "%s\\n" "${THIS_SCRIPT}"',
+                        argv0], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_the_script_name_is_resolved_for_both_ways_this_file_can_be_run() -> None:
+    """Both cases honestly, which is why this is not a hardcoded constant.
+
+    Under sbatch there is nothing pasteable in ``$0`` and Slurm exports no variable carrying the
+    submitted path, so the tracked name is the only honest answer. Run directly, ``$0`` IS the path
+    that was run — and printing a fixed name for a file someone has renamed or copied elsewhere
+    would be the same lie in the other direction.
+    """
+    assert _this_script("/var/spool/slurmd/job190235/slurm_script") == "103_measure_geom_tol.sbatch"
+    assert _this_script(str(SBATCH_103)) == str(SBATCH_103)
+
+
+def _echo_block_after(anchor: str) -> str:
+    """The run of consecutive ``echo`` lines starting at ``anchor``."""
+    at = TEXT.index(anchor)
+    lines = TEXT[TEXT.rindex("\n", 0, at) + 1:].splitlines()
+    out = []
+    for line in lines:
+        if not line.strip().startswith("echo "):
+            break
+        out.append(line)
+    assert out, f"no echo block at {anchor!r}"
+    return "\n".join(out)
+
+
+def _rendered(block: str, **env: str) -> str:
+    """Run the sbatch's own echo lines with the variables they interpolate bound."""
+    prelude = "".join(f"{k}={v}\n" for k, v in env.items())
+    r = subprocess.run(["bash", "-c", prelude + block], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+#: How the sbatch decorates the lines it prints. Stripped so the assertion below is about the
+#: COMMAND and not about the framing.
+_DECORATION = re.compile(r"^(===\s*|\s+)", re.M)
+
+
+def test_the_merge_command_the_shard_path_prints_would_merge_this_run(tmp_path) -> None:
+    """THE REGRESSION GUARD, AND IT IS ASSERTED ON THE PRINTED STRING RATHER THAN ON THE SOURCE.
+
+    The last thing a successful shard prints is the merge command, and it is the line an operator
+    is most likely to paste without reading. Rendered under a fresh RUN_ID it has to come out as a
+    merge OF THAT RUN — because the default run's shard directory holds the previous partition,
+    whose sixteen artifacts are permanently uncommittable, and a merge over them completes, passes
+    every refusal, and overwrites configs/transfer25/pr08_geom_tol.json with a wrong number.
+    """
+    block = _echo_block_after('echo "=== NEXT, once every shard has landed')
+    printed = _rendered(block, RUN_ID="pr08-geom-tol-rerun", NUM_SHARDS="16",
+                        THIS_SCRIPT="103_measure_geom_tol.sbatch")
+    # Un-decorate and re-join the continuation, so what is asserted is the command as pasted.
+    command = _DECORATION.sub("", printed).replace("\\\n", " ")
+    command = " ".join(command.split())
+    assert "RUN_ID=pr08-geom-tol-rerun MERGE=1 NUM_SHARDS=16 sbatch" in command, (
+        "the printed merge command does not carry the run it was printed from, so pasting it "
+        f"merges whatever is under the DEFAULT RUN_ID:\n{printed}")
+    assert "pr08-geom-tol " not in command, "the default RUN_ID leaked into the printed command"
+    assert command.rstrip().endswith("103_measure_geom_tol.sbatch")
+    assert "--qos=2cpu-single-host" in command and "--gres=none" in command, (
+        "the free-QoS overrides are gone from the merge line; without them the merge is rejected, "
+        "or lands on `normal` at 1 minute and 0 GPUs")
+
+
+# -- the gate flag flipped, and this file may not go on asserting that it did not ------------------
+
+
+#: Words that put a claim about ``GATE_QUALIFIED`` being False into a time or a condition instead
+#: of asserting it as the state of the world right now. This is the sbatch's own convention — it
+#: keeps superseded reasoning and says when it stopped applying — and it is what the scan below can
+#: actually decide. It CANNOT decide English tense, so what it enforces is narrower and stated in
+#: the docstring: no unscoped assertion may stand alone.
+_SCOPED = ("while", "until", "was", "were", "would", "if not", "waive", "flipped", "13f0416",
+           "gone back", "gone BACK", "used to", "old ", "at measurement time", "gate=False")
+
+
+def test_the_file_does_not_assert_that_the_gate_flag_is_still_false() -> None:
+    """THE DEFECT: scripts/estimators/apple_sam2.py has read GATE_QUALIFIED = True since 13f0416
+    (2026-08-27, on the project owner's recorded decision), and large passages of the sbatch still
+    said it was False and drew conclusions from that — that every shard exits 3, that the array
+    buys a permanently uncommittable number, that nothing it produces may be committed.
+
+    THE DISTINCTION THIS TEST DRAWS, AND IT IS THE WHOLE POINT OF IT. Text that ASSERTS the flag is
+    False right now is stale. Text that EXPLAINS WHAT HAPPENS WHEN it is False — "while
+    GATE_QUALIFIED is False this branch is unreachable", "an unqualified adapter produces exit 3" —
+    is conditional, is still correct, and is load-bearing for a waived run, for a cluster copy that
+    lags HEAD, and for the re-flip apple_sam2's own "WHAT WOULD TAKE IT BACK" paragraph provides
+    for. Deleting it would be a worse defect than leaving the stale text.
+
+    WHAT IS MECHANICALLY CHECKABLE IS NOT THAT DISTINCTION. No scan can read tense. What is checked
+    instead is the convention this file already follows for keeping superseded reasoning legible:
+    every mention of the flag being False sits within three lines of a word that scopes it — a
+    tense, a condition, or the flip itself — and the handful of assertions that were the defect are
+    named literally, so putting one back fails here rather than in a Slurm log.
+    """
+    for phrase in ("sets GATE_QUALIFIED = False",
+                   "sets GATE_QUALIFIED=False",
+                   "THE FLAG HAS NOT MOVED",
+                   "GATE_QUALIFIED is False and nothing about the corpus can change that",
+                   "GATE_QUALIFIED=False guarantees today",
+                   "apple_sam2 still sets"):
+        assert phrase not in TEXT, (
+            f"the sbatch asserts {phrase!r} as the present state of the world; the flag has read "
+            "True since 13f0416 (2026-08-27)")
+
+    lines = TEXT.splitlines()
+    for i, line in enumerate(lines):
+        if "GATE_QUALIFIED" not in line:
+            continue
+        if "False" not in line and "false" not in line:
+            continue
+        if "getattr(" in line:
+            continue  # a default for a missing attribute, not a claim about its value
+        window = "\n".join(lines[max(0, i - 3):i + 4])
+        assert any(m in window for m in _SCOPED), (
+            f"line {i + 1} says the gate flag is False with nothing nearby putting that in a time "
+            f"or a condition:\n{window}")
+
+
+def test_the_file_names_the_flip_its_date_and_what_the_array_now_buys() -> None:
+    """The other half, because "delete the stale sentence" would pass the scan above and leave the
+    operator with no account at all. The sbatch is the page someone reads while deciding whether to
+    spend 13.64 GPU-hours; it has to say what those hours now buy, and on whose authority."""
+    assert "13f0416" in TEXT, "the commit that flipped the flag is not named"
+    assert TEXT.count("2026-08-27") >= 2
+    assert "GATE_QUALIFIED = True" in TEXT, (
+        "the sbatch no longer states the flag's current value anywhere")
+    assert "COMMITTABLE GEOM_TOL" in TEXT, (
+        "the header no longer says what the 13.6 GPU-h array buys now that the flag is set")
+    assert "permanently uncommittable" in TEXT, (
+        "the header no longer says that the shards already under the default RUN_ID are not it")

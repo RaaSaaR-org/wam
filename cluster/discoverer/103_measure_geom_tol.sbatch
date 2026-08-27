@@ -1,13 +1,24 @@
 #!/bin/bash
 # Step 23 — T-040 / PR-08 §8 item 4: measure GEOM_TOL over the AppleToPlate source corpus.
 #
+# EVERY RECIPE BELOW CARRIES RUN_ID, AND IT IS NOT OPTIONAL PUNCTUATION. RUN_ID names the directory
+# a submission reads and writes -- ${PROJ}/runs/${RUN_ID}, which holds the pilot artifact, the shard
+# directory the array fills and the merge pools, and the transport copy sync.sh --pull takes home.
+# It defaults to pr08-geom-tol, and THAT DEFAULT NOW POINTS AT THE SIXTEEN PERMANENTLY
+# UNCOMMITTABLE SHARDS of the 2026-08-26/27 partition, so a re-run takes a fresh RUN_ID and every
+# step of that re-run has to be given the SAME one. `<run>` below is that value, typed out.
+# OMITTING IT ON THE MERGE LINE IS THE SINGLE MOST EXPENSIVE COPY-PASTE IN THIS FILE: a merge that
+# falls back to the default pools the stale sixteen into configs/transfer25/pr08_geom_tol.json and
+# writes a complete, refusal-passing, wrong number over the pre-commitment.
+#
 #   PILOT — measure the cost of the full run before paying it:
-#       PILOT=1 sbatch --time=00:30:00 103_measure_geom_tol.sbatch
+#       RUN_ID=<run> PILOT=1 sbatch --time=00:30:00 103_measure_geom_tol.sbatch
 #
 #   FULL — the committed number in ONE job. THE PILOT SAYS THIS DOES NOT FIT; see the arithmetic
 #          below. Kept because it is the right shape on any machine whose wall is longer than the
 #          run, and because the sharded path has to be checkable against something:
-#       GEOM_STEP_FRAMES=1 sbatch --time=<from PILOT.json> 103_measure_geom_tol.sbatch
+#       RUN_ID=<run> GEOM_STEP_FRAMES=1 sbatch --time=<from PILOT.json> \
+#           103_measure_geom_tol.sbatch
 #
 #   SHARD — the committed number as an array of N jobs, each measuring the episodes that hash to it.
 #           N = 16 AND --time=01:30:00 SINCE 2026-08-23; see RE-RUN SHAPE below for the arithmetic.
@@ -15,12 +26,12 @@
 #           the free submit slots — `%4` throttles running tasks and does nothing for the submit
 #           limit. One wave, repeated with the next four indices once the previous wave has left
 #           the queue:
-#       SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \
+#       RUN_ID=<run> SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \
 #           sbatch --array=0-3%4 --time=01:30:00 103_measure_geom_tol.sbatch
 #
 #   MERGE — once every shard has landed, pool them into the committed artifact. NO GPU IS USED, so
 #           it belongs on the free QoS, which needs its limits on the command line too:
-#       MERGE=1 NUM_SHARDS=16 sbatch --qos=2cpu-single-host --gres=none \
+#       RUN_ID=<run> MERGE=1 NUM_SHARDS=16 sbatch --qos=2cpu-single-host --gres=none \
 #           --cpus-per-task=2 --mem=8G --time=00:20:00 103_measure_geom_tol.sbatch
 #
 # ON THE `%4`, WHICH IS ABOUT THE RUNNING LIMIT AND NOT THE SUBMIT LIMIT, AND ON THE MERGE
@@ -204,32 +215,43 @@
 # queued task buys queue position and no throughput. Four waves of four:
 #
 #     squeue -u "${USER}" -r -h -o '%i' | wc -l        # must be <= 4 before each wave
-#     SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 sbatch --array=0-3%4   --time=01:30:00 <this file>
+#     RUN_ID=<run> SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \
+#         sbatch --array=0-3%4   --time=01:30:00 <this file>
 #     ... then 4-7, then 8-11, then 12-15, each after the previous wave has left the queue.
 #
 # NUM_SHARDS STAYS 16 IN EVERY WAVE. It is the denominator of the partition, not the size of the
 # submission; the merge insists on all sixteen. The per-wave NOTE below says so.
 #
-# WHAT THE RUN CANNOT PRODUCE TODAY, AND IT IS NOT A SCHEDULING PROBLEM.
-# scripts/estimators/apple_sam2.py sets GATE_QUALIFIED = False. Until 2026-08-26 this paragraph
-# said its GATE_QUALIFICATION_BLOCKERS "still lead with NOBODY HAS LOOKED AT A MASK"; THAT IS NO
-# LONGER THE REASON. The human look was discharged on 2026-08-26 and the propagation difference on
-# 2026-08-27, the tuple is now EMPTY, and all seven discharged entries are kept verbatim in
-# GATE_QUALIFICATION_DISCHARGED with the evidence that retired each one.
+# WHAT THE RUN BUYS, AND WHAT IT COULD NOT BUY UNTIL 2026-08-27.
+# scripts/estimators/apple_sam2.py NOW SETS GATE_QUALIFIED = True. It stood at False from the day
+# this file was written until 2026-08-27, when commit 13f0416 flipped it on the project owner's
+# recorded decision (573c80d). Everything this paragraph used to assert about that False is kept
+# below, in the tense it now belongs in, because the flag can go BACK — apple_sam2's own "WHAT
+# WOULD TAKE IT BACK" paragraph names three findings that would return it to False — and because a
+# waived run still meets every consequence of it.
 #
-# AN EMPTY TUPLE IS NOT PERMISSION, AND THE FLAG HAS NOT MOVED. The module's own comment beside
-# GATE_QUALIFIED states TWO preconditions and says an empty blocker tuple satisfies one of them.
-# The other is a RECORDED DECISION on the residue those discharges carry forward — in particular
-# blocker 2's residue (i): a failure the discharged blocker predicted, occurring by a route it did
-# not predict, on 92 frames. That decision is the project owner's, it is not made, and this file
-# neither makes it nor predicts it. So every shard still records gate_qualified: false with the
-# single reason "mask method ... is not gate-qualified", and the merge propagates it: the pooled
-# median is written, and it is written DISQUALIFIED.
+# WHAT THE BLOCKERS DID. Until 2026-08-26 this paragraph said GATE_QUALIFICATION_BLOCKERS "still
+# lead with NOBODY HAS LOOKED AT A MASK"; THAT STOPPED BEING THE REASON THEN. The human look was
+# discharged on 2026-08-26 and the propagation difference on 2026-08-27, the tuple went EMPTY, and
+# all seven discharged entries are kept verbatim in GATE_QUALIFICATION_DISCHARGED with the evidence
+# that retired each one. AN EMPTY TUPLE WAS NOT PERMISSION, and this file said so while that was
+# the live question: the module's own comment beside GATE_QUALIFIED states TWO preconditions and
+# says an empty blocker tuple satisfies one of them. The other is a RECORDED DECISION on the
+# residue those discharges carry forward — in particular blocker 2's residue (i): a failure the
+# discharged blocker predicted, occurring by a route it did not predict, on 92 frames. THAT
+# DECISION WAS MADE AND RECORDED, by the owner, on 2026-08-26/27, and 13f0416 is the flag moving
+# with it. This file did not make it and does not predict the next one.
 #
-# So these ~13.6 GPU-h buy a measured, committed-contract-checked, NOT-yet-quotable GEOM_TOL, and a
-# later flip of the flag requires RE-MEASURING THE CORPUS, because gate_qualified is baked into each
-# shard at measurement time and no merge re-derives it. That is a decision to take BEFORE the array
-# goes in, not after — and since 2026-08-27 it is enforced rather than advised: the SHARD path's
+# WHAT THAT CHANGES HERE, CONCRETELY. All three conjuncts measure_geom_tol.sam2_method() ANDs into
+# each shard's gate_qualified pass at HEAD — the flag, the weights the adapter names, and the
+# committed contract — so a shard measured at HEAD records gate_qualified: true AND EXITS 0, the
+# SHARD path's pre-GPU preflight lets the array start, and the merge takes its committable branch.
+# These ~13.6 GPU-h therefore buy a measured, committed-contract-checked, COMMITTABLE GEOM_TOL,
+# which is exactly what the sixteen shards already sitting under the default RUN_ID are not: they
+# were measured under the old flag, gate_qualified is baked into each shard AT MEASUREMENT TIME and
+# no merge re-derives it, so they are permanently uncommittable and this run is the re-measurement
+# that replaces them. That same arithmetic is why the flag is a decision to take BEFORE an array
+# goes in and not after — and since 2026-08-27 it is enforced rather than advised: the SHARD path's
 # pre-GPU preflight refuses to start while the flag is False, before a frame is decoded. See THE
 # PRE-GPU CONTRACT AND GATE PREFLIGHT in the SHARD branch below.
 #
@@ -408,6 +430,25 @@ RUN_ID=${RUN_ID:-pr08-geom-tol}
 OUT=${PROJ}/runs/${RUN_ID}
 mkdir -p "${OUT}"
 
+# EVERY COMMAND THIS FILE PRINTS CARRIES RUN_ID=${RUN_ID}, FOR THE REASON THE HEADER GIVES. Until
+# 2026-08-27 the NEXT and remedy lines below printed the bare recipe, so a copy-paste fell back to
+# the default RUN_ID rather than reproducing the run the operator was reading the log of. A printed
+# command that does not name the run it belongs to is worse than no command: it is right about the
+# shape and wrong about the world, and on the MERGE line it pools the previous partition.
+#
+# AND THE NAME THEY PRINT IS NOT $0. Slurm copies the batch script into the job's spool directory
+# and execs the copy, so under sbatch $0 is .../slurm_script and $(basename "$0") rendered the
+# literal string "slurm_script" -- see runs/_slurm_logs/geom-tol.189935_1.out:277, where it did.
+# An operator who pastes that gets "sbatch: error: Unable to open file slurm_script", which is a
+# dead end at exactly the moment the log is being read for what to do next. Slurm exports no
+# variable carrying the submitted path, so the spool copy is answered with this file's tracked
+# name. Run directly, $0 IS a path someone can paste and is kept: printing a fixed name for a file
+# that has been renamed or copied elsewhere would be the same lie in the other direction.
+THIS_SCRIPT=$0
+if [[ "$(basename "${THIS_SCRIPT}")" == "slurm_script" || ! -f "${THIS_SCRIPT}" ]]; then
+  THIS_SCRIPT=103_measure_geom_tol.sbatch
+fi
+
 PILOT_MODE=0
 if [[ "${PILOT:-0}" != "0" ]]; then PILOT_MODE=1; fi
 SHARD_MODE=0
@@ -459,8 +500,8 @@ if (( MERGE_MODE )); then
 
   [[ -d "${SHARD_DIR}" ]] || {
     echo "FATAL: ${SHARD_DIR} does not exist — no shard has run yet."
-    echo "       SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=1 \\"
-    echo "         sbatch --array=0-$((NUM_SHARDS - 1))%4 --time=01:30:00 $(basename "$0")"
+    echo "       RUN_ID=${RUN_ID} SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=1 \\"
+    echo "         sbatch --array=0-$((NUM_SHARDS - 1))%4 --time=01:30:00 ${THIS_SCRIPT}"
     exit 1
   }
 
@@ -475,8 +516,8 @@ if (( MERGE_MODE )); then
     echo "FATAL: shard artifact(s) missing from ${SHARD_DIR}: ${MISSING[*]} of ${NUM_SHARDS}."
     echo "       Re-submit just those array indices — the completed shards are skipped, so this"
     echo "       costs only the shards that did not land:"
-    echo "         SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=1 \\"
-    echo "           sbatch --array=$(IFS=,; echo "${MISSING[*]}")%4 --time=01:30:00 $(basename "$0")"
+    echo "         RUN_ID=${RUN_ID} SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=1 \\"
+    echo "           sbatch --array=$(IFS=,; echo "${MISSING[*]}")%4 --time=01:30:00 ${THIS_SCRIPT}"
     exit 1
   fi
 
@@ -535,7 +576,11 @@ PY
   echo "=== measure_geom_tol.py --merge exited ${RC}"
   # EXIT 3 IS NOT A FAILED MERGE. It means the pool was complete, every refusal passed, the median
   # was taken over the whole corpus and the RESULT is disqualified from the gate — which is what
-  # apple_sam2.GATE_QUALIFIED=False guarantees today, for every possible run of this partition. The
+  # apple_sam2.GATE_QUALIFIED=False guaranteed for every possible run of this partition, until
+  # 2026-08-27, when 13f0416 flipped that flag on. AT HEAD A MERGE OVER SHARDS MEASURED AT HEAD
+  # EXITS 0 AND TAKES THE COMMITTABLE BRANCH BELOW; this one is reached by a pool that is older
+  # than the flag — the sixteen shards under the default RUN_ID are — or by a waived run, and it
+  # stays because such a pool still has to be classified rather than silently copied. The
   # artifact IS written by measure_geom_tol.py in that case, and this branch used to exit before
   # copying it, so nine GPU-hours of measurement stayed on the cluster where sync.sh --pull (which
   # only walks ${PROJ}/runs) could not see it. Transport it and refuse to call it committable; the
@@ -546,16 +591,16 @@ PY
     echo "=== DO NOT COMMIT IT AS GEOM_TOL. Exit 3 means the merge completed and the number carries"
     echo "===   gate_qualified:false. Read gate_disqualified_reasons in the artifact: if the only"
     echo "===   entries are 'mask method ... is not gate-qualified', the corpus was measured"
-    echo "===   correctly and what is missing is the adapter's own opt-in: apple_sam2 still sets"
-    echo "===   GATE_QUALIFIED = False. NOT because 'nobody has looked at a mask' — that blocker"
-    echo "===   was discharged 2026-08-26 and GATE_QUALIFICATION_BLOCKERS is now the empty tuple."
-    echo "===   The flag has a SECOND precondition, stated in its own comment: a recorded decision"
-    echo "===   on the residue those discharges carry forward, in particular blocker 2's residue"
-    echo "===   (i) — a failure the discharged blocker predicted, occurring by a route it did not"
-    echo "===   predict, on 92 frames. That decision is the project owner's and it has not been"
-    echo "===   made. It is not discharged by a longer run, and whenever it is made, flipping the"
-    echo "===   flag means RE-MEASURING the corpus: gate_qualified is baked into each shard at"
-    echo "===   measurement time and no merge re-derives it."
+    echo "===   correctly and what was missing is the adapter's own opt-in AT THE TIME THESE"
+    echo "===   SHARDS WERE MEASURED. That opt-in has since been given: apple_sam2's flag was"
+    echo "===   flipped on on 2026-08-27 by commit 13f0416, on the project owner's recorded"
+    echo "===   decision about blocker 2's residue (i) — NOT because 'nobody has looked at a"
+    echo "===   mask', which was discharged 2026-08-26 and left GATE_QUALIFICATION_BLOCKERS the"
+    echo "===   empty tuple. So reaching this branch at HEAD means the pool is older than the flag"
+    echo "===   (the sixteen shards under the default RUN_ID are), or the cluster copy lags that"
+    echo "===   commit, or the run was waived. There is no repair either way: gate_qualified is"
+    echo "===   baked into each shard at measurement time and no merge re-derives it, so the"
+    echo "===   corpus is RE-MEASURED under a fresh RUN_ID and merged again."
     echo "===   Restore the pre-commitment before anything else reads that path. NOT with git:"
     echo "===   sync.sh:66 excludes '.git', so ${WAM} is not a repository and"
     echo "===   'git -C ... checkout --' fails there with 'not a git repository'. From the"
@@ -745,7 +790,8 @@ print(json.dumps(rec, indent=2))
 print(f"\n=== wrote {path}")
 PY
   echo "=== PILOT done. Read ${OUT}/GEOM_TOL_PILOT.json, then submit the full run with the"
-  echo "===   --time it recommends:  GEOM_STEP_FRAMES=1 sbatch --time=<hh:mm:00> $(basename "$0")"
+  echo "===   --time it recommends, and into THIS run, whose pilot artifact that --time came from:"
+  echo "===     RUN_ID=${RUN_ID} GEOM_STEP_FRAMES=1 sbatch --time=<hh:mm:00> ${THIS_SCRIPT}"
   exit 0
 fi
 
@@ -759,8 +805,8 @@ if (( SHARD_MODE )); then
     echo "       The shard index IS the array index; there is no default, because the default would"
     echo "       be shard 0 and a run that measured a twelfth of the corpus and exited 0."
     echo "       Submit it as an array:"
-    echo "         SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \\"
-    echo "           sbatch --array=0-3%4 --time=01:30:00 $(basename "$0")"
+    echo "         RUN_ID=${RUN_ID} SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \\"
+    echo "           sbatch --array=0-3%4 --time=01:30:00 ${THIS_SCRIPT}"
     exit 1
   }
   # No apostrophes in this message; see the note on the MERGE branch and on GEOM_STEP_FRAMES below.
@@ -822,17 +868,18 @@ if (( SHARD_MODE )); then
   # artifact for a different index, a different partition or a different step.
   #
   # ON gate_qualified. Refusing every artifact with gate_qualified:false was correct against a
-  # DATA-dependent disqualification and catastrophic against the one this corpus actually has.
-  # scripts/estimators/apple_sam2.py sets GATE_QUALIFIED=False, so EVERY shard of a perfectly good
-  # measurement records exactly one reason -- "mask method ... is not gate-qualified" -- and the old
-  # check therefore refused to reuse ANY shard, ever: each re-submission re-measured the whole
-  # partition and the array could never converge. That reason is a property of the ADAPTER, is
-  # identical across all N shards, and is re-derived by the merge from the same artifact, which
-  # still refuses to write a gate-qualified GEOM_TOL from it. Reusing such a shard therefore
-  # launders nothing. Every OTHER reason -- a truncating flag, coverage under the floor, an empty
-  # measurement -- is data-dependent, means THIS shard measured the wrong thing, and is still
-  # refused. headline_valid and the two truncating flags are checked directly rather than inferred
-  # from the reason strings, so a reason this rule does not recognise cannot be waved through.
+  # DATA-dependent disqualification and catastrophic against the one this corpus actually had.
+  # scripts/estimators/apple_sam2.py set GATE_QUALIFIED=False until 2026-08-27 (13f0416), so EVERY
+  # shard of a perfectly good measurement recorded exactly one reason -- "mask method ... is not
+  # gate-qualified" -- and the old check therefore refused to reuse ANY shard, ever: each
+  # re-submission re-measured the whole partition and the array could never converge. That reason
+  # is a property of the ADAPTER, is identical across all N shards, and is re-derived by the merge
+  # from the same artifact, which still refuses to write a gate-qualified GEOM_TOL from it. Reusing
+  # such a shard therefore launders nothing. Every OTHER reason -- a truncating flag, coverage under
+  # the floor, an empty measurement -- is data-dependent, means THIS shard measured the wrong thing,
+  # and is still refused. headline_valid and the two truncating flags are checked directly rather
+  # than inferred from the reason strings, so a reason this rule does not recognise cannot be waved
+  # through.
   #
   # AND THAT WHOLE PARAGRAPH IS TRUE ONLY WHILE THE WORLD AROUND THE SHARD HAS NOT MOVED, which is
   # the defect the two staleness checks inside the heredoc repair. "The adapter's standing flag,
@@ -1069,8 +1116,11 @@ PY
   #
   # THE REFUSAL MUST NOT BE READ AS "EDIT THE FLAG". apple_sam2.GATE_QUALIFIED is the project
   # owner's to move, in its own commit, once the residue blocker 2 carries forward is decided on the
-  # record; the module's own comment and CLAUDE.md both say no session may make that edit. The
-  # message below names the decision and does not name a diff.
+  # record — and it HAS moved: 13f0416 flipped it on on 2026-08-27, after that decision was
+  # recorded on 2026-08-26/27. So refusal 3 does not fire at HEAD at all; if it fires, the flag has
+  # gone BACK, and apple_sam2's own "WHAT WOULD TAKE IT BACK" paragraph is what to read for which
+  # finding did it. The module's own comment and CLAUDE.md both say no session may make that edit,
+  # in either direction. The message below names the decision and does not name a diff.
   #
   # THE WAIVER IS ONE ENV VAR AND IT IS LOUD. GEOM_WAIVE_CONTRACT_AND_GATE_PREFLIGHT=1 downgrades
   # all three refusals to warnings — for the case where an operator is knowingly measuring
@@ -1279,15 +1329,20 @@ if not bool(getattr(adapter, "GATE_QUALIFIED", False)):
          "decision goes afterwards. Flipping the flag later does not repair these artifacts — it",
          "requires re-measuring the corpus, at the full 13.6 GPU-h, a second time.",
          "",
-         "WHAT IS ACTUALLY OUTSTANDING, since GATE_QUALIFICATION_BLOCKERS is now the empty tuple:",
-         "the flag's own comment states TWO preconditions and says an empty blocker tuple",
-         "satisfies one. The other is a RECORDED DECISION on the residue the 2026-08-26",
-         "discharges carry forward — in particular blocker 2's residue (i), a failure the",
-         "discharged blocker predicted, occurring by a route it did not predict, on 92 frames.",
+         "WHAT THIS REFUSAL USED TO MEAN, AND WHY IT DOES NOT MEAN THAT ANY MORE. Until",
+         "2026-08-27 it meant the second of the flag's two preconditions was still open: an",
+         "empty GATE_QUALIFICATION_BLOCKERS tuple satisfies one, and the other is a RECORDED",
+         "DECISION on the residue the 2026-08-26 discharges carry forward — in particular",
+         "blocker 2's residue (i), a failure the discharged blocker predicted, occurring by a",
+         "route it did not predict, on 92 frames. THAT DECISION WAS MADE AND RECORDED by the",
+         "owner, and the flag moved with it in 13f0416 on 2026-08-27. So this refusal firing at",
+         "all means the flag has gone BACK, or that this cluster copy predates that commit.",
+         "Read apple_sam2's own WHAT WOULD TAKE IT BACK paragraph for which finding did it, and",
+         "treat THAT, not residue (i), as what is outstanding.",
          "",
-         "THAT DECISION IS THE PROJECT OWNER'S AND THIS IS NOT A REQUEST TO EDIT THE FLAG. The",
+         "IT IS STILL THE PROJECT OWNER'S FLAG AND THIS IS NOT A REQUEST TO EDIT THE FLAG. The",
          "module's own comment and CLAUDE.md both say no session may make that edit; it is the",
-         "owner's, on the record, in its own commit. Submit this array AFTER it lands."]))
+         "owner's, on the record, in its own commit. Submit this array AFTER it stands again."]))
 
 # THE FLAG IS ONLY ONE OF THREE CONJUNCTS, AND THE OTHER TWO FAIL THE SAME WAY FOR THE SAME MONEY.
 # What lands in the shard is not GATE_QUALIFIED: measure_geom_tol.sam2_method() writes
@@ -1549,10 +1604,14 @@ PY
   ELAPSED=$((SECONDS - START))
   echo "=== shard ${SHARD_INDEX} exited ${RC} after ${ELAPSED}s"
   # EXIT 3 IS TWO DIFFERENT EVENTS AND THIS FILE USED TO CONFLATE THEM. It means "the measurement
-  # is disqualified from the gate", which today is TRUE OF EVERY CORRECT SHARD, because
-  # apple_sam2.GATE_QUALIFIED is False and nothing about the corpus can change that. Treating it as
-  # FATAL printed sixteen failures over sixteen good measurements and — with the old resume check —
-  # guaranteed that every re-submission re-measured the whole partition. So exit 3 is re-classified
+  # is disqualified from the gate", which was TRUE OF EVERY CORRECT SHARD while
+  # apple_sam2.GATE_QUALIFIED was False — nothing about the corpus could change that — and stopped
+  # being true on 2026-08-27, when 13f0416 flipped that flag on: a shard measured at HEAD records
+  # gate_qualified: true, exits 0, and never reaches this branch. The branch stays because it is
+  # about the ARTIFACT and not about the flag, and a waived run, a lagging cluster copy or a
+  # re-flip still has to classify what it wrote. Treating exit 3 as FATAL printed sixteen failures
+  # over sixteen good measurements and — with the old resume check — guaranteed that every
+  # re-submission re-measured the whole partition. So exit 3 is re-classified
   # by asking the SAME question the resume check asks, of the artifact that was actually written:
   # a shard whose only disqualification is the adapter's standing flag has LANDED. Anything else,
   # and every other exit code, is still fatal and still writes nothing to the merge.
@@ -1560,14 +1619,17 @@ PY
      && shard_artifact_landed "${SHARD_OUT}" "${SHARD_INDEX}" "${NUM_SHARDS}" "${GEOM_STEP_FRAMES}"
   then
     echo "=== SHARD ${SHARD_INDEX}/${NUM_SHARDS} LANDED. Exit 3 here is the adapter's standing gate"
-    echo "===   flag (apple_sam2.GATE_QUALIFIED=False — NOT 'nobody has looked at a mask', which was"
-    echo "===   discharged 2026-08-26; the flag's second precondition, a recorded decision on"
-    echo "===   blocker 2's residue (i), is what is outstanding), which is identical across every"
-    echo "===   shard of this partition and is not a fact about this shard."
+    echo "===   flag (GATE_QUALIFIED is False in the adapter this job actually ran — NOT 'nobody"
+    echo "===   has looked at a mask', which was discharged 2026-08-26), which is identical across"
+    echo "===   every shard of this partition and is not a fact about this shard."
+    echo "===   READ THIS AS A SURPRISE, NOT AS ROUTINE: 13f0416 flipped that flag on on"
+    echo "===   2026-08-27, so a shard measured at HEAD records gate_qualified: true, exits 0 and"
+    echo "===   never prints this. Getting here means the cluster copy lags that commit, or the"
+    echo "===   flag has gone back, or this run was waived."
     echo "===   The merge will pool it and will write the pooled median DISQUALIFIED. THAT NUMBER"
-    echo "===   MUST NOT BE COMMITTED AS GEOM_TOL until the blocker is discharged, and discharging"
-    echo "===   it later means re-measuring the corpus: gate_qualified is baked in at measurement"
-    echo "===   time and no merge re-derives it."
+    echo "===   MUST NOT BE COMMITTED AS GEOM_TOL, and there is no later repair: gate_qualified is"
+    echo "===   baked in at measurement time and no merge re-derives it, so the corpus has to be"
+    echo "===   re-measured, under a fresh RUN_ID, by an adapter whose flag is set."
     RC=0
   fi
   if (( RC != 0 )); then
@@ -1578,13 +1640,14 @@ PY
     echo "       where one shard says gate_qualified false and another says true, so this stops the"
     echo "       whole measurement rather than skewing it. Exit 2 means nothing was measured at"
     echo "       all. Either way, fix the cause and re-run THIS index:"
-    echo "         SHARD=1 NUM_SHARDS=${NUM_SHARDS} GEOM_STEP_FRAMES=${GEOM_STEP_FRAMES} \\"
-    echo "           sbatch --array=${SHARD_INDEX} --time=01:30:00 $(basename "$0")"
+    echo "         RUN_ID=${RUN_ID} SHARD=1 NUM_SHARDS=${NUM_SHARDS} \\"
+    echo "           GEOM_STEP_FRAMES=${GEOM_STEP_FRAMES} \\"
+    echo "           sbatch --array=${SHARD_INDEX} --time=01:30:00 ${THIS_SCRIPT}"
     exit "${RC}"
   fi
   echo "=== NEXT, once every shard has landed (this is NOT GEOM_TOL and no shard is):"
-  echo "===   MERGE=1 NUM_SHARDS=${NUM_SHARDS} sbatch --qos=2cpu-single-host --gres=none \\"
-  echo "===     --cpus-per-task=2 --mem=8G --time=00:20:00 $(basename "$0")"
+  echo "===   RUN_ID=${RUN_ID} MERGE=1 NUM_SHARDS=${NUM_SHARDS} sbatch --qos=2cpu-single-host \\"
+  echo "===     --gres=none --cpus-per-task=2 --mem=8G --time=00:20:00 ${THIS_SCRIPT}"
   exit 0
 fi
 
