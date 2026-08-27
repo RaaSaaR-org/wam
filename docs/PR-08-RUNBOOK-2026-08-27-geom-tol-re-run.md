@@ -93,6 +93,25 @@ RUN_ID=pr08-geom-tol-v2 SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \
 …then `4-7`, `8-11`, `12-15`, one wave at a time. Cost per wave ≈ 2.9–3.9 GPU-h, ≈ 56–66 min
 elapsed. **Total 13.64 GPU-h.**
 
+**Do not paste that line.** It is ~250 characters, and on 2026-08-27 a terminal's visual wrap
+became a real newline directly after `sbatch`: Slurm read an empty script (`Batch script is
+empty!`) and `--qos=…` ran as a shell command on the next line. Nothing was submitted, which was
+luck — the same break one word later submits a wave with a flag missing. Use the wrapper, whose
+argv is short enough that it cannot break that way:
+
+```bash
+./cluster/discoverer/submit_geom_tol_wave.sh 1        # then 2, 3, 4
+./cluster/discoverer/submit_geom_tol_wave.sh merge
+./cluster/discoverer/watch_geom_tol.sh                # read-only, one snapshot, no polling
+```
+
+The wrapper decides nothing. It carries byte-for-byte the flags on this page —
+`tests/test_submit_geom_tol_wave.py` fails if the two ever disagree — and adds two refusals that
+each already cost this project a submission: it will not submit while the cluster adapter still
+reads `GATE_QUALIFIED = False`, and it will not submit a wave that does not fit under
+`MaxSubmitJobsPU=8` **counting a peer session's jobs**, which is the check `squeue`-on-my-run-only
+would miss.
+
 **Why waves and not one array.** The project QoS carries two different limits. `MaxJobsPU=4` caps
 *running* jobs and `%4` is the throttle that respects it. `MaxSubmitJobsPU=8` caps *submitted*
 (pending + running) jobs, **every array task counts as one**, and `%4` does nothing for it —
