@@ -41,36 +41,90 @@ EST=estimators.apple_sam2
 
 free_mib() { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1; }
 
+# THREE CONSECUTIVE SAMPLES, TWENTY SECONDS APART, AND THE REASON IS A FAILURE THIS SCRIPT ALREADY
+# HAD. The first version tested `free_mib` once and started; it caught a dip while a neighbouring
+# job was between allocations, launched, and died with a CUDA OOM 40 seconds later. A single sample
+# of free memory is not a statement about the next ten minutes. Three agreeing samples is not one
+# either, but it excludes the transient, and an OOM is treated as "go back to waiting" below rather
+# than as a fatal — which is what actually makes this safe.
+SAMPLES=3
+SAMPLE_GAP=20
+
+headroom_holds() {
+  local i free
+  for ((i = 0; i < SAMPLES; i++)); do
+    free="$(free_mib)"
+    if [[ "${free}" -lt "${MIN_FREE_MIB}" ]]; then
+      echo "  sample $((i + 1))/${SAMPLES}: ${free} MiB free, need ${MIN_FREE_MIB}"
+      return 1
+    fi
+    [[ $((i + 1)) -lt ${SAMPLES} ]] && sleep "${SAMPLE_GAP}"
+  done
+  return 0
+}
+
 waited=0
-while [[ "$(free_mib)" -lt "${MIN_FREE_MIB}" ]]; do
-  if [[ "${waited}" -ge "${WAIT_MINUTES}" ]]; then
-    echo "GIVING UP: ${MIN_FREE_MIB} MiB never became free within ${WAIT_MINUTES} min." >&2
-    echo "  Nothing was measured. CPU is not an option here: 8.28 s/frame measured, Arm B ~77 h." >&2
-    exit 4
-  fi
-  echo "waiting for GPU: $(free_mib) MiB free, need ${MIN_FREE_MIB} (${waited}/${WAIT_MINUTES} min)"
-  sleep 300
-  waited=$((waited + 5))
-done
-echo "=== GPU has $(free_mib) MiB free; starting. ==="
-nvidia-smi --query-gpu=name,memory.free --format=csv,noheader
+wait_for_gpu() {
+  while ! headroom_holds; do
+    if [[ "${waited}" -ge "${WAIT_MINUTES}" ]]; then
+      echo "GIVING UP: ${MIN_FREE_MIB} MiB never held for ${SAMPLES} samples within ${WAIT_MINUTES} min." >&2
+      echo "  Nothing further was measured. CPU is not an option: 8.28 s/frame, Arm B ~77 h." >&2
+      exit 4
+    fi
+    echo "waiting for GPU (${waited}/${WAIT_MINUTES} min)"
+    nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader | sed 's/^/    holder: /'
+    sleep 300
+    waited=$((waited + 5))
+  done
+  echo "=== GPU headroom held across ${SAMPLES} samples ($(free_mib) MiB free); starting. ==="
+}
+
+# Fragmentation is the other way a run this size dies on a shared card, and the allocator's own
+# advice is the fix. Harmless when the card is empty.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+wait_for_gpu
+
+# AN OOM IS NOT A RESULT AND IS NOT A FATAL. Another process taking the card back mid-run says
+# nothing about this measurement, so the step goes back to the wait loop and is retried rather than
+# ending the protocol half-measured. Anything else — a missing capture, a refusing contract, an
+# estimator that will not load — is a real refusal and stops everything, because retrying it would
+# just produce the same refusal more slowly.
+OOM_RETRIES=6
+
+run_step() {  # <label> <command...>
+  local label="$1"; shift
+  local attempt=0 rc=0 log
+  log="$(mktemp)"
+  while :; do
+    set +e
+    "$@" 2>&1 | tee "${log}"
+    rc=${PIPESTATUS[0]}
+    set -e
+    # exit 3 is "written but not gate-qualified", the expected state while GATE_QUALIFIED is False.
+    if [[ ${rc} -eq 0 || ${rc} -eq 3 ]]; then rm -f "${log}"; return 0; fi
+    if grep -qiE "OutOfMemoryError|CUDA out of memory" "${log}"; then
+      attempt=$((attempt + 1))
+      if [[ ${attempt} -gt ${OOM_RETRIES} ]]; then
+        echo "GIVING UP on ${label}: ${OOM_RETRIES} OOMs. The card is not free enough." >&2
+        rm -f "${log}"; exit 4
+      fi
+      echo "--- ${label}: CUDA OOM (attempt ${attempt}/${OOM_RETRIES}). Back to waiting."
+      wait_for_gpu
+      continue
+    fi
+    echo "FATAL: ${label} exited ${rc}; nothing was written." >&2
+    rm -f "${log}"; exit "${rc}"
+  done
+}
 
 measure() {  # <capture dir> <artifact stem>
   local cap="$1" stem="$2"
   local out="${V17}/EST_DRIFT-${stem}.json"
   if [[ -f "${out}" ]]; then echo "SKIP ${stem} (measured)"; return 0; fi
   echo "--- measuring ${stem} (${cap})"
-  # exit 3 is "written but not gate-qualified", which is the expected state while
-  # GATE_QUALIFIED is False. Only a 2 (fatal, nothing written) is a failure here.
-  set +e
-  .venv/bin/python scripts/measure_est_drift.py measure \
+  run_step "${stem}" .venv/bin/python scripts/measure_est_drift.py measure \
     --capture "${cap}" --estimators "${EST}" --arm both --out "${out}"
-  local rc=$?
-  set -e
-  if [[ ${rc} -ne 0 && ${rc} -ne 3 ]]; then
-    echo "FATAL: ${stem} exited ${rc}; nothing was written." >&2
-    exit "${rc}"
-  fi
 }
 
 # --- V17 §5 C1 first: the outcome table reads the control before anything else. ----------------
@@ -85,12 +139,8 @@ for id in C2-t20 C2-t40 C2-t80; do measure "${V17}/${id}" "${id}"; done
 # --- V17 §3 Arm B: the real corpus. -------------------------------------------------------------
 if [[ ! -f "${V17}/ARM_DIVERGENCE.json" ]]; then
   echo "--- Arm B: 40 episodes, both arms, cross-arm divergence runs"
-  set +e
-  .venv/bin/python scripts/measure_arm_divergence.py \
+  run_step "Arm B" .venv/bin/python scripts/measure_arm_divergence.py \
     --corpus "${CORPUS}" --estimators "${EST}" --out "${V17}/ARM_DIVERGENCE.json"
-  rc=$?
-  set -e
-  [[ ${rc} -eq 0 || ${rc} -eq 3 ]] || { echo "FATAL: Arm B exited ${rc}" >&2; exit "${rc}"; }
 fi
 
 # --- V17 §4: pool, and read the outcome. --------------------------------------------------------
@@ -105,7 +155,7 @@ fi
 # outcome N would not flip the flag without it any more than this would without V17.
 if [[ ! -f runs/pr08-operating-point/EPISODE_094_CENSUS.json ]]; then
   echo "--- V18: every frame of episode_000094, both decodes, which ones the filter refuses"
-  .venv/bin/python scripts/census_operating_point_episode.py \
+  run_step "V18 census" .venv/bin/python scripts/census_operating_point_episode.py \
     --episode episode_000094 \
     --corpus "${CORPUS}" \
     --corpus /home/humanoid/wam-t041/pr08-apple-640x480 \
