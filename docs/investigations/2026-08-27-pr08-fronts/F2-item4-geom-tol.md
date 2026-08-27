@@ -269,10 +269,24 @@ refuses in the *opposite* direction (`committed None, this run 0.1`). A repo syn
 # 1. Fresh RUN_ID so the 16 stale shard artifacts cannot be reused or overwritten in place.
 #    (Do NOT reuse pr08-geom-tol: see Defect D-1. `mv` inside /valhalla is a hard prohibition.)
 #    Four waves of four; MaxSubmitJobsPU=8 counts every array task, %4 does not help the submit limit.
-#    GEOM_SECONDS_PER_FRAME=0.29 is the MEASURED rate (§5, Defect D-3); the shipped default 0.18
-#    disarms the walltime self-check.
-RUN_ID=pr08-geom-tol-v2 SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 GEOM_SECONDS_PER_FRAME=0.29 \
-  sbatch --array=0-3%4  --time=01:50:00 cluster/discoverer/103_measure_geom_tol.sbatch
+#
+#    ---- CORRECTED 2026-08-27, LATER THE SAME DAY. DO NOT PASS GEOM_SECONDS_PER_FRAME. ----
+#    The line below was written against the shipped default 0.18, which it was right to override.
+#    That default no longer exists: it was replaced the same day by 0.2478, together with
+#    GEOM_LOAD_SECONDS 120 -> 410, and the pair is a least-squares fit over the previous array's
+#    OWN sixteen (frames, wall-clock) pairs -- 0.2478 x 171 625 + 16 x 410 = 49 089 s against a
+#    measured 49 091 s, two seconds and 0.005 % apart. Passing 0.29 ON TOP of the new L=410 charges
+#    the load twice: shard 5 then estimates 5646 s against 5398 s of wall, and THE SELF-CHECK
+#    REFUSES THE WAVE. The override that armed the check now disarms it, which is the exact
+#    inversion this note exists to stop.
+#
+#    The walltime below is also superseded: 01:30:00 fits with the fitted constants (worst shard
+#    3933 s observed, 5398 s available), and 01:45:00 buys shard 5 a wider margin for free, since
+#    GPU-hours are billed on runtime and not on the request.
+#    The live runbook is docs/PR-08-RUNBOOK-2026-08-27-geom-tol-re-run.md.
+RUN_ID=pr08-geom-tol-v2 SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 \
+  sbatch --qos=ehpc-aif-2026pg01-905 --array=0-3%4 --time=01:45:00 \
+  cluster/discoverer/103_measure_geom_tol.sbatch
 #   ... wait until `squeue -u $USER -r -h -o '%i' | wc -l` is <= 4, then:
 RUN_ID=pr08-geom-tol-v2 SHARD=1 NUM_SHARDS=16 GEOM_STEP_FRAMES=1 GEOM_SECONDS_PER_FRAME=0.29 \
   sbatch --array=4-7%4  --time=01:50:00 cluster/discoverer/103_measure_geom_tol.sbatch

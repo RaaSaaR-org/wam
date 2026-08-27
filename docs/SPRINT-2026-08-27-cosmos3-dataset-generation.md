@@ -10,7 +10,27 @@ resolved in favour of the other file, and this page is the one that gets correct
 
 ---
 
-> **SUPERSEDED IN PART, the same day it was written.**
+> **SUPERSEDED TWICE, both times on the day it was written. READ THE SECOND NOTICE FIRST.**
+>
+> **The decision the whole page builds toward has been taken, and the two pages that record it are
+> the live ones:**
+>
+> - [`preregistration/PR-08-RESULT-2026-08-27-geom-tol-is-measured-and-uncommittable.md`](preregistration/PR-08-RESULT-2026-08-27-geom-tol-is-measured-and-uncommittable.md)
+>   — GEOM_TOL is **already measured** at `0.47857992441961017 px` over all 402 episodes and every
+>   candidate margin is positive, and that is precisely why the artifact may not be committed: one
+>   of its three defects records *which frames were measured*. The owner took the fork on the
+>   **re-measure** side.
+> - [`PR-08-RUNBOOK-2026-08-27-geom-tol-re-run.md`](PR-08-RUNBOOK-2026-08-27-geom-tol-re-run.md)
+>   — the literal commands for that re-run, **prepared and not submitted**. It supersedes every
+>   submission recipe anywhere else in this repository, including the sbatch's own header.
+>
+> Three things it corrects that would have cost the run: `sync.sh` is **not** hygiene but a repair,
+> because job 190191's merge overwrote the cluster's own pre-commitment file; the submission needs
+> a **fresh `RUN_ID`**, and the commands the script printed omitted it; and
+> `GEOM_SECONDS_PER_FRAME=0.29` must **not** be passed any more — that override armed the walltime
+> self-check against the old default and now disarms it.
+>
+> **AND, SUPERSEDED IN PART BEFORE THAT.**
 > **§§2–4 and §7 below are replaced by
 > [`PR-08-DECISION-SHEET-2026-08-27.md`](PR-08-DECISION-SHEET-2026-08-27.md)**, which was produced by
 > six parallel investigations plus an adversarial re-read of each, and which corrects this page in
