@@ -539,9 +539,10 @@ frames moved by >0.01 when re-rendered on an RTX 5090 (`pr08_robot_mask_area.jso
 **Against (c):** it makes item 3 — which is otherwise fully independent — wait on item 5 of the sprint.
 **Recommendation: (b) REGISTER-EPISODE**, written as a rule version that states plainly that the episode
 was selected from the 17 and that the resulting `seconds_per_frame` is biased by the selection. It is the
-only exit that produces a real end-to-end wall clock without switching a gate off. `episode_000093`
-(448 frames, closest of the 17 to the corpus median of 421.5) is reachable with no code change via
-`CHUNK_TOTAL=402 CHUNK_INDEX=94`.
+only exit that produces a real end-to-end wall clock without switching a gate off. ~~`episode_000093` (448 frames, closest of the 17 to the corpus median of 421.5)~~ **— WRONG, corrected 2026-08-27 by `T40_RULE_V20` §3.** `episode_000093` has 448 frames against a median of
+421.5, |Δ| = 26.5, eighth-closest. The closest is **`episode_000371`, 422 frames, |Δ| = 0.5**, and
+that is what V20 registers. The `CHUNK_INDEX` is resolved from the manifest at submission time
+rather than asserted, because it depends on the manifest and not on a document.
 **Cost of NO / of doing nothing:** every timing submission burns an H200 slot to reproduce a refusal two
 committed artifacts already predict, and item 3 never closes.
 
