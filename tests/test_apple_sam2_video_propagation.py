@@ -146,18 +146,37 @@ def test_this_module_discharges_nothing():
     is not a verdict.
 
     This asserted ``len(...) == 3`` until 2026-08-26, when blockers 1 and 2 were discharged on
-    their own evidence and the count went stale — which is the wrong tripwire, because a count has
-    to be edited by every legitimate discharge and therefore stops guarding anything. The invariant
-    this test is actually about is narrower and does not decay: **the blocker THIS module is the
-    evidence for must still be open**, and this module must not be what closes it.
+    their own evidence and the count went stale. It then asserted the propagation blocker was still
+    OPEN, and that went stale on 2026-08-27 when it was discharged. Both were the wrong tripwire
+    for the same reason: they track the blocker's STATE, which every legitimate discharge changes,
+    rather than the invariant this test is about — **whatever closes that blocker, it may not be
+    the mere existence of this module.** Producing the evidence a blocker asks for and accepting it
+    are different acts, and only the second may shorten the tuple.
+
+    So the guard now reads the DISCHARGE and checks what it rests on: the owner's decision
+    (T40_RULE_V14) and a measurement whose criterion was registered before the first capture was
+    rendered (T40_RULE_V17), and NOT "a propagation arm was written". That invariant does not
+    decay, because it is about the discharge's grounds rather than its date.
     """
     assert apple_sam2.GATE_QUALIFIED is False
-    assert any(
-        b.startswith("PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION")
-        for b in apple_sam2.GATE_QUALIFICATION_BLOCKERS
-    ), "the propagation blocker is gone from GATE_QUALIFICATION_BLOCKERS"
-    assert not any(
-        "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in d
+    discharged = [
+        d
         for d in apple_sam2.GATE_QUALIFICATION_DISCHARGED
-    ), "the propagation blocker was discharged; this module may not be the thing that did it"
+        if "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in d
+    ]
+    assert len(discharged) == 1, "the propagation wording must be readable in exactly one place"
+    entry = discharged[0]
+    assert "T40_RULE_V14" in entry, "its Isaac/MuJoCo half is the owner's decision, not ours"
+    assert "T40_RULE_V17" in entry, "its corpus half is a measurement with a pre-registered rule"
+    # The specific bad discharge this test exists against: the arm existing, or the arm's own
+    # numbers, being treated as the thing that closed the blocker the arm was built to answer.
+    assert "outcome N" in entry, "the discharge must name the registered outcome it reached"
+    # ONLY THE GROUNDS ARE CHECKED, not the whole entry. The retired wording is quoted verbatim
+    # after the `>>>` marker and it names this module as what DROVE both arms — which is true, and
+    # is exactly the distinction: being the evidence is allowed, being the reason is not.
+    grounds = entry.split(">>>", 1)[0]
+    assert vid.__name__.split(".")[-1] not in grounds, (
+        "this module must not appear among the grounds of the discharge it is the evidence for"
+    )
+    assert "answered by the owner" in grounds and "registered one BEFORE" in grounds
     assert "NOTHING" in vid.PROPAGATION_CONTRACT["discharges"]
