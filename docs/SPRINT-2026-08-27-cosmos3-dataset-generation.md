@@ -10,6 +10,38 @@ resolved in favour of the other file, and this page is the one that gets correct
 
 ---
 
+> **SUPERSEDED IN PART, the same day it was written.**
+> **§§2–4 and §7 below are replaced by
+> [`PR-08-DECISION-SHEET-2026-08-27.md`](PR-08-DECISION-SHEET-2026-08-27.md)**, which was produced by
+> six parallel investigations plus an adversarial re-read of each, and which corrects this page in
+> nine places. Four of those corrections change what gets submitted; three change a cost by more than
+> 40 %. §§0, 1, 5 and 6 below still stand, except §6's cost table, which the sheet re-measures.
+>
+> The four that change a submission, so that nobody acts on this page by accident:
+>
+> 1. **§2's "Blocked on: an owner decision to submit. Nothing technical." is wrong.** The `97 TIMING=1`
+>    run generates a full 590-frame clip and *then* refuses in `robot_composite.check_mask` on frame 0.
+>    `episode_000000` has 254 empty-mask frames of 590, and frame 0 is one of them.
+> 2. **§3.3's "cluster" label on `EST_DRIFT_P95` describes a job that does not need to exist.** The
+>    measurement runs locally, ~3 min on the workstation's RTX 5090, at zero allocation cost.
+> 3. **§7 step 1 — the cluster census of `episode_000094` — is not on the critical path**, and as
+>    specified it varies machine and code at once, so it cannot isolate the variable it is aimed at.
+> 4. **Which drift arm G0b subtracts must be decided BEFORE the `GEOM_TOL` array, not after.**
+>    `segmenter.propagation` is a pre-registered contract field; deciding it afterwards means paying
+>    the array's GPU-hours a second time. That ordering is stated nowhere in this document.
+>
+> And two numbers this page gets wrong: the `GEOM_TOL` re-run costs **13.64 GPU-h**, not ≈9 (measured
+> by summing the previous array's own sixteen shard logs); and the joint G0c yield with both halves of
+> `check_mask` armed is **17 of 402 episodes (4.23 %)**, a product that is written down nowhere in the
+> repository and is the number a stage-1 launch decision turns on.
+>
+> The working notes behind all of this, including the claims their adversarial re-reads knocked down,
+> are in [`investigations/2026-08-27-pr08-fronts/`](investigations/2026-08-27-pr08-fronts/README.md).
+
+---
+
+---
+
 ## 0. The sentence that defines the goal
 
 `docs/preregistration/PR-08-photoreal-augmentation.md` §1:
