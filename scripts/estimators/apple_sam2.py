@@ -632,7 +632,66 @@ SEGMENTER_CONTRACT: dict[str, Any] = {
 #: QUESTION**: read those two entries before reading this one as "almost clear", and in particular
 #: read blocker 2's residue (i), which records that the failure blocker 2 predicted DID occur on 92
 #: frames by a route blocker 2 did not predict.
-GATE_QUALIFICATION_BLOCKERS: tuple[str, ...] = (
+GATE_QUALIFICATION_BLOCKERS: tuple[str, ...] = ()
+
+#: **EMPTY IS NOT PERMISSION, AND THE TUPLE BEING EMPTY IS NOT WHY.** Six entries were discharged
+#: between 2026-08-22 and 2026-08-26 and the seventh — the propagation difference — on 2026-08-27.
+#: Every one of them is still readable below, in full, with the evidence that retired it: nothing
+#: has been deleted from this module, and a reader who wants to know what this adapter was ever
+#: accused of reads :data:`GATE_QUALIFICATION_DISCHARGED` and finds all seven.
+#:
+#: :data:`GATE_QUALIFIED` IS STILL ``False``, and its own comment says why in a sentence this edit
+#: does not touch: the flag has TWO preconditions and an empty blocker tuple satisfies one of them.
+#: The other is a recorded decision on the residue the 2026-08-26 entries carry forward, and
+#: `PR-08-RESULT-2026-08-27-the-rate-is-bounded-and-the-per-frame-arm-is-the-one-that-broke.md` §6
+#: leaves an open five-frame disagreement inside the evidence for it.
+
+#: What used to be in the tuple above and is not any more, with the evidence that removed it. A
+#: blocker that simply DISAPPEARS between two commits is indistinguishable from a blocker somebody
+#: deleted because it was in the way, and the whole value of the tuple is that it cannot be reduced
+#: quietly. Kept in ``stats()`` too, so the artifact carries the shrinking as well as the remainder.
+GATE_QUALIFICATION_DISCHARGED: tuple[str, ...] = (
+    "2026-08-27 — the propagation difference. THE ENTRY NAMED TWO INDEPENDENT SUFFICIENT REASONS "
+    "AND BOTH ARE NOW CLOSED, BY DIFFERENT ACTS. Reason one — 'the capture is MuJoCo and this "
+    "blocker says Isaac' — was a rule question for the project owner and was answered by the "
+    "owner on 2026-08-27 as T40_RULE_V14 (docs/preregistration/PR-08-V14-mujoco-stands-in-for-"
+    "isaac.md), which licenses a MuJoCo capture to stand in FOR EST_DRIFT_P95 AND THE ARM "
+    "COMPARISON AND FOR NOTHING ELSE. Reason two — '480 frames of ONE trajectory is not a corpus' "
+    "— had no registered criterion at all, so no measurement could have closed it; T40_RULE_V17 "
+    "registered one BEFORE the first capture was rendered, and its outcome N was reached: "
+    "3840 frames over eight distinct trajectories (Arm A) and 16846 frames over 40 whole episodes "
+    "of the REAL corpus (Arm B, seed 40017), zero propagation-side runs of >= 10 frames in either, "
+    "with a positive control that fires. WHAT THE DISCHARGE CARRIES, because V17 §4 requires it "
+    "in this text and not in a document a reader may not open. (1) THE COUNTS ARE 3840 SIMULATED "
+    "AND 16846 REAL, AND THE BOUND IS A BOUND: forty clean episodes of 402 bounds the per-episode "
+    "rate at 3/40 = 7.5 % by the rule of three, i.e. this clean sweep is still consistent with "
+    "ABOUT THIRTY OF THE 402 EPISODES CONTAINING AN EVENT. This sample can detect divergence; it "
+    "cannot certify its absence. (2) ARM B HAS NO GROUND TRUTH. It measures whether the two arms "
+    "AGREE, not whether either is right: two masks wrong in the same place score 1.0 and this "
+    "design cannot see it. (3) ARM A IS MUJOCO — an untextured 14-group convex proxy mesh, a "
+    "static prop, a rasteriser that is neither ray-traced nor photoreal, with a cube distractor "
+    "left in the scene. (4) THE POSITIVE CONTROL ONLY DEMONSTRATES THE GROSS CASE. V17 §5's dose "
+    "ladder was measured and NEVER FIRED: at 110.64 px of median inter-frame object motion, 84x "
+    "the measured capture's, the propagation arm produced ZERO sub-0.5 frames. The only thing that "
+    "made it fail is a HELD WRONG SEED (C3, one run of 480 frames), which is the grossest possible "
+    "version of the failure this blocker described. NOTHING MEASURED HERE SHOWS THAT low_iou_runs "
+    "CAN DETECT A SUBTLE OR PARTIAL DRIFT. (5) AND THE ATTRIBUTION PREMISE ARM B RESTED ON WAS "
+    "FALSIFIED BY THIS PROJECT'S OWN CONTROL DATA. V17 §3 argued that a long cross-arm divergence "
+    "run must belong to the propagation arm, because the per-frame arm's errors are independent "
+    "across frames and independent errors do not produce long runs. The per-frame arm then "
+    "produced a run of THIRTEEN consecutive frames at IoU exactly 0.0 (capture A3, f294-f306) "
+    "while the propagation arm produced none anywhere in that capture — scene difficulty is "
+    "correlated across frames, so an estimator with no memory fails for the whole occlusion while "
+    "one with memory tracks through. No conclusion rests on that premise, because Arm B found no "
+    "run at all, but the next person to reach for the inference needs to know it was tested and "
+    "failed. IT ALSO INVERTS THIS ENTRY'S OWN FRAMING AT THE RUN LEVEL: limb (b) said propagation "
+    "drifts and stays off while a per-frame estimator recovers on the next frame; measured, the "
+    "contiguous failure is the per-frame arm's. Pooled p95 over 3840 frames: per-frame "
+    "0.3120786214328541, propagation 0.4486097454155794, delta +0.1365. The p99/p100 crossing the "
+    "single capture showed is confirmed and wider — per-frame 1.0431/67.633 against propagation "
+    "0.5631/19.399. Full reading: docs/preregistration/PR-08-RESULT-2026-08-27-the-rate-is-"
+    "bounded-and-the-per-frame-arm-is-the-one-that-broke.md. THE RETIRED WORDING, VERBATIM, "
+    "BETWEEN THE MARKERS: >>> "
     "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION, and it is the one difference left. "
     "Everything else in §4 step 2's 'the same segmenter' now matches Cosmos-Transfer2.5's "
     "sam2_model.py exactly — both checkpoints at pinned revisions, the 'apple.' phrase, "
@@ -681,14 +740,7 @@ GATE_QUALIFICATION_BLOCKERS: tuple[str, ...] = (
     "mis-gated by this: configs/transfer25/pr08_geom_tol.json records geom_tol_px, est_drift_p95_px "
     "and gate_margin_px all null, so run_g0_gates.gate_budget() refuses before subtracting anything. "
     "Full reading: "
-    "docs/preregistration/PR-08-RESULT-2026-08-26-both-arms-measured-the-generator-is-the-worse-one.md.",
-)
-
-#: What used to be in the tuple above and is not any more, with the evidence that removed it. A
-#: blocker that simply DISAPPEARS between two commits is indistinguishable from a blocker somebody
-#: deleted because it was in the way, and the whole value of the tuple is that it cannot be reduced
-#: quietly. Kept in ``stats()`` too, so the artifact carries the shrinking as well as the remainder.
-GATE_QUALIFICATION_DISCHARGED: tuple[str, ...] = (
+    "docs/preregistration/PR-08-RESULT-2026-08-26-both-arms-measured-the-generator-is-the-worse-one.md. <<<",
     "2026-08-22 — 'never executed, no checkpoint staged anywhere in this project' (T-040, "
     "2026-08-21). Withdrawn by measurement: job 189583 staged facebook/sam2-hiera-large, "
     "IDEA-Research/grounding-dino-base and depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf "
@@ -839,18 +891,49 @@ GATE_QUALIFICATION_DISCHARGED: tuple[str, ...] = (
     "not analysed; whether those refusals were correct is a separate open question.",
 )
 
-#: Opt-IN, and this module still does not opt in. ONE condition above is open, and it is the one
-#: this file has named from the start as the last difference from upstream: this adapter re-detects
-#: per frame where Transfer2.5 propagates. Counted rather than indexed on purpose: the tuple shrank
-#: on 2026-08-22 and again on 2026-08-26, and a comment that said "blocker 4" went on pointing at
-#: whatever had moved into that slot. :data:`GATE_QUALIFICATION_DISCHARGED` now carries SIX
-#: conditions closed by evidence rather than by deletion — which is progress and is not permission.
+#: Opt-IN, and this module still does not opt in. **NO CONDITION ABOVE IS OPEN ANY MORE, AND THAT
+#: IS NOT WHY THIS IS STILL ``False``.** The last one — this adapter re-detects per frame where
+#: Transfer2.5 propagates — was discharged on 2026-08-27 in two acts: T40_RULE_V14, the owner's
+#: decision on its Isaac/MuJoCo half, and T40_RULE_V17 outcome N on its corpus half, whose
+#: criterion was registered before the first capture was rendered.
+#: :data:`GATE_QUALIFICATION_DISCHARGED` now carries SEVEN conditions closed by evidence rather
+#: than by deletion — which is progress and is not permission.
+#:
+#: **WHAT IS STILL OPEN IS THE SECOND PRECONDITION, and it was never a blocker.** Read the
+#: propagation discharge before reading this flag: it retires as a BOUND, not as an absence, and it
+#: carries five disclosures in its own text — that forty clean episodes of 402 still permit ~thirty
+#: containing an event; that Arm B has no ground truth and measures agreement rather than
+#: correctness; that Arm A is a rasterised proxy mesh; that the positive control only ever fired on
+#: a HELD WRONG SEED while the dose ladder never fired at all, so nothing shows this instrument can
+#: see a subtle drift; and that the attribution premise Arm B rested on was falsified by this
+#: project's own control data.
 #:
 #: **A SHORTER BLOCKER TUPLE DOES NOT FLIP THIS FLAG, AND NO EDIT THAT SHORTENS THE TUPLE MAY FLIP
-#: IT IN THE SAME COMMIT.** It stays ``False`` until the remaining entry is closed AND somebody
-#: decides, on the record, what to do with the residue the two 2026-08-26 entries carry forward —
-#: in particular blocker 2's residue (i), a failure the discharged blocker predicted, occurring by
-#: a route it did not predict, on 92 frames. ``measure_est_drift`` reads this flag with a default of
+#: IT IN THE SAME COMMIT.** That sentence was written while the tuple still had an entry and it
+#: binds hardest now that it has none: the tuple reached zero on 2026-08-27 and this flag did not
+#: move in that commit, which is the behaviour it was written to require.
+#:
+#: It stays ``False`` until somebody decides, on the record, what to do with the residue the two
+#: 2026-08-26 entries carry forward — in particular blocker 2's residue (i), a failure the
+#: discharged blocker predicted, occurring by a route it did not predict, on 92 frames.
+#: **T40_RULE_V18 registered a decision rule for that BEFORE its census ran, and the census reached
+#: outcome C (CONTAINED)**: over all 509 frames of ``episode_000094``, on both decode trees, 31
+#: masks were refused as the wrong object, all inside the documented f101-f155 run, and ZERO
+#: non-refused mask exceeded 3x the episode's median area — the largest is 1.31x against the
+#: audit's plate masks at ~4.3x. Two separate runs on one workstation differ on 0 of 509 frames and
+#: the two decodes are bit-identical on all 509.
+#:
+#: **AND ONE THING INSIDE THAT EVIDENCE IS UNEXPLAINED, WHICH IS WHY THIS IS STILL A PERSON'S
+#: CALL.** ``runs/pr08-geom-tol/shards/shard-7.json`` records the same episode as
+#: ``n_frames_with_centroid: 473``; the census measures 478. The five-frame gap is not the
+#: largest-connected-component floor — every centroid-less frame here is a refusal — and it runs
+#: against this module's own claim that V10's only possible effect on a frame is a refusal, since
+#: the shards ran a pre-V10 adapter and should refuse fewer rather than five more. The remaining
+#: candidate is a cross-machine difference of the class already established for the robot prompt.
+#: **That is a hypothesis, not a measurement.** Full reading:
+#: docs/preregistration/PR-08-RESULT-2026-08-27-the-rate-is-bounded-and-the-per-frame-arm-is-the-one-that-broke.md.
+#:
+#: ``measure_est_drift`` reads this flag with a default of
 #: False and stamps ``estimator_not_gate_qualified``; the artifact is still written, and exits 3.
 GATE_QUALIFIED = False
 

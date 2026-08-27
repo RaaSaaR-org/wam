@@ -1018,17 +1018,22 @@ def on_the_record(module) -> str:
 def test_it_does_not_claim_to_be_a_gate_estimator_and_says_why(loaded):
     module, _ = loaded
     assert module.GATE_QUALIFIED is False
-    assert module.GATE_QUALIFICATION_BLOCKERS
     record = on_the_record(module)
     assert "coverage" in record
-    # Both are still readable in full. The first was discharged on 2026-08-26 by the human look it
-    # named; the second is the one still open, and it is asserted against the OPEN tuple below.
+    # Both are still readable in full, and BOTH ARE NOW DISCHARGED — the first on 2026-08-26 by the
+    # human look it named, the second on 2026-08-27 by T40_RULE_V14 (its Isaac/MuJoCo half, an
+    # owner decision) and T40_RULE_V17 outcome N (its corpus half, a measurement whose criterion
+    # was registered before the first capture was rendered).
     assert "NOBODY HAS LOOKED AT A MASK" in record
     assert "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in record
-    assert any(
-        "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in b
-        for b in module.GATE_QUALIFICATION_BLOCKERS
-    ), "the propagation blocker must still be OPEN, not merely on the record"
+    # THE TUPLE IS EMPTY AND THE FLAG IS STILL FALSE, which is the whole point of this test now.
+    # An empty blocker tuple is one of GATE_QUALIFIED's two preconditions and not the flag; the
+    # module has to keep saying what the other one is, or "why" becomes unanswerable from the code.
+    assert module.GATE_QUALIFICATION_BLOCKERS == ()
+    source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
+    assert "EMPTY IS NOT PERMISSION" in source
+    assert "TWO preconditions" in source
+    assert "residue" in source
 
 
 def test_the_stale_never_executed_blocker_is_withdrawn_by_evidence_and_not_by_deletion(loaded):
@@ -2022,8 +2027,14 @@ def test_producing_the_fix_did_not_accept_it(loaded):
     and blocker 3 — per-frame segmentation vs upstream's propagation — is untouched by any of it."""
     module, _ = loaded
     assert module.GATE_QUALIFIED is False
-    assert any("PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in b
-               for b in module.GATE_QUALIFICATION_BLOCKERS)
+    # The propagation entry was discharged on 2026-08-27, and the guard moves WITH it rather than
+    # lapsing: what this test forbids is the validity filter being the ground of a discharge, and
+    # that is checkable against the discharged text exactly as it was against the open one.
+    propagation = [d for d in module.GATE_QUALIFICATION_DISCHARGED
+                   if "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in d]
+    assert len(propagation) == 1
+    assert "T40_RULE_V14" in propagation[0] and "T40_RULE_V17" in propagation[0]
+    assert "mask_validity" not in propagation[0]
     # Blocker 1 was discharged on 2026-08-26 — BY THE HUMAN LOOK IT NAMED, which is its own first
     # limb. The thing this test forbids is a different route: the validity filter making the
     # masks unavailable and that counting as an answer. So the discharge must cite the look, and
@@ -2517,13 +2528,95 @@ def test_v10_discharged_nothing(loaded):
     assert module.GATE_QUALIFIED is False
     # ``len(...) == 3`` stood here until 2026-08-26 and was the wrong guard: a count has to be
     # edited by every legitimate discharge, so it stops guarding the moment one happens. What V10
-    # may not do is be the GROUND of a discharge, and that is what is checked.
-    assert any("PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in b
-               for b in module.GATE_QUALIFICATION_BLOCKERS)
+    # may not do is be the GROUND of a discharge, and that is what is checked — against the whole
+    # discharged tuple, which is where the propagation entry moved on 2026-08-27 and where the
+    # check has to follow it.
     assert not any(
         "DISCHARGED BY" in d and "V10" in d for d in module.GATE_QUALIFICATION_DISCHARGED
     )
+    assert not any("V10" in d for d in module.GATE_QUALIFICATION_BLOCKERS)
     assert not any(
         "DISCHARGED BY" in d and "reference" in d.lower() and "scope" in d.lower()
         for d in module.GATE_QUALIFICATION_DISCHARGED
     )
+
+
+# -- T40_RULE_V17 §4 outcome N: what the propagation discharge must carry, forever ---------------
+#
+
+
+def _propagation_discharge(module) -> str:
+    hits = [
+        d
+        for d in module.GATE_QUALIFICATION_DISCHARGED
+        if "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in d
+    ]
+    assert len(hits) == 1, "exactly one entry may carry the propagation wording"
+    return hits[0]
+
+
+def test_the_propagation_entry_was_retired_verbatim_and_not_rewritten(loaded):
+    """A blocker that is SUMMARISED on its way out is a blocker whose wording nobody can check.
+
+    The discharge quotes the retired text between `>>>` and `<<<` markers, which is what makes
+    "moved, not deleted" an assertion rather than a claim. The three sentences below are the ones
+    a rewrite would soften first: the two-sided-bias argument, the refuted limb, and the reason
+    the 2026-08-26 measurement was NOT itself a discharge.
+    """
+    module, _ = loaded
+    entry = _propagation_discharge(module)
+    body = entry.split(">>>", 1)[1].rsplit("<<<", 1)[0]
+    assert "The bias is TWO-SIDED, which is why this cannot be waved through as conservative" in body
+    assert "Limb (a) IS REFUTED AT p95" in body
+    assert "480 frames of ONE trajectory is not a corpus" in body
+    assert "STILL OPEN ON 2026-08-26" in body
+
+
+def test_the_discharge_carries_every_disclosure_v17_required_of_it(loaded):
+    """V17 §4 outcome N fixed FOUR items before the data existed and the result added a fifth.
+    They live in the tuple rather than only in the result document, because a reader who reaches
+    for `GATE_QUALIFICATION_DISCHARGED` to see whether this adapter may be trusted is exactly the
+    reader who will not open a file named after a date."""
+    module, _ = loaded
+    entry = _propagation_discharge(module)
+    # (1) the counts, AND the bound read as a bound
+    assert "3840" in entry and "16846" in entry
+    assert "7.5 %" in entry and "THIRTY OF THE 402" in entry
+    assert "cannot certify its absence" in entry
+    # (2) Arm B measures agreement, not correctness
+    assert "ARM B HAS NO GROUND TRUTH" in entry
+    assert "wrong in the same place" in entry
+    # (3) Arm A is a simulator, with the substitution's licence named
+    assert "ARM A IS MUJOCO" in entry and "T40_RULE_V14" in entry
+    # (4) the control only demonstrates the gross case — the disclosure V17 §5 owed if the ladder
+    #     never fired, which is what happened
+    assert "NEVER FIRED" in entry
+    assert "110.64 px" in entry
+    assert "SUBTLE OR PARTIAL DRIFT" in entry
+    # (5) the premise Arm B's attribution rested on, falsified by this project's own control data
+    assert "FALSIFIED" in entry
+    assert "THIRTEEN consecutive frames" in entry
+
+
+def test_an_empty_blocker_tuple_did_not_flip_the_flag(loaded):
+    """The one thing `GATE_QUALIFIED`'s committed comment forbids in as many words: *A SHORTER
+    BLOCKER TUPLE DOES NOT FLIP THIS FLAG, AND NO EDIT THAT SHORTENS THE TUPLE MAY FLIP IT IN THE
+    SAME COMMIT.* The tuple reached zero on 2026-08-27 and the flag did not move."""
+    module, _ = loaded
+    assert module.GATE_QUALIFICATION_BLOCKERS == ()
+    assert module.GATE_QUALIFIED is False
+    assert len(module.GATE_QUALIFICATION_DISCHARGED) == 7
+
+
+def test_nothing_was_deleted_on_the_way_to_an_empty_tuple(loaded):
+    """Seven accusations were made against this adapter and seven are still readable. A tuple that
+    empties by deletion and one that empties by discharge are indistinguishable from the tuple
+    alone, which is the entire reason the discharged list exists."""
+    module, _ = loaded
+    discharged = " ".join(module.GATE_QUALIFICATION_DISCHARGED)
+    for wording in (
+        "never executed, no checkpoint staged",
+        "NOBODY HAS LOOKED AT A MASK",
+        "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION",
+    ):
+        assert wording in discharged, wording
