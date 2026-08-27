@@ -96,7 +96,12 @@
 # apple_sam2.GATE_QUALIFICATION_BLOCKERS[0] says this in as many words -- "it is also evidence
 # about a configuration THIS FILE HAS SINCE REPLACED" -- and the array was sized off it anyway.
 #
-# USE p = 0.18 s/frame UNTIL A PILOT RE-MEASURES IT AT THE CURRENT OPERATING POINT. Then:
+# USE p = 0.18 s/frame UNTIL SOMETHING RE-MEASURES IT AT THE CURRENT OPERATING POINT.
+# SOMETHING HAS, AND IT WAS NOT A PILOT: the N = 16 partition itself ran on 2026-08-26/27 and its
+# sixteen logs give p = 0.2478 s/frame with L = 410 s. The block under the table below derives that
+# from the logs and is what this file's defaults now carry. Everything between here and it is the
+# 2026-08-23 planning arithmetic, kept because the SHAPE it chose (N = 16 at 01:30:00) is the shape
+# that ran and survived — only its cost model was wrong, and by 1.50x. Then:
 #
 #     full corpus          171 625 x 0.18                          = 30 893 s = 8.58 GPU-h
 #                          (+ N model loads; at N = 8, 8.85 GPU-h)
@@ -122,31 +127,69 @@
 # at N = 4 it reproduces job 189658's own shard 0 (100 episodes, 42 673 frames) and shard 2
 # (114 episodes, 48 766 frames) to the frame.
 #
-#   N   heaviest shard   x mean    at p=0.18 s/frame + L=120 s      x1.25      total GPU-h
+#   N   heaviest shard   x mean    at p=0.2478 s/frame + L=410 s    x1.25      total GPU-h
 #   --------------------------------------------------------------------------------------
-#    4      48 766 f      1.137          02:28:17                 03:05:22        8.715
-#    5      38 042 f      1.108          01:56:07                 02:25:09        8.748
-#    6      32 326 f      1.130          01:38:58                 02:03:43        8.781
-#    8      24 546 f      1.144          01:15:38                 01:34:32        8.848
-#   10      21 265 f      1.239          01:05:47                 01:22:14        8.915
-#   12      17 404 f      1.217          00:54:12                 01:07:45        8.981
-#   16      14 162 f      1.320          00:44:29                 00:55:36        9.115
-#   20      13 363 f      1.557          00:42:05                 00:52:36        9.248
-#   24      10 677 f      1.493          00:34:01                 00:42:32        9.381
+#    4      48 766 f      1.137          03:28:14                 04:20:18       12.269
+#    5      38 042 f      1.108          02:43:57                 03:24:56       12.383
+#    6      32 326 f      1.130          02:20:20                 02:55:25       12.497
+#    8      24 546 f      1.144          01:48:13                 02:15:16       12.725
+#   10      21 265 f      1.239          01:34:40                 01:58:19       12.953
+#   12      17 404 f      1.217          01:18:43                 01:38:24       13.181
+#   16      14 162 f      1.320          01:05:19                 01:21:39       13.636
+#   20      13 363 f      1.557          01:02:01                 01:17:32       14.092
+#   24      10 677 f      1.493          00:50:56                 01:03:40       14.548
 #
-# p = 0.18 IS A PLANNING CONSTANT OVER A FLOOR, NOT A MEASUREMENT. 189658 established only
-# p >= 0.166 (shard 0 did not finish 42 673 frames in 7 200 s less a 116 s load). The true rate is
-# unknown above that floor, so the number that decides the shape is not the estimate but the
-# BREAK-EVEN p -- the rate at which the heaviest shard exactly hits the request:
+# THE COST MODEL IN THAT TABLE IS MEASURED (2026-08-27), AND THE (0.18, 120) TABLE IT REPLACES WAS
+# 1.50x OPTIMISTIC. The heaviest-shard column and the x1.25 column moved with it; the frame counts
+# and the imbalance ratios did not, because those come from the manifest and are unchanged.
 #
-#     N = 16, --time=01:30:00   break-even p = (5400 - 120)/14 162 = 0.3728 s/frame
-#                              = 2.25x the measured floor, 2.07x the plan, 4.5x the pilot
-#     N =  8, --time=02:00:00   break-even p = 0.2884 = 1.74x the floor   <- the old shape
-#     N =  5, --time=03:00:00   break-even p = 0.2807 = 1.69x the floor
+# WHERE THE PAIR COMES FROM, SO THE NEXT READER CAN RE-DERIVE IT RATHER THAN TRUST IT. The N = 16
+# partition RAN — four waves of four, jobs 189935, 189971, 189984 and 190125 — and each of the
+# sixteen logs prints BOTH its own shard's exact frame count (the self-check's "N episodes, F of
+# 171 625 frames" line) and its wall clock (the "shard i exited 3 after Ts" line). Sixteen (F, t)
+# pairs are a cost model, not a planning constant:
 #
-# 189658 died because the true p was 2.2x the number it was planned against. N = 16 at 01:30:00 is
-# the cheapest shape that survives that same error again. It costs 0.27 GPU-h more than N = 8 (the
-# eight extra model loads) and it caps the loss from ONE dead shard at 44 minutes instead of 76.
+#     for f in runs/_slurm_logs/geom-tol.1899*_*.out runs/_slurm_logs/geom-tol.190125_*.out; do
+#       grep -o 'exited [0-9]* after [0-9]*s' "$f" | head -1; done \
+#       | awk -F'[ s]' '{s+=$4} END {print NR, s, s/3600}'
+#     -> 16   49 091 s   13.6364 GPU-h          <- the measured total; the old table said 9.115
+#
+#     least squares over the sixteen (F, t)   p = 0.2478 s/frame, L = 410 s
+#     per-shard rate t/F                      0.2640 - 0.3189 s/frame, mean 0.2879
+#
+# The fit is not an approximation OF that total: least-squares residuals sum to zero, so the
+# UNROUNDED fit — p = 0.247793, L = 410.219 — reproduces the observed 49 091 s exactly. The four
+# significant figures this file actually carries are a rounding OF that fit and do not: 0.2478 x
+# 171 625 + 16 x 410 = 49 089 s, 2 s under, 0.005 %. Said precisely rather than as "exactly",
+# because a reader who checks the arithmetic and finds a 2 s gap has no way to tell a rounding from
+# a mistake, and this file's whole claim on the operator is that its numbers check out. The old
+# model was under by
+# 4.52 GPU-h in total, and — which is the part that kills a job — under by 40 % on the shard that
+# decides the array: the heaviest (index 5, 14 162 frames) took 3 741 s = 62.4 min against the old
+# model's 00:44:29. A --time=01:00:00 request would have passed the self-check and died at the
+# wall, which is the exact failure the self-check was written for after 189658.
+#
+# WHY NOT THE BLENDED 0.29. The mean per-shard rate is 0.2879 s/frame, but every shard's t ALREADY
+# CONTAINS one load, so that mean has L folded into it. Pairing 0.2879 with L = 410 charges the
+# load twice and over-estimates the heaviest shard by ~21 % — safe, and not honest. The two
+# self-consistent pairs are (0.2478, 410) and (0.2879, 0); the fitted one is what this file uses,
+# because L is a real fixed cost the sharding arithmetic above subtracts explicitly, and because it
+# is the pair that reproduces the total.
+#
+# THE NUMBER THAT DECIDES THE SHAPE IS STILL THE BREAK-EVEN p -- the rate at which the heaviest
+# shard exactly hits the request -- and it is now compared against a measurement rather than a floor:
+#
+#     N = 16, --time=01:30:00   break-even p = (5400 - 410)/14 162 = 0.3524 s/frame
+#                              = 1.42x the fitted rate, and 1.11x the WORST per-shard rate observed
+#                                (0.3189, shard 0). All sixteen fitted: the heaviest used 3 741 of
+#                                5 400 s, 69 % of the request.
+#     N =  8, --time=02:00:00   break-even p = (7200 - 410)/24 546 = 0.2766 = 1.12x the fitted rate
+#     N =  5, --time=03:00:00   break-even p = (10800 - 410)/38 042 = 0.2731 = 1.10x
+#
+# So N = 16 at 01:30:00 is vindicated and the two coarser shapes are not: ~10 % of margin against a
+# rate that varies by 21 % across shards is not margin. N = 16 costs 0.911 GPU-h more than N = 8
+# (the eight extra model loads, 8 x 410 s) and it caps the loss from ONE dead shard at 65 minutes
+# instead of 108.
 #
 # AND THE SUBMIT LIMIT IS WHY IT GOES UP IN WAVES RATHER THAN AS ONE ARRAY.
 # MaxSubmitJobsPU = 8 and MaxJobsPU = 4 on the project QoS, both DenyOnLimit. AN N-TASK ARRAY IS N
@@ -168,14 +211,27 @@
 # submission; the merge insists on all sixteen. The per-wave NOTE below says so.
 #
 # WHAT THE RUN CANNOT PRODUCE TODAY, AND IT IS NOT A SCHEDULING PROBLEM.
-# scripts/estimators/apple_sam2.py sets GATE_QUALIFIED = False and its GATE_QUALIFICATION_BLOCKERS
-# still lead with "NOBODY HAS LOOKED AT A MASK". Every shard therefore records
-# gate_qualified: false with the single reason "mask method ... is not gate-qualified", and the
-# merge propagates it: the pooled median is written, and it is written DISQUALIFIED. Flipping that
-# flag is a claim about human review and is not this file's to make. So these ~9 GPU-h buy a
-# measured, committed-contract-checked, NOT-yet-quotable GEOM_TOL, and a later discharge of the
-# blocker requires re-measuring the corpus, because gate_qualified is baked into each shard at
-# measurement time. That is a decision to take BEFORE the array goes in, not after.
+# scripts/estimators/apple_sam2.py sets GATE_QUALIFIED = False. Until 2026-08-26 this paragraph
+# said its GATE_QUALIFICATION_BLOCKERS "still lead with NOBODY HAS LOOKED AT A MASK"; THAT IS NO
+# LONGER THE REASON. The human look was discharged on 2026-08-26 and the propagation difference on
+# 2026-08-27, the tuple is now EMPTY, and all seven discharged entries are kept verbatim in
+# GATE_QUALIFICATION_DISCHARGED with the evidence that retired each one.
+#
+# AN EMPTY TUPLE IS NOT PERMISSION, AND THE FLAG HAS NOT MOVED. The module's own comment beside
+# GATE_QUALIFIED states TWO preconditions and says an empty blocker tuple satisfies one of them.
+# The other is a RECORDED DECISION on the residue those discharges carry forward — in particular
+# blocker 2's residue (i): a failure the discharged blocker predicted, occurring by a route it did
+# not predict, on 92 frames. That decision is the project owner's, it is not made, and this file
+# neither makes it nor predicts it. So every shard still records gate_qualified: false with the
+# single reason "mask method ... is not gate-qualified", and the merge propagates it: the pooled
+# median is written, and it is written DISQUALIFIED.
+#
+# So these ~13.6 GPU-h buy a measured, committed-contract-checked, NOT-yet-quotable GEOM_TOL, and a
+# later flip of the flag requires RE-MEASURING THE CORPUS, because gate_qualified is baked into each
+# shard at measurement time and no merge re-derives it. That is a decision to take BEFORE the array
+# goes in, not after — and since 2026-08-27 it is enforced rather than advised: the SHARD path's
+# pre-GPU preflight refuses to start while the flag is False, before a frame is decoded. See THE
+# PRE-GPU CONTRACT AND GATE PREFLIGHT in the SHARD branch below.
 #
 # The SHARD path below no longer treats that standing, corpus-independent disqualification as a
 # failed shard: an artifact whose ONLY gate_disqualified_reason is the adapter's own flag LANDS,
@@ -454,7 +510,16 @@ PY
     echo "       and the pixel grid, written down BEFORE the number. measure_geom_tol.py --merge"
     echo "       refuses to write that path without it, so this merge would fail after reading"
     echo "       every shard."
-    echo "       Update the checkout: git -C ${WAM} checkout -- configs/transfer25/pr08_geom_tol.json"
+    echo "       RECOVERY, AND IT IS NOT A GIT COMMAND. This message used to say"
+    echo "       'git -C ${WAM} checkout -- configs/...', which CANNOT RUN HERE:"
+    echo "       cluster/discoverer/sync.sh:66 rsyncs the repo with --exclude '.git', so"
+    echo "       ${WAM} is a copy of a working tree and not a repository — the"
+    echo "       command fails with 'not a git repository' at exactly the moment the"
+    echo "       pre-commitment has been lost. Re-send the tracked file from the workstation,"
+    echo "       which is the only machine that has the history:"
+    echo "         ./cluster/discoverer/sync.sh"
+    echo "       (Run it BY A HUMAN from the workstation checkout. It also re-stamps"
+    echo "       ${WAM}/GIT_COMMIT, which is how the run records what code it ran.)"
     exit 1
   fi
 
@@ -481,12 +546,21 @@ PY
     echo "=== DO NOT COMMIT IT AS GEOM_TOL. Exit 3 means the merge completed and the number carries"
     echo "===   gate_qualified:false. Read gate_disqualified_reasons in the artifact: if the only"
     echo "===   entries are 'mask method ... is not gate-qualified', the corpus was measured"
-    echo "===   correctly and what is missing is the adapter's own opt-in — apple_sam2's"
-    echo "===   GATE_QUALIFICATION_BLOCKERS, which lead with NOBODY HAS LOOKED AT A MASK. That is"
-    echo "===   discharged by a human, not by a longer run, and discharging it means re-measuring"
-    echo "===   the corpus, because gate_qualified is baked into each shard at measurement time."
-    echo "===   Restore the pre-commitment before anything else reads that path:"
-    echo "===     git -C ${WAM} checkout -- configs/transfer25/pr08_geom_tol.json"
+    echo "===   correctly and what is missing is the adapter's own opt-in: apple_sam2 still sets"
+    echo "===   GATE_QUALIFIED = False. NOT because 'nobody has looked at a mask' — that blocker"
+    echo "===   was discharged 2026-08-26 and GATE_QUALIFICATION_BLOCKERS is now the empty tuple."
+    echo "===   The flag has a SECOND precondition, stated in its own comment: a recorded decision"
+    echo "===   on the residue those discharges carry forward, in particular blocker 2's residue"
+    echo "===   (i) — a failure the discharged blocker predicted, occurring by a route it did not"
+    echo "===   predict, on 92 frames. That decision is the project owner's and it has not been"
+    echo "===   made. It is not discharged by a longer run, and whenever it is made, flipping the"
+    echo "===   flag means RE-MEASURING the corpus: gate_qualified is baked into each shard at"
+    echo "===   measurement time and no merge re-derives it."
+    echo "===   Restore the pre-commitment before anything else reads that path. NOT with git:"
+    echo "===   sync.sh:66 excludes '.git', so ${WAM} is not a repository and"
+    echo "===   'git -C ... checkout --' fails there with 'not a git repository'. From the"
+    echo "===   workstation checkout, by a human:"
+    echo "===     ./cluster/discoverer/sync.sh"
     exit "${RC}"
   fi
   if (( RC != 0 )); then
@@ -826,6 +900,360 @@ PY
   echo "===   episode list: shards are computed by different jobs at different times, and a range"
   echo "===   would silently re-partition the corpus the moment a clip is added or removed."
 
+  # -- THE PRE-GPU CONTRACT AND GATE PREFLIGHT ----------------------------------------------------
+  #
+  # ADDED 2026-08-27, AND IT IS THE MOST EXPENSIVE THING THIS FILE HAS EVER GOT WRONG.
+  #
+  # WHAT WAS MISSING. Nothing on this path compared the adapter this job is about to run against
+  # ${WAM}/configs/transfer25/pr08_geom_tol.json — the PR-08 §4 step 2 pre-commitment — BEFORE the
+  # GPU work. measure_geom_tol.py does compare, twice, and both comparisons are too late to save
+  # anything:
+  #
+  #   * on the SHARD path its --out is ${SHARD_OUT}, so merge_committed_contract() treats a stale
+  #     shard artifact sitting there as "the committed contract". That comparison runs AFTER the
+  #     decode. A FORCE=1 re-measure into a populated shard directory therefore decodes this
+  #     shard's ~11 000 frames, then exits 2, then writes nothing — and the refusal blames the
+  #     operator's segmenter for disagreeing with a file this job produced itself;
+  #   * the real cross-check against the committed document happens at the MERGE, which is a
+  #     separate submission an array later.
+  #
+  # WHAT THAT COST, MEASURED. TWELVE of the last sixteen shards ran a pre-6a32143 adapter, because
+  # the cluster copy lagged HEAD and nothing on this path could see it; and ALL SIXTEEN lack
+  # mask_validity_reference_max_frame_fraction, which the committed document has. The result is a
+  # whole array of shards that are internally consistent, mutually mergeable, and unusable: the
+  # merge refuses them against the committed contract with one field named
+  # (contract_disagreements(landed, committed) -> [{'field':
+  # 'mask_validity_reference_max_frame_fraction', 'geom_tol': 0.1, 'this_run': None}]), an array
+  # and 13.6 GPU-h later.
+  #
+  # WHAT IT DOES. Three refusals, all before a frame is decoded, all naming a different remedy:
+  #
+  #   1. CONTRACT DRIFT — the adapter's live SEGMENTER_CONTRACT against the committed document.
+  #      The comparison is measure_geom_tol.contract_disagreements(), IMPORTED, not reimplemented:
+  #      a second spelling of "the same segmenter" is exactly the kind of copy that drifts, and the
+  #      direction it drifts in is a preflight that passes a run the merge will refuse. Both
+  #      imports are resolved EXACTLY THE WAY THE MEASUREMENT RESOLVES THEM: measure_geom_tol.py
+  #      off the PYTHONPATH this file exported above, and then estimators.apple_sam2 the way that
+  #      module's own _import_sam2_adapter() reaches it (importing measure_geom_tol first puts its
+  #      directory at the head of sys.path, which is why the order here is not arbitrary). A
+  #      preflight that passes therefore cannot be reading a different adapter than the run — and
+  #      it also proves the adapter imports at all, which the measurement would otherwise discover
+  #      on frame 0 with the GPU already allocated.
+  #   2. A STALE SHARD ARTIFACT AT --out — the same comparison against whatever is already at
+  #      ${SHARD_OUT}, because on this path THAT file is what measure_geom_tol.py will read as the
+  #      committed contract. This is the FORCE=1 case above, refused for 0 GPU-seconds instead of
+  #      after the decode. It is deliberately NOT fixed by deleting the file: that stale artifact is
+  #      the only in-situ evidence that this shard was measured by a different adapter, and an
+  #      `rm -f` here would silence the one detector this path has.
+  #   3. THE SHARD WOULD RECORD gate_qualified: false — refused, and this is the one that is not
+  #      obvious. gate_qualified is BAKED INTO EACH SHARD AT MEASUREMENT TIME and no merge
+  #      re-derives it, so a partition started before it can be true produces sixteen artifacts
+  #      that are permanently disqualified however the decision goes afterwards. The full 13.6
+  #      GPU-h buys a number that cannot be committed. The header says "that is a decision to take
+  #      BEFORE the array goes in"; this is that sentence, enforced. Note that what the shard
+  #      records is not the flag alone: sam2_method() writes `GATE_QUALIFIED and bool(checkpoints)
+  #      and contract is not None`, so ALL THREE conjuncts are checked here — the flag, the weights
+  #      the adapter declares (through measure_geom_tol's own _adapter_checkpoints()), and the
+  #      contract, which is refusal 1. Checking the flag alone would print PREFLIGHT OK over two
+  #      thirds of the condition and buy the same disqualified number.
+  #
+  # THE REFUSAL MUST NOT BE READ AS "EDIT THE FLAG". apple_sam2.GATE_QUALIFIED is the project
+  # owner's to move, in its own commit, once the residue blocker 2 carries forward is decided on the
+  # record; the module's own comment and CLAUDE.md both say no session may make that edit. The
+  # message below names the decision and does not name a diff.
+  #
+  # THE WAIVER IS ONE ENV VAR AND IT IS LOUD. GEOM_WAIVE_CONTRACT_AND_GATE_PREFLIGHT=1 downgrades
+  # all three refusals to warnings — for the case where an operator is knowingly measuring
+  # something that is not going to be committed. It waives the CHECKS, never the two imports: a
+  # measure_geom_tol.py or an adapter that will not import is a broken cluster copy, the
+  # measurement itself cannot run, and there is nothing to waive.
+  #
+  # WHAT THIS DOES NOT TOUCH, SO THE NEXT READER DOES NOT GO LOOKING. It is on the SHARD path only:
+  # the PILOT deliberately produces a disqualified sample and the FULL path is not the shape this
+  # corpus is measured in. It also sits AFTER the resume check above, so a partition that has
+  # already landed is still skipped for free rather than being refused for a flag its artifacts
+  # already record. And one downstream consequence worth naming: while GATE_QUALIFIED is False,
+  # the "exit 3 is the adapter's standing flag, so this shard LANDED" branch further down is now
+  # unreachable except under the waiver — that branch is kept because it is about the artifact,
+  # not about the flag, and a waived run still has to classify what it wrote.
+  if ! CONTRACT_FILE="${WAM}/configs/transfer25/pr08_geom_tol.json" \
+       SHARD_OUT="${SHARD_OUT}" \
+       GIT_COMMIT_FILE="${WAM}/GIT_COMMIT" \
+       WAIVED="${GEOM_WAIVE_CONTRACT_AND_GATE_PREFLIGHT:-0}" python - <<'PY'
+import importlib, json, os
+from collections.abc import Mapping
+
+CONTRACT_FILE = os.environ["CONTRACT_FILE"]
+SHARD_OUT = os.environ.get("SHARD_OUT") or ""
+WAIVED = os.environ.get("WAIVED", "0") != "0"
+
+# The one recovery command that works on this machine. `git -C ${WAM} checkout -- ...` does not:
+# cluster/discoverer/sync.sh:66 rsyncs with --exclude '.git', so the cluster copy is a working tree
+# with no repository behind it and git answers "not a git repository".
+SYNC = "./cluster/discoverer/sync.sh      # from the WORKSTATION checkout, by a human"
+
+
+def say(*lines):
+    for line in lines:
+        print("===   " + line)
+
+
+def load(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+# -- the two imports. A failure here is a broken or half-synced cluster copy and is never waivable:
+#    the measurement resolves the same names from the same PYTHONPATH and could not run either.
+try:
+    mgt = importlib.import_module("measure_geom_tol")
+except Exception as exc:
+    print("FATAL: PREFLIGHT — STALE OR BROKEN CLUSTER COPY.")
+    say("scripts/measure_geom_tol.py will not import: %s: %s" % (type(exc).__name__, exc),
+        "The measurement resolves the same module from the same PYTHONPATH, so this job cannot",
+        "produce anything at all. This is not waivable. Re-send the repo and re-submit:",
+        "  " + SYNC)
+    raise SystemExit(1)
+
+# WHICH ADAPTER — ASKED, NEVER ASSUMED. The module name is read off measure_geom_tol.py, because
+# that is the name its own _import_sam2_adapter() will resolve during the measurement. A literal
+# fallback here would invert the one guarantee this block is for: if the measurement's spec is ever
+# renamed or repointed, a preflight carrying its own copy of the old name would import the OLD
+# adapter, find it agreeing with the committed contract, and print PREFLIGHT OK about a module this
+# job does not run. There is no honest default for "which adapter is the measurement's", so absence
+# is a refusal — and not a waivable one, for the same reason the imports are not: a cluster copy
+# whose measure_geom_tol.py has no SAM2_ADAPTER_SPEC is a copy this preflight cannot speak about at
+# all.
+SPEC = getattr(mgt, "SAM2_ADAPTER_SPEC", None)
+if not isinstance(SPEC, str) or not SPEC:
+    print("FATAL: PREFLIGHT — measure_geom_tol.py DECLARES NO SAM2_ADAPTER_SPEC.")
+    say("This preflight names the adapter by asking the measurement which module it will import,",
+        "so that the two cannot disagree about it. Nothing here may guess that name: a guess that",
+        "happens to import would be checked, reported OK, and be the wrong module. Not waivable.",
+        "If the cluster copy is stale or half-synced, re-send it and re-submit:",
+        "  " + SYNC)
+    raise SystemExit(1)
+try:
+    adapter = importlib.import_module(SPEC)
+except Exception as exc:
+    print("FATAL: PREFLIGHT — THE ADAPTER WILL NOT IMPORT.")
+    say("%s: %s: %s" % (SPEC, type(exc).__name__, exc),
+        "--method sam2 would fail on frame 0 with the same error, after the GPU is allocated.",
+        "This is not waivable. If the cluster copy is stale, re-send it:",
+        "  " + SYNC)
+    raise SystemExit(1)
+
+commit = "(no GIT_COMMIT stamp — sync.sh writes one; this copy predates it or was not synced)"
+try:
+    with open(os.environ["GIT_COMMIT_FILE"], encoding="utf-8") as handle:
+        commit = handle.read().strip() or commit
+except OSError:
+    pass
+
+say("PREFLIGHT: the adapter this job would run, against the committed pre-commitment.",
+    "cluster copy at %s" % commit,
+    "adapter    %s  (%s)" % (SPEC, getattr(adapter, "__file__", "?")),
+    "version    %s" % getattr(adapter, "ESTIMATOR_VERSION", "(none declared)"),
+    "committed  %s" % CONTRACT_FILE)
+
+failures = []  # (headline, [detail lines])
+
+live = getattr(adapter, "SEGMENTER_CONTRACT", None)
+# Mapping, not dict, because that is the test measure_geom_tol.sam2_method() applies to the same
+# attribute ("contract = dict(contract) if isinstance(contract, Mapping) else None"). An adapter
+# that froze its contract behind a MappingProxyType — the obvious way to make a pre-registered
+# constant unwritable — is accepted by the measurement, and a preflight spelling the test `dict`
+# would refuse it with THE ADAPTER EXPORTS NO SEGMENTER_CONTRACT and send the operator off to
+# re-sync a cluster copy that was never stale. Refusing a run the real check would accept is as
+# much a defect here as passing one it would refuse; this preflight is only worth anything if it
+# answers the same question, the same way.
+live = dict(live) if isinstance(live, Mapping) else None
+if live is None:
+    failures.append((
+        "THE ADAPTER EXPORTS NO SEGMENTER_CONTRACT.",
+        ["%s declares no operating point, so PR-08 §4 step 2's 'the same segmenter' is" % SPEC,
+         "uncheckable — and an uncheckable requirement reads downstream exactly like a satisfied",
+         "one. measure_geom_tol.py withholds gate qualification for this on its own, after the",
+         "decode. Almost certainly a stale cluster copy:",
+         "  " + SYNC]))
+
+committed = None
+try:
+    doc = load(CONTRACT_FILE)
+except Exception as exc:
+    doc = None
+    failures.append((
+        "THE COMMITTED PRE-COMMITMENT IS MISSING OR UNREADABLE.",
+        ["%s: %s" % (type(exc).__name__, exc),
+         "That file IS the PR-08 §4 step 2 pre-commitment. The merge refuses to write over a path",
+         "that carries no contract, so this whole partition would be unmergeable. Note that job",
+         "190191 overwrote this path once already, with a merged disqualified artifact. Restore",
+         "the tracked file from the workstation — NOT with git, this copy has no .git:",
+         "  " + SYNC]))
+if doc is not None:
+    committed, where = mgt.committed_segmenter_contract(doc)
+    if committed is None:
+        failures.append((
+            "THE COMMITTED DOCUMENT CARRIES NO SEGMENTER BLOCK.",
+            ["%s parses, but has neither a top-level 'segmenter' nor" % CONTRACT_FILE,
+             "mask_method.params.segmenter. 'The file used to say so before it was overwritten' is",
+             "not a property anything downstream can read. Restore the tracked file:",
+             "  " + SYNC]))
+    else:
+        say("committed contract found at %r (%d fields)" % (where, len(committed)))
+
+if live is not None and committed is not None:
+    drift = mgt.contract_disagreements(live, committed)
+    if drift:
+        detail = ["%s: committed %r, this adapter %r" % (d["field"], d["geom_tol"], d["this_run"])
+                  for d in drift]
+        failures.append((
+            "CONTRACT DRIFT — the adapter is not the one the committed document describes.",
+            detail + [
+                "",
+                "TWO CAUSES, TWO DIFFERENT REMEDIES, AND THE FIELD NAMES ABOVE TELL THEM APART.",
+                "(a) THE CLUSTER COPY LAGS HEAD. This is what happened last time: twelve of the",
+                "    last sixteen shards ran a pre-6a32143 adapter and all sixteen were missing",
+                "    mask_validity_reference_max_frame_fraction, which the committed document has.",
+                "    A field the adapter simply does not have ('this adapter None') is this case.",
+                "    Remedy, from the workstation, by a human:",
+                "      " + SYNC,
+                "(b) THE ADAPTER HAS GENUINELY MOVED PAST ITS PRE-REGISTRATION. Then the number",
+                "    this array would produce is not the number PR-08 §4 step 2 registered, and",
+                "    the remedy is a NEW pre-registration that says so — a PR-08 V-document and a",
+                "    re-committed contract, decided by the project owner. IT IS NOT AN EDIT TO",
+                "    THE segmenter BLOCK OF pr08_geom_tol.json: that block is the pre-commitment,",
+                "    and changing a value in it silently invalidates every artifact already",
+                "    measured against it."]))
+    else:
+        say("contract agrees field for field on all %d fields." % len(committed))
+
+# THE FORCE=1 TRAP. On this path measure_geom_tol.py's --out IS the shard artifact, and
+# merge_committed_contract() reads whatever is already there as "the committed contract" — after
+# the decode. Ask the same question here, for nothing.
+if live is not None and SHARD_OUT and os.path.exists(SHARD_OUT):
+    previous = None
+    try:
+        previous = load(SHARD_OUT)
+    except Exception:
+        previous = None  # a truncated file from a task killed at the wall; not a contract at all
+    stale, stale_where = (mgt.committed_segmenter_contract(previous)
+                          if isinstance(previous, dict) else (None, None))
+    if stale is not None:
+        stale_drift = mgt.contract_disagreements(live, stale)
+        if stale_drift:
+            failures.append((
+                "A STALE SHARD ARTIFACT AT --out WOULD REFUSE THIS RUN AFTER THE DECODE.",
+                ["%s already exists and records a segmenter at %r that" % (SHARD_OUT, stale_where),
+                 "disagrees with this adapter on: "
+                 + ", ".join(d["field"] for d in stale_drift),
+                 "measure_geom_tol.py writes this shard THROUGH merge_committed_contract(), which",
+                 "treats the file already at --out as the committed contract. It would decode this",
+                 "shard in full and THEN exit 2, writing nothing — the failure that destroys the",
+                 "work instead of preventing it.",
+                 "",
+                 "REMEDY: measure into a FRESH RUN_ID, which is the mitigation that needs no source",
+                 "change and keeps the evidence:",
+                 "  RUN_ID=<fresh> SHARD=1 NUM_SHARDS=... GEOM_STEP_FRAMES=1 \\",
+                 "    sbatch --array=... --time=01:30:00 103_measure_geom_tol.sbatch",
+                 "DO NOT simply delete the old shard. It is the only in-situ record that this index",
+                 "was measured by a different adapter, and deleting it hides cause (a) above."]))
+
+# THE FLAG. Checked last because it is the one an operator is most likely to want to argue with.
+if not bool(getattr(adapter, "GATE_QUALIFIED", False)):
+    failures.append((
+        "%s.GATE_QUALIFIED IS False — this array would buy a disqualified number." % SPEC,
+        ["gate_qualified is BAKED INTO EACH SHARD AT MEASUREMENT TIME and no merge re-derives",
+         "it. So every shard measured now records gate_qualified: false permanently, the merge",
+         "propagates it, and the pooled median can never be committed as GEOM_TOL however the",
+         "decision goes afterwards. Flipping the flag later does not repair these artifacts — it",
+         "requires re-measuring the corpus, at the full 13.6 GPU-h, a second time.",
+         "",
+         "WHAT IS ACTUALLY OUTSTANDING, since GATE_QUALIFICATION_BLOCKERS is now the empty tuple:",
+         "the flag's own comment states TWO preconditions and says an empty blocker tuple",
+         "satisfies one. The other is a RECORDED DECISION on the residue the 2026-08-26",
+         "discharges carry forward — in particular blocker 2's residue (i), a failure the",
+         "discharged blocker predicted, occurring by a route it did not predict, on 92 frames.",
+         "",
+         "THAT DECISION IS THE PROJECT OWNER'S AND THIS IS NOT A REQUEST TO EDIT THE FLAG. The",
+         "module's own comment and CLAUDE.md both say no session may make that edit; it is the",
+         "owner's, on the record, in its own commit. Submit this array AFTER it lands."]))
+
+# THE FLAG IS ONLY ONE OF THREE CONJUNCTS, AND THE OTHER TWO FAIL THE SAME WAY FOR THE SAME MONEY.
+# What lands in the shard is not GATE_QUALIFIED: measure_geom_tol.sam2_method() writes
+# `gate_qualified=declared_gate and bool(checkpoints) and contract is not None`. The contract half
+# is the refusal above. The WEIGHTS half is checked here, because an adapter that sets the flag and
+# names no checkpoints is refused by that AND — quietly, at measurement time, into every one of the
+# sixteen artifacts, with the reason parked in gate_qualification_withheld_reason where nothing
+# reads it until the merge. A preflight that checked only the flag would print PREFLIGHT OK over
+# exactly the 13.6 GPU-h loss it exists to prevent, having looked at two thirds of the condition.
+# Read through measure_geom_tol's own _adapter_checkpoints() for the same reason
+# contract_disagreements() is imported rather than re-spelled: it is the single implementation of
+# "what did this adapter DECLARE it loads" (ESTIMATOR_CHECKPOINTS, then CHECKPOINT_ATTRS), and a
+# second copy of that rule here would be a copy that drifts. A private name, and named as such: if
+# it moves, this refuses rather than passing, which is the safe direction and is waivable, because
+# unlike the imports the measurement itself still runs.
+checkpoints_of = getattr(mgt, "_adapter_checkpoints", None)
+declared_checkpoints = checkpoints_of(adapter) if callable(checkpoints_of) else None
+if not declared_checkpoints:
+    failures.append((
+        "%s NAMES NO WEIGHTS — the shard would record gate_qualified: false anyway." % SPEC
+        if callable(checkpoints_of) else
+        "measure_geom_tol._adapter_checkpoints IS GONE — the weights half cannot be checked.",
+        (["The adapter declares neither ESTIMATOR_CHECKPOINTS nor any of the single-checkpoint",
+          "attributes measure_geom_tol._adapter_checkpoints() reads. sam2_method() writes",
+          "gate_qualified = GATE_QUALIFIED and bool(checkpoints) and contract is not None, so the",
+          "flag being True is not enough and this array would still buy a disqualified number —",
+          "\"an estimator is its weights as much as its code\", in that function's own words: a",
+          "tolerance that cannot say which weights produced it cannot be re-run at gate time,",
+          "which is the only thing GEOM_TOL is for.",
+          "",
+          "Almost certainly a stale or partial cluster copy of scripts/estimators/:",
+          "  " + SYNC]
+         if callable(checkpoints_of) else
+         ["scripts/measure_geom_tol.py no longer exports _adapter_checkpoints(), which is where",
+          "this preflight reads the weights half of gate_qualified from. It is not re-spelled here",
+          "on purpose — a second copy of that rule is a copy that drifts. Refusing rather than",
+          "passing, because an unchecked conjunct reads downstream exactly like a satisfied one.",
+          "Re-send the repo, or move this preflight to whatever replaced that function:",
+          "  " + SYNC])))
+
+if not failures:
+    say("PREFLIGHT OK: the contract agrees field for field, the adapter names its weights, and its",
+        "GATE_QUALIFIED flag is set — the three conjuncts sam2_method() ANDs into each shard's",
+        "gate_qualified. Proceeding to the walltime self-check.")
+    raise SystemExit(0)
+
+print("")
+for headline, detail in failures:
+    print(("WARNING (WAIVED): " if WAIVED else "FATAL: ") + "PREFLIGHT — " + headline)
+    say(*detail)
+    print("")
+
+if WAIVED:
+    print("################################################################################")
+    print("#  GEOM_WAIVE_CONTRACT_AND_GATE_PREFLIGHT=1 IS SET. Every refusal above was")
+    print("#  downgraded to a warning and this shard is measuring anyway.")
+    print("#  WHAT YOU ARE BUYING: an artifact that the merge, or PR-08 §4 step 2, or both,")
+    print("#  will refuse — at full GPU cost. There is no code path that repairs it later;")
+    print("#  the contract and gate_qualified are baked in at measurement time.")
+    print("#  DO NOT COMMIT ANYTHING THIS RUN PRODUCES AS GEOM_TOL.")
+    print("################################################################################")
+    raise SystemExit(0)
+
+print("       REFUSING TO START, BEFORE ANY DECODE. Nothing was measured and no GPU-seconds were")
+print("       spent. Each refusal above names its own remedy; they are different remedies and the")
+print("       field names say which one applies.")
+print("       If you are knowingly measuring something that will not be committed, and only then:")
+print("         GEOM_WAIVE_CONTRACT_AND_GATE_PREFLIGHT=1")
+raise SystemExit(1)
+PY
+  then
+    echo "FATAL: the pre-GPU contract/gate preflight refused this shard (see above). Nothing was"
+    echo "       decoded, no GPU-seconds were spent, and no artifact was written or overwritten."
+    exit 1
+  fi
+
   # -- THE WALLTIME SELF-CHECK -------------------------------------------------------------------
   #
   # WHAT THIS USED TO DO AND WHY IT WAS WORSE THAN NOTHING. It re-read full_run_seconds and
@@ -855,11 +1283,42 @@ PY
   #      produces nothing — 189658 spent six of them proving it. GEOM_ALLOW_TIGHT_WALL=1 overrides,
   #      and the refusal prints the command that would.
   #
-  # GEOM_SECONDS_PER_FRAME defaults to 0.18: the planning constant over 189658's measured floor of
-  # 0.166. It is an env var so a re-measured pilot does not need an edit here — but note that a
-  # PILOT that matches the committed contract is preferred over it automatically.
-  GEOM_SECONDS_PER_FRAME=${GEOM_SECONDS_PER_FRAME:-0.18}
-  GEOM_LOAD_SECONDS=${GEOM_LOAD_SECONDS:-120}
+  # THE FALLBACK COST MODEL IS MEASURED, AND SINCE 2026-08-27 IT IS NOT (0.18, 120).
+  #
+  # It was (0.18, 120) — 189658's measured FLOOR of 0.166 rounded up, paired with the discredited
+  # pilot's load — and that pair is 1.50x optimistic, which is the same class of error as the one it
+  # was written to catch. THE PARTITION HAS SINCE RUN, so the pair is now read off sixteen real
+  # shards. Both numbers come out of the previous array's own logs, and both can be re-derived
+  # without trusting this comment: runs/_slurm_logs/geom-tol.1899*_*.out and geom-tol.190125_*.out
+  # (jobs 189935, 189971, 189984, 190125 — four waves of four), each of which prints its own shard's
+  # exact frame count and its wall clock. Summed and fitted:
+  #
+  #     sum of the sixteen wall clocks           49 091 s = 13.6364 GPU-h
+  #     least squares over the (frames, seconds) p = 0.2478 s/frame, L = 410 s
+  #     per-shard rate                           0.2640 - 0.3189 s/frame, mean 0.2879
+  #
+  # Least-squares residuals sum to zero, so the unrounded fit (p = 0.247793, L = 410.219)
+  # reproduces the 49 091 s exactly — the pair is the total, not an approximation of it. Rounded to
+  # the four figures below it lands at 49 089 s, 2 s under, which is a rounding and not a second
+  # model. The header's planning table has
+  # been recomputed on it: N = 16 costs 13.636 GPU-h, not the 9.115 the old constants predicted.
+  #
+  # WHY THIS MATTERS AT THIS LINE AND NOT ONLY IN THE HEADER. The heaviest shard (index 5, 14 162
+  # frames) actually took 3 741 s = 62.4 min. At (0.18, 120) THIS CHECK estimated it at 44.5 min and
+  # would have waved through a --time=01:00:00 request that dies at the wall — a self-check that
+  # reassures is worse than none, which is the sentence this whole block was written under. At
+  # (0.2478, 410) it estimates 65.3 min, x1.25 = 81.7 min: it still passes --time=01:30:00 (the
+  # shape that ran) and it refuses the one-hour request.
+  #
+  # NOT THE BLENDED 0.29. Each shard's wall clock already contains one model load, so the 0.2879
+  # mean has L folded into it; pairing it with 410 charges the load twice and over-estimates by
+  # ~21 %. The two self-consistent pairs are (0.2478, 410) and (0.2879, 0). The fitted one is used
+  # because L is a real fixed cost this file's sharding arithmetic subtracts explicitly.
+  #
+  # Both stay env vars so a re-measured pilot or a different machine does not need an edit here —
+  # and a PILOT that matches the committed contract is still preferred over them automatically.
+  GEOM_SECONDS_PER_FRAME=${GEOM_SECONDS_PER_FRAME:-0.2478}
+  GEOM_LOAD_SECONDS=${GEOM_LOAD_SECONDS:-410}
   if ! SHARD_INDEX="${SHARD_INDEX}" NUM_SHARDS="${NUM_SHARDS}" \
        MANIFEST="${SOURCE}/manifest.json" PILOT_JSON="${OUT}/GEOM_TOL_PILOT.json" \
        CONTRACT_FILE="${WAM}/configs/transfer25/pr08_geom_tol.json" \
@@ -991,8 +1450,10 @@ PY
      && shard_artifact_landed "${SHARD_OUT}" "${SHARD_INDEX}" "${NUM_SHARDS}" "${GEOM_STEP_FRAMES}"
   then
     echo "=== SHARD ${SHARD_INDEX}/${NUM_SHARDS} LANDED. Exit 3 here is the adapter's standing gate"
-    echo "===   blocker (apple_sam2.GATE_QUALIFIED=False, 'NOBODY HAS LOOKED AT A MASK'), which is"
-    echo "===   identical across every shard of this partition and is not a fact about this shard."
+    echo "===   flag (apple_sam2.GATE_QUALIFIED=False — NOT 'nobody has looked at a mask', which was"
+    echo "===   discharged 2026-08-26; the flag's second precondition, a recorded decision on"
+    echo "===   blocker 2's residue (i), is what is outstanding), which is identical across every"
+    echo "===   shard of this partition and is not a fact about this shard."
     echo "===   The merge will pool it and will write the pooled median DISQUALIFIED. THAT NUMBER"
     echo "===   MUST NOT BE COMMITTED AS GEOM_TOL until the blocker is discharged, and discharging"
     echo "===   it later means re-measuring the corpus: gate_qualified is baked in at measurement"

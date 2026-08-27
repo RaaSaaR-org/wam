@@ -180,3 +180,312 @@ def test_this_module_discharges_nothing():
     )
     assert "answered by the owner" in grounds and "registered one BEFORE" in grounds
     assert "NOTHING" in vid.PROPAGATION_CONTRACT["discharges"]
+
+
+# -- the refusal mirror: what the colour filter WOULD have refused, on BOTH branches ---------------
+#
+# `stats()["n_frames_the_colour_filter_would_have_refused"]` exists for exactly one purpose: to be
+# set beside the per-frame arm's `n_frames_mask_refused` so that the two arms' p95s are known to
+# have been computed over comparable frame populations. That purpose fails silently if the two
+# counters mirror different sets of branches, and since PR-08 V10 `segment()` has TWO branches on
+# which it returns an all-False mask and increments `MASK_REFUSED_FRAMES`: the object-scale branch
+# and the IoU branch. This module mirrored only the second until 2026-08-27.
+#
+# The tests below run BOTH arms over the same frames with the weights stubbed out — no GPU, no
+# checkpoint, no network — and compare the counters the two arms actually moved. A source grep would
+# not do: the proposed fix that these tests replace passed its own grep test while raising
+# UnboundLocalError on the first frame it was meant to count.
+
+
+class _FakeImagePredictor:
+    """`apple_sam2._predictor()`'s surface, returning a mask the test chose.
+
+    The per-frame arm's detection and segmentation are not what is under test here — the refusal
+    accounting downstream of them is — and loading SAM 2 to assert on a counter would make this a
+    test that skips whenever the weights are absent.
+    """
+
+    def __init__(self, mask: np.ndarray) -> None:
+        self._mask = mask
+
+    def set_image(self, frame: np.ndarray) -> None:
+        pass
+
+    def predict(self, box=None, multimask_output=False):
+        return self._mask[None].astype(np.float32), None, None
+
+
+class _FakeVideoPredictor:
+    """`SAM2VideoPredictor`'s surface as `propagate()` uses it, yielding masks the test chose.
+
+    `propagate_in_video` hands back logits at the video resolution and the module thresholds them at
+    > 0, exactly as the real predictor's caller does, so the masks that reach the counting loop are
+    the masks named here.
+    """
+
+    def __init__(self, masks) -> None:
+        self._masks = list(masks)
+
+    def init_state(self, video_path, offload_video_to_cpu=True, offload_state_to_cpu=True):
+        return {"n_frames": len(self._masks)}
+
+    def add_new_points_or_box(self, **kwargs):
+        return None
+
+    def propagate_in_video(self, state, start_frame_idx=0):
+        for i, mask in enumerate(self._masks):
+            logits = torch.where(torch.from_numpy(mask), 1.0, -1.0)[None, None]
+            yield i, [vid.SEED_OBJECT_ID], logits
+
+    def reset_state(self, state):
+        return None
+
+
+def _warm_scene_frame(h=48, w=64) -> np.ndarray:
+    """A frame the colour reference CANNOT arbitrate: a warm table filling 40 % of the picture.
+
+    This is `train-01-oak-tungsten` as `object_color_reference` sees it, at measured proportions
+    rather than invented ones: PR-08 V10 §4.1 and the 2026-08-27 audit of job 189926's contact
+    sheets measure the reference at 37.18-56.40 % of the panel on that style, against
+    `MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION = 0.10`. 40 % is inside that measured population.
+    """
+    frame = np.zeros((h, w, 3), dtype=np.uint8)
+    frame[:, :, 2] = 200                          # cold everywhere: r low, so r > 90 fails
+    frame[int(h * 0.6):, :] = (190, 120, 60)      # warm oak: r-b = 130 > 50, sat = 0.684 > 0.35
+    return frame
+
+
+def _table_mask(frame: np.ndarray) -> np.ndarray:
+    """The mask that makes the missing branch VISIBLE: the warm table itself.
+
+    Its IoU against the colour reference is ~1.0, so the IoU branch — the only one this module
+    mirrored — says "keep". The object-scale branch, which `segment()` reaches FIRST, refuses it.
+    A mask that both branches refuse would not distinguish the fixed module from the broken one.
+    """
+    mask = np.zeros(frame.shape[:2], dtype=bool)
+    mask[int(frame.shape[0] * 0.6):, :] = True
+    return mask
+
+
+def _refusal_counters_of_the_per_frame_arm() -> tuple[int, int, int]:
+    return (
+        apple_sam2.MASK_REFUSED_FRAMES,
+        apple_sam2.MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES,
+        apple_sam2.MASK_REFUSED_NO_REFERENCE_FRAMES,
+    )
+
+
+def _refusal_counters_of_the_propagation_arm() -> tuple[int, int, int]:
+    return (
+        vid.WOULD_HAVE_BEEN_REFUSED_FRAMES,
+        vid.WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES,
+        vid.WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES,
+    )
+
+
+def _run_both_arms(monkeypatch, frames, masks):
+    """The same frames and the same masks through both arms; returns each arm's counter DELTAS.
+
+    Deltas rather than absolutes because `apple_sam2`'s counters are cumulative over the process and
+    the harness reads them the same way (`counters_at_start_of_run` / `counters_at_end_of_run`).
+    """
+    monkeypatch.setattr(apple_sam2, "_detector", lambda: (None, None))
+    monkeypatch.setattr(apple_sam2, "_best_box", lambda frame: np.array([0.0, 0.0, 1.0, 1.0]))
+
+    before_pf = _refusal_counters_of_the_per_frame_arm()
+    for frame, mask in zip(frames, masks):
+        monkeypatch.setattr(apple_sam2, "_predictor", lambda mask=mask: _FakeImagePredictor(mask))
+        apple_sam2.segment(frame)
+    after_pf = _refusal_counters_of_the_per_frame_arm()
+
+    monkeypatch.setattr(vid, "_video_predictor", lambda: _FakeVideoPredictor(masks))
+    monkeypatch.setattr(vid, "seed_box", lambda frame: np.array([0.0, 0.0, 1.0, 1.0]))
+    before_prop = _refusal_counters_of_the_propagation_arm()
+    got = vid.propagate(frames)
+    after_prop = _refusal_counters_of_the_propagation_arm()
+    assert len(got) == len(frames)
+
+    return (
+        tuple(a - b for a, b in zip(after_pf, before_pf)),
+        tuple(a - b for a, b in zip(after_prop, before_prop)),
+    )
+
+
+def test_the_fixture_reproduces_the_object_scale_misfire_rather_than_assuming_it():
+    """The premise, measured on the fixture: the reference is scene-scale AND the IoU passes.
+
+    Both halves matter. If the reference were object-scale the frame would not exercise the missing
+    branch at all; if the IoU failed, the branch this module already had would refuse the frame and
+    the two arms would agree by accident.
+    """
+    frame = _warm_scene_frame()
+    reference = apple_sam2.object_color_reference(frame)
+    fraction = apple_sam2.reference_frame_fraction(reference)
+    assert fraction > apple_sam2.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION, (
+        f"the fixture must reproduce the measured misfire; got {fraction:.4f}"
+    )
+    assert apple_sam2.reference_is_object_scale(reference) is False
+    iou = apple_sam2.mask_validity_iou(_table_mask(frame), reference)
+    assert iou >= apple_sam2.MASK_VALIDITY_MIN_IOU, (
+        "the IoU branch must PASS this mask, or the test cannot tell a two-branch mirror from a "
+        f"one-branch one; got {iou:.4f}"
+    )
+
+
+def test_both_arms_count_the_object_scale_refusal_identically(monkeypatch):
+    """THE DEFECT, AS A TEST. Warm background, mask on the table: `segment()` refuses on the V10
+    object-scale branch, and until 2026-08-27 the propagation arm counted zero.
+
+    The assertion is equality of the two arms' counters, not a fixed number, because the claim the
+    artifact makes about this pair is a comparison and not a level. Before the fix this reads
+    `(1, 1, 0) != (0, 0, 0)` on a single frame — the same 1-vs-0 disagreement the three MuJoCo
+    captures already show between `n_frames_mask_refused` and this counter.
+    """
+    frames = [_warm_scene_frame()]
+    masks = [_table_mask(frames[0])]
+    per_frame, propagation = _run_both_arms(monkeypatch, frames, masks)
+    assert per_frame == (1, 1, 0), "the per-frame arm must refuse via the object-scale branch"
+    assert propagation == per_frame, (
+        "the propagation arm's would-have-refused counters must be the per-frame arm's refusal "
+        "counters recomputed over this arm's masks; a mirror of one of the two branches is a "
+        "comparison of two different refusal populations, not a smaller comparison"
+    )
+
+
+def test_both_arms_count_the_iou_branch_and_its_empty_reference_case_identically(monkeypatch):
+    """The branch this module always had, plus the sub-attribution inside it, still agree.
+
+    A frame with no warm pixels at all: the reference is EMPTY, which `reference_is_object_scale`
+    deliberately calls object-scale (an empty reference is not a scene), so `segment()` falls
+    through to the IoU branch, refuses at IoU 0.0 and attributes the refusal to "nothing here can
+    confirm the mask" rather than to "the mask is demonstrably the plate". The two have opposite
+    implications for the budget, so an arm that pooled them would not be answering the same
+    question as the arm it is subtracted from.
+    """
+    frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    frame[:, :, 2] = 200                       # cold everywhere: the reference is empty
+    mask = np.zeros((32, 32), dtype=bool)
+    mask[4:12, 4:12] = True
+    per_frame, propagation = _run_both_arms(monkeypatch, [frame], [mask])
+    assert per_frame == (1, 0, 1), "empty reference -> IoU branch, counted as no_reference"
+    assert propagation == per_frame
+
+
+def test_a_mask_the_filter_accepts_moves_no_counter_on_either_arm(monkeypatch):
+    """The counterpart, so the mirror cannot be satisfied by counting everything.
+
+    A warm apple on a cold background — the corpus the reference was built for, where its own
+    justification holds — is accepted by both branches, and neither arm records a refusal.
+    """
+    frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    frame[:, :, 2] = 200
+    frame[10:16, 10:16] = (220, 30, 20)        # ~3.5 % of the frame: an object-scale reference
+    mask = np.zeros((32, 32), dtype=bool)
+    mask[10:16, 10:16] = True
+    per_frame, propagation = _run_both_arms(monkeypatch, [frame], [mask])
+    assert per_frame == (0, 0, 0)
+    assert propagation == per_frame
+
+
+def test_an_empty_propagated_mask_is_not_mirrored_because_segment_returns_before_the_filter(
+    monkeypatch,
+):
+    """`segment()` counts an empty mask in EMPTY_MASK_FRAMES and returns BEFORE the validity check.
+
+    A mirror that ran the filter on an empty mask would refuse it (IoU 0.0 against a non-empty
+    reference) and manufacture a refusal the per-frame arm never records.
+    """
+    frame = _warm_scene_frame()
+    empty = np.zeros(frame.shape[:2], dtype=bool)
+    before = vid.EMPTY_PROPAGATED_FRAMES
+    per_frame, propagation = _run_both_arms(monkeypatch, [frame], [empty])
+    assert per_frame == (0, 0, 0)
+    assert propagation == (0, 0, 0)
+    assert vid.EMPTY_PROPAGATED_FRAMES == before + 1
+
+
+def test_a_label_the_filter_has_no_reference_for_is_counted_as_unevaluable_not_as_agreement(
+    monkeypatch,
+):
+    """The zero that would otherwise be read as "the filter would have refused nothing".
+
+    For a label outside `MASK_VALIDITY_REFERENCE_LABELS` the per-frame arm refuses the RUN on its
+    first call, before any counter moves (PR-08 V10 §2) — so there is no per-frame refusal count in
+    existence to compare against. This arm does not adopt that run-level refusal, because whether
+    §6's second label is measured with the filter off is an owner decision and not this module's;
+    what it must not do is report a silent zero that reads as agreement.
+    """
+    monkeypatch.setattr(apple_sam2, "OBJECT_TEXT_PROMPT", "plate.")
+    assert apple_sam2.mask_validity_reference_is_defined() is False
+    with pytest.raises(apple_sam2.MaskValidityReferenceUndefined):
+        apple_sam2.segment(_warm_scene_frame())
+
+    frames = [_warm_scene_frame()]
+    masks = [_table_mask(frames[0])]
+    monkeypatch.setattr(vid, "_video_predictor", lambda: _FakeVideoPredictor(masks))
+    monkeypatch.setattr(vid, "seed_box", lambda frame: np.array([0.0, 0.0, 1.0, 1.0]))
+    before_refused = vid.WOULD_HAVE_BEEN_REFUSED_FRAMES
+    before_unevaluable = vid.FILTER_MIRROR_UNEVALUABLE_FRAMES
+    vid.propagate(frames)
+    assert vid.WOULD_HAVE_BEEN_REFUSED_FRAMES == before_refused
+    assert vid.FILTER_MIRROR_UNEVALUABLE_FRAMES == before_unevaluable + 1
+    assert vid.stats()["n_frames_the_colour_filter_mirror_could_not_evaluate"] >= 1
+
+
+def test_the_counters_are_reported_and_zeroed_as_a_set():
+    """A counter that `reset_counters()` forgets carries the previous run's frames into this one,
+    and a counter `stats()` forgets never reaches the artifact at all — which is how a mirror comes
+    to be believed rather than checked."""
+    vid.WOULD_HAVE_BEEN_REFUSED_FRAMES = 3
+    vid.WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES = 2
+    vid.WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES = 1
+    vid.FILTER_MIRROR_UNEVALUABLE_FRAMES = 4
+    reported = vid.stats()
+    assert reported["n_frames_the_colour_filter_would_have_refused"] == 3
+    assert reported["n_frames_the_colour_filter_would_have_refused_reference_not_object_scale"] == 2
+    assert reported["n_frames_the_colour_filter_would_have_refused_no_reference"] == 1
+    assert reported["n_frames_the_colour_filter_mirror_could_not_evaluate"] == 4
+    assert reported["colour_filter_mirror_covers_both_refusal_branches"] is True
+    vid.reset_counters()
+    zeroed = vid.stats()
+    for key, value in zeroed.items():
+        if key.startswith("n_frames") or key == "n_propagation_runs":
+            assert value == 0, f"{key} survived reset_counters()"
+
+
+def test_the_contract_names_which_of_this_arms_counters_is_which_of_the_per_frame_arms():
+    """The artifact records PROPAGATION_CONTRACT verbatim, and the only use of a would-have-refused
+    count is a subtraction against the other arm's. A reader has to be able to see which counter
+    pairs with which, and that both branches are in the pair, without reading this module."""
+    mirror = vid.PROPAGATION_CONTRACT["colour_filter_mirror"]
+    assert set(mirror["branches_mirrored"]) == {"reference_is_object_scale", "mask_validity_iou"}
+    assert "MASK_REFUSED_FRAMES" in mirror["n_frames_the_colour_filter_would_have_refused"]
+    for key in mirror:
+        if key.startswith("n_frames"):
+            assert key in vid.stats(), f"{key} is described in the contract and never reported"
+
+
+def test_the_flag_this_arm_publishes_is_pinned_to_segments_actual_branch_COUNT():
+    """`stats()["colour_filter_mirror_covers_both_refusal_branches"]` is a hard-coded `True` that
+    travels into every EST_DRIFT artifact, so something has to make it false when it stops being
+    true.
+
+    The behavioural tests above run both arms over frames chosen to hit the two branches that exist
+    today; by construction they cannot hit a THIRD branch nobody has written yet, which is exactly
+    the change that would make the published flag a lie and turn the two arms' refusal counts back
+    into different quantities. This one is deliberately a source-level tripwire on `apple_sam2` —
+    read-only, nothing here writes to that module — and it fires in the commit that adds the branch
+    rather than in the artifact that was pooled with it.
+    """
+    source = (_REPO / "scripts" / "estimators" / "apple_sam2.py").read_text(encoding="utf-8")
+    body = source[source.index("\ndef segment(") : source.index("\ndef estimate_depth(")]
+    refusal_branches = body.count("MASK_REFUSED_FRAMES += 1")
+    mirrored = vid.PROPAGATION_CONTRACT["colour_filter_mirror"]["branches_mirrored"]
+    assert refusal_branches == len(mirrored), (
+        f"apple_sam2.segment() now increments MASK_REFUSED_FRAMES on {refusal_branches} branches "
+        f"and this arm mirrors {len(mirrored)} ({list(mirrored)}). Until the counting loop in "
+        "apple_sam2_video.propagate() follows, the two arms' refusal counters are computed over "
+        "different frame populations and their difference is not a difference of anything — while "
+        "stats() keeps publishing colour_filter_mirror_covers_both_refusal_branches: True."
+    )
+    assert vid.stats()["colour_filter_mirror_covers_both_refusal_branches"] is True

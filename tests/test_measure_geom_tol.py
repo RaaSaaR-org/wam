@@ -2822,6 +2822,350 @@ def test_carry_is_not_a_measurement_and_refuses_to_share_a_command_line_with_one
     assert "MEASURES NOTHING" in capsys.readouterr().err
 
 
+# -- --carry-est-drift and the ARM: the one thing in that artifact nothing downstream can see -----
+#
+# scripts/measure_est_drift.py --arm both measures ONE capture two ways: this repository's adapter
+# re-detecting on every frame (`per_frame`), and Cosmos-Transfer2.5's own topology of one frame-0
+# detection propagated forward (`propagation`). Both are valid measurements, they differ, and the
+# artifact's TOP-LEVEL est_drift_p95_px is the per-frame one BY CONSTRUCTION — measure_est_drift
+# computes it from the per-frame pairs. Until 2026-08-27 --carry-est-drift read that field and only
+# that field, so the arm G0b's budget came from was chosen by a field name; on the V17 grid that is
+# 0.16650 px of margin instead of 0.02997 px, a 5.56x wider per-clip tolerance and 28.5 % of
+# GEOM_TOL. And it is invisible afterwards: both arms are the same adapter and record the SAME
+# segmenter contract, so contract_disagreements() agrees, run_g0_gates' join on the segmenter name
+# matches, and the document reads as a finished gate either way.
+#
+# Which arm PR-08 §6 subtracts is an OPEN OWNER DECISION and none of these tests answers it. What
+# they pin is that the code refuses to answer it either — and that when a person does answer it, the
+# answer is written down where a later reader can tell it from a default.
+
+
+def _two_arm_est_artifact(path: Path, *, per_frame=0.5, propagation=0.9,
+                          per_frame_coverage=1.0, propagation_coverage=1.0,
+                          min_coverage=0.9, **over) -> Path:
+    """An artifact in the shape `measure_est_drift.py measure --arm both` writes.
+
+    The headline number is the per-frame arm's, exactly as that script writes it, because the whole
+    point of these tests is that the headline being one particular arm is a property of the producer
+    and not a decision anybody made.
+
+    EACH ARM CARRIES ITS OWN COVERAGE, and the document carries the floor, because that is what
+    measure_est_drift writes and because the two are not interchangeable: `coverage_below_floor`
+    and `headline_valid` are computed from the PER-FRAME arm only, so a document can be
+    gate_qualified while its propagation arm sits under the same floor. That is not a hypothetical
+    shape — runs/pr08-est-drift/v17/EST_DRIFT-C1-lattice.json is exactly it (per-frame 0.95,
+    propagation 0.483, min_coverage 0.9) — so a fixture that omitted the field would let a carry
+    of a barely-measured arm pass a test.
+    """
+    def arm(name: str, p95: float | None, coverage: float | None) -> dict:
+        return {"arm": name, "measured": p95 is not None, "absent_because": None,
+                "est_drift_p95_px": p95, "n_frames": 480, "n_measured": 480,
+                "coverage": coverage}
+
+    return _est_artifact(
+        path,
+        est_drift_p95_px=per_frame,
+        est_drift_p95_px_arm="per_frame",
+        coverage=per_frame_coverage,
+        min_coverage=min_coverage,
+        arm_comparison={
+            "arms": ["per_frame", "propagation"],
+            "per_frame": arm("per_frame", per_frame, per_frame_coverage),
+            "propagation": arm("propagation", propagation, propagation_coverage),
+        },
+        **over,
+    )
+
+
+def test_a_two_arm_budget_is_not_carried_until_somebody_names_the_arm(
+    tmp_path: Path, capsys
+) -> None:
+    """THE DEFECT, stated as a test. `--arm both` used to change nothing about which number reached
+    the gate document: the carry read the top-level field, which is the per-frame arm by
+    construction. Two arms in one artifact is not a malformed file and not a mismatch — it is two
+    valid measurements 28.5 % of the tolerance apart, and picking one of them is a decision. So the
+    carry refuses, names both numbers, and says whose decision it is."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "records 2 measured arms" in err
+    # Both candidates are printed, because a refusal that hides the alternative is asking the
+    # operator to decide without the numbers.
+    assert "per_frame" in err and "propagation" in err
+    assert "0.5" in err and "0.9" in err
+    # And it says why there is no default to fall back on, rather than merely that there is none.
+    assert "TWO-SIDED" in err
+    assert "CROSS between p95 and p99" in err
+    assert "--est-drift-arm" in err
+    assert out.read_bytes() == before, "nothing may be written while the arm is undecided"
+    assert not mgt.sidecar_path(out).exists()
+
+
+@pytest.mark.parametrize("arm,expected,margin", [("per_frame", 0.5, 3.0),
+                                                 ("propagation", 0.9, 2.6)])
+def test_naming_the_arm_carries_that_arms_number_and_records_that_it_was_named(
+    tmp_path: Path, arm: str, expected: float, margin: float
+) -> None:
+    """The number that lands is the named arm's — including when that is NOT the artifact's headline
+    field, which is the half that was unreachable before. And the document records which arm it is
+    and that a person said so, because a later reader has no other way to tell a decision from a
+    default: both arms are the same adapter under the same segmenter contract."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", arm]) == mgt.EXIT_OK
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px"] == expected
+    assert doc["gate_margin_px"] == pytest.approx(margin)
+    # THE DURABLE COPY. est_drift_source is a declared measurement slot, so merge_committed_contract
+    # carries it into every later artifact written over this document; a new top-level key would not
+    # be carried, and the number would outlive the record of which arm it is.
+    assert f"arm={arm!r}" in doc["est_drift_source"]
+    assert "arm_selected_by=" in doc["est_drift_source"]
+    assert "--est-drift-arm" in doc["est_drift_source"]
+    # The detail beside it, including the arm that was NOT taken and how far away it was.
+    prov = doc["est_drift_arm_provenance"]
+    assert prov["arm"] == arm
+    assert prov["arms_measured_px"] == {"per_frame": 0.5, "propagation": 0.9}
+    assert "--est-drift-arm" in prov["selected_by"]
+
+
+def test_the_arm_a_carry_recorded_survives_a_later_geom_tol_measurement(tmp_path: Path) -> None:
+    """The mechanical reason the arm is written into est_drift_source rather than into a slot of its
+    own. A later GEOM_TOL run over the same document carries the measurement slots forward and drops
+    everything else, so an arm recorded anywhere but in a declared slot would be lost while the
+    number it describes survived — the number outliving what says which measurement it is, which is
+    the failure refuse_unnamed_est_drift exists to prevent, one field over."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json")
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", "propagation"]) == mgt.EXIT_OK
+
+    # What a later measuring run brings: its own tolerance, its own segmenter, and nulls in the
+    # EST_DRIFT slots it did not measure.
+    later = {
+        "GEOM_TOL_px": 4.0,
+        "mask_method": {"name": "sam2-hiera-large+gdino-base",
+                        "params": {"segmenter": dict(STUB_CONTRACT)}},
+        "est_drift_p95_px": None,
+        "est_drift_source": None,
+        mgt.EST_DRIFT_NAME_FIELD: None,
+    }
+    mgt.merge_committed_contract(out, later)
+
+    assert later["est_drift_p95_px"] == 0.9, "the number is a declared slot and is carried"
+    assert "arm='propagation'" in later["est_drift_source"], "so is what says which arm it is"
+
+
+def test_a_single_arm_budget_still_carries_with_no_flag_and_says_why_no_decision_was_needed(
+    tmp_path: Path
+) -> None:
+    """The behaviour that already worked is untouched: an artifact from a default `--arm per_frame`
+    run carries a single number, there is nothing to choose between, and demanding a flag there
+    would be refusing the case with no ambiguity in it. It still records the arm and how it was
+    settled, so the two kinds of document are read the same way."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_OK
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px"] == 0.5
+    assert "arm='per_frame'" in doc["est_drift_source"]
+    assert "no decision to make" in doc["est_drift_source"]
+    assert doc["est_drift_arm_provenance"]["arms_measured_px"] == {"per_frame": 0.5}
+
+
+def test_naming_an_arm_the_measurement_never_drove_refuses(tmp_path: Path, capsys) -> None:
+    """--est-drift-arm states a decision about a measurement; it cannot manufacture one. An arm the
+    artifact does not carry sends the operator back to the measurement rather than quietly to the
+    arm that happens to be in the file."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", "propagation"]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "did not measure" in err
+    assert "--arm both" in err
+    assert out.read_bytes() == before
+
+
+def test_naming_the_one_arm_a_single_arm_artifact_did_measure_is_accepted(tmp_path: Path) -> None:
+    """The flag is refused when it names an arm the artifact did not measure — never merely because
+    the artifact measured one. Pinned because the flag's own help text claimed the opposite until
+    2026-08-27 ("REQUIRED for such an artifact and refused for any other"), and an operator who
+    reads that either does not type it where it is harmless or reports a bug when it works. The
+    behaviour is the right one: naming per_frame over a one-arm capture states a decision that
+    happened to have no alternative, and the artifact records it as stated rather than as inferred,
+    which is the distinction the whole flag exists to keep."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    est = _est_artifact(tmp_path / "pr08_est_drift.json")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", "per_frame"]) == mgt.EXIT_OK
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px"] == 0.5
+    assert "arm='per_frame'" in doc["est_drift_source"]
+    assert "--est-drift-arm" in doc["est_drift_arm_provenance"]["selected_by"], (
+        "a stated decision must not be recorded as 'there was no decision to make'"
+    )
+
+
+def test_an_artifact_disagreeing_with_itself_about_the_per_frame_arm_is_not_carried(
+    tmp_path: Path, capsys
+) -> None:
+    """The headline and arm_comparison.per_frame are one percentile over one set of pairs, so they
+    cannot differ unless the file was edited. Whichever of the two is right, neither is carryable
+    from a document that states the same quantity twice and differently."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json")
+    doc = json.loads(est.read_text())
+    doc["est_drift_p95_px"] = 0.4
+    est.write_text(json.dumps(doc, indent=2) + "\n")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", "per_frame"]) == mgt.EXIT_FATAL
+    assert "twice and differently" in capsys.readouterr().err
+    assert out.read_bytes() == before
+
+
+def test_an_arm_under_the_documents_own_coverage_floor_is_not_carried(
+    tmp_path: Path, capsys
+) -> None:
+    """THE HOLE NAMING AN ARM OPENS, and it is open on a file that exists.
+
+    measure_est_drift derives `coverage` from the PER-FRAME pairs, stamps `coverage_below_floor`
+    from it and computes `headline_valid` from it; the propagation arm's coverage is written inside
+    its own block and read by nothing. So `gate_qualified` — the flag --carry-est-drift refuses on
+    — is a verdict about the per-frame number, and until an arm could be named that was harmless,
+    because the per-frame number was the only one carryable. These are C1-lattice's real numbers:
+    runs/pr08-est-drift/v17/EST_DRIFT-C1-lattice.json states a propagation p95 of 0.3194 px over 29
+    of 60 frames against its own registered min_coverage of 0.9, and its three disqualification
+    reasons are all about the estimator flag and the committed GEOM_TOL document — none about
+    coverage. The moment those clear, that artifact is carryable, and the arm flag would hand G0b a
+    percentile over under half a capture."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _two_arm_est_artifact(
+        tmp_path / "pr08_est_drift.json",
+        per_frame=0.1855527738074582, propagation=0.3194458657163223,
+        per_frame_coverage=0.95, propagation_coverage=0.48333333333333334, min_coverage=0.9,
+    )
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", "propagation"]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "0.48333333333333334" in err and "0.9" in err
+    # It must say why the document's own pass does not cover this number, not merely that it
+    # refuses: the operator is holding a file stamped gate_qualified.
+    assert "PER-FRAME arm only" in err
+    assert out.read_bytes() == before
+    assert not mgt.sidecar_path(out).exists()
+
+
+def test_an_arm_whose_sample_the_artifact_never_states_is_not_carried(
+    tmp_path: Path, capsys
+) -> None:
+    """And absence refuses rather than passes. A p95 whose sample nothing states is the
+    default-permissive pattern the reader's side of this cross-check was repaired for on
+    2026-08-22 — `if est['resolution_hw'] is not None and ...` one field over. Nothing already on
+    disk is disqualified by refusing here, because naming an arm is itself new."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json", propagation_coverage=None)
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out),
+                "--est-drift-arm", "propagation"]) == mgt.EXIT_FATAL
+    assert "nothing to compare" in capsys.readouterr().err
+    assert out.read_bytes() == before
+
+
+def test_a_qualified_artifact_whose_comparison_block_drops_the_per_frame_arm_is_not_carried(
+    tmp_path: Path, capsys
+) -> None:
+    """THE SAME DEFECT ARRIVING THROUGH THE BACK DOOR, which is why the self-agreement check is not
+    conditional on which arm was asked for. An artifact that is gate_qualified and states a
+    top-level p95 while its arm_comparison records the per-frame arm as NOT measured cannot have
+    been written by measure_est_drift — `per_frame_arm_not_measured` disqualifies exactly that run.
+    Read literally, though, it leaves ONE measured arm, so the two-arm refusal does not fire, and
+    the carry would take the propagation number with no flag on the command line and no decision
+    behind it: an arm chosen by a malformed file instead of by a field name."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    before = out.read_bytes()
+    est = _two_arm_est_artifact(tmp_path / "pr08_est_drift.json")
+    doc = json.loads(est.read_text())
+    doc["arm_comparison"]["per_frame"]["measured"] = False
+    doc["arm_comparison"]["per_frame"]["est_drift_p95_px"] = None
+    est.write_text(json.dumps(doc, indent=2) + "\n")
+
+    assert run(["--carry-est-drift", str(est), "--out", str(out)]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "per_frame_arm_not_measured" in err
+    assert "contradicts itself" in err
+    assert out.read_bytes() == before
+
+
+def test_an_arm_flag_on_a_command_line_that_carries_nothing_refuses(tmp_path: Path, capsys) -> None:
+    """A flag that is silently ignored is worse than no flag: this one exists so that a decision is
+    legible afterwards, and an operator who typed it on a measuring command line would believe they
+    had stated one."""
+    corpus, masks = make_corpus(tmp_path, {"ep0": walk((10, 10), (2, 0), 5)})
+    rc = run(["--corpus", str(corpus), "--masks", str(masks), "--out", str(tmp_path / "o.json"),
+              "--est-drift-arm", "propagation"])
+    assert rc == mgt.EXIT_FATAL
+    assert "carries nothing" in capsys.readouterr().err
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_a_pooled_artifact_names_what_is_missing_and_that_the_decision_is_open(
+    tmp_path: Path, capsys
+) -> None:
+    """DEFECT 8, made legible rather than fixed. scripts/pool_est_drift_arms.py writes a different
+    schema with a different shape, and no committed tool can carry it into the gate document. That
+    is not an oversight to route around: whether G0b's budget is the POOLED p95 or a single
+    capture's is a question T40_RULE_V17 §4 explicitly declines to answer, and building the carry
+    would answer it by making one of the two the reachable one. So the refusal stands and what it
+    owes the operator is the whole list plus the name of the open question — not `does not carry
+    schema wam.est_drift/1`, which reads as a conversion problem."""
+    out = write_contract(tmp_path / "pr08_geom_tol.json", geom_tol_px=3.5, GEOM_TOL_px=3.5,
+                         mask_method={"name": "sam2-hiera-large+gdino-base"})
+    pooled = tmp_path / "POOLED.json"
+    pooled.write_text(json.dumps({
+        "schema": "wam.est_drift_pooled/1",
+        "arms": {"per_frame": {"pooled_est_drift_p95_px": 0.31},
+                 "propagation": {"pooled_est_drift_p95_px": 0.45}},
+    }, indent=2) + "\n")
+
+    assert run(["--carry-est-drift", str(pooled), "--out", str(out)]) == mgt.EXIT_FATAL
+    err = capsys.readouterr().err
+    assert "POOLED artifact" in err
+    # Every one of the four ways it is not carryable, named separately.
+    assert "gate_qualified" in err
+    assert "est_drift_p95_px — absent" in err
+    assert "estimators.name" in err
+    assert "resolution_hw" in err
+    # And the reason the answer is not a code change.
+    assert "T40_RULE_V17" in err
+    assert "does not get to do that" in err
+    assert json.loads(out.read_text())["est_drift_p95_px"] is None
+
+
 # -- what the adapter saw, recorded beside what the harness measured -----------------------------
 #
 # The evidence the adapter's second gate-qualification blocker asks for "from a full pass" — the

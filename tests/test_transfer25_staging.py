@@ -23,8 +23,11 @@ corresponds to a decision recorded in the two headers rather than to an implemen
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -471,3 +474,316 @@ def test_99_does_not_capture_stdout_so_it_needs_no_quiet_flag() -> None:
     assert not re.search(r"\$\(uvx hf@latest download", stage), (
         "99 now captures hf's stdout; if so it needs --quiet for the reason 100 does"
     )
+
+
+# -- 97's TIMING branch: the artifact it reuses, and the number it projects with -------------------
+#
+# Two defects live here and both are silent. The default RUN_ID still holds job 189142's
+# THROUGHPUT.json — 0.2 s/frame from a run whose own log says "0 success, 1 error" — and the timing
+# branch's first act was to cat it and exit 0, which prices the whole partition at 238.4 GPU-h
+# against roughly 2 380 at the artifact's own end-to-end rate. And the projection multiplied by a
+# literal 172_000 while the corpus is 171 625 and partition_facts.json already carried the counted
+# figure. Both of these are checked here by RUNNING the embedded python rather than by reading it:
+# a heredoc is not covered by anything else in this repository, and its failure mode is a cluster
+# job that dies four hundred lines in.
+
+def _py_block(text: str, marker: str) -> str:
+    """One `python - ... <<'PY'` body out of a job file, chosen by a string only it contains."""
+    # `<<'PY'` can be followed by more of the command line -- the classifier ends `|| TP_VERDICT=$?`
+    # so that `set -e` does not kill the job on a refusal -- hence `[^\n]*` before the body.
+    blocks = re.findall(r"<<'PY'[^\n]*\n(.*?)\nPY\n", text, re.S)
+    hits = [b for b in blocks if marker in b]
+    assert len(hits) == 1, f"{len(hits)} blocks contain {marker!r}; the marker is no longer unique"
+    return hits[0]
+
+
+def _run_block(block: str, *argv: str) -> "subprocess.CompletedProcess":
+    """Exactly how the sbatch runs it: `python - <args>` with the body on stdin."""
+    return subprocess.run(
+        [sys.executable, "-", *argv], input=block, text=True, capture_output=True, check=False
+    )
+
+
+#: The artifact job 189142 actually left at the default RUN_ID, field for field, as quoted in
+#: docs/investigations/2026-08-27-pr08-fronts/F1-item3-throughput.md §3. Every field is well-formed;
+#: that is the point of it. Nothing INSIDE this file says the run generated no clip, which is why
+#: reading it as a finished measurement was the easiest thing in the world to do.
+_JOB_189142 = {
+    "measured_on": "1 x H200, 640x480, one episode",
+    "episode": "episode_000000",
+    "style": "train-01-oak-tungsten",
+    "frames": 590,
+    "wall_seconds": 118.0,
+    "seconds_per_frame": 0.2,
+    "gpu_seconds_per_frame": 0.2,
+    "frames_per_variant": 172000,
+    "gpu_hours_per_variant": 9.56,
+    "gpu_hours_per_variant_is_lower_bound_above_1_gpu": True,
+    "generator": "nvidia/Cosmos-Transfer2.5-2B@ce8440327c632d8313c3bde69db13b627ba5cae1",
+    "control": "depth:0.5,seg:0.5",
+    "ceiling_gpu_hours_supplied_at_measurement_time": None,
+    "ceiling_gpu_hours_supplied_at_measurement_time_note": (
+        "null is the expected value. PR-08 §8 item 3: no budget line exists until this measurement "
+        "does, so TIMING=1 asks for no ceiling and ignores one if supplied."),
+}
+
+
+def _classifier() -> str:
+    return _py_block(_text(_RESTYLE), "UNPROVEN: schema is")
+
+
+def _classify(tmp_path: pathlib.Path, payload) -> "subprocess.CompletedProcess":
+    target = tmp_path / "THROUGHPUT.json"
+    target.write_text(payload if isinstance(payload, str) else json.dumps(payload, indent=2))
+    return _run_block(_classifier(), str(target))
+
+
+def test_the_timing_branch_refuses_job_189142s_artifact_outright(tmp_path: pathlib.Path) -> None:
+    """The one real THROUGHPUT.json this project has ever produced must never be reused.
+
+    It is a wall clock around a crash: the driver died in SetupArguments validation, produced no
+    clip and exited 0, and 118 s became 0.2 s/frame. Nothing in the file contradicts it, so the
+    check cannot be "does it look wrong" — it is "can it PROVE a clip came out", and this one
+    predates the field that records that. Unproven and wrong are the same thing for a number that
+    prices 4 290 625 frames.
+    """
+    done = _classify(tmp_path, _JOB_189142)
+    assert done.returncode == 4, done.stdout + done.stderr
+    assert "UNPROVEN" in done.stdout
+
+
+def test_an_artifact_that_records_no_successful_unit_is_refused(tmp_path: pathlib.Path) -> None:
+    payload = dict(_JOB_189142, schema="wam.transfer25_throughput/1", units_timed=1,
+                   units_succeeded=0)
+    done = _classify(tmp_path, payload)
+    assert done.returncode == 4
+    assert "NO SUCCESSFUL UNIT" in done.stdout
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        {"disqualified": "measured under the wrong control spec"},
+        {"gate_disqualified_reasons": ["segmenter contract disagreement"]},
+        {"measurement_qualified": False},
+    ],
+)
+def test_a_disqualified_artifact_is_refused_however_the_disqualification_is_spelled(
+    tmp_path: pathlib.Path, marker: dict
+) -> None:
+    """None of these fields exist in what 97 writes today, and that is deliberate.
+
+    They are the shapes a later version or a hand-annotation would use to say "do not build a
+    budget on this". A reuse check that only understood today's schema would read tomorrow's
+    disqualification as an unknown key and reuse the number anyway.
+    """
+    payload = dict(_JOB_189142, schema="wam.transfer25_throughput/1", units_timed=1,
+                   units_succeeded=1, **marker)
+    done = _classify(tmp_path, payload)
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "DISQUALIFIED" in done.stdout
+
+
+def test_an_unreadable_artifact_is_refused_rather_than_crashing_the_job(tmp_path: pathlib.Path) -> None:
+    done = _classify(tmp_path, "{not json at all")
+    assert done.returncode == 2
+    assert "UNREADABLE" in done.stdout
+
+
+def test_a_qualified_artifact_still_passes_the_check(tmp_path: pathlib.Path) -> None:
+    """The guard must not become "never reuse anything", or the requeue guard it sits on top of —
+    a preempted timing job re-timing work it already finished on the paid QoS — comes back."""
+    payload = dict(_JOB_189142, schema="wam.transfer25_throughput/1", units_timed=1,
+                   units_succeeded=1)
+    done = _classify(tmp_path, payload)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "qualified: 1 successful unit" in done.stdout
+
+
+def test_a_fresh_timing_submission_refuses_a_pre_existing_artifact_before_it_can_be_reused() -> None:
+    """The bash half: the disqualification check runs first, and no flag reaches past it.
+
+    Order is the whole property here. REUSE_THROUGHPUT exists so an operator can deliberately
+    re-read a measurement; it must not be able to re-read job 189142's, because that file is not a
+    measurement someone forgot to re-read.
+    """
+    text = _text(_RESTYLE)
+    branch = text[text.index("if (( TIMING_MODE )); then"):]
+    verdict = branch.index("if (( TP_VERDICT != 0 )); then")
+    reuse = branch.index('if [[ "${REUSE_THROUGHPUT:-0}" != "0" ]]; then')
+    requeue = branch.index("if (( TIMING_RESTARTS >= 1 )); then")
+    assert verdict < requeue < reuse, (
+        "the qualification check must precede both the requeue guard and REUSE_THROUGHPUT"
+    )
+    assert "REUSE_THROUGHPUT does not override it" in branch
+    # And a fresh submission that finds a QUALIFIED artifact still refuses, naming both exits.
+    assert "this is a FRESH timing submission" in branch
+    assert "pass a fresh RUN_ID" in branch
+
+
+def test_the_headers_own_timing_recipe_passes_an_explicit_run_id() -> None:
+    """The recipe is what gets pasted. Without a RUN_ID it lands on the default path, which is
+    where the disqualified artifact lives — the trap and the instructions were the same line."""
+    header = _text(_RESTYLE)[: _text(_RESTYLE).index("#SBATCH") if "#SBATCH" in _text(_RESTYLE) else 4000]
+    recipe = re.search(r"TIMING=1 STAGE=1 [^\n]*\n(?:#[^\n]*\n){0,3}", header)
+    assert recipe, "the header no longer carries a TIMING=1 recipe"
+    assert "RUN_ID=" in recipe.group(0), (
+        "the TIMING=1 recipe passes no RUN_ID, so it resolves to the default one — which still "
+        "holds job 189142's disqualified THROUGHPUT.json"
+    )
+
+
+def test_the_projection_multiplies_by_the_counted_corpus_and_not_by_a_coined_number() -> None:
+    """PR-08 §8 item 3 forbids inventing numbers in exactly this artifact.
+
+    172_000 was a rounded stand-in for a number the job already had: partition_facts.json carries
+    corpus_frames, summed over the manifest at expansion time, and the corpus is 171 625 frames.
+    The 0.2 % gap is not the argument — the argument is that a budget derived from a measured rate
+    has to be derived over a counted corpus, or nothing downstream can check the derivation.
+    """
+    text = _text(_RESTYLE)
+    assert not re.search(r"FRAMES_PER_VARIANT\s*=\s*172_?000", text), (
+        "the coined frame count is back. The prose above it may cite 172_000 as the number that "
+        "was there; the assignment may not be it."
+    )
+    assert 'CORPUS_FRAMES=$(python -c' in text and '"corpus_frames"' in text
+    assert "FRAMES_PER_VARIANT = int(corpus_frames)" in text
+    assert '"frames_per_variant_source"' in text, (
+        "the artifact must say where its frame count came from; it is the field that makes the "
+        "projection checkable without the job log"
+    )
+
+
+def _timing_writer() -> str:
+    return _py_block(_text(_RESTYLE), "FRAMES_PER_VARIANT = int(corpus_frames)")
+
+
+def _troot(tmp_path: pathlib.Path, *statuses: str) -> pathlib.Path:
+    root = tmp_path / "timing_raw"
+    for i, status in enumerate(statuses):
+        unit = root / f"unit{i}"
+        unit.mkdir(parents=True)
+        (unit / "sample_outputs.json").write_text(json.dumps({"status": status, "unit": f"unit{i}"}))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _write_throughput(tmp_path: pathlib.Path, troot: pathlib.Path, corpus_frames: str = "171625"):
+    out = tmp_path / "THROUGHPUT.json"
+    unit = json.dumps({"unit": "episode_000093__train-01__r00", "episode": "episode_000093",
+                       "frames": 448, "style": "train-01", "repeat": 0, "seed": 7001})
+    return out, _run_block(
+        _timing_writer(), unit, "900", str(out), "nvidia/Cosmos-Transfer2.5-2B", "deadbeef",
+        "", "depth:0.5,seg:0.5", corpus_frames, str(troot),
+    )
+
+
+def test_the_throughput_artifact_records_the_corpus_it_projected_over(tmp_path: pathlib.Path) -> None:
+    out, done = _write_throughput(tmp_path, _troot(tmp_path, "success"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    report = json.loads(out.read_text())
+    assert report["frames_per_variant"] == 171625, "the projection did not use the counted corpus"
+    assert report["units_succeeded"] == 1 and report["units_timed"] == 1
+    assert report["schema"] == "wam.transfer25_throughput/1"
+    # 900 s / 448 frames x 171 625 frames / 3600 -- recomputed here rather than copied, because a
+    # projection nobody can reproduce from the artifact's own fields is not a derivation.
+    assert report["gpu_hours_per_variant"] == round(900 / 448 * 171625 / 3600.0, 2)
+
+
+def test_a_timing_run_whose_unit_died_writes_no_artifact_at_all(tmp_path: pathlib.Path) -> None:
+    """The second, independent assertion that a clip exists — the first is --require-success.
+
+    Job 189142 had neither, and its wall clock around a crash became the budget input. This one is
+    the important half because it lands IN the file: it is what lets every later reader decide
+    whether the number is a measurement without knowing the job number.
+    """
+    out, done = _write_throughput(tmp_path, _troot(tmp_path, "error"))
+    assert done.returncode != 0
+    assert "0 successful unit record" in (done.stdout + done.stderr)
+    assert not out.exists(), "a THROUGHPUT.json was written for a run that generated nothing"
+
+
+def test_a_timing_run_that_produced_two_clips_is_refused_as_not_the_measurement_asked_for(
+    tmp_path: pathlib.Path,
+) -> None:
+    """"one timed episode on an H200" is the registered measurement, and a wall clock around two
+    episodes divided by one episode's frame count is a number about nothing."""
+    out, done = _write_throughput(tmp_path, _troot(tmp_path, "success", "success"))
+    assert done.returncode != 0
+    assert "2 successful unit record" in (done.stdout + done.stderr)
+    assert not out.exists()
+
+
+def _refusal_advice() -> str:
+    return _py_block(_text(_RESTYLE), "G0c REFUSED THIS UNIT ON ITS SOURCE MASKS")
+
+
+def test_a_timing_run_refused_before_generation_names_the_owner_decision_and_makes_none(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The refusal is cheap now; the DECISION behind it is still not this job's to make.
+
+    The driver's source-mask preflight turns "half a GPU-hour and no artifact" into "seconds and no
+    artifact", which changes the price of the failure and nothing else. What the operator does next
+    — whether an empty robot mask is acceptable for a timed measurement, and which of the 402
+    episodes the measurement runs on — is open, and reaching any episode already needs no code
+    change (CHUNK_INDEX/CHUNK_TOTAL). So the job says so, and picks nothing.
+    """
+    root = tmp_path / "timing_raw" / "episode_000000__train-01__r00"
+    root.mkdir(parents=True)
+    (root / "sample_outputs.json").write_text(json.dumps({
+        "status": "error", "unit": "episode_000000__train-01__r00", "episode": "episode_000000",
+        "detail": "SourceMaskRefusal: ... the robot mask is EMPTY on frame 0.",
+        "g0c": {"composited": False, "refused_before_generation": True},
+    }))
+    done = _run_block(_refusal_advice(), str(tmp_path / "timing_raw"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "REFUSED THIS UNIT ON ITS SOURCE MASKS" in done.stdout
+    assert "episode_000000" in done.stdout, "the operator is not told which episode refused"
+    assert "THIS IS NOT A RETRY" in done.stdout
+    assert "registered rule version" in done.stdout
+    # And it must not choose: no episode is recommended anywhere in the job, by id.
+    assert not re.search(r"episode_0*\d+", _text(_RESTYLE)), (
+        "97 names a specific episode. Choosing the timed episode because it survives G0c is a "
+        "selection made after seeing the data and needs a rule version, not a line in an sbatch."
+    )
+
+
+def test_the_refusal_advice_stays_silent_for_an_ordinary_failed_unit(tmp_path: pathlib.Path) -> None:
+    """A unit that died in the generator is a different failure and must not be given G0c's
+    explanation — the operator would go and read a gate that had nothing to do with it."""
+    root = tmp_path / "timing_raw" / "u0"
+    root.mkdir(parents=True)
+    (root / "sample_outputs.json").write_text(json.dumps({
+        "status": "error", "unit": "u0",
+        "g0c": {"composited": False, "refused_before_generation": False},
+    }))
+    done = _run_block(_refusal_advice(), str(tmp_path / "timing_raw"))
+    assert done.returncode == 0
+    assert done.stdout.strip() == ""
+
+
+def test_one_qualification_check_serves_both_paths_that_read_the_throughput_artifact() -> None:
+    """The TIMING path asks before REUSING a measurement; GENERATE asks before DERIVING from one.
+
+    Two copies of that question could answer differently about the same file, which is the failure
+    mode of every duplicated gate — so it is a shell function defined once. The generation side is
+    the one that spends the allocation: its ceiling gate reads exactly `seconds_per_frame` out of
+    this file, and job 189142's artifact answers 0.2 from a run that produced no clip. There is no
+    override on that side, deliberately: a GPU-h ceiling is not a thing to be waived on a submit
+    line.
+    """
+    text = _text(_RESTYLE)
+    assert text.count("throughput_qualification() {") == 1, (
+        "two definitions of the qualification check can answer differently about one file"
+    )
+    calls = [m.start() for m in re.finditer(r'throughput_qualification "\$\{THROUGHPUT\}"', text)]
+    assert len(calls) == 2, f"expected the timing and the generation caller, found {len(calls)}"
+
+    generate = text.index("\n# GENERATE\n")
+    assert min(calls) < generate < max(calls), (
+        "one of the two paths that reads THROUGHPUT.json does not ask whether it can be built on"
+    )
+    tail = text[generate:]
+    assert "REUSE_THROUGHPUT" not in tail, "the generation path must offer no override"
+    assert "spend the allocation under a budget line that measures nothing" in tail

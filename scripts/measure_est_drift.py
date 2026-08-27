@@ -2650,6 +2650,26 @@ def main(argv: list[str] | None = None) -> int:
     # whose value is "we did not do that" to every artifact on disk would be a change to every
     # artifact on disk.
     if run_propagation:
+        # WHICH ARM `est_drift_p95_px` AT THE TOP OF THIS DOCUMENT IS, said in the artifact instead
+        # of only in this file's comments. That field is the PER-FRAME arm by construction — it is a
+        # percentile over `pairs`, which only the per-frame pass fills — and until this key existed
+        # the sole record of that fact was the comment beside `per_frame_arm_not_measured` above. A
+        # reader of a `--arm both` artifact therefore saw three p95s (one headline, one per arm)
+        # with nothing saying which arm the headline was, and `measure_geom_tol.py
+        # --carry-est-drift` read the headline and wrote it into the committed gate document — so
+        # the arm that reached G0b was selected by a FIELD NAME and not by anybody. That carry now
+        # refuses a two-arm artifact outright unless the operator names an arm (`--est-drift-arm`),
+        # because which arm PR-08 §6 subtracts is an open owner decision and the bias between the
+        # arms is recorded as two-sided; this key is the same fact stated from the producing side,
+        # so the artifact is legible on its own without the consumer's refusal to explain it.
+        #
+        # WRITTEN ONLY ON A TWO-ARM DOCUMENT, for the identical reason `arm_comparison` itself is: a
+        # default `--arm per_frame` run must keep writing exactly the document it wrote before this
+        # existed. Where one arm ran there is no ambiguity to resolve, and adding a key to every
+        # artifact on disk to say so would be a change to every artifact on disk. `null` when the
+        # per-frame arm did not run at all — in which case `est_drift_p95_px` is null beside it and
+        # `per_frame_arm_not_measured` is already in the reasons.
+        artifact["est_drift_p95_px_arm"] = "per_frame" if run_per_frame else None
         artifact["arm_comparison"] = arm_comparison_block(
             arm_block(
                 "per_frame",

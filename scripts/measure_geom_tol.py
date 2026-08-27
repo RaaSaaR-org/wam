@@ -3142,6 +3142,20 @@ def _check_mode_flags(args: argparse.Namespace) -> None:
             "       it into the committed document. Run it on its own, after the measurement it "
             "carries."
         )
+    # --est-drift-arm answers a question only the carry asks. Silently ignoring it on a measuring
+    # command line would let an operator believe they had stated the decision when the run that
+    # needs it never saw the flag — and the flag exists precisely so that a decision is legible
+    # afterwards. A flag that does nothing is worse here than no flag at all.
+    if getattr(args, "est_drift_arm", None) is not None and not carrying:
+        raise MethodUnavailable(
+            f"FATAL: --est-drift-arm {args.est_drift_arm} names which arm of an EST_DRIFT "
+            "measurement is CARRIED, and\n"
+            "       this command line carries nothing. It is not an instruction to a measurement: "
+            "this script measures\n"
+            "       GEOM_TOL, which has no arms. To choose an arm, pass it beside "
+            "--carry-est-drift; to measure the\n"
+            "       arms in the first place, that is scripts/measure_est_drift.py --arm both."
+        )
     if carrying:
         return
 
@@ -3293,6 +3307,25 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                          "Refuses a disqualified or null measurement, a different segmenter name, "
                          "a segmenter whose parameters disagree field for field, and a different "
                          "pixel grid. Measures nothing and needs no corpus")
+    ap.add_argument("--est-drift-arm", choices=EST_DRIFT_ARM_CHOICES, default=None,
+                    metavar="ARM",
+                    help="which segmenter topology's p95 --carry-est-drift takes out of an "
+                         "artifact that measured more than one "
+                         f"({' | '.join(EST_DRIFT_ARM_CHOICES)}). REQUIRED for such an artifact; "
+                         "optional for one that measured a single arm, where it states a decision "
+                         "there was none to make; refused when it names an arm the artifact never "
+                         "measured, and refused on a command line that carries nothing. "
+                         "scripts/measure_est_drift.py --arm both measures the same frames as this "
+                         "adapter's per-frame segment(rgb) AND as Cosmos-Transfer2.5's "
+                         "seed-and-propagate topology, and the artifact's top-level "
+                         "est_drift_p95_px is the per-frame number by construction — so without "
+                         "this flag the arm that reaches the gate is picked by a field name. Both "
+                         "arms record the same segmenter contract, so no check downstream can see "
+                         "which one landed. Which arm PR-08 §6 subtracts is an OPEN OWNER DECISION "
+                         "and this flag is where it is stated, not where it is defaulted: the bias "
+                         "between the arms is recorded as two-sided and the two distributions "
+                         "cross between p95 and p99, so there is no conservative arm to fall back "
+                         "on. What you pass is written into est_drift_source")
     return ap.parse_args(argv)
 
 
@@ -3418,6 +3451,188 @@ def merge_main(args: argparse.Namespace) -> int:
 #: and "it was JSON and it had the right key" is not a reason to believe it is that number.
 EST_DRIFT_SCHEMA = "wam.est_drift/1"
 
+#: What ``scripts/pool_est_drift_arms.py`` stamps on the POOLED artifact — the union of several
+#: captures, a different document with a different shape (per-arm ``pooled_est_drift_p95_px``, no
+#: top-level number, no estimator block, no grid). It is named here for ONE reason: being handed one
+#: must produce a message about the question that is actually open rather than a bare schema
+#: mismatch. See :func:`pooled_est_drift_refusal`. **No carry path is built for it, deliberately** —
+#: whether G0b's budget is the pooled number or a single capture's is an unanswered owner decision.
+#: ``T40_RULE_V17`` §4 lines 200-202, in its own words: "whether the pooled number or the
+#: single-capture number is the one G0b subtracts is a separate question this document does not
+#: answer." Writing the plumbing would answer it by making one of the two the reachable one, which
+#: is the same class of mistake as picking an arm by a field name.
+EST_DRIFT_POOLED_SCHEMA = "wam.est_drift_pooled/1"
+
+#: The two segmenter TOPOLOGIES ``scripts/measure_est_drift.py --arm both`` measures over one
+#: capture, and the two values ``--est-drift-arm`` accepts. Spelled with the producer's own strings
+#: (``measure_est_drift.ARM_CHOICES``) because they are the keys in the artifact's
+#: ``arm_comparison`` block and a second spelling here would be a second vocabulary.
+#:
+#: That tuple has a THIRD value, ``both``, and it is deliberately not here: ``both`` is an
+#: instruction to the MEASUREMENT ("do it twice") and is not an answer to "which of the two does
+#: PR-08 §6 subtract from GEOM_TOL". Accepting it would be accepting a non-answer.
+EST_DRIFT_ARM_CHOICES: tuple[str, ...] = ("per_frame", "propagation")
+
+#: THE ARM THE TOP-LEVEL ``est_drift_p95_px`` IS, and — the part that matters here — the arm every
+#: QUALIFICATION check in the producing script is about. ``measure_est_drift.main`` computes
+#: ``coverage`` from the per-frame pairs, stamps ``coverage_below_floor`` when that coverage is
+#: under ``min_coverage``, and sets ``headline_valid`` from the same two numbers; the propagation
+#: arm's coverage is recorded inside its own block and feeds NOTHING. So ``gate_qualified``, which
+#: :func:`est_drift_measurement` refuses on, is a verdict about this arm and about the run's
+#: conditions — never about the other arm's number. Naming it here rather than repeating the string
+#: is what lets the carry say, at the one place it matters, "the document's verdict is not about
+#: the number you asked me to carry".
+EST_DRIFT_HEADLINE_ARM = "per_frame"
+
+
+def est_drift_arms(
+    doc: Mapping,
+) -> tuple[dict[str, float], dict[str, float | None], str | None]:
+    """Which arms an EST_DRIFT artifact actually MEASURED, each one's p95, and each one's coverage.
+
+    Extraction only.
+
+    No policy lives here — this reads what is on disk and says so; the refusal that decides what to
+    do about two arms is in :func:`carry_est_drift_main`, where the operator's command line is.
+
+    ``scripts/measure_est_drift.py`` writes ``arm_comparison`` only when a second topology was
+    driven (its own comment: "adding a key whose value is 'we did not do that' to every artifact on
+    disk would be a change to every artifact on disk"), so an artifact WITHOUT that block measured
+    exactly one arm, and by construction it is ``per_frame``: the top-level ``est_drift_p95_px`` is
+    computed from the per-frame pairs, and a run that never drove them stamps
+    ``per_frame_arm_not_measured`` into ``gate_disqualified_reasons`` and so cannot be carried at
+    all. That is why the single-arm case returns the top-level number under the name ``per_frame``
+    rather than under no name: an unnamed arm is exactly the ambiguity this function exists to end.
+
+    THE COVERAGE COMES OUT WITH THE NUMBER, and not as a courtesy. An arm's p95 is a percentile
+    over the frames on which BOTH centroids were recoverable, so a p95 and the fraction of the
+    capture it was computed over are one fact in two fields — ``EST_DRIFT-C1-lattice.json`` states
+    a propagation p95 of 0.3194 px over 29 of 60 frames (coverage 0.483) beside a per-frame p95
+    over 57 of 60 (coverage 0.95), against that same document's ``min_coverage`` 0.9. Carrying the
+    first without the second would be carrying a number the artifact's own registered floor says
+    does not stand. ``None`` where the artifact records no coverage for an arm, which is the
+    answer to "was it recorded" rather than a permission.
+
+    Returns ``({arm: p95}, {arm: coverage | None}, absent_because)``, the mappings in the
+    artifact's own arm order and carrying only arms it says are measured with a number to show
+    for it.
+    """
+    comparison = doc.get("arm_comparison")
+    if not isinstance(comparison, Mapping):
+        drift = doc.get("est_drift_p95_px")
+        if not isinstance(drift, (int, float)):
+            return {}, {}, (
+                "the artifact records no arm_comparison block and no top-level est_drift_p95_px, "
+                "so it names no measured arm at all"
+            )
+        top_coverage = doc.get("coverage")
+        return (
+            {EST_DRIFT_HEADLINE_ARM: float(drift)},
+            {
+                EST_DRIFT_HEADLINE_ARM: (
+                    float(top_coverage) if isinstance(top_coverage, (int, float)) else None
+                )
+            },
+            "the artifact records no arm_comparison block, so measure_est_drift drove one arm and "
+            "est_drift_p95_px is that arm's number",
+        )
+    listed = comparison.get("arms")
+    names = [str(a) for a in listed] if isinstance(listed, Sequence) and not isinstance(
+        listed, (str, bytes)
+    ) else list(EST_DRIFT_ARM_CHOICES)
+    found: dict[str, float] = {}
+    coverage: dict[str, float | None] = {}
+    for name in names:
+        block = comparison.get(name)
+        if not isinstance(block, Mapping) or not block.get("measured"):
+            continue
+        p95 = block.get("est_drift_p95_px")
+        if isinstance(p95, (int, float)):
+            found[name] = float(p95)
+            arm_coverage = block.get("coverage")
+            coverage[name] = (
+                float(arm_coverage) if isinstance(arm_coverage, (int, float)) else None
+            )
+    if not found:
+        return {}, {}, (
+            "the artifact carries an arm_comparison block in which no arm is both measured and "
+            "carrying a p95"
+        )
+    return found, coverage, None
+
+
+def pooled_est_drift_refusal(path: Path, doc: Mapping) -> str:
+    """The message for a POOLED artifact, which has no carry path and must not silently acquire one.
+
+    WHY THIS IS A MESSAGE AND NOT A FEATURE. ``scripts/pool_est_drift_arms.py`` pools eight captures
+    into one p95 per arm, and that number is a real measurement — but whether PR-08 §6 subtracts
+    the pooled number or one capture's is a question ``T40_RULE_V17`` §4 explicitly leaves open, and
+    it is not this script's to answer. Building the carry would answer it by making the pooled
+    number the one that can reach the gate document — a decision made by which code path exists,
+    which is the same failure ``--est-drift-arm`` was added to stop one field over.
+
+    So the refusal stays, and what changes is that it stops being a bare schema mismatch. The
+    absences are RE-DERIVED from the document rather than listed from memory, so that a pooled
+    writer which later grows one of these fields does not leave this paragraph asserting it is
+    missing.
+    """
+    missing: list[str] = []
+    if doc.get("gate_qualified") is None:
+        missing.append(
+            "gate_qualified — absent. est_drift_measurement() refuses a falsy value here, and "
+            "absence is falsy: nothing in the pooled document says the captures under it were "
+            "qualified to be subtracted from anything."
+        )
+    if not isinstance(doc.get("est_drift_p95_px"), (int, float)):
+        missing.append(
+            "est_drift_p95_px — absent. The pooled document states one p95 PER ARM, as "
+            "arms.<arm>.pooled_est_drift_p95_px, and states no single headline number. Which of "
+            "the two a carry would take is the same open owner decision --est-drift-arm exists "
+            "for, and it has no answer here either."
+        )
+    estimators = doc.get("estimators")
+    name = estimators.get("name") if isinstance(estimators, Mapping) else None
+    if not isinstance(name, str) or not name.strip():
+        missing.append(
+            "estimators.name — absent. This is the JOIN KEY: PR-08 §4 step 2 requires both halves "
+            "of GEOM_TOL - EST_DRIFT_P95 to come from one segmenter, and the pooled document names "
+            "the artifacts it pooled without naming the segmenter they share."
+        )
+    grid = doc.get("resolution_hw")
+    if not isinstance(grid, Sequence) or isinstance(grid, (str, bytes)) or len(grid) != 2:
+        missing.append(
+            "resolution_hw — absent, and this one does NOT currently refuse: the grid comparison "
+            "in carry_est_drift_main reads `if est['resolution_hw'] is not None and ...`, so a "
+            "document recording no grid passes the grid check BY SAYING NOTHING. That is the "
+            "default-permissive pattern this repo rejects everywhere else and the reader's side "
+            "(measure_est_drift.cross_check_geom_tol) was repaired for on 2026-08-22; the carry "
+            "side was not. It is named here rather than tightened, because tightening it changes "
+            "what an already-landed single-capture artifact is allowed to do — a rule change."
+        )
+    lines = [
+        f"FATAL: {path} is the POOLED artifact ({EST_DRIFT_POOLED_SCHEMA}), and there is no path "
+        "from it into\n       the committed gate document. It is not a near miss: this mode "
+        f"requires {EST_DRIFT_SCHEMA} and the\n       pooled document differs from it in "
+        f"{len(missing)} further way(s), each of which is its own refusal —\n",
+    ]
+    for item in missing:
+        lines.append("         " + item + "\n")
+    lines.append(
+        "\n       THE MISSING PIECE IS A DECISION, NOT CODE. Whether G0b's budget is the POOLED "
+        "p95 (eight\n"
+        "       captures, 3 840 frames) or a SINGLE capture's is unanswered — T40_RULE_V17 §4: "
+        "'whether the\n"
+        "       pooled number or the single-capture number is the one G0b subtracts is a separate "
+        "question this\n"
+        "       document does not answer.' Adding a carry path here would answer it by making one "
+        "of the two the\n"
+        "       one that can reach the gate, and this script does not get to do that. Take the "
+        "question to whoever\n"
+        "       owns PR-08, and carry a single-capture artifact once they have. Nothing was "
+        "written."
+    )
+    return "".join(lines)
+
 
 def _artifact_rel(path: Path) -> str:
     """Repo-relative when it is under the repo, ABSOLUTE otherwise. Never raises.
@@ -3452,6 +3667,12 @@ def est_drift_measurement(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MethodUnavailable(f"FATAL: {path} is not readable JSON: {exc}") from exc
     if not isinstance(doc, dict) or doc.get("schema") != EST_DRIFT_SCHEMA:
+        # THE POOLED DOCUMENT GETS ITS OWN PARAGRAPH. It is the one wrong schema that arrives here
+        # on purpose rather than by accident — somebody carrying "the EST_DRIFT number", of which
+        # V17 produced eight captures' worth — and "does not carry schema wam.est_drift/1" sends
+        # that person looking for a conversion instead of at the decision that is actually open.
+        if isinstance(doc, dict) and doc.get("schema") == EST_DRIFT_POOLED_SCHEMA:
+            raise MethodUnavailable(pooled_est_drift_refusal(path, doc))
         raise MethodUnavailable(
             f"FATAL: {path} does not carry schema {EST_DRIFT_SCHEMA!r} (got "
             f"{(doc or {}).get('schema')!r} ). This mode copies a measured number into the "
@@ -3480,8 +3701,24 @@ def est_drift_measurement(path: Path) -> dict[str, Any]:
             "       halves of GEOM_TOL - EST_DRIFT_P95 and there is nothing here to join on. "
             "Nothing was written."
         )
+    arms, arm_coverage, arms_absent_because = est_drift_arms(doc)
     return {
         "est_drift_p95_px": float(drift),
+        # WHICH ARMS THE ARTIFACT MEASURED, carried out of the file as data rather than decided
+        # here. `est_drift_p95_px` above is the PER-FRAME arm by construction (see est_drift_arms),
+        # and this mapping is what lets carry_est_drift_main refuse to write it as if that were a
+        # choice somebody made. Empty on an artifact that names no measured arm, with the reason.
+        "arms": arms,
+        # AND ON HOW MANY FRAMES EACH ONE STANDS, beside the floor the artifact registered for
+        # itself. `gate_qualified` above is computed from the PER-FRAME arm's coverage only
+        # (measure_est_drift `coverage_below_floor`), so it is not a verdict about a second arm's
+        # number, and a carry of that second arm has to check what the document already recorded
+        # rather than inherit a pass that was never about it. `min_coverage` is null on an artifact
+        # written before that field existed, which the carry treats as "not recorded", not as "no
+        # floor".
+        "arm_coverage": arm_coverage,
+        "min_coverage": doc.get("min_coverage"),
+        "arms_absent_because": arms_absent_because,
         "name": name,
         "resolution_hw": doc.get("resolution_hw"),
         "segmenter_contract": (doc.get("geom_tol_cross_check") or {}).get(
@@ -3509,8 +3746,216 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
     measurement — a different segmenter name, a segmenter whose parameters differ field for field,
     a different pixel grid — and writes the number, the name, a provenance string naming the
     artifact and its digest, and the re-derived margin. Nothing else in the document is touched.
+
+    AND SINCE 2026-08-27 IT REFUSES A SECOND, DIFFERENT WAY: an artifact that measured more than one
+    segmenter ARM may not be carried unless the command line names the arm. That is not a variant of
+    the checks above — every one of those is about two things failing to be the same measurement,
+    and this one is about ONE artifact holding two measurements that are both valid and that differ
+    by 28.5 % of the tolerance. See the block at the top of the body for why it refuses instead of
+    defaulting, and :data:`EST_DRIFT_ARM_CHOICES` for why it will not accept "both" as an answer.
     """
     est = est_drift_measurement(args.carry_est_drift)
+
+    # -- WHICH ARM, AND WHETHER ANYBODY CHOSE IT --------------------------------------------------
+    #
+    # THE HOLE THIS CLOSES, and it is a gate-corrupting one rather than a job-losing one.
+    # ``scripts/measure_est_drift.py --arm both`` measures the SAME frames two ways — this
+    # repository's per-frame segment(rgb), and Cosmos-Transfer2.5's own topology of one frame-0
+    # detection propagated forward — and writes both p95s into ``arm_comparison``. The artifact's
+    # TOP-LEVEL ``est_drift_p95_px``, which is the field this mode used to read and the only field
+    # it used to read, is the per-frame number BY CONSTRUCTION: measure_est_drift computes it from
+    # the per-frame pairs and stamps ``per_frame_arm_not_measured`` when that arm did not run. So
+    # ``--arm both`` changed nothing about which number reached the gate document, and the first
+    # successful carry would have handed G0b the per-frame arm — on the V17 grid, 0.16650 px of
+    # margin instead of 0.02997 px, a 5.56x wider per-clip tolerance, 28.5 % of GEOM_TOL — because
+    # of a FIELD NAME rather than because anybody decided anything.
+    #
+    # AND NOTHING DOWNSTREAM COULD SEE IT. Both arms are the same adapter and therefore record the
+    # same SEGMENTER_CONTRACT, so contract_disagreements() below compares two identical blocks and
+    # agrees, run_g0_gates joins on a name that matches, and the document reads as a finished gate
+    # either way. That is the family this whole file is built against: two plausible pixel numbers
+    # subtracting to a plausible pixel number.
+    #
+    # SO THIS REFUSES INSTEAD OF PICKING, AND IT WILL KEEP REFUSING. Which arm PR-08 §6 subtracts is
+    # an open decision that belongs to whoever owns PR-08, and there is no safe default available to
+    # take in the meantime: scripts/estimators/apple_sam2.py:701-710 records the bias between the
+    # two arms as TWO-SIDED — "neither a lower nor an upper bound on the generator's mask error" —
+    # and :723-728 records that the two distributions CROSS between p95 and p99, so "take the
+    # conservative one" does not name an arm either. A single-arm artifact is carried exactly as
+    # before: there is no decision to make when only one arm was measured, and refusing there would
+    # be refusing the thing that already works.
+    arms: dict[str, float] = dict(est["arms"])
+    requested: str | None = getattr(args, "est_drift_arm", None)
+    if not arms:
+        raise MethodUnavailable(
+            f"FATAL: {args.carry_est_drift} names no measured arm: "
+            f"{est['arms_absent_because']}.\n"
+            "       PR-08 §6 subtracts EST_DRIFT_P95 from GEOM_TOL and §4 step 2 asks which "
+            "segmenter produced it;\n"
+            "       an arm is the other half of that question — the same adapter re-detecting "
+            "every frame and the same\n"
+            "       adapter propagating one detection are two different measurements. Nothing was "
+            "written."
+        )
+    if requested is not None and requested not in arms:
+        raise MethodUnavailable(
+            f"FATAL: --est-drift-arm {requested} names an arm {args.carry_est_drift} did not "
+            "measure.\n"
+            f"       That artifact carries: {', '.join(sorted(arms))}.\n"
+            "       Measure the arm you mean — scripts/measure_est_drift.py measure --arm both "
+            "drives the same\n"
+            "       frames through both topologies — rather than carrying the arm that happens to "
+            "be in the file.\n"
+            "       Nothing was written."
+        )
+    if requested is None and len(arms) > 1:
+        rows = "".join(
+            f"         {name:<12} {value!r} px\n" for name, value in sorted(arms.items())
+        )
+        raise MethodUnavailable(
+            f"FATAL: {args.carry_est_drift} records {len(arms)} measured arms and nothing on this "
+            "command line says\n       which one G0b subtracts:\n"
+            + rows
+            + "       est_drift_p95_px at the top of that artifact is the PER-FRAME arm by "
+            "construction, not by a\n"
+            "       decision, so carrying it silently would hand the gate an arm chosen by a field "
+            "name. Both arms are\n"
+            "       the same adapter and record the SAME segmenter contract, so nothing downstream "
+            "— not the field-for-\n"
+            "       field comparison below, not run_g0_gates' join on the segmenter name — can "
+            "tell which one landed.\n"
+            "\n"
+            "       WHICH ARM IS AUTHORITATIVE IS AN OPEN OWNER DECISION AND THIS SCRIPT WILL NOT "
+            "MAKE IT.\n"
+            "       scripts/estimators/apple_sam2.py:701-710 records the bias between them as "
+            "TWO-SIDED — 'neither a\n"
+            "       lower nor an upper bound on the generator's mask error' — and :723-728 records "
+            "that the two\n"
+            "       distributions CROSS between p95 and p99, so 'take the conservative one' names "
+            "no arm either.\n"
+            f"       Pass --est-drift-arm {' or --est-drift-arm '.join(sorted(arms))} to state the "
+            "decision. Whichever you\n"
+            "       pass is written into est_drift_source beside the number, so a later reader can "
+            "tell a decision from\n"
+            "       a default. Nothing was written."
+        )
+    arm = requested if requested is not None else next(iter(arms))
+    arm_selected_by = (
+        f"stated on the command line as --est-drift-arm {arm}"
+        if requested is not None
+        else "the artifact measured exactly one arm, so there was no decision to make"
+    )
+    drift_px = arms[arm]
+
+    # -- THE ARTIFACT HAS TO AGREE WITH ITSELF ABOUT THE PER-FRAME ARM, WHICHEVER ARM IS CARRIED --
+    #
+    # Checked unconditionally, and not only when the per-frame arm is the one being taken, because
+    # the top-level number and the per-frame block are the SAME percentile over the SAME pairs
+    # (measure_est_drift computes both from `paired_displacements(pairs)`) and their agreement is
+    # the evidence that this file was written by that script rather than assembled by hand. Two
+    # concrete failures it stops, both of which end with a number reaching the gate that nobody
+    # chose:
+    #
+    #   * the per-frame arm MISSING from arm_comparison while the top-level number is present. Any
+    #     artifact that reaches here is gate_qualified, and measure_est_drift stamps
+    #     `per_frame_arm_not_measured` into gate_disqualified_reasons whenever that arm did not
+    #     run, so a qualified artifact whose comparison block does not carry it is self-
+    #     contradictory. Left unchecked it is worse than untidy: `arms` would then hold exactly one
+    #     entry, `propagation`, the len(arms) > 1 refusal below would not fire, and the carry would
+    #     take the propagation arm with NO flag and no decision — the defect this whole block
+    #     exists to close, arriving through the back door.
+    #   * the two per-frame numbers DISAGREEING, which cannot happen from one run and means the
+    #     file was edited. Whichever of the two is right, neither is carryable from a document that
+    #     states one quantity twice and differently.
+    if EST_DRIFT_HEADLINE_ARM not in arms:
+        raise MethodUnavailable(
+            f"FATAL: {args.carry_est_drift} is gate_qualified and states est_drift_p95_px = "
+            f"{est['est_drift_p95_px']!r}, but its\n"
+            f"       arm_comparison block records no measured {EST_DRIFT_HEADLINE_ARM} arm — it "
+            f"records: {', '.join(sorted(arms)) or '(none)'}.\n"
+            "       measure_est_drift stamps per_frame_arm_not_measured into "
+            "gate_disqualified_reasons whenever that\n"
+            "       arm did not run, so no artifact it wrote can be both qualified and missing it. "
+            "This document\n"
+            "       contradicts itself about which measurement it is, and the arm that would be "
+            "carried out of it is\n"
+            "       whichever one is left. Nothing was written."
+        )
+    if abs(arms[EST_DRIFT_HEADLINE_ARM] - est["est_drift_p95_px"]) > 1e-9:
+        raise MethodUnavailable(
+            f"FATAL: {args.carry_est_drift} states the per-frame p95 twice and differently: "
+            f"{est['est_drift_p95_px']!r} at\n"
+            f"       the top level and {arms[EST_DRIFT_HEADLINE_ARM]!r} in "
+            "arm_comparison.per_frame. Both are written by one\n"
+            "       run over one set of pairs, so they cannot disagree unless the file was edited. "
+            "Nothing was written."
+        )
+
+    # -- AND AN ARM THAT IS NOT THE HEADLINE ONE HAS NEVER BEEN THROUGH A COVERAGE FLOOR ----------
+    #
+    # `gate_qualified`, which est_drift_measurement refuses on above, is not a verdict about this
+    # number. measure_est_drift derives `coverage` from the PER-FRAME pairs, stamps
+    # `coverage_below_floor` when that coverage is under `min_coverage`, and computes
+    # `headline_valid` from the same two — while the propagation arm's own coverage is written
+    # inside its block and read by nothing. Before --est-drift-arm existed that asymmetry was
+    # harmless, because the per-frame number was the only one that could ever be carried. Naming an
+    # arm makes a second number reachable, and it would arrive holding a pass that was issued about
+    # a different measurement.
+    #
+    # THIS IS NOT HYPOTHETICAL AND THE ARTIFACT IS ON DISK. runs/pr08-est-drift/v17/
+    # EST_DRIFT-C1-lattice.json records min_coverage 0.9, a per-frame arm over 57 of 60 frames
+    # (coverage 0.95, p95 0.1856 px) and a propagation arm over 29 of 60 (coverage 0.483, p95
+    # 0.3194 px). Its three disqualification reasons today are all about the estimator flag and the
+    # committed GEOM_TOL document — none about coverage — so the moment those clear, that file
+    # becomes carryable and `--est-drift-arm propagation` would hand G0b a p95 measured on under
+    # half the capture, under a floor the same document registered at 0.9.
+    #
+    # So the floor the artifact registered for itself is applied to the number actually being
+    # carried. That is not a new rule and not a decision about which arm is authoritative: it is
+    # measure_est_drift's own `min_coverage`, read out of the document it was recorded in, applied
+    # to the arm the operator named. An artifact that records no floor, or an arm that records no
+    # coverage, refuses rather than passes — the reader's side of this cross-check was repaired on
+    # 2026-08-22 for exactly the pattern where saying nothing was treated as saying yes, and this
+    # path is new, so no artifact already on disk is newly disqualified by refusing here.
+    if arm != EST_DRIFT_HEADLINE_ARM:
+        floor = est["min_coverage"]
+        covered = est["arm_coverage"].get(arm)
+        if not isinstance(floor, (int, float)) or not isinstance(covered, (int, float)):
+            raise MethodUnavailable(
+                f"FATAL: {args.carry_est_drift} cannot show that its {arm} arm's p95 stands on "
+                "enough of the capture.\n"
+                f"       min_coverage: {floor!r}; arm_comparison.{arm}.coverage: {covered!r}. One "
+                "of the two is not a\n"
+                "       number, so there is nothing to compare.\n"
+                "       This matters for a non-headline arm and only for one: measure_est_drift's "
+                "coverage_below_floor\n"
+                "       and headline_valid are both computed from the PER-FRAME arm's coverage, so "
+                "the gate_qualified\n"
+                f"       this document carries is not a verdict about the {arm} number. Re-measure "
+                "with a\n"
+                "       measure_est_drift that records both fields rather than carrying a p95 "
+                "whose sample nothing\n"
+                "       states. Nothing was written."
+            )
+        if covered < floor:
+            raise MethodUnavailable(
+                f"FATAL: {args.carry_est_drift}'s {arm} arm measured {covered!r} of the capture, "
+                f"under that same\n       document's registered min_coverage {floor!r}. Its p95 "
+                f"{drift_px!r} px is a percentile over the frames\n       on which both centroids "
+                "were recoverable, and PR-08 §6 subtracts it from GEOM_TOL as if it\n"
+                "       characterised the capture.\n"
+                "       THE DOCUMENT'S OWN gate_qualified DOES NOT COVER THIS. measure_est_drift "
+                "computes coverage,\n"
+                "       coverage_below_floor and headline_valid from the PER-FRAME arm only — the "
+                f"{arm} arm's coverage\n       is recorded and read by nothing — so this artifact "
+                "can be qualified on one arm while the other\n       one falls through the same "
+                "floor. (It has already happened: "
+                "runs/pr08-est-drift/v17/EST_DRIFT-C1-lattice.json,\n       per-frame 0.95 against "
+                "propagation 0.483, min_coverage 0.9.)\n"
+                "       Carry an artifact whose named arm clears the floor, or re-measure this "
+                "capture. Nothing was written."
+            )
+
     out: Path = args.out
     if not out.is_file():
         raise MethodUnavailable(
@@ -3565,13 +4010,49 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
             raise MethodUnavailable("".join(lines))
 
     record = dict(doc)
-    record["est_drift_p95_px"] = est["est_drift_p95_px"]
+    record["est_drift_p95_px"] = drift_px
     record[EST_DRIFT_NAME_FIELD] = est["name"]
+    # THE ARM IS SPELLED INTO `est_drift_source` AND NOT INTO A NEW SLOT, for a mechanical reason
+    # rather than a stylistic one. `est_drift_source` is already one of CONTRACT_MEASUREMENT_FIELDS,
+    # so merge_committed_contract() carries it forward verbatim into every later GEOM_TOL artifact
+    # written over this document ("if record.get(key) is None: record[key] = existing.get(key)").
+    # A NEW top-level key would not be in that list, so the next corpus re-measure would keep the
+    # number and drop the arm — the number surviving without the thing that says what it is, which
+    # is exactly the failure refuse_unnamed_est_drift exists to prevent, one field over. Adding a
+    # slot instead would change the committed document's `measurement_fields`, which is a
+    # CONTRACT-section field carrying its own spec_version and its own review; that is a reviewed
+    # commit of its own and not a side effect of a carry.
     record["est_drift_source"] = (
         f"{_artifact_rel(est['path'])} measured_utc={est['measured_utc']} "
         f"sha256={est['sha256']} estimator={est['name']!r} "
-        f"is_lower_bound={bool(est['is_lower_bound'])}"
+        f"is_lower_bound={bool(est['is_lower_bound'])} "
+        f"arm={arm!r} arm_selected_by={arm_selected_by!r}"
     )
+    # ADDITIVE AND READ-ONLY, in the same class as the estimator_stats blocks elsewhere in this
+    # file: nothing reads it back, no gate_qualified depends on it, and a later measurement over
+    # this document drops it along with every other non-slot key — which is why the durable copy is
+    # the string above and this is the detail beside it. It records what was NOT chosen and how far
+    # away it was, because that is the part a reader cannot reconstruct: on the V17 grid the two
+    # arms differ by ~0.137 px against a ~0.479 px tolerance, i.e. by 28.5 % of the whole budget,
+    # and a document naming only the winner cannot be audited for the decision that produced it.
+    record["est_drift_arm_provenance"] = {
+        "arm": arm,
+        "selected_by": arm_selected_by,
+        "arms_measured_px": {name: float(value) for name, value in sorted(arms.items())},
+        "meaning": (
+            "WHICH SEGMENTER TOPOLOGY THE CARRIED EST_DRIFT_P95 CAME FROM, and how that was "
+            "chosen. `per_frame` is scripts/estimators/apple_sam2.py's segment(rgb), re-detected "
+            "independently on every frame; `propagation` is one GroundingDINO detection on frame 0 "
+            "seeded into a SAM2VideoPredictor and tracked forward, which is Cosmos-Transfer2.5's "
+            "own topology. Both are the same adapter and record the SAME segmenter contract, so "
+            "no field-for-field comparison downstream can tell them apart — this block is the only "
+            "record there is. `selected_by` distinguishes a decision from a default: a two-arm "
+            "artifact cannot be carried at all without --est-drift-arm naming one, because which "
+            "arm PR-08 §6 subtracts is an open owner decision and the bias between the arms is "
+            "recorded as two-sided (apple_sam2.py:701-710), with the two distributions crossing "
+            "between p95 and p99 (:723-728) — so there is no conservative default to fall back on."
+        ),
+    }
     # Declared, so that a later measure_geom_tol run carries both slots forward rather than
     # dropping the name it never wrote itself.
     declared = record.get("measurement_fields")
@@ -3589,12 +4070,18 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
         if isinstance(record.get(key), (int, float)):
             tol_key, tol = key, float(record[key])
             break
-    record["gate_margin_px"] = None if tol is None else tol - est["est_drift_p95_px"]
+    record["gate_margin_px"] = None if tol is None else tol - drift_px
 
     side, digest = write_artifact(out, record)
-    print(f"carried     EST_DRIFT_P95 {est['est_drift_p95_px']} px from "
+    print(f"carried     EST_DRIFT_P95 {drift_px} px from "
           f"{_artifact_rel(est['path'])}", file=sys.stderr)
     print(f"segmenter   {est['name']} — matches this document's own mask method", file=sys.stderr)
+    # PRINTED, not merely written: the arm is the one property of this number that the file it came
+    # from cannot make obvious, and the operator is the last reader who can still stop a wrong one.
+    print(f"arm         {arm} — {arm_selected_by}", file=sys.stderr)
+    for name, value in sorted(arms.items()):
+        if name != arm:
+            print(f"            (not carried: {name} = {value} px)", file=sys.stderr)
     print(f"wrote       {out}", file=sys.stderr)
     print(f"sha256      {digest}  ({side})", file=sys.stderr)
     if tol is None:
@@ -3603,7 +4090,7 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
               "other half.", file=sys.stderr)
         return EXIT_NOT_GATE_QUALIFIED
     margin = record["gate_margin_px"]
-    print(f"margin      {tol_key} {tol} - EST_DRIFT_P95 {est['est_drift_p95_px']} = "
+    print(f"margin      {tol_key} {tol} - EST_DRIFT_P95 {drift_px} ({arm}) = "
           f"{margin:.6f} px", file=sys.stderr)
     if margin <= 0.0:
         print("\nNON-POSITIVE MARGIN. PR-08 §6: that is the finding — record it. The move is a "

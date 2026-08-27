@@ -6,7 +6,17 @@
 #   episode on an H200" WITHOUT waiting for T-39, so the timing path asks for neither a T-39
 #   attestation nor a budget — the budget is what it MEASURES. See (a) and (c) below:
 #       TIMING=1 STAGE=1 STYLE_SET=train CHUNK_INDEX=1 CHUNK_TOTAL=1 CONTROL=depth:0.5,seg:0.5 \
+#         RUN_ID=t040-transfer25-restyle-timing-<YYYY-MM-DD> \
 #         sbatch --time=01:30:00 97_transfer25_restyle.sbatch
+#
+#   THE EXPLICIT RUN_ID IS PART OF THE RECIPE. This line passed none until 2026-08-27, so it
+#   resolved to the default RUN_ID (see the -- paths -- section), where job 189142's THROUGHPUT.json
+#   still sits: 0.2 s/frame, from a run whose own log says "0 success, 1 error". The timing branch's
+#   first act was to `cat` that file and exit 0, and the operator read a finished measurement that
+#   prices the whole partition ~10x under. That branch now refuses to reuse an artifact it cannot
+#   see a successful unit inside, and refuses to reuse ANY pre-existing one on a fresh submission
+#   unless REUSE_THROUGHPUT=1 says so — but a dated RUN_ID is the answer that also keeps the two
+#   measurements side by side, so it belongs in the recipe rather than in the error message.
 #
 #   THE --time OVERRIDE IS PART OF THE RECIPE, NOT A TWEAK. The #SBATCH --time=04:00:00 below is
 #   sized for a GENERATION chunk and is simply wrong for one episode: `common` churns on 1-2 hour
@@ -1284,6 +1294,12 @@ PY
 WORK_SHA=$(cat "${WORK_LIST}.sha256")
 CHUNK_FRAMES=$(cat "${WORK_LIST}.frames")
 PARTITION_FRAMES=$(python -c 'import json,sys;print(json.load(open(sys.argv[1]))["whole_partition_frames"])' "${PARTITION_FACTS}")
+# One variant of the corpus, in frames, straight off the manifest the expansion above read. The
+# TIMING branch below projects `seconds_per_frame x this` into gpu_hours_per_variant, and until
+# 2026-08-27 it multiplied by a literal 172_000 instead — see FRAMES_PER_VARIANT there. Read here,
+# beside the partition-wide count it is a factor of, because both come out of the same file and a
+# reader comparing them should not have to go looking for the second one.
+CORPUS_FRAMES=$(python -c 'import json,sys;print(json.load(open(sys.argv[1]))["corpus_frames"])' "${PARTITION_FACTS}")
 
 # -- stamp: refuse to resume into a directory that is not this invocation's -----------------------
 # scripts/run_i8_rung_local.sh:165-195, and the reasoning transfers exactly. Every value below is a
@@ -1307,21 +1323,134 @@ else
 fi
 
 # ------------------------------------------------------------------------------------------------
+# Can THIS THROUGHPUT.json be built on? One definition, called by both paths that read it.
+# ------------------------------------------------------------------------------------------------
+# Exit 0 = qualified. 2 = unreadable. 3 = disqualified. 4 = unproven (nothing in it says a clip was
+# ever produced). Written once and called twice on purpose: the TIMING path asks before REUSING a
+# measurement, and the GENERATE path asks before DERIVING a ceiling from one, and those two must
+# never be able to answer differently about the same file.
+throughput_qualification() {
+  python - "$1" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    tp = json.loads(open(p).read())
+except (OSError, ValueError) as exc:
+    print(f"    UNREADABLE: {exc}")
+    sys.exit(2)
+if not isinstance(tp, dict):
+    print(f"    NOT A THROUGHPUT RECORD: the file holds a {type(tp).__name__}, not an object.")
+    sys.exit(2)
+# A disqualification, however it was written. None of these fields exist in the record this job
+# writes today, and that is the point: they are the shapes a LATER version or a hand-annotation
+# would use to say "do not build a budget on this", and a reuse check that only understood today's
+# schema would silently ignore tomorrow's.
+dq = []
+if tp.get("disqualified"):
+    dq.append(f"disqualified={tp['disqualified']!r}")
+reasons = tp.get("gate_disqualified_reasons")
+if isinstance(reasons, (list, tuple)) and reasons:
+    dq.append(f"gate_disqualified_reasons={list(reasons)!r}")
+if tp.get("measurement_qualified") is False:
+    dq.append("measurement_qualified=false")
+if dq:
+    print("    DISQUALIFIED: " + "; ".join(dq))
+    sys.exit(3)
+# Did a clip actually come out of the run that produced this? The writer below records the count it
+# measured, under a schema name, and both landed on 2026-08-27. An artifact without them is not
+# necessarily bad — it is UNPROVEN, which for a number that prices 4.29M frames is the same thing.
+# Job 189142's artifact is exactly this case: every field it carries is well-formed and its
+# seconds_per_frame is a clock around a crash.
+if tp.get("schema") != "wam.transfer25_throughput/1":
+    print(f"    UNPROVEN: schema is {tp.get('schema')!r}, not 'wam.transfer25_throughput/1'.")
+    print("    It was written before this job recorded whether the timed unit produced a clip, so")
+    print("    nothing in it can distinguish a timed episode from a timed crash.")
+    sys.exit(4)
+ok = tp.get("units_succeeded")
+if not isinstance(ok, int) or isinstance(ok, bool) or ok < 1:
+    print(f"    NO SUCCESSFUL UNIT: units_succeeded={ok!r}. A wall clock around a unit that")
+    print("    produced no clip is not a throughput number.")
+    sys.exit(4)
+print(f"    qualified: {ok} successful unit(s), {tp.get('frames')} frames, "
+      f"{tp.get('seconds_per_frame')} s/frame, generator {tp.get('generator')}")
+PY
+}
+
+# ------------------------------------------------------------------------------------------------
 # TIMING — a GATE, not a warm-up. PR-08 §8 item 3 licenses exactly this: "one timed episode on an
 # H200 at 640x480". It is the precondition for the full run, and it is where the number in
 # CEILING_GPU_H is supposed to come from.
 # ------------------------------------------------------------------------------------------------
 THROUGHPUT=${OUT}/THROUGHPUT.json
 if (( TIMING_MODE )); then
+  TIMING_RESTARTS=${SLURM_RESTART_COUNT:-0}
   # 94's probe branch returns BEFORE the train section's pass rail, so a preempted probe requeued
   # itself onto the paid QoS with no bound at all, and redid work it had already finished. This
   # branch carries both guards for the same reason.
+  #
+  # BUT "the file is there" IS NOT "the measurement is done", AND UNTIL 2026-08-27 THIS READ IT AS
+  # IF IT WERE. RUN_ID defaults to t040-transfer25-restyle (see the -- paths -- section above) and
+  # the header's own recipe passed no RUN_ID, so a fresh timing submission resolved THROUGHPUT to
+  # the path where job 189142's artifact still sits: 0.2 s/frame, produced by a run whose own log
+  # says "0 success, 1 error" — the driver crashed in SetupArguments validation, generated nothing,
+  # exited 0, and the clock around the crash became the budget. That file `cat`s and `exit 0`s in
+  # under a second, the operator reads a completed measurement, and the whole partition prices at
+  # 238.4 GPU-h against roughly 2 380 at the artifact's own end-to-end rate. A budget line that is
+  # ~10x under is worse than no budget line, because PR-08 §8 item 3 makes this file the gate.
+  #
+  # So the three cases are now separated, and only one of them reuses anything:
+  #   * an artifact that cannot PROVE a clip was produced is never reused, by anyone, for any
+  #     reason. That is the classifier below and it is checked first, so no flag and no requeue can
+  #     reach past it.
+  #   * a REQUEUE of this same job (SLURM_RESTART_COUNT >= 1) finding an artifact it wrote itself
+  #     keeps the original guard: the work is done, do not redo it on the paid QoS.
+  #   * a FRESH submission finding one refuses and names the two exits — a new RUN_ID, which is the
+  #     right answer, or REUSE_THROUGHPUT=1 if the operator really means to re-read this file.
+  # There is no way to spend GPU-hours by getting this wrong; every branch here is free. What the
+  # refusal protects is the number, not the allocation.
   if [[ -f "${THROUGHPUT}" ]]; then
-    echo "=== ${THROUGHPUT} already exists — the measurement is done, nothing to time:"
+    echo "=== ${THROUGHPUT} already exists. Reading what it actually records before trusting it:"
+    TP_VERDICT=0
+    throughput_qualification "${THROUGHPUT}" || TP_VERDICT=$?
+    if (( TP_VERDICT != 0 )); then
+      cat "${THROUGHPUT}"
+      echo "FATAL: ${THROUGHPUT} cannot be reused as the PR-08 §8 item 3 measurement (see above)."
+      echo "       This is refused OUTRIGHT — REUSE_THROUGHPUT does not override it, because the"
+      echo "       file is not a measurement that failed to be re-read, it is a number with"
+      echo "       nothing behind it. PR-08 §8 item 3 derives the whole partition's GPU-h ceiling"
+      echo "       from seconds_per_frame; a figure from a run that generated no clip prices the"
+      echo "       corpus against a crash."
+      echo "       DO: submit with a fresh RUN_ID, e.g."
+      echo "           TIMING=1 STAGE=1 STYLE_SET=train CHUNK_INDEX=1 CHUNK_TOTAL=1 \\"
+      echo "             CONTROL=<key:weight,...> RUN_ID=t040-transfer25-restyle-timing-<date> \\"
+      echo "             sbatch --time=01:30:00 97_transfer25_restyle.sbatch"
+      echo "       Moving or deleting the old artifact is the operator's call and is NOT done here:"
+      echo "       ${THROUGHPUT} is the evidence of what job 189142 actually produced."
+      exit 1
+    fi
+    if (( TIMING_RESTARTS >= 1 )); then
+      echo "=== requeue #${TIMING_RESTARTS} of this job, and the measurement it wrote is already"
+      echo "    here. Nothing to time — this is the guard 94's probe branch was missing:"
+      cat "${THROUGHPUT}"
+      exit 0
+    fi
+    if [[ "${REUSE_THROUGHPUT:-0}" != "0" ]]; then
+      echo "=== REUSE_THROUGHPUT=${REUSE_THROUGHPUT}: reusing the qualified artifact above as this"
+      echo "    submission's measurement, on the operator's explicit instruction."
+      cat "${THROUGHPUT}"
+      exit 0
+    fi
     cat "${THROUGHPUT}"
-    exit 0
+    echo "FATAL: this is a FRESH timing submission (SLURM_RESTART_COUNT=${TIMING_RESTARTS}) and"
+    echo "       ${THROUGHPUT} already holds a measurement from an earlier run."
+    echo "       Reusing it silently is how a stale seconds-per-frame becomes a budget line nobody"
+    echo "       chose: RUN_ID defaults to t040-transfer25-restyle, so a submission that passes no"
+    echo "       RUN_ID lands on whatever the last run left there. Choose, explicitly:"
+    echo "         * measure again  ->  pass a fresh RUN_ID (recommended; it also keeps the two"
+    echo "                              measurements side by side)"
+    echo "         * reuse this one ->  re-submit with REUSE_THROUGHPUT=1"
+    exit 1
   fi
-  TIMING_RESTARTS=${SLURM_RESTART_COUNT:-0}
   if (( TIMING_RESTARTS >= 2 )); then
     echo "FATAL: the timing run has been requeued ${TIMING_RESTARTS} times without producing"
     echo "       ${THROUGHPUT}. Something is wrong with the measurement, not with the queue."
@@ -1389,15 +1518,53 @@ if (( TIMING_MODE )); then
     echo "       THROUGHPUT.json is deliberately NOT written -- a wall clock around a failed unit"
     echo "       is not a throughput number, and PR-08 §8 item 3 derives the budget from this file."
     echo "       Per-unit reason: ${TROOT}/*/sample_outputs.json"
+    # If G0c refused the unit on its SOURCE masks, the driver's preflight caught it before the
+    # generator ran and this failure cost seconds rather than an H200 slot. Say so, and say what it
+    # is evidence OF — because the operator's next move is not to retry, and it is not a decision
+    # this job may make for them. The timed episode is fixed by `head -1` of a deterministically
+    # sorted work list, and 385 of the corpus's 402 episodes are refused by one half of check_mask
+    # or the other (runs/pr08-robot-mask-area/POOLED.json). WHICH episode PR-08 §8 item 3's
+    # measurement runs on, and whether an empty source mask is acceptable at all, are open owner
+    # decisions. This job refuses; it does not choose.
+    python - "${TROOT}" <<'PY' || true
+import json, pathlib, sys
+refused = []
+for rec in sorted(pathlib.Path(sys.argv[1]).glob("*/sample_outputs.json")):
+    try:
+        payload = json.loads(rec.read_text())
+    except (OSError, ValueError):
+        continue
+    if (payload.get("g0c") or {}).get("refused_before_generation") is True:
+        refused.append(payload)
+if not refused:
+    sys.exit(0)
+print()
+print("       G0c REFUSED THIS UNIT ON ITS SOURCE MASKS, BEFORE THE GENERATOR RAN.")
+print("       Nothing was generated and no GPU-hours were spent on a clip; the refusal is the same")
+print("       one the composite would have raised afterwards, discovered where it is free. The")
+print("       episode is:", refused[0].get("episode"), "-", refused[0].get("unit"))
+print()
+print("       THIS IS NOT A RETRY. The robot mask is a property of the SOURCE frame, so the same")
+print("       episode will refuse identically on every resubmission. Two questions are open and")
+print("       both are the project owner's, not this job's:")
+print("         * whether an empty robot mask is acceptable for a timed measurement at all")
+print("         * which episode PR-08 §8 item 3's 'one timed episode' is, given that the work")
+print("           list's first row is refused and choosing another because it survives G0c is a")
+print("           selection made after seeing the data")
+print("       Both need a registered rule version. CHUNK_INDEX/CHUNK_TOTAL can already reach any")
+print("       episode without a code change, which is exactly why the choice must be written down")
+print("       rather than typed on a submit line.")
+PY
     exit 1
   }
   TIMING_WALL=$((SECONDS - S))
   echo "=== timed episode: ${TIMING_WALL}s"
 
   python - "${TIMING_UNIT}" "${TIMING_WALL}" "${THROUGHPUT}" "${TRANSFER_MODEL_ID}" \
-           "${TRANSFER_MODEL_REVISION}" "${CEILING_GPU_H}" "${CONTROL}" <<'PY'
-import json, sys
-unit, wall, out, model, rev, ceiling, control = sys.argv[1:8]
+           "${TRANSFER_MODEL_REVISION}" "${CEILING_GPU_H}" "${CONTROL}" \
+           "${CORPUS_FRAMES}" "${TROOT}" <<'PY'
+import json, pathlib, sys
+unit, wall, out, model, rev, ceiling, control, corpus_frames, troot = sys.argv[1:10]
 u = json.loads(unit)
 wall = float(wall)
 # The ceiling is EXEMPT on this path (header (c)): PR-08 §8 item 3 says no budget line exists
@@ -1410,19 +1577,61 @@ if frames <= 0:
 if wall <= 0:
     sys.exit("FATAL: the timed episode took 0s. Nothing was generated; that is not a measurement.")
 sec_per_frame = wall / frames
+# WHAT THE TIMED UNIT ACTUALLY PRODUCED, counted off the driver's own per-unit records rather than
+# inferred from an exit status. --require-success above already exits 1 when a unit dies, so this is
+# the second of two independent assertions that a clip exists — and it is the one that lands IN the
+# artifact, which is what matters. Job 189142 wrote a THROUGHPUT.json whose every field was
+# well-formed from a run its own log describes as "0 success, 1 error"; nothing inside that file
+# could contradict it, so every later reader had to know the job number to know the number was
+# fiction. This count is what makes the artifact self-describing, and the reuse check at the top of
+# this branch refuses any THROUGHPUT.json that does not carry it.
+records = sorted(pathlib.Path(troot).glob("*/sample_outputs.json"))
+succeeded = []
+for rec in records:
+    try:
+        payload = json.loads(rec.read_text())
+    except (OSError, ValueError) as exc:
+        sys.exit(f"FATAL: {rec} is unreadable ({exc}) — the timed unit's own record is the evidence "
+                 "that a clip was produced, so an unreadable one is not a measurement.")
+    if payload.get("status") == "success":
+        succeeded.append(payload)
+if len(succeeded) != 1:
+    sys.exit(f"FATAL: the timed run left {len(succeeded)} successful unit record(s) in {troot} out "
+             f"of {len(records)}. PR-08 §8 item 3 times ONE episode; a clock around zero clips is "
+             "not a throughput number and a clock around two is not the number it asks for. "
+             "THROUGHPUT.json is deliberately not written.")
 # GPU-seconds, not wall-seconds. The measurement is on ONE GPU so the two coincide here, and that
 # is exactly why PR-08 asks for one H200: it makes the number directly comparable to the per-GPU
 # billing rate. At NPROC>1 the wall drops but the GPU-seconds do not, so a projection built on
 # this number is a LOWER BOUND for any multi-GPU run and is recorded as such.
-FRAMES_PER_VARIANT = 172_000   # PR-08 §8 item 3: 402 episodes x ~427 mean frames
+#
+# FRAMES_PER_VARIANT IS READ, NOT COINED. It was `172_000  # 402 episodes x ~427 mean frames` until
+# 2026-08-27 — a rounded number typed into the one artifact PR-08 §8 item 3 forbids inventing
+# numbers in, while the exact figure was already sitting two hundred lines up: partition_facts.json
+# carries corpus_frames, summed from the manifest the run actually reads (see the expansion above),
+# and the corpus is 171 625 frames, not 172 000. The gap is small (0.2 %) and its size is not the
+# argument; the argument is that a budget derived from a measured rate must be derived over a
+# counted corpus, or the derivation cannot be checked against anything.
+FRAMES_PER_VARIANT = int(corpus_frames)
+if FRAMES_PER_VARIANT <= 0:
+    sys.exit("FATAL: partition_facts.json reports corpus_frames <= 0. The projection below is a "
+             "rate times a frame count; without the count there is no projection.")
 gpu_h_per_variant = sec_per_frame * FRAMES_PER_VARIANT / 3600.0
 report = {
+    # Named so a reader — and the reuse check at the top of this branch — can tell an artifact that
+    # records whether a clip was produced from one that predates the question.
+    "schema": "wam.transfer25_throughput/1",
     "measured_on": "1 x H200, 640x480, one episode",
+    "units_timed": len(records),
+    "units_succeeded": len(succeeded),
     "episode": u["episode"], "style": u["style"], "frames": frames,
     "wall_seconds": round(wall, 1),
     "seconds_per_frame": round(sec_per_frame, 4),
     "gpu_seconds_per_frame": round(sec_per_frame, 4),
     "frames_per_variant": FRAMES_PER_VARIANT,
+    "frames_per_variant_source": (
+        "partition_facts.json corpus_frames — summed over this manifest's episodes at "
+        "expansion time. Not an estimate and not a round number."),
     "gpu_hours_per_variant": round(gpu_h_per_variant, 2),
     "gpu_hours_per_variant_is_lower_bound_above_1_gpu": True,
     "generator": f"{model}@{rev}",
@@ -1462,6 +1671,26 @@ fi
   echo "       Run: TIMING=1 CHUNK_INDEX=1 CHUNK_TOTAL=1 ... sbatch 97_transfer25_restyle.sbatch"
   exit 1
 }
+# EXISTING IS NOT THE SAME AS USABLE, AND THIS IS THE PATH THAT SPENDS THE ALLOCATION. The ceiling
+# gate below reads exactly one field out of this file — seconds_per_frame — and multiplies it by
+# whole_partition_frames to decide whether a chunk may run. Job 189142's artifact would answer 0.2,
+# from a run that produced no clip, and every projection built on it comes out ~10x under: the gate
+# passes, the pass rail is sized against a fiction, and the ceiling T40_RULE_V2 §3 asks for is a
+# number nobody measured. So the same qualification the TIMING path applies before REUSING a
+# measurement is applied here before DERIVING from one. There is no override: a ceiling is not a
+# thing to be overridden on a submit line, and re-measuring costs ~0.5 GPU-h against a partition
+# priced in the thousands.
+TP_VERDICT=0
+throughput_qualification "${THROUGHPUT}" || TP_VERDICT=$?
+if (( TP_VERDICT != 0 )); then
+  cat "${THROUGHPUT}"
+  echo "FATAL: ${THROUGHPUT} exists but cannot be built on (see above), and the GPU-h ceiling this"
+  echo "       job enforces is derived from its seconds_per_frame. Generating against it would"
+  echo "       spend the allocation under a budget line that measures nothing."
+  echo "       Re-measure: TIMING=1 STAGE=1 STYLE_SET=<set> CHUNK_INDEX=1 CHUNK_TOTAL=1 \\"
+  echo "                   CONTROL=<key:weight,...> RUN_ID=<fresh> sbatch 97_transfer25_restyle.sbatch"
+  exit 1
+fi
 cat "${THROUGHPUT}"
 
 # -- PR-08 §6 G0b: the geometry budget has to be positive BEFORE anything is generated ------------

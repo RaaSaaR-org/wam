@@ -23,6 +23,17 @@ so the harvest cannot file it either. There is no flag, no environment variable 
 skips it — ``--backend null`` composites too, because it is a placeholder GENERATOR, not a
 placeholder pipeline.
 
+AND G0c IS ASKED FIRST, NOT ONLY LAST. The robot mask is a property of the SOURCE frame, so every
+refusal ``robot_composite.check_mask`` can produce is knowable before the generator is called;
+until :func:`preflight_source_masks` landed, none of them were, and a unit G0c was always going to
+refuse was refused only after its clip had been generated in full. That is not a hypothetical
+ordering nit: 385 of the corpus's 402 episodes are refused by one half of that check or the other
+(``runs/pr08-robot-mask-area/POOLED.json``), the episode the TIMING=1 path times is one of them,
+and each attempt bought an H200 slot and no THROUGHPUT.json. **The check itself is unchanged and
+the post-composite call is still what decides.** The preflight cannot make a clip pass — it runs
+the same function, over the same masks, against the same bound, in the same frame order, so what it
+refuses is a subset of what the composite refuses. It moves the discovery, never the decision.
+
 NOTHING HERE IS LICENSED TO RUN. PR-08 §1 gates generation, and staging Transfer2.5's weights is a
 download at scale — the project owner's call under the sub-project rule. This script exists so that
 the decision is about generating, not about whether a driver could be written.
@@ -479,6 +490,242 @@ def _quarantine_uncomposited(out_dir: pathlib.Path) -> str | None:
     return str(quarantined)
 
 
+class SourceMaskRefusal(robot_composite.CompositeError):
+    """G0c refused this unit on its SOURCE masks, BEFORE the generator was called.
+
+    A subclass rather than a new error type or a flag, so that nothing that already handles the
+    refusal has to learn about it: ``run_unit``'s per-unit guard catches ``Exception``, ``main``
+    translates ``robot_composite.CompositeError`` into a driver refusal, and every existing caller
+    that catches ``CompositeError`` catches this too. What the subclass buys is a NAME in the
+    per-unit record — ``detail`` reads ``SourceMaskRefusal: …`` — because "G0c refused this clip"
+    and "G0c refused this clip after we paid to generate it" are the same verdict at prices that
+    differ by half a GPU-hour, and only one of them is worth an operator's attention.
+    """
+
+
+@dataclass
+class SourceMaskMemo:
+    """Which source episodes THIS RUN has already watched G0c refuse, keyed so it cannot lie.
+
+    Every style-instance of an episode revisits the same source, and the robot mask is a property
+    of the SOURCE frame — identical across every restyle of it, which is the whole argument for
+    :class:`robot_composite.MaskCache`. Without a memo the units that share one refused episode each
+    re-decode the source, each re-read ~16 MB of packed masks and each re-walk every frame through
+    ``check_mask``, to reach the identical refusal once per unit. The mask cache makes the second
+    discovery cheap; it does not make it free, and it cannot make it zero.
+
+    HOW MANY THAT IS, COUNTED FOR ONE INVOCATION RATHER THAN FOR THE STAGE. This memo's lifetime is
+    one process, and one invocation of this driver generates exactly one ``--style-set``, so what it
+    can save is the repeats WITHIN a set: four per episode in `T40_RULE_V11` §2's stage 1 (whose 8
+    style-instances are 4 train plus 4 matched identity repeats, submitted as two jobs), and ten per
+    episode per set in the full 25-instance rendering. Stated that way and not as "eight", because a
+    per-run memo cannot save anything across two submissions and a docstring that implied it could
+    would be describing a cache this class is not.
+
+    THE KEY IS THE PREDICATE'S OWN INPUTS AND NOTHING ELSE. ``check_mask``'s verdict on an episode
+    is a function of exactly three things: the source bytes, the segmenter that turns them into
+    masks, and the bound the covered fraction is compared against. The first two are precisely what
+    ``MaskCache.key`` hashes — reused here rather than restated, so a segmenter re-pin can never
+    invalidate the mask cache while leaving this memo standing — and the third is added on top,
+    because ``MaskCache`` has no reason to know about a bound and half of ``check_mask`` is that
+    bound. A memo keyed on the episode id instead would be a memo that survives exactly the changes
+    it must not survive.
+
+    TWO PROPERTIES THIS MUST HAVE, AND HAS BY CONSTRUCTION:
+
+    * **It never lets an episode pass.** Only refusals are stored. A unit whose source masks cleared
+      the check is checked again on the next style-instance, at the cost of a cache read, because a
+      memo of PASSES would be a way past the gate the moment any of its three inputs changed in a
+      way the key failed to capture. Storing only the refusals means the worst a stale entry can do
+      is refuse a unit that G0c also refuses.
+    * **It never skips an episode silently.** A memo hit is not a ``continue``: the unit still goes
+      through ``run_unit``, which withdraws any stale ``sample_outputs.json`` from an earlier pass
+      and writes an ``error`` record carrying the remembered reason. A unit skipped without that
+      record would leave an earlier attempt's ``success`` on disk for the harvest to file. The hit
+      is also counted and printed, per unit and again in the run's closing line.
+    """
+
+    #: memo key → the refusal message ``check_mask`` produced the first time it was seen.
+    refusals: dict[str, str] = field(default_factory=dict)
+    #: Units refused straight out of the memo, i.e. without a mask pass of their own.
+    hits: int = 0
+    #: Units refused by an actual mask pass, each of which put one entry in ``refusals``.
+    misses: int = 0
+
+    @staticmethod
+    def key(source_video: pathlib.Path, composite: "robot_composite.CompositeContext") -> str:
+        """The three inputs ``check_mask``'s verdict is a function of, hashed the way G0c hashes."""
+        return json.dumps(
+            {
+                # The source bytes AND the segmenter identity, from the one definition of that pair
+                # in the codebase. Sharing it with the mask cache is deliberate: two keys over the
+                # same facts drift, and the drift is silent.
+                "masks": robot_composite.MaskCache.key(source_video, composite.masker.provenance()),
+                # The other half of the predicate. Both fields, not just the number: a bound file
+                # re-measured to the same fraction under a different distribution is a different
+                # claim, and the sha256 is what says so.
+                "bound": [composite.bound.max_frame_fraction, composite.bound.artifact_sha256],
+            },
+            sort_keys=True,
+        )
+
+    def recall(self, key: str) -> str | None:
+        return self.refusals.get(key)
+
+    def remember(self, key: str, message: str) -> None:
+        self.refusals[key] = message
+
+    def summary(self, units: int) -> str:
+        refused = self.hits + self.misses
+        return (
+            f"=== G0c source-mask preflight: {refused} of {units} units refused BEFORE generation "
+            f"({len(self.refusals)} distinct sources; {self.hits} of the refusals were served from "
+            "this run's memo and cost no mask pass)"
+        )
+
+
+def preflight_source_masks(
+    unit: WorkUnit,
+    sample: dict,
+    composite: "robot_composite.CompositeContext",
+    memo: SourceMaskMemo | None = None,
+) -> dict:
+    """Run G0c's own per-frame check over the SOURCE masks before the backend is called.
+
+    WHY THIS EXISTS. ``composite_clip`` takes its masks from the SOURCE video
+    (``robot_composite.source_masks``), so every refusal ``check_mask`` can produce is knowable
+    before a single GPU-second of generation is spent — and until this function existed, none of
+    them were. The order was: generate the clip, decode it, decode the source, segment the source,
+    and only then refuse on frame 0. Measured against the corpus that is not a rare path: 385 of 402
+    episodes are refused by one half of ``check_mask`` or the other
+    (``runs/pr08-robot-mask-area/POOLED.json``), and the episode the TIMING=1 path times is one of
+    them — it burns an H200 slot generating 590 frames to reproduce a refusal two committed
+    artifacts already predict, and writes no THROUGHPUT.json.
+
+    WHAT THIS IS NOT. It does not weaken, bypass, waive or shortcut G0c. ``composite_clip``'s
+    post-composite check is untouched and still runs over every frame of every clip; nothing here
+    can make a clip pass that would otherwise fail. This moves the DISCOVERY earlier. The decision
+    is exactly where it was.
+
+    WHY IT CANNOT DISAGREE WITH THE CHECK IT ANTICIPATES. The predicate is not re-implemented: this
+    calls ``robot_composite.check_mask`` itself, with ``composite.bound`` — the same frozen bound
+    object the composite will use — over masks obtained from ``robot_composite.source_masks`` for
+    the same source path, which is the same call ``composite_clip`` makes and which goes through the
+    same :class:`robot_composite.MaskCache`. Frames are walked from 0 upward in the same order, so
+    even the frame the refusal names is the same. The one difference is the ``source=`` string in
+    the message, which no predicate reads: ``composite_clip`` names the generated clip, which does
+    not exist yet here, so this names the source. The refusals this raises are therefore a SUBSET of
+    the refusals ``composite_clip`` raises — a strict subset, because ``composite_clip`` also
+    refuses on frame-count disagreements it checks before ever reaching ``check_mask``, and those
+    are deliberately not duplicated here rather than re-stated in a second place where they could
+    drift.
+
+    AND IT DOES NOT MOVE THE THROUGHPUT MEASURAND, WITH ONE COST NAMED RATHER THAN HIDDEN. The
+    masks are computed inside the driver, inside the window ``97_transfer25_restyle.sbatch`` times,
+    and cached; the composite that follows a passing preflight reads them back instead of computing
+    them. The number of source-mask passes per timed episode — the expensive half, a segmentation
+    per frame — is one before this change and one after it. What is genuinely new is ONE EXTRA
+    DECODE of the source clip per unit, because ``source_masks`` takes frames and there is no way to
+    hand ``composite_clip`` the array this function already holds. That is seconds against a
+    generation measured in minutes, it lands inside the timed window rather than outside it, and it
+    moves the derived GPU-h ceiling in the conservative direction. It is written down here because a
+    timing artifact whose measurand moved silently is the defect this whole file's timing path
+    exists to avoid. (With ``cache=None`` — which the driver never constructs, since
+    ``--mask-cache`` always resolves to a path — the mask pass would be paid twice as well, and the
+    cost is accepted there in exchange for the refusal being cheap.)
+
+    AND IT INHERITS PR-08 V9's OBJECT-FILTER COUNTERS, BECAUSE MOVING THE MASK PASS MOVED THEM.
+    ``composite_clip`` differences ``masker.filter_counters`` around its own ``source_masks`` call
+    and writes the delta into every clip's record, and ``robot_composite`` states the reason in one
+    line: *"a filter whose firing is not recorded cannot be told apart from a corpus that never
+    triggered it."* Once this function computes the masks first, that call is a CACHE HIT for every
+    clip on the driver's path, the delta is zero for every clip, and the whole corpus's record says
+    nothing about whether the apple-drop filter ever fired — including
+    ``frames_emptied_by_the_filter``, which is the counter that distinguishes "the segmenter found
+    no robot" from "the filter removed the only detection", the exact question `T40_RULE_V12`'s
+    empty-mask semantics turn on. ``composite_clip``'s note already says all-zero-with-cache means
+    "not measured here" rather than "never fired", so nothing downstream is made to lie; the number
+    simply stopped existing. So it is differenced HERE, around the one pass that actually runs the
+    masker, and recorded in this function's own block. It is the same arithmetic over the same
+    counters — nothing is re-implemented and nothing can be double-counted, because AT MOST one of
+    the two blocks is non-zero for a given clip and each says whether its own masks came from the
+    cache. Both read zero when the masks were already cached before this unit started, which is the
+    honest answer: this run did not run the filter on that episode, an earlier one did.
+    """
+    source_video = pathlib.Path(sample["video_path"])
+    key = SourceMaskMemo.key(source_video, composite) if memo is not None else None
+
+    if memo is not None and key is not None:
+        remembered = memo.recall(key)
+        if remembered is not None:
+            memo.hits += 1
+            raise SourceMaskRefusal(
+                f"unit {unit.unit}: {remembered}\n"
+                "       (Remembered from an earlier unit of this run over the same source, the same "
+                "segmenter and the same bound — see SourceMaskMemo. The mask pass was not repeated; "
+                "the refusal is the one that pass produced.)"
+            )
+
+    # Differenced around the mask pass and nothing else, exactly as ``composite_clip`` does it: the
+    # counters are cumulative over the masker's life, so only the caller that brackets a call can
+    # say what that call did. The IoU diagnostic is not in this bracket for the same reason it is
+    # not in the composite's — it masks GENERATED frames, and the filter's behaviour there is a
+    # different question.
+    before_filter = dict(getattr(composite.masker, "filter_counters", {}) or {})
+    frames = robot_composite.decode_clip(source_video)
+    masks, from_cache = robot_composite.source_masks(source_video, frames, composite)
+    after_filter = dict(getattr(composite.masker, "filter_counters", {}) or {})
+    try:
+        for index in range(masks.shape[0]):
+            robot_composite.check_mask(
+                masks[index],
+                frame_index=index,
+                bound=composite.bound,
+                source=str(source_video),
+            )
+    except robot_composite.CompositeError as exc:
+        message = (
+            f"{exc}\n"
+            "       REFUSED BEFORE GENERATION. The robot mask is a property of the SOURCE frame, so "
+            "this verdict was reachable without the generator; PR-08 §6 G0c would have raised the "
+            "same refusal after the clip was generated, and raising it here costs seconds instead "
+            "of an H200 slot. Nothing has been waived: the post-composite check is unchanged and "
+            "this unit produced no clip."
+        )
+        if memo is not None and key is not None:
+            memo.remember(key, message)
+            memo.misses += 1
+        raise SourceMaskRefusal(f"unit {unit.unit}: {message}") from exc
+
+    return {
+        "checked": True,
+        "frames_checked": int(masks.shape[0]),
+        "masks_from_cache": bool(from_cache),
+        "bound": composite.bound.max_frame_fraction,
+        "robot_mask_object_filter": {
+            "note": (
+                "PR-08 V9, counted over the SOURCE frames of this clip, differenced around the "
+                "mask pass this preflight runs. This is the block that carries the counts on the "
+                "driver's path: the preflight computes the source masks, so the composite's own "
+                "copy of these counters is differenced around a cache hit and reads all-zero with "
+                "masks_from_cache true. At most one of the two blocks is non-zero for a clip, and "
+                "each one's masks_from_cache says whether it was the pass that ran the filter; "
+                "both read zero when the masks were cached before this unit started."
+            ),
+            "masks_from_cache": bool(from_cache),
+            "max_iou": float(robot_composite.ROBOT_MASK_OBJECT_MAX_IOU),
+            **{
+                name: int(after_filter.get(name, 0) - before_filter.get(name, 0))
+                for name in sorted(set(after_filter) | set(before_filter))
+            },
+        },
+        "predicate": (
+            "robot_composite.check_mask over robot_composite.source_masks — the same function over "
+            "the same masks the post-composite check runs, called before the backend"
+        ),
+    }
+
+
 def run_unit(
     unit: WorkUnit,
     sample: dict,
@@ -486,6 +733,7 @@ def run_unit(
     backend: str,
     setup: dict,
     composite: "robot_composite.CompositeContext",
+    memo: SourceMaskMemo | None = None,
 ) -> Outcome:
     """One unit, isolated. Composites, then writes ``sample_outputs.json`` LAST.
 
@@ -500,6 +748,13 @@ def run_unit(
     ``robot_composite.build_context``, which has no way to build one that does not composite. The
     three lines are therefore the whole of the guarantee — success implies composited, an exception
     implies quarantined, and there is no fourth outcome.
+
+    G0c ALSO SITS BEFORE THE BACKEND NOW, and that is an addition to the order rather than a change
+    to it. :func:`preflight_source_masks` runs the same ``check_mask`` over the same source masks
+    first, so a unit G0c will refuse is refused before the generator is called. It is inside this
+    guard, not above the loop, because it is a per-unit fact: one episode's masks say nothing about
+    the next episode's, and a refusal that killed the chunk would take 401 innocent episodes with
+    it. The post-composite call below is unchanged and is still what decides.
     """
     out_dir = out_root / unit.unit
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -512,6 +767,12 @@ def run_unit(
     (out_dir / UNCOMPOSITED_QUARANTINE).unlink(missing_ok=True)
 
     try:
+        # BEFORE the backend, deliberately and as the first thing this unit does. See
+        # preflight_source_masks: the masks come from the SOURCE, so every refusal check_mask can
+        # produce is knowable here, and discovering it after generation is how the TIMING=1 path
+        # came to spend an H200 slot per attempt to learn something two committed artifacts already
+        # said.
+        preflight = preflight_source_masks(unit, sample, composite, memo)
         extra = (
             _null_backend(sample, out_dir)
             if backend == "null"
@@ -520,6 +781,9 @@ def run_unit(
         video = out_dir / "vision.mp4"
         if not video.is_file() or video.stat().st_size == 0:
             raise DriverError(f"unit {unit.unit}: vision.mp4 missing or empty after the backend ran.")
+        # Recorded, not merely done: a reader of one clip's record can then see that its source
+        # masks were checked before it was generated as well as after it was composited.
+        extra["g0c_source_mask_preflight"] = preflight
         extra["g0c"] = composite.composite(
             source_video=pathlib.Path(sample["video_path"]),
             generated_video=video,
@@ -538,6 +802,11 @@ def run_unit(
                 "traceback": traceback.format_exc(limit=8),
                 "g0c": {
                     "composited": False,
+                    # True when the source-mask preflight refused this unit, i.e. when no generation
+                    # was paid for. It is a fact about the price of this refusal and it belongs in
+                    # the record: without it, "0 success, N error" reads the same whether the chunk
+                    # spent an hour of H200 time or four seconds.
+                    "refused_before_generation": isinstance(exc, SourceMaskRefusal),
                     "uncomposited_output_quarantined_to": quarantined,
                     "note": (
                         "PR-08 §6 G0c: this unit produced no composited clip, so it produced no "
@@ -738,6 +1007,12 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+        # One memo per RUN, built here so its lifetime is exactly this invocation's. It is not
+        # persisted to disk on purpose: a memo that outlived the process would have to be
+        # invalidated by everything that invalidates its key, and the file that already solves that
+        # problem correctly is the mask cache. Within one invocation the eight style-instances of
+        # stage 1 that share an episode are the case that matters, and they are all in this loop.
+        memo = SourceMaskMemo()
         failures = 0
         for i, unit in enumerate(units, start=1):
             episode = episodes.get(unit.episode)
@@ -760,10 +1035,15 @@ def main(argv: list[str] | None = None) -> int:
                 controls=controls,
                 bucket=bucket,
             )
-            outcome = run_unit(unit, sample, args.out, args.backend, setup, composite)
+            outcome = run_unit(unit, sample, args.out, args.backend, setup, composite, memo)
             failures += outcome.status != "success"
             print(f"[{i}/{len(units)}] {unit.unit} {outcome.status} {outcome.detail}", flush=True)
 
+        # Printed unconditionally, including as a line of zeros. The count of units G0c refused
+        # before they were generated is the difference between a chunk that spent its GPU-hours and
+        # one that did not, and a number that only appears when it is non-zero is a number nobody
+        # can compare across runs.
+        print(memo.summary(len(units)), flush=True)
         print(f"=== done: {len(units) - failures} success, {failures} error", flush=True)
         if failures and args.require_success:
             print(

@@ -1469,6 +1469,60 @@ def test_both_arms_are_measured_over_the_same_frames_and_both_p95s_are_recorded(
     assert doc["est_drift_p95_px"] == block["per_frame"]["est_drift_p95_px"]
 
 
+def test_a_two_arm_artifact_says_which_arm_its_headline_number_is(tmp_path):
+    """WHICH ARM `est_drift_p95_px` IS, said in the artifact and not only in the producer's source.
+
+    It is the per-frame arm by construction — a percentile over `pairs`, which only the per-frame
+    pass fills — and for as long as that was recorded nowhere, a `--arm both` document carried three
+    p95s with nothing saying which arm the headline one was. That is not a documentation nit: the
+    consumer, `measure_geom_tol.py --carry-est-drift`, read the headline and wrote it into the
+    committed gate document, so the arm G0b's budget came from was selected by a FIELD NAME. Both
+    arms are the same adapter under the same SEGMENTER_CONTRACT, so no downstream comparison could
+    ever have seen which one landed. Which arm §6 subtracts is an open owner decision and this key
+    answers none of it — it makes the artifact legible about what it already contains."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(6)])
+    out = tmp_path / "d.json"
+    ed.main(_both_arms_argv(cap, out, tmp_path))
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px_arm"] == "per_frame"
+    assert doc["est_drift_p95_px"] == doc["arm_comparison"]["per_frame"]["est_drift_p95_px"]
+
+
+def test_a_default_run_does_not_grow_the_arm_key_either(tmp_path):
+    """Same licence as `arm_comparison`'s: a default `--arm per_frame` run writes exactly the
+    document it wrote before the second arm existed. There is no ambiguity to resolve where one arm
+    ran, and adding a key to say so to every artifact on disk would be a change to every artifact on
+    disk — including the ones the V17 grid already produced."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(5)])
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    assert "est_drift_p95_px_arm" not in doc
+    assert "arm_comparison" not in doc
+
+
+def test_a_propagation_only_run_says_its_headline_is_no_arm_at_all(tmp_path):
+    """`--arm propagation` leaves `est_drift_p95_px` null and stamps `per_frame_arm_not_measured`.
+    The arm key follows the number rather than the flag: null, not "propagation" — writing the
+    propagation arm's name beside a null headline would read as a claim that the propagation p95 is
+    the headline, which is exactly what that disqualification exists to prevent."""
+    cap = _iou_capture(tmp_path, [_square((32, 48), 12 + i, 16) for i in range(5)])
+    out = tmp_path / "d.json"
+    ed.main(
+        ["measure", "--capture", str(cap), "--estimators", _naive_estimator(tmp_path),
+         "--arm", "propagation", "--propagation-module", _stub_propagator(tmp_path),
+         "--object-class", "apple", "--min-area-px", "1", "--min-coverage", "0.0",
+         "--out", str(out)]
+    )
+    doc = json.loads(out.read_text())
+    assert doc["est_drift_p95_px"] is None
+    assert doc["est_drift_p95_px_arm"] is None
+
+
 def test_both_arms_are_shown_byte_identical_pixels_and_the_artifact_records_it(tmp_path):
     """THE CONFOUND. If one arm reads raw arrays and the other reads JPEGs, the comparison
     measures the codec. The harness records a sha256 of the exact pixels each arm was handed, per

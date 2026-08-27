@@ -64,7 +64,9 @@ NOT the same, on purpose, and both are recorded in :data:`PROPAGATION_CONTRACT`:
    looking for: a mask that has drifted onto the table would be refused, counted as "no mask", and
    the run of low-IoU frames — blocker 3's failure mode (b) — would never appear. What the filter
    WOULD have refused is counted anyway, in :func:`stats`, so the choice is visible instead of
-   silent.
+   silent — and it is counted over **both** of ``segment()``'s refusal branches, because that
+   counter's only use is to be set beside the per-frame arm's ``n_frames_mask_refused`` and two
+   counters mirroring different branch sets do not subtract.
 
 WHAT IT REFUSES TO DO
 ---------------------
@@ -181,6 +183,36 @@ PROPAGATION_CONTRACT: dict[str, Any] = {
         "blocker 3's failure mode (b) — would never appear. What the filter would have refused is "
         "counted in stats() anyway, so the choice is visible rather than silent."
     ),
+    # WHICH OF THIS ARM'S COUNTERS IS WHICH OF THE PER-FRAME ARM'S, stated as a field because the
+    # only reason to record "what the filter would have refused" is to subtract it from what the
+    # filter DID refuse on the other arm — and a subtraction of two counters that mirror different
+    # sets of branches is not a difference of anything. Since PR-08 V10 segment() refuses a
+    # non-empty mask on TWO branches; this module mirrored one of them until 2026-08-27, which made
+    # the pair non-comparable on any capture whose background is warm enough to move the colour
+    # reference off the fruit (measured 37.2-56.4 % of the frame on train-01-oak-tungsten, against
+    # the 0.10 bound). The MuJoCo captures that have actually run are unaffected, and the record is
+    # thinner than "the counter reads zero on all three": EST_DRIFT-mujoco-trajectory-f480 carries
+    # n_frames_mask_refused_reference_not_object_scale = 0 against 1 refusal in 480 calls, while
+    # s60-f720 (25 of 720) and s20-f240 (12 of 240) were measured by a PRE-V10 adapter and carry no
+    # such field at all — there the branch could not have fired because it did not exist. Either
+    # way the misfire is not in those numbers, so this repairs the meaning BEFORE the first warm
+    # capture rather than after it.
+    "colour_filter_mirror": {
+        "n_frames_the_colour_filter_would_have_refused": "apple_sam2 MASK_REFUSED_FRAMES",
+        "n_frames_the_colour_filter_would_have_refused_reference_not_object_scale": (
+            "apple_sam2 MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES (inside the total)"
+        ),
+        "n_frames_the_colour_filter_would_have_refused_no_reference": (
+            "apple_sam2 MASK_REFUSED_NO_REFERENCE_FRAMES (inside the total)"
+        ),
+        "n_frames_the_colour_filter_mirror_could_not_evaluate": (
+            "no counterpart: segment() refuses the RUN for a label the filter has no reference "
+            "for, so on those frames there is no per-frame refusal count to mirror and the zeros "
+            "above are not evidence of agreement."
+        ),
+        "branches_mirrored": ("reference_is_object_scale", "mask_validity_iou"),
+        "branch_order": "segment()'s own: object-scale first, and the IoU test only when it passes",
+    },
     "discharges": _DISCHARGES,
 }
 
@@ -205,7 +237,38 @@ PROPAGATED_FRAMES = 0
 EMPTY_PROPAGATED_FRAMES = 0
 #: Frames whose propagated mask would have been REFUSED by apple_sam2's colour filter had it been
 #: applied. Recorded, never acted on: see PROPAGATION_CONTRACT["mask_validity_filter_reason"].
+#:
+#: THE WHOLE POINT OF THIS COUNTER IS THAT IT IS THE PER-FRAME ARM'S ``MASK_REFUSED_FRAMES``
+#: COMPUTED OVER THIS ARM'S MASKS, so it must mirror **every** branch on which ``segment()``
+#: returns all-False and increments that counter, in ``segment()``'s own order. Since PR-08 V10
+#: there are two of them (``apple_sam2.py``, the ``reference_is_object_scale`` branch and the
+#: ``mask_validity_iou`` branch), and this module mirrored only the second until 2026-08-27. A
+#: mirror of one branch is not a smaller mirror — on any warm-background capture the per-frame arm
+#: refuses through the branch that was missing, so the two arms' refusal counts stop being the same
+#: quantity and the propagation-vs-per-frame comparison becomes a comparison of two different
+#: refusal populations. The three counters below are the same decomposition ``apple_sam2.stats()``
+#: publishes, so the arms can be subtracted term by term rather than only in total.
 WOULD_HAVE_BEEN_REFUSED_FRAMES = 0
+#: Inside :data:`WOULD_HAVE_BEEN_REFUSED_FRAMES`, not beside it — exactly as
+#: ``MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES`` sits inside ``MASK_REFUSED_FRAMES``. The V10
+#: branch: the colour reference covers more of the frame than an object can, so it cannot arbitrate
+#: this mask in either direction and ``segment()`` refuses the frame as undecidable.
+WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES = 0
+#: Also inside :data:`WOULD_HAVE_BEEN_REFUSED_FRAMES`, mirroring ``MASK_REFUSED_NO_REFERENCE_FRAMES``:
+#: the IoU branch fired on a frame where the reference is EMPTY, i.e. "nothing here can confirm the
+#: mask" rather than "the mask is demonstrably the plate". ``apple_sam2`` keeps the two apart
+#: because they have opposite implications for the budget; an arm that pooled them would answer that
+#: question differently from the arm it is compared against.
+WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES = 0
+#: Frames on which the mirror could not be computed AT ALL because the colour filter has no
+#: reference for the label this process was told to segment (``WAM_PR08_OBJECT_PROMPT="plate."``,
+#: PR-08 V10 §2). ``segment()`` does not refuse such a frame — it refuses the whole RUN, before any
+#: counter moves — so there is no per-frame number to mirror and a zero in the counters above would
+#: be read as "the filter would have refused nothing", which is the opposite of what happened. This
+#: arm does not adopt the run-level refusal, because whether §6's second label is measured with the
+#: filter off is an OWNER decision (PR-08 V10 §2's closing paragraph, and it is unanswered); what it
+#: does instead is make the gap countable rather than silent.
+FILTER_MIRROR_UNEVALUABLE_FRAMES = 0
 #: The seed box, as [x0, y0, x1, y1], of the most recent run.
 LAST_SEED_BOX: list[float] | None = None
 
@@ -214,18 +277,39 @@ def reset_counters() -> None:
     """Zero the counters. The models are ``apple_sam2``'s and are not touched here."""
     global PROPAGATION_RUNS, PROPAGATED_FRAMES, EMPTY_PROPAGATED_FRAMES
     global WOULD_HAVE_BEEN_REFUSED_FRAMES, LAST_SEED_BOX
+    global WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES
+    global WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES, FILTER_MIRROR_UNEVALUABLE_FRAMES
     PROPAGATION_RUNS = PROPAGATED_FRAMES = EMPTY_PROPAGATED_FRAMES = 0
     WOULD_HAVE_BEEN_REFUSED_FRAMES = 0
+    WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES = 0
+    WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES = 0
+    FILTER_MIRROR_UNEVALUABLE_FRAMES = 0
     LAST_SEED_BOX = None
 
 
 def stats() -> dict[str, Any]:
-    """What this arm did, for the artifact. Cumulative over the process, like ``apple_sam2``'s."""
+    """What this arm did, for the artifact. Cumulative over the process, like ``apple_sam2``'s.
+
+    The three ``would_have_refused`` numbers are the per-frame arm's ``n_frames_mask_refused``,
+    ``n_frames_mask_refused_reference_not_object_scale`` and ``n_frames_mask_refused_no_reference``
+    recomputed over THIS arm's masks, with the same nesting: the last two are inside the first.
+    They are only comparable with the per-frame arm's if every refusal branch is mirrored, which is
+    why ``colour_filter_mirror_covers_both_refusal_branches`` is stated as a field a reader of the
+    artifact can check rather than left as a property of the source.
+    """
     return {
         "n_propagation_runs": PROPAGATION_RUNS,
         "n_frames_propagated": PROPAGATED_FRAMES,
         "n_frames_empty_propagated_mask": EMPTY_PROPAGATED_FRAMES,
         "n_frames_the_colour_filter_would_have_refused": WOULD_HAVE_BEEN_REFUSED_FRAMES,
+        "n_frames_the_colour_filter_would_have_refused_reference_not_object_scale": (
+            WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES
+        ),
+        "n_frames_the_colour_filter_would_have_refused_no_reference": (
+            WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES
+        ),
+        "n_frames_the_colour_filter_mirror_could_not_evaluate": FILTER_MIRROR_UNEVALUABLE_FRAMES,
+        "colour_filter_mirror_covers_both_refusal_branches": True,
         "colour_filter_applied": False,
         "seed_box_xyxy": list(LAST_SEED_BOX) if LAST_SEED_BOX is not None else None,
     }
@@ -403,6 +487,12 @@ def propagate(rgbs: Sequence[np.ndarray]) -> list[np.ndarray]:
     """
     global PROPAGATION_RUNS, PROPAGATED_FRAMES, EMPTY_PROPAGATED_FRAMES
     global WOULD_HAVE_BEEN_REFUSED_FRAMES, LAST_SEED_BOX
+    # EVERY counter this function touches is declared here, and the reason is a concrete bug rather
+    # than style: a name incremented with `+=` and NOT named in a `global` is a local, so the first
+    # frame the new branch fires on raises UnboundLocalError — i.e. the run dies on exactly the
+    # warm-background frame the branch was added to count, and a source-grep test would still pass.
+    global WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES
+    global WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES, FILTER_MIRROR_UNEVALUABLE_FRAMES
 
     import torch
 
@@ -461,11 +551,32 @@ def propagate(rgbs: Sequence[np.ndarray]) -> list[np.ndarray]:
             mask = np.zeros((height, width), dtype=bool)
         masks.append(mask)
         if not mask.any():
+            # An empty mask is not a refusal on either arm: segment() counts it in EMPTY_MASK_FRAMES
+            # and returns BEFORE the validity check, so the mirror must not run here either.
             EMPTY_PROPAGATED_FRAMES += 1
-        elif apple_sam2.mask_validity_reference_is_defined():
+        elif not apple_sam2.mask_validity_reference_is_defined():
+            # segment() would not have refused this FRAME — it would have refused the RUN, on its
+            # first call and before any counter moved (PR-08 V10). There is therefore no per-frame
+            # refusal to mirror, and counting these frames as "the filter would have refused
+            # nothing" would manufacture agreement between the arms out of a label the filter does
+            # not cover. Asked per frame rather than hoisted, because segment() asks per call.
+            FILTER_MIRROR_UNEVALUABLE_FRAMES += 1
+        else:
+            # BOTH of segment()'s refusal branches, in segment()'s own order and with segment()'s
+            # own nesting. The object-scale test GATES the IoU test there rather than sitting beside
+            # it (apple_sam2, PR-08 V10): when the reference covers the scene it refuses a correct
+            # mask of a restyled apple and ACCEPTS a mask of the warm background, so reaching the
+            # IoU comparison at all is the fail-OPEN half of the same defect. Mirroring the two as
+            # independent tests would therefore count a different set of frames than the arm this
+            # counter exists to be compared with.
             reference = apple_sam2.object_color_reference(frames[i])
-            if apple_sam2.mask_validity_iou(mask, reference) < apple_sam2.MASK_VALIDITY_MIN_IOU:
+            if not apple_sam2.reference_is_object_scale(reference):
                 WOULD_HAVE_BEEN_REFUSED_FRAMES += 1
+                WOULD_HAVE_BEEN_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES += 1
+            elif apple_sam2.mask_validity_iou(mask, reference) < apple_sam2.MASK_VALIDITY_MIN_IOU:
+                WOULD_HAVE_BEEN_REFUSED_FRAMES += 1
+                if not reference.any():
+                    WOULD_HAVE_BEEN_REFUSED_NO_REFERENCE_FRAMES += 1
 
     PROPAGATION_RUNS += 1
     PROPAGATED_FRAMES += len(masks)

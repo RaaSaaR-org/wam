@@ -1624,3 +1624,318 @@ def test_every_g0c_claim_97_makes_about_its_clips_directory_names_the_evidence_f
         "the chunk record no longer refuses to be written when the directory cannot support its "
         "own G0c claim"
     )
+
+
+# -- G0c, asked BEFORE the generator instead of only after it -------------------------------------
+#
+# The defect these cover cost half a GPU-hour per attempt and produced nothing. The masks come from
+# the SOURCE video, so every refusal check_mask can raise is knowable before the backend is called;
+# until the preflight landed, the driver generated the full clip first and refused on frame 0
+# afterwards. 385 of the corpus's 402 episodes are refused by one half of that check or the other
+# (runs/pr08-robot-mask-area/POOLED.json), and the episode 97's TIMING=1 path times is one of them.
+
+
+def _same_episode_work_list(corpus, styles=("train-01", "train-02")) -> list[dict]:
+    """Two units over ONE episode, which is the shape stage 1 actually has.
+
+    One invocation of the driver generates one ``--style-set``, so the repeats it can re-discover a
+    refusal over are the ones within that set: four per episode under T40_RULE_V11 §2's stage 1
+    (its 8 style-instances are 4 train plus 4 matched identity repeats, submitted as two jobs), ten
+    per episode per set in the full rendering. Two is enough to tell "discovered once" from
+    "discovered per unit", which is the whole distinction.
+    """
+    rows = [
+        {"unit": f"ep000__{style}__r00", "episode": "ep000", "frames": 12,
+         "style": style, "repeat": 0, "seed": 7100 + i}
+        for i, style in enumerate(styles)
+    ]
+    corpus["work"].write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return rows
+
+
+def test_the_source_mask_preflight_refuses_the_unit_before_the_backend_is_ever_called(
+    corpus, monkeypatch
+):
+    """The whole point. A unit G0c was always going to refuse must not be generated first.
+
+    The backend is replaced with a recorder rather than merely observed, because "was it called"
+    is the entire claim: the refusal itself was already correct before the preflight existed, it
+    just arrived after ~11 minutes of H200 time and one of the four running-job slots.
+    """
+    real = rt._null_backend
+    called: list[str] = []
+
+    def recording(sample, out_dir):
+        called.append(sample["name"])
+        return real(sample, out_dir)
+
+    monkeypatch.setattr(rt, "_null_backend", recording)
+    monkeypatch.setattr(rc, "build_masker", lambda: FakeMasker(rows=(0, 0), cols=(0, 0)))
+
+    # Still 0: a per-unit refusal is per-unit. One episode's masks say nothing about the next's.
+    assert rt.main(_argv(corpus)) == 0
+    assert called == [], f"the generator ran on units G0c refuses: {called}"
+
+    for row in corpus["rows"]:
+        unit = corpus["out"] / row["unit"]
+        record = json.loads((unit / "sample_outputs.json").read_text())
+        assert record["status"] == "error"
+        assert record["detail"].startswith("SourceMaskRefusal:")
+        assert "EMPTY on frame 0" in record["detail"]
+        assert record["g0c"]["composited"] is False
+        assert record["g0c"]["refused_before_generation"] is True
+        assert not (unit / "vision.mp4").exists()
+        # Nothing was generated, so there is nothing to quarantine — and the absence is the saving.
+        assert not (unit / rt.UNCOMPOSITED_QUARANTINE).exists()
+
+
+def test_the_preflight_refuses_an_over_large_mask_before_the_backend_too(corpus, monkeypatch):
+    """Both halves of check_mask, not just the empty one.
+
+    The preflight calls check_mask itself rather than re-implementing either half, so this is a
+    test that the WHOLE predicate moved and not the branch that happened to be in front of us: an
+    over-large mask means the composite copies the source back over everything, the restyle becomes
+    a no-op, and arms B and C silently become arm A at full GPU cost.
+    """
+    real = rt._null_backend
+    called: list[str] = []
+    monkeypatch.setattr(rt, "_null_backend", lambda s, d: (called.append(s["name"]), real(s, d))[1])
+    monkeypatch.setattr(rc, "build_masker", lambda: FakeMasker(rows=(0, FRAME_H), cols=(0, FRAME_W)))
+
+    assert rt.main(_argv(corpus)) == 0
+    assert called == []
+    record = json.loads((corpus["out"] / corpus["rows"][0]["unit"] / "sample_outputs.json").read_text())
+    assert "above the committed bound" in record["detail"]
+    assert record["g0c"]["refused_before_generation"] is True
+
+
+def test_a_unit_the_preflight_passes_is_still_composited_and_checked_frame_by_frame(corpus):
+    """The preflight moves the discovery, never the decision.
+
+    A unit that clears it is generated, composited and checked again by composite_clip over every
+    frame — the post-composite check is untouched, and the per-clip record still carries the
+    evidence 97's harvest refuses to file a clip without.
+    """
+    assert rt.main(_argv(corpus)) == 0
+    for row in corpus["rows"]:
+        record = json.loads((corpus["out"] / row["unit"] / "sample_outputs.json").read_text())
+        assert record["status"] == "success"
+        pre = record["g0c_source_mask_preflight"]
+        assert pre["checked"] is True and pre["frames_checked"] == row["frames"]
+        assert record["g0c"]["composited"] is True
+        assert record["g0c"]["frames_composited"] == record["g0c"]["frames_total"] == row["frames"]
+
+
+def test_the_preflight_and_the_composite_run_one_mask_pass_between_them_not_two(
+    corpus, tmp_path, masker
+):
+    """The measurand 97's TIMING=1 window is around must not move, and it does not.
+
+    The preflight computes the source masks through robot_composite.source_masks, so they land in
+    the same MaskCache the composite then reads: one pass per source episode before this change and
+    one after it. That matters beyond tidiness — the timed window in 97 wraps the whole driver, and
+    a second mask pass inside it would inflate seconds_per_frame, which is the number PR-08 §8
+    item 3 derives the partition's GPU-h ceiling from.
+    """
+    argv = _argv(corpus, {"--mask-cache": str(tmp_path / "masks"), "--iou-stride": "1000000"})
+    assert rt.main(argv) == 0
+    # 12 + 9 source frames, one pass each, plus the single IoU sample per unit (index 0 always
+    # lands under any stride). A second source pass would show up here as +21.
+    assert masker.calls == 12 + 9 + 2, masker.calls
+
+
+def test_a_refusal_is_not_re_walked_for_every_style_instance_of_the_same_episode(
+    corpus, monkeypatch, capsys
+):
+    """Defect 11: eight style-instances over one refused episode must cost one mask pass, not eight.
+
+    The instrument is source_masks rather than the masker's call count, because the MaskCache alone
+    would already make the second unit's masker calls zero — and that is exactly the confusion
+    worth ruling out. The cache makes re-discovery cheap; the memo makes it not happen.
+    """
+    rows = _same_episode_work_list(corpus)
+    monkeypatch.setattr(rc, "build_masker", lambda: FakeMasker(rows=(0, 0), cols=(0, 0)))
+    real_source_masks = rc.source_masks
+    passes: list[str] = []
+
+    def counting(source_video, frames, context):
+        passes.append(str(source_video))
+        return real_source_masks(source_video, frames, context)
+
+    monkeypatch.setattr(rc, "source_masks", counting)
+
+    assert rt.main(_argv(corpus)) == 0
+    assert len(passes) == 1, f"the same source was walked {len(passes)} times: {passes}"
+
+    # And NOT silently: both units carry their own error record, with the reason.
+    for row in rows:
+        record = json.loads((corpus["out"] / row["unit"] / "sample_outputs.json").read_text())
+        assert record["status"] == "error"
+        assert "EMPTY on frame 0" in record["detail"]
+        assert record["g0c"]["refused_before_generation"] is True
+    assert "Remembered from an earlier unit of this run" in json.loads(
+        (corpus["out"] / rows[1]["unit"] / "sample_outputs.json").read_text()
+    )["detail"]
+
+    out = capsys.readouterr().out
+    assert "2 of 2 units refused BEFORE generation" in out
+    assert "1 distinct sources" in out and "1 of the refusals were served from this run's memo" in out
+
+
+def test_the_memo_never_remembers_that_an_episode_PASSED(corpus, monkeypatch):
+    """Only refusals are memoised, and that asymmetry is the safety property.
+
+    A memo of passes would be a way past G0c the moment any input changed in a way the key failed
+    to capture; a memo of refusals can at worst refuse a unit G0c also refuses. So a passing
+    episode is re-checked for every style-instance of it — at the price of a cache read, which is
+    what the cache is for.
+    """
+    _same_episode_work_list(corpus)
+    real_check = rc.check_mask
+    checks: list[int] = []
+
+    def counting(mask, *, frame_index, bound, source):
+        checks.append(frame_index)
+        return real_check(mask, frame_index=frame_index, bound=bound, source=source)
+
+    monkeypatch.setattr(rc, "check_mask", counting)
+    assert rt.main(_argv(corpus)) == 0
+    # Two units x 12 frames x (one preflight + one post-composite pass). The memo saves none of
+    # them, because none of them refused.
+    assert len(checks) == 2 * 12 * 2, len(checks)
+
+
+def test_the_memo_key_cannot_leak_across_a_different_bound_or_a_different_segmenter(
+    corpus, bound, tmp_path
+):
+    """The key is the predicate's own inputs: the source bytes, the segmenter, and the bound.
+
+    A memo keyed on the episode id would survive exactly the changes it must not survive — a
+    re-pinned SAM 2 produces different masks from the same bytes, and a re-decided bound is a
+    different question about the same masks. Both are checked here against the same source file, so
+    the only thing that can be moving the key is the thing under test.
+    """
+    source = corpus["manifest"].parent / "videos" / "ep000.mp4"
+    base = rc.CompositeContext(
+        masker=FakeMasker(), bound=_cross_checked(bound, corpus), iou_stride=10, cache=None
+    )
+    baseline = rt.SourceMaskMemo.key(source, base)
+
+    class Repinned(FakeMasker):
+        def provenance(self) -> dict:
+            return dict(super().provenance(), version="a-different-pin")
+
+    repinned = rc.CompositeContext(
+        masker=Repinned(), bound=base.bound, iou_stride=10, cache=None
+    )
+    assert rt.SourceMaskMemo.key(source, repinned) != baseline
+
+    loose = json.loads(bound.read_text())
+    loose["max_frame_fraction"] = 0.9
+    loose_path = _write(tmp_path / "loose.json", loose)
+    moved_bound = rc.CompositeContext(
+        masker=FakeMasker(), bound=_cross_checked(loose_path, corpus), iou_stride=10, cache=None
+    )
+    assert rt.SourceMaskMemo.key(source, moved_bound) != baseline
+
+    # And it is stable for the thing it is supposed to be stable for: same source, same segmenter,
+    # same bound, a different unit of the same run.
+    twin = rc.CompositeContext(
+        masker=FakeMasker(), bound=_cross_checked(bound, corpus), iou_stride=10, cache=None
+    )
+    assert rt.SourceMaskMemo.key(source, twin) == baseline
+
+
+def test_the_preflight_reads_the_same_bound_object_the_composite_will_use(corpus, monkeypatch):
+    """Exactness, asserted rather than argued: one bound, one predicate, one mask source.
+
+    If the preflight could ever pass a unit the composite then refuses it would be worse than
+    nothing — the operator would have paid for the generation AND for a refusal that claimed to
+    have been pre-checked. So the bound the preflight passes to check_mask is asserted to be the
+    context's own frozen AreaBound, by identity.
+    """
+    seen: list[object] = []
+    real_check = rc.check_mask
+
+    def watching(mask, *, frame_index, bound, source):
+        seen.append(bound)
+        return real_check(mask, frame_index=frame_index, bound=bound, source=source)
+
+    monkeypatch.setattr(rc, "check_mask", watching)
+    assert rt.main(_argv(corpus)) == 0
+    assert seen, "check_mask was not called at all"
+    assert all(b is seen[0] for b in seen), "two different bounds reached one run's checks"
+
+
+def test_the_timing_path_now_refuses_in_seconds_instead_of_after_a_generated_clip(
+    corpus, monkeypatch
+):
+    """97's TIMING=1 contract, end to end, on the shape the corpus actually has.
+
+    The timed unit is `head -1` of a deterministically sorted work list, and 385 of 402 episodes
+    are refused by one half of check_mask or the other — so the timing run's most likely outcome is
+    a refusal. It was previously a refusal that arrived after the full clip had been generated:
+    ~0.3-0.5 GPU-h and one of four running-job slots, per attempt, for no THROUGHPUT.json. The exit
+    code is unchanged (--require-success -> 1, and 97 writes no artifact); what changed is that
+    nothing was generated to reach it.
+    """
+    real = rt._null_backend
+    called: list[str] = []
+    monkeypatch.setattr(rt, "_null_backend", lambda s, d: (called.append(s["name"]), real(s, d))[1])
+    monkeypatch.setattr(rc, "build_masker", lambda: FakeMasker(rows=(0, 0), cols=(0, 0)))
+
+    assert rt.main(_argv(corpus, {"--require-success": None})) == 1
+    assert called == [], "the generator ran before the refusal that was knowable without it"
+    assert not list(corpus["out"].glob("*/vision.mp4"))
+
+
+class CountingFilterMasker(FakeMasker):
+    """A masker that carries PR-08 V9's cumulative ``filter_counters``, as the real one does.
+
+    ``FakeMasker`` declares none, so ``composite_clip``'s ``getattr(..., {})`` sees an empty dict
+    and every object-filter assertion in this file is vacuous. The real ``Sam2RobotMasker`` counts
+    six things and never resets them; the caller that brackets a mask pass is the only thing that
+    can say what that pass did. This declares two of the six, incremented per masked frame, which
+    is enough to tell a differenced count from a zero.
+    """
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.filter_counters = {"frames_masked": 0, "detections_dropped_as_object": 0}
+
+    def mask(self, rgb) -> np.ndarray:
+        self.filter_counters["frames_masked"] += 1
+        self.filter_counters["detections_dropped_as_object"] += 1
+        return super().mask(rgb)
+
+
+def test_the_preflight_records_the_object_filter_counts_its_own_mask_pass_produced(
+    corpus, monkeypatch, tmp_path
+):
+    """Moving the mask pass moved PR-08 V9's counters with it, and they must land somewhere.
+
+    ``composite_clip`` differences ``masker.filter_counters`` around its own ``source_masks`` call,
+    because — robot_composite's own words — "a filter whose firing is not recorded cannot be told
+    apart from a corpus that never triggered it". Once the preflight computes the masks first, that
+    call is a cache hit for EVERY clip the driver produces, its delta is zero for every clip, and
+    the corpus's record loses the only number that separates "the segmenter found no robot" from
+    "the filter removed the only detection" — which is the question T40_RULE_V12's empty-mask
+    semantics turn on. The composite's block still reads zero here, with masks_from_cache true, and
+    that is correct and documented; what this asserts is that the counts exist in the block that
+    ran the pass.
+    """
+    masker = CountingFilterMasker()
+    monkeypatch.setattr(rc, "build_masker", lambda: masker)
+    assert rt.main(_argv(corpus, {"--mask-cache": str(tmp_path / "masks")})) == 0
+
+    for row in corpus["rows"]:
+        record = json.loads((corpus["out"] / row["unit"] / "sample_outputs.json").read_text())
+        counted = record["g0c_source_mask_preflight"]["robot_mask_object_filter"]
+        assert counted["masks_from_cache"] is False
+        assert counted["frames_masked"] == row["frames"], counted
+        assert counted["detections_dropped_as_object"] == row["frames"], counted
+        # And the composite's own copy is the cache-hit zero the note describes, so the two blocks
+        # never both claim the same firings.
+        composited = record["g0c"]["robot_mask_object_filter"]
+        assert composited["masks_from_cache"] is True
+        assert composited["frames_masked"] == 0
