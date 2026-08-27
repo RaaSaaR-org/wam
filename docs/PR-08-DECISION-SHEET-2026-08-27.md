@@ -210,6 +210,17 @@ is refused outright (exit 2). Fixing it changes the contract's **shape**, not it
 
 ## 2. The critical path, as it actually is
 
+> **UPDATE, later on 2026-08-27 — steps 1 and 2 are DONE, and step 3 has become a fork.**
+> Step 1 was signed and `apple_sam2.GATE_QUALIFIED` is `True` (`13f0416`). Step 2 was answered
+> `per_frame` (`ea315e5`). Step 3 is no longer "submit the array": a five-front investigation found
+> that the landed number **already exists and every candidate margin is positive**, that the record
+> holding it is uncommittable for **three** reasons rather than two, and that repairing that record
+> now would be a gate rewritten after seeing its output. **The fork — salvage under a new blind
+> pre-registration, or spend the 13.64 GPU-h — is in
+> [`preregistration/PR-08-RESULT-2026-08-27-geom-tol-is-measured-and-uncommittable.md`](preregistration/PR-08-RESULT-2026-08-27-geom-tol-is-measured-and-uncommittable.md),
+> and it is the owner's to take.** That page supersedes steps 3–5 below wherever they disagree;
+> the two runbook lines added inside them are new and are not superseded.
+
 Read the three LOUD lines first; they change what gets submitted and in what order.
 
 > **LOUD 1 — the sprint's step 1 (cluster census of `episode_000094`) is NOT on the critical path.**
@@ -250,6 +261,21 @@ from shard 0 at `:2982, :2996`), **and** the one-field contract disagreement I m
 a re-merge, a migration nor a flag exists — the CLI has no `--force`, no `--contract`, no migration flag
 [F2, ADV via argparse].
 
+> **CORRECTED, later on 2026-08-27. There is a THIRD reason, and a precondition on submitting.**
+> The third is provenance: the shards were produced by an adapter that predates the V10 refusal
+> branch, which the missing contract field is the declaration of. More importantly, the second
+> reason is **not** a metadata mismatch — `mask_validity_reference_max_frame_fraction` refuses
+> frames, so it records *which frames were measured*, and whether it would refuse zero of this
+> corpus's 171,625 frames or thousands is **UNKNOWN**. See the determination linked at the head of
+> this section.
+>
+> **SUBMIT ONLY WITH A FRESH `RUN_ID`.** `RUN_ID` defaults to `pr08-geom-tol` (`:407`), the resume
+> check at `:886` runs *before* the contract-and-gate preflight at `:979`, and until it was repaired
+> today `shard_artifact_landed` called those stale shards reusable. A default submission would have
+> made all 16 tasks print "already landed. Skipping." and exit 0 in seconds, with the preflight
+> never executing. The repair refuses them now, but the fresh `RUN_ID` is still the right gesture.
+> Never `FORCE=1` into `pr08-geom-tol`; never set `GEOM_WAIVE_CONTRACT_AND_GATE_PREFLIGHT`.
+
 **Step 4 — LOCAL, NOT CLUSTER: measure `EST_DRIFT` → `configs/transfer25/pr08_est_drift.json`.**
 Cost: ~3 min of the local RTX 5090 per capture; **0 GPU-h of allocation**. Produces the drift half.
 **Must follow step 3**: `measure_est_drift.cross_check_geom_tol` (`:1578-1589`) disqualifies on both the
@@ -260,6 +286,32 @@ document has no `gate_qualified` key at all today.
 `est_drift_estimator_name`, `est_drift_source`, `gate_margin_px`. **→ §8 item 4 closes iff the margin
 is > 0.** Blocked by defect 2 if step 2 answers "propagation": the carry reads only the top-level
 `est_drift_p95_px`, which is the per-frame arm by construction.
+
+> **THE RUNBOOK LINE, because two of its three requirements are invisible until they cost a job.**
+>
+> ```
+> .venv/bin/python scripts/measure_geom_tol.py \
+>     --carry-est-drift <the EST_DRIFT artifact> \
+>     --est-drift-arm per_frame
+> ```
+>
+> 1. **`--est-drift-arm per_frame` is MANDATORY** for a two-arm artifact. Omit it and the run exits
+>    2 writing nothing (`measure_geom_tol.py:3816`). The refusal is *unreachable today* — the
+>    `gate_qualified` check at `:3681` fires first — so it goes live at exactly the moment it can
+>    cost a job. That is why it is written here and not left in a comment.
+> 2. **Run it strictly AFTER the merge.** `--out` defaults to the tracked
+>    `configs/transfer25/pr08_geom_tol.json`. Until it was repaired today, a qualified artifact
+>    carried onto the un-merged contract wrote three fields **and a `.sha256` sidecar** and only
+>    then exited 3 — a digest certifying a half-written gate document. It now refuses and writes
+>    nothing, but the ordering is still the rule.
+> 3. **The carry exiting 0 is NOT evidence that GEOM_TOL is gate-qualified.** It now refuses an
+>    unqualified target, which is the repair; do not read a clean exit as a qualification.
+>
+> **And if step 2's answer is ever revisited to POOLED: there is no carry path at all.**
+> `--carry-est-drift runs/pr08-est-drift/v17/POOLED-V19.json` exits 2, four refusals deep.
+> `measure_geom_tol.py:3454-3462` says the absence is deliberate — *"Writing the plumbing would
+> answer it by making one of the two the reachable one."* So **D-D is a precondition, not a
+> preference**, and answering it POOLED is a rule change with its own version bump.
 
 **Step 6 — CLUSTER: `97 TIMING=1` → `THROUGHPUT.json` → derive the ceilings. → §8 item 3 closes.**
 Independent of steps 1–5 (the `GATE_QUALIFIED` exemption is verified three ways, §1.1). **Blocked on an
