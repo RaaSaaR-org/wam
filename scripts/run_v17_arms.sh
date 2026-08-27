@@ -136,6 +136,22 @@ for id in A1 A2 A3 A4 A5 A6 A7 A8; do measure "${V17}/${id}" "${id}"; done
 # --- V17 §5 C2, the dose ladder. Reported, never pooled. ----------------------------------------
 for id in C2-t20 C2-t40 C2-t80; do measure "${V17}/${id}" "${id}"; done
 
+# --- T40_RULE_V19 §3: C3, the control C1 could not be. -------------------------------------------
+# C1 fired (10 runs) but its longest run was 5, which is the lattice's own period rather than a
+# measurement of the statistic's sensitivity — a lattice control cannot produce a run longer than
+# the lattice repeats. C3 seeds the propagation on the cube distractor's GROUND-TRUTH box on frame
+# 0 of A1, a coherent capture that makes exactly one revolution, so there is no periodic return to
+# break the run. Its est_drift_p95_px is the cube-to-apple distance and means NOTHING; only
+# low_iou_runs is read. The fire condition is V17 §5's, unchanged: n_runs >= 1 and longest_run >= 10.
+if [[ ! -f "${V17}/EST_DRIFT-C3-wrongseed.json" ]]; then
+  echo "--- V19: C3, propagation held on the wrong object over A1"
+  WAM_PR08_CONTROL_SEED_FROM_CAPTURE="${V17}/A1" WAM_PR08_CONTROL_SEED_LABEL=cube \
+  run_step "C3-wrongseed" .venv/bin/python scripts/measure_est_drift.py measure \
+    --capture "${V17}/A1" --estimators "${EST}" --arm both \
+    --propagation-module estimators.apple_sam2_video_wrongseed \
+    --out "${V17}/EST_DRIFT-C3-wrongseed.json"
+fi
+
 # --- V17 §3 Arm B: the real corpus. -------------------------------------------------------------
 if [[ ! -f "${V17}/ARM_DIVERGENCE.json" ]]; then
   echo "--- Arm B: 40 episodes, both arms, cross-arm divergence runs"
