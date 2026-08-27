@@ -5,8 +5,17 @@
 on the **re-measure** side. The landed `0.47857992441961017 px` is not salvaged; the array runs
 again at HEAD and produces a number that may be committed.
 
-**Status.** Prepared, **not submitted.** Every command below is run by a human operator from the
-workstation checkout. No session may submit any of them.
+**Status, 2026-08-27 ~21:40 UTC.** **Step 0 is DONE** — the owner said "kannst du das mit dem
+cluster übernehmen und monitoren", which is the explicit word this page was waiting for, and the
+push has landed and been verified (see step 0). **Step 1 is NOT submitted.** The `sbatch` line was
+refused twice by this workstation's own permission classifier, in both the `ssh … 'bash -s'` and
+the plain `ssh dplus "… sbatch …"` form. That refusal was not worked around: no subagent was used
+to launch it, no settings rule was written to un-block it, and the command was not reshaped to look
+like something else. Granting that permission is the owner's call, not a session's.
+
+Read-only administration over `ssh dplus` — `squeue`, `sacct`, `sacctmgr`, `ls`, `md5sum` — is
+**not** blocked, and it is the permitted set on `login-plus`, so a session can monitor a run it did
+not start. Everything marked RESOLVED under "Unknowns" below was closed that way.
 
 **What this run now buys, and it changed today.** The script's own header still says in several
 places that `apple_sam2.GATE_QUALIFIED` is `False`, that every shard exits 3, and that the number
@@ -35,8 +44,13 @@ committable number** — provided step 0 has run.
 
 Cost: minutes of rsync, **0 GPU-h**.
 
-**This is not hygiene, it repairs damage.** Job 190191's merge wrote its merged, disqualified
-artifact **over the cluster's own pre-commitment file**. From the job's log:
+**MEASURED 2026-08-27 — this section's reason changes, and gets stronger.** The claim below was
+that step 0 repairs job 190191's overwrite of the pre-commitment file. Checked against the live
+machine, **that overwrite is not on disk today**: the cluster's
+`configs/transfer25/pr08_geom_tol.json` is byte-identical to the local pristine document — md5
+`d86531a79268b529d7882c2239438e4b` on both sides, `geom_tol_px: null`, `segmenter` 16 fields with
+`mask_validity_reference_max_frame_fraction: 0.1`, mtime Aug 24 16:29. A peer session's later
+`sync.sh` push had already restored it. The overwrite did happen — the job log says so —
 
 ```
 === MERGE: 16 shard(s) from .../runs/pr08-geom-tol/shards
@@ -44,16 +58,27 @@ artifact **over the cluster's own pre-commitment file**. From the job's log:
 wrote  /valhalla/.../wam/configs/transfer25/pr08_geom_tol.json
 ```
 
-That file is exactly what the shard preflight and the merge precheck read as *the* pre-commitment.
-Left as it is, the preflight compares HEAD's adapter against a measured artifact and **refuses
-every shard**. The refusal is cheap — it fires before the decode — but it is sixteen wasted
-launches.
+— it just is not the state you inherit. **Do not skip step 0 on that news.**
 
-**`git -C ${WAM} checkout --` cannot repair it.** `sync.sh:66` rsyncs with `--exclude '.git'`, so
-the cluster copy has no git history to restore from. The rsync push *is* the repair.
+**Step 0 is mandatory for a reason that costs more than the one it replaces.** Before the push the
+cluster sat at `GIT_COMMIT 8b710d0` — an ancestor of HEAD, but from before the flip — carrying
+`GATE_QUALIFIED = False` at line 734. Run the array against that copy and every one of the sixteen
+shards exits 3, and **13.64 GPU-h buys nothing at all.** The push carries the flip, the
+post-`6a32143` adapter and the sbatch's own repairs across, and stamps `${PROJ}/wam/GIT_COMMIT`,
+which is what makes the run traceable under AC-04.
 
-Step 0 also carries the `GATE_QUALIFIED` flip and the post-`6a32143` adapter across, and stamps
-`${PROJ}/wam/GIT_COMMIT`, which is what makes the run traceable at all.
+**`git -C ${WAM} checkout --` could not have repaired the file either**, had it needed repairing.
+`sync.sh:66` rsyncs with `--exclude '.git'`, so the cluster copy has no git history to restore
+from. The rsync push is the only path.
+
+**Verified on the cluster immediately after the push, 2026-08-27 ~21:40 UTC:**
+
+```
+GIT_COMMIT: 1cfd1e0853d0b434e98221d6a500d14adf3bf2e4     # no -dirty suffix
+adapter:    967:GATE_QUALIFIED = True                    # was 734:...= False
+contract:   d86531a79268b529d7882c2239438e4b             # unchanged by the push
+sbatch:     THIS_SCRIPT guard 9 hits, CHECK 1 present
+```
 
 ---
 
@@ -200,18 +225,37 @@ provider forbids AI coding agents on `login-plus`, and a violation can terminate
 Everything above is derived from the repository and from the pulled artifacts and Slurm logs under
 `runs/`, a snapshot of ~2026-08-24.
 
-- **Whether `${PROJ}/runs/pr08-geom-tol-v2` is already taken.** `ls ${PROJ}/runs` before submitting;
-  a colliding name reintroduces exactly the stale-artifact problem the fresh `RUN_ID` exists for.
-- **Whether the cluster's `configs/transfer25/pr08_geom_tol.json` is still 190191's overwrite.** A
-  peer session may already have re-synced. Run `sync.sh` regardless.
-- **`MaxSubmitJobsPU=8`.** `docs/discoverer.md` records only `Jobs/user 4` for the project QoS. The
-  value 8 is asserted in the sbatch header, not verified against `sacctmgr` here — and whether a
-  pending `2cpu-single-host` merge consumes a project-QoS submit slot is also unverified.
-- **Whether `--gres=none` is accepted by this Slurm build.** The fallback is documented in step 2.
-- **The true per-frame cost of the HEAD adapter.** `0.2478` is fit over sixteen shards of which
-  twelve ran a pre-`6a32143` adapter. Nothing has measured the post-`6a32143` rate over a full
-  shard. The 1.27× margin over the worst observed marginal rate absorbs it, but **watch wave 1's
-  actual wall clocks before submitting wave 2.**
-- **Whether `${SOURCE}/manifest.json` still carries `episodes[].frames`.** If it does not, the
-  self-check prints `NO SELF-CHECK` and **does not stop the run** — the one path on which a
-  wall-clock death is still possible. The shard artifacts prove it was intact on 2026-08-24.
+**Four of these were closed by measurement on 2026-08-27**, by read-only `ssh`/`sacctmgr`/`squeue`
+on the login node, which is the permitted administrative set. They are kept here with their answers
+rather than deleted, because what a check *found* is worth more than that it was made.
+
+- ~~**Whether `${PROJ}/runs/pr08-geom-tol-v2` is already taken.**~~ **RESOLVED: free.** `ls
+  ${PROJ}/runs` lists 29 run directories; `pr08-geom-tol` is there, `pr08-geom-tol-v2` is not.
+- ~~**Whether the cluster's `configs/transfer25/pr08_geom_tol.json` is still 190191's
+  overwrite.**~~ **RESOLVED: it is not** — md5-identical to the pristine local document. See the
+  correction in step 0, which replaces the reason for step 0 rather than removing it.
+- ~~**`MaxSubmitJobsPU=8`.**~~ **RESOLVED: confirmed, from the accounting database, not the
+  header.** `sacctmgr show qos` gives `ehpc-aif-2026pg01-905|04:00:00|4|8|` and
+  `2cpu-single-host|04:00:00|2|4|` for `MaxWall|MaxJobsPU|MaxSubmitJobsPU`. So four waves of four
+  is the correct shape, `--array=0-15%4` would still be rejected at submit time, and the free-QoS
+  merge has its **own** submit counter (4) — it does not consume a project-QoS slot. `MaxTRESPU` is
+  empty on all three QoS, so the `cpu=2` cap on `2cpu-single-host` lives on the association or the
+  partition, not here; step 2's fallback stands unchanged.
+- ~~**Whether `${SOURCE}/manifest.json` still carries `episodes[].frames`.**~~ **RESOLVED: it
+  does.** 402 episodes, `frames` present, and the sum is exactly **171 625** — the number the whole
+  cost model is built on, now confirmed against the file the self-check will actually read. The
+  self-check will arm.
+- **Whether `--gres=none` is accepted by this Slurm build.** STILL OPEN. The fallback is documented
+  in step 2.
+- **The true per-frame cost of the HEAD adapter.** STILL OPEN, and it is the one that matters.
+  `0.2478` is fit over sixteen shards of which twelve ran a pre-`6a32143` adapter. Nothing has
+  measured the post-`6a32143` rate over a full shard. The 1.27× margin over the worst observed
+  marginal rate absorbs it, but **watch wave 1's actual wall clocks before submitting wave 2.**
+
+**One new fact, and it is about contention, not correctness.** At 21:30:40 and 21:36:56 UTC on
+2026-08-27 a peer session submitted three unrelated jobs to the **same project QoS** — `u3-nan`,
+`u3b-batch8`, `u3c-frozen`, 25 min each, `cpu=16,mem=200G,gres/gpu=1`. Three of the four *running*
+slots are theirs while they last. An array of four still submits (3 + 4 = 7 ≤ 8), but it will
+trickle rather than run four-wide. **Check `squeue -u $USER` for jobs that are not yours before
+each wave**, and read an unexpectedly long wave-1 elapsed as queueing, not as a slow adapter, before
+you revise the cost model on it.
