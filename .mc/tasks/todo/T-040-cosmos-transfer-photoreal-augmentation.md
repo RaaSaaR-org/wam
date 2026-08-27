@@ -1125,4 +1125,62 @@ card — a CPU run needs `CUDA_VISIBLE_DEVICES=""` too.
 one entry, §8 items 3 and 4 are OPEN, §1 binds in full, and no outcome of V17 or V18 flips the flag
 on its own. Nothing was submitted to the cluster: `docs/handoff.md` reserves that to the owner.
 
+### 2026-08-27 (later) — V17 ran end to end, the last blocker retired, and the flag did not move
+
+**`GATE_QUALIFICATION_BLOCKERS` is empty for the first time since it was written.** The propagation
+entry named two independent sufficient reasons; V14 (owner, signed) closed the first and V17
+outcome N closed the second. The 4 372-character wording moved into
+`GATE_QUALIFICATION_DISCHARGED` **verbatim**, between `>>>`/`<<<` markers, and a test reads the
+body back and checks the three sentences a rewrite would soften first. Seven accusations, seven
+still readable, none deleted.
+
+**`GATE_QUALIFIED` is still `False`, in a separate commit, which is what its own comment demands.**
+
+**Outcome N — the rate is bounded, not absent.** Arm A: 3 840 frames, eight trajectories, 0
+propagation runs. Arm B: 40 whole episodes of the REAL corpus, 16 846 frames, **0 frames of 16 846
+below cross-arm IoU 0.5** — not few, none — per-episode median 0.9788–0.9937. Rule of three: 40
+clean of 402 still permits ~30 episodes containing an event.
+
+| | p50 | p95 | p99 | p100 | G0b margin |
+|---|---|---|---|---|---|
+| per-frame | 0.0755 | **0.31208** | 1.0431 | **67.633** | 0.16650 px (34.79 %) |
+| propagation | 0.2247 | **0.44861** | 0.5631 | 19.399 | **0.02997 px (6.26 %)** |
+
+The p99/p100 crossing is confirmed at eight times the sample and is wider than the single capture
+showed. The propagation margin moves 1.78 % → 6.26 %; still not room.
+
+**Three findings that cut against the result, all of them in the discharge text itself:**
+
+1. **The dose ladder never fired.** V17 §5 asked at what inter-frame motion propagation begins to
+   lose the object. At **110.64 px/frame — 84× the measured capture's — SAM 2 produced zero
+   sub-0.5 frames.** The only thing that made it fail is a *held wrong seed* (C3: one run of 480).
+   **Nothing here shows `low_iou_runs` can see a subtle drift.**
+2. **The only contiguous failure is ours.** A3 f294–f306: **13 frames at IoU exactly 0.0 in the
+   per-frame arm**, none in the propagated arm. That inverts limb (b) at the run level.
+3. **V17 §3's attribution premise is falsified by our own control data.** Per-frame errors are not
+   independent across frames — scene difficulty is correlated. Nothing rests on it (Arm B found no
+   run), but the next person to reach for that inference needs to know it failed.
+
+**C1 could not have fired and the reason is structural**: its runs start at 5, 10, 15, 22, 27, 32,
+37, 47, 52, 57 — the lattice's own period, `n_unscored_frames = 0`. A lattice control cannot make a
+run longer than the lattice repeats. `T40_RULE_V19` replaced the control **without moving any
+threshold** and states the "keep trying controls until one fires" objection against itself first.
+Both pooled artifacts are kept: `POOLED.json` (C1 → **V**) and `POOLED-V19.json` (C3 → **N**).
+
+**V18 outcome C.** `episode_000094`, all 509 frames, both decodes: 31 refusals in `[109, 149]`,
+**zero** non-refused masks over 3× the episode median (largest 1.31×, the audit's plate masks
+~4.3×). Two runs on this workstation differ on 0 of 509. The two decode trees are **bit-identical**
+— 0 of 509 differ in mask area or centroid — which **corrects** the operating-point result's
+attribution of the `f129` score difference to the decodes: it is between machines, not codecs.
+
+**And the reason the flag was not flipped, named rather than hedged.** `shard-7.json` records
+`episode_000094` as `n_frames_with_centroid: 473`; the census measures **478**. Five frames, not
+explained by the largest-component floor, and running against this module's own claim that V10 can
+only refuse *more*. The remaining candidate is a cross-machine difference — a hypothesis, not a
+measurement. It sits inside the evidence for `GATE_QUALIFIED`'s second precondition, so the flip is
+the owner's, and what closes it is named: the same census run on the cluster.
+
+Result: `docs/preregistration/PR-08-RESULT-2026-08-27-the-rate-is-bounded-and-the-per-frame-arm-is-the-one-that-broke.md`.
+Full suite 3 354 passed, 0 failed. No clip licensed; §8 items 3 and 4 open; `T40_RULE_V1` §1 binds.
+
 %% mc-links: [[T-39]] [[T-34]] [[T-36]] [[T-37]] [[T-041]] %%
