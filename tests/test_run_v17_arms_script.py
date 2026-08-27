@@ -12,11 +12,38 @@ about a second, kept the stale files, printed nothing that said so, and the carr
 refused for reasons that had stopped describing reality. The remediation on record — "point it at a
 fresh directory" — was not reachable: there was no flag and no environment override.
 
-So these tests hold three properties, and they are behavioural rather than textual wherever the
+**THAT DAY IS 2026-08-27: `GATE_QUALIFIED` IS NOW True.** The blocker tuple reached `()` and the
+project owner decided T40_RULE_V18 §3 outcome C for blocker 2's residue (i), in
+`docs/preregistration/PR-08-RESULT-2026-08-27-residue-i-is-contained-and-the-flag-flips.md`.
+Nothing about this script changed with it and nothing here was relaxed. What changed is which side
+of the comparison the artifacts on disk are on: the thirteen pre-flip files now DISAGREE with the
+running adapter, the pre-flight says STALE, and `--reuse-existing` refuses. That refusal is the
+feature, on the exact day it was written for.
+
+READ THAT NARROWLY. THIS FILE IS NOT EVIDENCE THAT THE GATE IS OPEN AND NOTHING BELOW TESTS THAT
+IT IS. The flag is one input to `gate_qualified` and qualifies no artifact by itself:
+`measure_geom_tol.sam2_method` still requires the checkpoints and the contract too. T40_RULE_V1 §1
+is not lifted. PR-08 §8 items 3 and 4 are open. Blocker 1 was not touched by the determination, so
+NOBODY HAS LOOKED at a mask — the area test is a proxy for a wrong-object mask, not an observation
+of one. Five frames of the 473-vs-478 gap are unexplained and the decode hypothesis for them is
+refuted. Everything below is about the PROVENANCE of a file on disk, which instrument wrote it, and
+never about whether that instrument's numbers were right. The tripwires on the flip's legitimacy
+live with the module, in `tests/test_apple_sam2_estimator.py`,
+`tests/test_apple_sam2_video_propagation.py` and `tests/test_audit_apple_masks.py`.
+
+The fixtures below are therefore built RELATIVE to the flag the script actually reads
+(:func:`_live_gate_qualified`) and never pinned to a literal True or False. A fixture pinned to a
+literal is a fixture that silently changes meaning the next time the flag moves — which is not
+hypothetical in either direction: the module's own comment lists what would take the flip back.
+"Agrees with the running adapter" and "was written on the other side of the flip" are the two things
+these tests need to say, and each is said as a function of the live flag.
+
+So these tests hold four properties, and they are behavioural rather than textual wherever the
 behaviour can be reached without a GPU: an existing artifact stops the script instead of being
-skipped; the operator's way out is nameable on the command line; and an artifact whose recorded
-`gate_qualified` disagrees with the running adapter's is called out by name, because that is the
-case that actually bites.
+skipped; the operator's way out is nameable on the command line; an artifact whose recorded
+`gate_qualified` disagrees with the running adapter's is called out BY NAME AND BY VERDICT, because
+that is the case that actually bites; and an artifact from the other side of the flip is never
+reusable, which is the protection the flip actually bought.
 
 Nothing here measures anything. Every invocation is arranged to refuse, or to give up at the GPU
 wait, long before `measure_est_drift` is reached.
@@ -24,6 +51,7 @@ wait, long before `measure_est_drift` is reached.
 
 from __future__ import annotations
 
+import functools
 import json
 import pathlib
 import subprocess
@@ -32,6 +60,8 @@ import pytest
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO / "scripts" / "run_v17_arms.sh"
+#: The interpreter the script's own pre-flight runs, so the flag read here is the flag it compares.
+_VENV_PYTHON = _REPO / ".venv" / "bin" / "python"
 
 #: Enough to make `headroom_holds` fail on its first sample and `wait_for_gpu` give up immediately,
 #: so an invocation that gets PAST the pre-flight still measures nothing. Without this a test that
@@ -50,11 +80,82 @@ def _captures(root: pathlib.Path) -> pathlib.Path:
     return root
 
 
+@functools.lru_cache(maxsize=1)
+def _live_gate_qualified() -> bool:
+    """`GATE_QUALIFIED` AS THE SCRIPT READS IT — same module, same interpreter, same import path.
+
+    Every fixture below is a function of this and never of a literal. The flag flipped False -> True
+    on 2026-08-27 and the module's own comment names what would take it back, so a fixture spelled
+    `gate_qualified=False` does not mean "agrees with the adapter" for longer than one flip: it
+    meant that before, it means the opposite now, and the test keeps passing while guarding the
+    other case. Reading the live value is also itself a check — a `GATE_QUALIFIED` that stopped
+    being a bool would make the pre-flight's comparison meaningless, so that is asserted here.
+    """
+    probe = (
+        "import importlib, sys; sys.path.insert(0, 'scripts'); "
+        "print(repr(getattr(importlib.import_module('estimators.apple_sam2'), "
+        "'GATE_QUALIFIED', None)))"
+    )
+    done = subprocess.run(
+        [str(_VENV_PYTHON), "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=str(_REPO),
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    value = done.stdout.strip()
+    assert value in ("True", "False"), (
+        f"the pre-flight compares every artifact against GATE_QUALIFIED and read {value!r}; a "
+        "non-bool there makes 'agrees' and 'STALE' claims about nothing"
+    )
+    return value == "True"
+
+
 def _artifact(path: pathlib.Path, *, gate_qualified: bool, adapter: bool | None) -> None:
     doc: dict = {"schema": "wam.est_drift/1", "gate_qualified": gate_qualified}
     if adapter is not None:
         doc["estimator_stats"] = {"adapter": {"gate_qualified": adapter}}
     path.write_text(json.dumps(doc))
+
+
+def _artifact_agreeing_with_the_adapter(path: pathlib.Path) -> None:
+    """An EST_DRIFT artifact that WAS written by the adapter this invocation drives.
+
+    Both recorded flags follow the live one, so this keeps meaning "agrees" whichever way the flag
+    stands: the pre-flight's rule is `recorded != live` in either direction, plus the one-sided
+    `live is True and artifact.gate_qualified is False`, and this fixture is on the right side of
+    both by construction.
+    """
+    live = _live_gate_qualified()
+    _artifact(path, gate_qualified=live, adapter=live)
+
+
+def _artifact_from_before_the_flip(path: pathlib.Path) -> None:
+    """An artifact written on the OTHER SIDE of the flip, i.e. the thirteen files really on disk.
+
+    Today that is `gate_qualified: false` against a module reading True — what all thirteen
+    `EST_DRIFT-*.json` under `runs/pr08-est-drift/v17` carry, and `ARM_DIVERGENCE.json` beside them.
+    (`POOLED.json` records no adapter flag at all; it is the pre-flight's `rewritten` case, not this
+    one.) Expressed as the negation of the live flag so it still means "written by a different
+    instrument" if the flag is ever taken back to False.
+    """
+    live = _live_gate_qualified()
+    _artifact(path, gate_qualified=not live, adapter=not live)
+
+
+def _verdict(stdout: str, name: str) -> str:
+    """The pre-flight's verdict for the listed artifact whose path ends in `name`.
+
+    Asserting `"STALE" in stdout and name in stdout` passes when the two belong to DIFFERENT lines,
+    which is exactly what happens when a flip swaps which fixture is stale: the assertion outlives
+    the swap and stops testing anything. The verdict is read off the artifact's own line instead.
+    """
+    for line in stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1].endswith("/" + name):
+            return fields[0]
+    raise AssertionError(f"the pre-flight never listed {name}:\n{stdout}")
 
 
 def _run(out_dir: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
@@ -102,11 +203,16 @@ def test_an_existing_artifact_stops_the_script_instead_of_being_skipped(tmp_path
     It refuses rather than choosing, because whether an artifact on disk is a measurement to keep or
     a stale file to replace is not decidable from the file system — it is the operator's call, and
     the whole failure mode is that the old script answered it silently and always the same way.
+
+    The artifact here AGREES with the running adapter, which is the harder half of the property: the
+    default mode refuses on existence alone, not on staleness, so a run that found only agreeing
+    artifacts still stops and still makes the operator say which of the three exits they want.
     """
     out = _captures(tmp_path)
-    _artifact(out / "EST_DRIFT-A1.json", gate_qualified=False, adapter=False)
+    _artifact_agreeing_with_the_adapter(out / "EST_DRIFT-A1.json")
     done = _run(out, *_NEVER_ENOUGH_GPU)
     assert done.returncode == 5, done.stdout + done.stderr
+    assert _verdict(done.stdout, "EST_DRIFT-A1.json") == "agrees", done.stdout
     assert "REFUSING TO SKIP" in done.stderr
     for named_exit in ("--reuse-existing", "--remeasure", "--out-dir"):
         assert named_exit in done.stderr, "the refusal must name the ways out, not just refuse"
@@ -119,7 +225,7 @@ def test_the_refusal_happens_before_the_gpu_wait(tmp_path):
     measurement. A refusal discovered after that wait is a refusal discovered at the worst possible
     moment, so the pre-flight runs first — fail closed, fail fast, fail cheap."""
     out = _captures(tmp_path)
-    _artifact(out / "EST_DRIFT-A1.json", gate_qualified=False, adapter=False)
+    _artifact_agreeing_with_the_adapter(out / "EST_DRIFT-A1.json")
     done = _run(out, *_NEVER_ENOUGH_GPU)
     assert done.returncode == 5
     assert "waiting for GPU" not in done.stdout
@@ -131,12 +237,20 @@ def test_the_skip_can_be_forced_and_then_says_it_did_not_measure(tmp_path):
 
     The wording matters as much as the flag: `SKIP <stem> (measured)` claimed a measurement that did
     not happen, which is how a stale artifact travels into a pool without anyone deciding it should.
+
+    WHAT MOVED ON 2026-08-27. This fixture used to be spelled `gate_qualified=False`, which agreed
+    with the adapter only for as long as `GATE_QUALIFIED` was False. After the flip that same
+    literal is an artifact from the previous instrument, the pre-flight correctly calls it STALE and
+    `--reuse-existing` correctly refuses — the script was right and the fixture was stale. So the
+    artifact is now built from the live flag: the override under test is "reuse what AGREES", and
+    forcing the skip past a disagreement is a different property, tested (as a refusal) below.
     """
     out = _captures(tmp_path)
-    _artifact(out / "EST_DRIFT-A1.json", gate_qualified=False, adapter=False)
+    _artifact_agreeing_with_the_adapter(out / "EST_DRIFT-A1.json")
     done = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
     combined = done.stdout + done.stderr
     assert "REFUSING" not in combined, combined
+    assert _verdict(done.stdout, "EST_DRIFT-A1.json") == "agrees", done.stdout
     assert "--reuse-existing: the artifacts above are kept" in done.stdout
     assert "NOT measured by this run" in _text(), (
         "the per-step message must not claim the skipped artifact was measured"
@@ -153,31 +267,130 @@ def test_an_artifact_whose_gate_qualified_disagrees_with_the_adapter_is_named(tm
     it keys on the segmenter contract, the resolution, the object class, the propagator spec and the
     IoU threshold, and the gate flag is in none of them.
 
-    The direction exercised here is an artifact claiming True against a module reading False, which
-    is the one available while `GATE_QUALIFIED` is False. The direction that will fire after the
-    flip is the mirror of it — the module True, the artifacts on disk False — and is the same
-    comparison in the same expression.
+    The direction that fires TODAY is the mirror of the one this test was written with: it used to
+    build A2 as `True` against a module reading False, and after the 2026-08-27 flip it is the
+    module reading True and the file on disk saying False. Same comparison, same expression, sides
+    swapped. That is why the fixtures are the live flag and its negation rather than literals,
+    and why the verdict is read off each artifact's OWN line. The old form (`"STALE" in stdout and
+    "EST_DRIFT-A2.json" in stdout`) still passed after the flip with the two roles exchanged, which
+    is a test that survives the event it was watching for without noticing it.
     """
     out = _captures(tmp_path)
-    _artifact(out / "EST_DRIFT-A1.json", gate_qualified=False, adapter=False)
-    _artifact(out / "EST_DRIFT-A2.json", gate_qualified=True, adapter=True)
+    _artifact_agreeing_with_the_adapter(out / "EST_DRIFT-A1.json")
+    _artifact_from_before_the_flip(out / "EST_DRIFT-A2.json")
     done = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
     assert done.returncode == 5, done.stdout + done.stderr
-    assert "STALE" in done.stdout and "EST_DRIFT-A2.json" in done.stdout
-    assert "agrees" in done.stdout and "EST_DRIFT-A1.json" in done.stdout, (
+    assert _verdict(done.stdout, "EST_DRIFT-A2.json") == "STALE", done.stdout
+    assert _verdict(done.stdout, "EST_DRIFT-A1.json") == "agrees", (
         "an artifact that DOES agree must be reported as agreeing, or the check is just a refusal"
     )
     assert "REFUSING" in done.stderr
     assert "--remeasure" in done.stderr and "--out-dir" in done.stderr
 
 
+def test_artifacts_from_before_the_flip_are_stale_and_cannot_be_reused(tmp_path):
+    """THE SITUATION THE WHOLE PRE-FLIGHT WAS BUILT FOR, NOW THAT IT IS THE REAL ONE.
+
+    `GATE_QUALIFIED` flipped on 2026-08-27 and every EST_DRIFT artifact under
+    `runs/pr08-est-drift/v17`, plus the `ARM_DIVERGENCE.json` beside them, was written on the other
+    side of that flip. This is the state of the world the header predicted: an
+    operator re-runs this script precisely BECAUSE the flag moved, and the old script would have
+    skipped all thirteen in about a second and kept exactly the files the re-run existed to replace.
+    So the property is pinned directly, across all three writers at once and in the mode where it
+    bites: a pre-flip set is STALE, `--reuse-existing` refuses it, nothing is measured, nothing on
+    disk is touched, and the refusal names the two exits that do produce post-flip artifacts.
+
+    It is written as the negation of the live flag rather than as a literal `false` so that it keeps
+    testing the flip rather than the date: the module's own comment lists what would take the flag
+    back to False, and on that day these same three files become the pre-flip set again with the
+    values exchanged.
+
+    Note what is NOT claimed here. That the flag moved says nothing about whether these artifacts'
+    numbers were right; STALE means "not written by the instrument running now", which is a
+    statement about provenance and about `pool_est_drift_arms._instrument_key` being unable to see
+    the difference — not a verdict on any measurement.
+    """
+    out = _captures(tmp_path)
+    pre_flip = not _live_gate_qualified()
+    _artifact_from_before_the_flip(out / "EST_DRIFT-A1.json")
+    (out / "ARM_DIVERGENCE.json").write_text(
+        json.dumps({"estimators": {"gate_qualified": pre_flip}})
+    )
+    _census(out / "CENSUS.json", pre_flip)
+    names = ("EST_DRIFT-A1.json", "ARM_DIVERGENCE.json", "CENSUS.json")
+    before = {name: (out / name).read_text() for name in names}
+
+    done = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
+    assert done.returncode == 5, done.stdout + done.stderr
+    for name in before:
+        assert _verdict(done.stdout, name) == "STALE", done.stdout
+    assert "REFUSING" in done.stderr
+    for named_exit in ("--remeasure", "--out-dir"):
+        assert named_exit in done.stderr, (
+            "a refusal that names no way forward is where a flip stalls"
+        )
+    assert "Nothing was measured" in done.stderr
+    assert not (out / "POOLED.json").exists(), "a refusal must not leave a pool behind"
+    assert {name: (out / name).read_text() for name in names} == before, (
+        "the refusal must leave the pre-flip artifacts exactly as it found them: a refusal to "
+        "reuse them, not a decision to discard them"
+    )
+
+    # The default mode refuses too, and SAYS a disagreement is what it found: on the day of a flip
+    # "these files exist" and "these files are from the previous instrument" are different warnings,
+    # and only the second explains why the operator is standing here.
+    default = _run(out, *_NEVER_ENOUGH_GPU)
+    assert default.returncode == 5, default.stdout + default.stderr
+    assert "REFUSING TO SKIP" in default.stderr
+    assert "DISAGREES" in default.stderr, default.stderr
+
+    # And the way forward is a re-measurement, not a reuse: --remeasure gets past the pre-flight
+    # (and then dies at the GPU wait, which is what _NEVER_ENOUGH_GPU is for).
+    forward = _run(out, "--remeasure", *_NEVER_ENOUGH_GPU)
+    assert "MEASURED AGAIN" in forward.stdout, forward.stdout + forward.stderr
+    assert forward.returncode == 4, forward.stdout + forward.stderr
+
+
+def test_an_artifact_that_came_out_not_qualified_is_not_reusable_once_the_module_claims_it_is(
+    tmp_path,
+):
+    """The OTHER half of the STALE rule, and the half that only exists after a flip.
+
+    An artifact records two different things: the adapter's flag when the file was written, and
+    whether that measurement itself came out gate-qualified. They can differ — a run can be driven
+    by a qualified adapter and still write `gate_qualified: false` for reasons of its own — so the
+    pre-flight reports both and treats the mismatch as stale in ONE direction: the module now claims
+    qualification and the file on disk says it does not have it. Reusing that file would carry a
+    not-qualified measurement into a pool assembled under a flag that says otherwise.
+
+    The expectation is deliberately asymmetric, because the rule is. While the module reads False, a
+    `gate_qualified: false` artifact is not in tension with anything and is a perfectly ordinary
+    measurement; it is the module's True that turns the same file into a contradiction. Written this
+    way the test states the asymmetry instead of hiding it behind a literal.
+    """
+    out = _captures(tmp_path)
+    live = _live_gate_qualified()
+    _artifact(out / "EST_DRIFT-A1.json", gate_qualified=False, adapter=live)
+    done = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
+    expected = "STALE" if live else "agrees"
+    assert _verdict(done.stdout, "EST_DRIFT-A1.json") == expected, done.stdout
+    assert (done.returncode == 5) is live, done.stdout + done.stderr
+
+
 def test_the_pre_flight_reports_the_adapters_flag_even_when_nothing_is_stale(tmp_path):
     """The comparison is printed on every run, not only on the failing one. It is the fact that
-    decides between reusing and re-measuring, and it is invisible from the file names."""
+    decides between reusing and re-measuring, and it is invisible from the file names.
+
+    The fixture has to be the agreeing one for the test to be about what its name says. Pinned to
+    `False` it kept passing after the flip while quietly becoming a second copy of the STALE case,
+    so the run really is checked for having no disagreement in it.
+    """
     out = _captures(tmp_path)
-    _artifact(out / "EST_DRIFT-A1.json", gate_qualified=False, adapter=False)
+    _artifact_agreeing_with_the_adapter(out / "EST_DRIFT-A1.json")
     done = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
     assert "estimators.apple_sam2.GATE_QUALIFIED is" in done.stdout
+    assert "STALE" not in done.stdout and "UNCHECKABLE" not in done.stdout, done.stdout
+    assert done.returncode != 5, done.stdout + done.stderr
     assert "16 artifacts expected" in done.stdout, (
         "every artifact the script writes must be pre-flighted, including ARM_DIVERGENCE, POOLED "
         "and the V18 census — a partial list is a silent skip with extra steps"
@@ -253,38 +466,77 @@ def test_every_step_and_every_summary_reads_the_chosen_directory():
 # `--reuse-existing` would have carried a pre-flip census forward in silence, which is the whole
 # defect this pre-flight was written to close.
 #
-# The direction exercised is an artifact claiming True against a module reading False, because that
-# is the one reachable while `GATE_QUALIFIED` is False; the post-flip direction is the same
-# expression with the operands swapped.
+# Since the 2026-08-27 flip both directions are reachable, so both are exercised for each writer:
+# an artifact recording the live flag must come back `agrees`, and one recording its negation must
+# come back `STALE`. One direction alone is not enough: a probe that reads none of these keys
+# refuses too, as `UNCHECKABLE`, so a lone "it refused" assertion cannot tell "compared and
+# disagreed" from "never found a flag to compare", and the second is the bug.
+
+
+def _census(path: pathlib.Path, flag: bool) -> None:
+    """A V18 census as `census_operating_point_episode` writes one: no top-level `gate_qualified`,
+    the adapter's flag under `estimator_stats` and again in the `estimator` summary block."""
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "wam.operating_point_census/1",
+                "estimator": {"gate_qualified": flag},
+                "estimator_stats": {"gate_qualified": flag},
+            }
+        )
+    )
 
 
 def test_a_census_shaped_artifact_is_compared_at_the_key_the_census_actually_writes(tmp_path):
     """The V18 census records no top-level `gate_qualified` at all, so it is invisible to a probe
-    that reads only `estimator_stats.adapter` plus the artifact's own outcome."""
+    that reads only `estimator_stats.adapter` plus the artifact's own outcome.
+
+    BOTH DIRECTIONS ARE EXERCISED, and that is what carries the intent past the flip. The verdict is
+    read off the census's own line, so a probe blind to these keys fails here: it would report
+    `UNCHECKABLE` for both censuses, and `UNCHECKABLE` is a refusal too — asserting only "exit 5"
+    would let a probe that never found the flag pass as though it had compared it. Only a probe that
+    reads `estimator_stats.gate_qualified` / `estimator.gate_qualified` can say `agrees` for one and
+    `STALE` for the other. The stale one is now the census a pre-flip run left behind, which is the
+    file this check was written for: it is the OTHER precondition on `GATE_QUALIFIED`, and carrying
+    it silently across the flip is the defect the pre-flight exists to close.
+    """
     out = _captures(tmp_path)
-    (out / "CENSUS.json").write_text(
-        json.dumps(
-            {
-                "schema": "wam.operating_point_census/1",
-                "estimator": {"gate_qualified": True},
-                "estimator_stats": {"gate_qualified": True},
-            }
-        )
-    )
+
+    _census(out / "CENSUS.json", _live_gate_qualified())
+    agreeing = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
+    assert _verdict(agreeing.stdout, "CENSUS.json") == "agrees", agreeing.stdout
+    assert "REFUSING" not in agreeing.stderr, agreeing.stderr
+
+    _census(out / "CENSUS.json", not _live_gate_qualified())
     done = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
     assert done.returncode == 5, done.stdout + done.stderr
-    assert "STALE" in done.stdout and "CENSUS.json" in done.stdout
+    assert _verdict(done.stdout, "CENSUS.json") == "STALE", done.stdout
     assert "REFUSING" in done.stderr
 
 
 def test_an_arm_divergence_shaped_artifact_is_compared_at_its_own_key(tmp_path):
     """`measure_arm_divergence` writes the adapter block under `estimators`, and this artifact is
-    one of the two the pool reads directly."""
+    one of the two the pool reads directly.
+
+    Same two directions as the census, for the same reason: a probe that does not read `estimators`
+    reports `UNCHECKABLE` either way and would pass a one-directional exit-5 assertion while having
+    compared nothing. The flags follow the live one, so the STALE case stays "written by the other
+    instrument" whichever way the flag stands.
+    """
     out = _captures(tmp_path)
-    (out / "ARM_DIVERGENCE.json").write_text(json.dumps({"estimators": {"gate_qualified": True}}))
+    divergence = out / "ARM_DIVERGENCE.json"
+
+    divergence.write_text(json.dumps({"estimators": {"gate_qualified": _live_gate_qualified()}}))
+    agreeing = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
+    assert _verdict(agreeing.stdout, "ARM_DIVERGENCE.json") == "agrees", agreeing.stdout
+    assert "REFUSING" not in agreeing.stderr, agreeing.stderr
+
+    divergence.write_text(
+        json.dumps({"estimators": {"gate_qualified": not _live_gate_qualified()}})
+    )
     done = _run(out, "--reuse-existing", *_NEVER_ENOUGH_GPU)
     assert done.returncode == 5, done.stdout + done.stderr
-    assert "STALE" in done.stdout and "ARM_DIVERGENCE.json" in done.stdout
+    assert _verdict(done.stdout, "ARM_DIVERGENCE.json") == "STALE", done.stdout
 
 
 def test_an_artifact_recording_no_gate_flag_is_not_reported_as_agreeing(tmp_path):

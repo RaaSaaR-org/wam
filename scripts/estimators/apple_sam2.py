@@ -899,8 +899,9 @@ GATE_QUALIFICATION_DISCHARGED: tuple[str, ...] = (
 #: :data:`GATE_QUALIFICATION_DISCHARGED` now carries SEVEN conditions closed by evidence rather
 #: than by deletion — which is progress and is not permission.
 #:
-#: **WHAT IS STILL OPEN IS THE SECOND PRECONDITION, and it was never a blocker.** Read the
-#: propagation discharge before reading this flag: it retires as a BOUND, not as an absence, and it
+#: **THE SECOND PRECONDITION WAS DECIDED ON 2026-08-27 AND THIS FLAG IS NOW ``True``.** It was
+#: never a blocker; it was a person's call, and the person made it. Read the propagation discharge
+#: before reading this flag: it retires as a BOUND, not as an absence, and it
 #: carries five disclosures in its own text — that forty clean episodes of 402 still permit ~thirty
 #: containing an event; that Arm B has no ground truth and measures agreement rather than
 #: correctness; that Arm A is a rasterised proxy mesh; that the positive control only ever fired on
@@ -913,29 +914,57 @@ GATE_QUALIFICATION_DISCHARGED: tuple[str, ...] = (
 #: binds hardest now that it has none: the tuple reached zero on 2026-08-27 and this flag did not
 #: move in that commit, which is the behaviour it was written to require.
 #:
-#: It stays ``False`` until somebody decides, on the record, what to do with the residue the two
-#: 2026-08-26 entries carry forward — in particular blocker 2's residue (i), a failure the
-#: discharged blocker predicted, occurring by a route it did not predict, on 92 frames.
-#: **T40_RULE_V18 registered a decision rule for that BEFORE its census ran, and the census reached
-#: outcome C (CONTAINED)**: over all 509 frames of ``episode_000094``, on both decode trees, 31
-#: masks were refused as the wrong object, all inside the documented f101-f155 run, and ZERO
-#: non-refused mask exceeded 3x the episode's median area — the largest is 1.31x against the
-#: audit's plate masks at ~4.3x. Two separate runs on one workstation differ on 0 of 509 frames and
-#: the two decodes are bit-identical on all 509.
+#: **WHAT DECIDED IT.** It stayed ``False`` until somebody decided, on the record, what to do with
+#: the residue the two 2026-08-26 entries carry forward — in particular blocker 2's residue (i), a
+#: failure the discharged blocker predicted, occurring by a route it did not predict, on 92 frames.
+#: ``T40_RULE_V18`` registered the decision rule for that BEFORE its census ran; the census reached
+#: **outcome C (CONTAINED)**; and the **project owner decided outcome C on 2026-08-27**, in
+#: `PR-08-RESULT-2026-08-27-residue-i-is-contained-and-the-flag-flips.md`, which carries V18 §3
+#: outcome C's four required disclosures in its own text. The measurement behind it: over all 509
+#: frames of ``episode_000094``, on both decode trees, 31 masks were refused as the wrong object,
+#: all inside the documented f101-f155 run (span [109, 149]), and ZERO non-refused mask exceeded 3x
+#: the episode's median area — 478 kept per decode, median 5650.5 px, largest 7383 px at f82 =
+#: 1.3066x, against the audit's plate masks at ~4.3x. The two decodes disagree on nothing:
+#: ``jaccard`` 1.0, both refused-in-one-only lists empty, and ``n_no_centroid_that_are_not_refusals``
+#: is 0 on both, so every centroid-less frame in that episode is a refusal rather than a detector
+#: miss or an empty box.
 #:
-#: **AND ONE THING INSIDE THAT EVIDENCE IS UNEXPLAINED, WHICH IS WHY THIS IS STILL A PERSON'S
-#: CALL.** ``runs/pr08-geom-tol/shards/shard-7.json`` records the same episode as
-#: ``n_frames_with_centroid: 473``; the census measures 478. The five-frame gap is not the
-#: largest-connected-component floor — every centroid-less frame here is a refusal — and it runs
-#: against this module's own claim that V10's only possible effect on a frame is a refusal, since
-#: the shards ran a pre-V10 adapter and should refuse fewer rather than five more. The remaining
-#: candidate is a cross-machine difference of the class already established for the robot prompt.
-#: **That is a hypothesis, not a measurement.** Full reading:
-#: docs/preregistration/PR-08-RESULT-2026-08-27-the-rate-is-bounded-and-the-per-frame-arm-is-the-one-that-broke.md.
+#: **THE FLIP DOES NOT ERASE WHAT THE DETERMINATION COULD NOT CLOSE, AND THE FLAG BEING ``True``
+#: IS NOT A CLAIM THAT IT DID.** Three things stand, and they stand in this module because a reader
+#: who trusts this flag should meet them here rather than in a file they may not open:
+#:
+#: (a) **Five frames are still unexplained.** ``runs/pr08-geom-tol/shards/shard-7.json`` records the
+#:     same episode as ``n_frames_with_centroid: 473``; the census measures 478. The cross-machine
+#:     DECODE hypothesis is **refuted** — ``episode_000094`` decodes bit-identically through cv2,
+#:     imageio/FFMPEG and pyav over both corpus trees, 509/509 on all four pairings — so whatever
+#:     the five are, they are not a codec. Three of them are pinned (f101, f108, f124), the fourth
+#:     is one of {f152, f153, f154} and the fifth is **unrecoverable from any artifact in this
+#:     repository**: two rival 4-subsets tie with the accepted hypothesis at 0.165650 px on max|D|.
+#: (b) **NOBODY HAS LOOKED.** Blocker 1 is discharged and this determination did not touch it. The
+#:     area test is a proxy for a wrong-object mask, not an observation of one, and a wrong-object
+#:     mask of apple-plausible area passes every test in V18 and in the determination.
+#: (c) **It is one episode of 402 and bounds nothing corpus-wide.** The 16-shard corpus pass
+#:     recorded no per-frame centroid-present flag, so there is nothing corpus-wide to census
+#:     against. Corpus-wide decode bit-identity is likewise NOT MEASURED — one episode of 402.
+#:
+#: **AND THIS FLAG LICENSES NO CLIP.** It is one input to ``gate_qualified`` and nothing else:
+#: ``measure_geom_tol.sam2_method`` computes ``gate_qualified = declared_gate and bool(checkpoints)
+#: and contract is not None``, so this flag being ``True`` qualifies an artifact only when the
+#: weights and the contract are there too. ``T40_RULE_V1`` §1 is untouched, PR-08 §8 items 3 and 4
+#: are both still open, and **the existing GEOM_TOL = 0.478579… does not become committable**: its
+#: sixteen shards baked ``gate_qualified: false`` in at measurement time and disagree with the
+#: committed contract on ``mask_validity_reference_max_frame_fraction``. The corpus pass must be run
+#: again at HEAD.
+#:
+#: **WHAT WOULD TAKE IT BACK.** A look finding a wrong-object mask of apple-plausible area among the
+#: 478 kept frames; a per-frame flag from the re-measured pass showing refusals outside ~f101-f155
+#: elsewhere, or any non-refused mask over 3x its episode's median; or an explanation of the five
+#: frames that implicates the filter rather than the machine. Any of those reopens residue (i), and
+#: this flag goes back to ``False``.
 #:
 #: ``measure_est_drift`` reads this flag with a default of
 #: False and stamps ``estimator_not_gate_qualified``; the artifact is still written, and exits 3.
-GATE_QUALIFIED = False
+GATE_QUALIFIED = True
 
 
 # -- the pins are checked at import, not at first load ----------------------------------------------

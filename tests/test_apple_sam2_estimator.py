@@ -15,6 +15,7 @@ a green test suite make a real request.
 from __future__ import annotations
 
 import importlib
+import json
 import pathlib
 import re
 import sys
@@ -26,6 +27,9 @@ import torch
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts"))
+# ``src`` too, for the fake Isaac binding the gate-flag branch test captures frames from: the
+# downstream half of that test is what ``measure_est_drift`` STAMPS, and stamping happens in main().
+sys.path.insert(0, str(_REPO / "src"))
 
 MODULE = "estimators.apple_sam2"
 _ADAPTER_SOURCE = _REPO / "scripts" / "estimators" / "apple_sam2.py"
@@ -997,7 +1001,15 @@ def test_a_non_image_array_is_refused(loaded):
         module.segment(np.zeros(STUB_FRAME_HW, dtype=np.uint8))
 
 
-# -- gate qualification is opt-in, and this module does not opt in --------------------------------------------
+# -- gate qualification is opt-in, and on 2026-08-27 this module opted in ---------------------------------------
+#
+# THE FLAG MOVED, AND THESE TESTS ARE ABOUT WHAT MOVED IT. `GATE_QUALIFIED` was `False` from the day
+# it was written until 2026-08-27, and every test below asserted that value as shorthand for the
+# thing actually worth defending: that nobody flips it because it is in the way. The value is no
+# longer that shorthand, so the shorthand is gone and the grounds are asserted directly — the owner
+# determination, at the path the module names, with the three things it could NOT close still stated
+# beside the flag. A future session that flips this flag back and forth has none of that, and every
+# one of these tests fails on it.
 
 
 def on_the_record(module) -> str:
@@ -1015,25 +1027,120 @@ def on_the_record(module) -> str:
     )
 
 
-def test_it_does_not_claim_to_be_a_gate_estimator_and_says_why(loaded):
+#: The determination that flipped :data:`GATE_QUALIFIED` on 2026-08-27, by file name. Restated here
+#: rather than read out of the module for the same reason ``CONTRACT_PINS`` is: a test that takes the
+#: citation from the thing it is checking cannot notice the citation changing. It is also the one
+#: artifact a casual flip would not have to produce, which is why the tests below open the FILE and
+#: not only the sentence that names it.
+DETERMINATION = "PR-08-RESULT-2026-08-27-residue-i-is-contained-and-the-flag-flips.md"
+
+#: What that determination could NOT close, in the module's own words, in the module's own text next
+#: to the flag: (a) five frames of the 473-vs-478 gap are unexplained AND the decode hypothesis for
+#: them is refuted, (b) nobody has looked — blocker 1 is untouched and the area test is a proxy for a
+#: wrong-object mask rather than an observation of one, (c) it is one episode of 402 and bounds
+#: nothing corpus-wide. The flip does not erase these. A flag comment that has lost one of them tells
+#: its reader less than the determination told the owner, which is how a documented decision decays
+#: into a green flag.
+FLIP_DISCLOSURES: tuple[str, ...] = (
+    "Five frames are still unexplained",
+    "DECODE hypothesis is **refuted**",
+    "NOBODY HAS LOOKED",
+    "one episode of 402 and bounds nothing corpus-wide",
+)
+
+
+def flag_comment(module) -> str:
+    """The comment block committed immediately above ``GATE_QUALIFIED``, as flowing text.
+
+    The ``#:`` markers are stripped and the lines joined with spaces, so a sentence that wraps in the
+    source is still one sentence to a test. Read out of the FILE rather than off an attribute
+    because the grounds of this flag are prose: they exist only in the source, and the flip is
+    legitimate exactly to the extent that they are still there and still say what they said.
+    """
+    lines = pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
+    at = [n for n, line in enumerate(lines) if line.startswith("GATE_QUALIFIED = ")]
+    assert len(at) == 1, "exactly one module-level assignment to GATE_QUALIFIED"
+    end = at[0]
+    start = end
+    while start > 0 and lines[start - 1].startswith("#:"):
+        start -= 1
+    assert start < end, "GATE_QUALIFIED must keep the comment block that states its grounds"
+    return " ".join(line[2:].strip() for line in lines[start:end])
+
+
+def the_flip_is_on_the_record(module) -> str:
+    """Everything that makes the 2026-08-27 flip a determination rather than a convenience.
+
+    Four things, and a session that flipped the flag because it was in the way would have none of
+    them: the flag is ``True``; it CITES a determination by name and that determination EXISTS on
+    disk, carrying `T40_RULE_V18` §3 outcome C's four required disclosures in its own text; the
+    module still states the three things the determination could not close; and nothing was deleted
+    on the way — all seven discharged conditions are still readable.
+
+    Returns the flag's comment block, so a caller can go on to check what those grounds must NOT
+    say — this is the helper for "the flip is accounted for", not for "the flip was correct", and
+    no test may read it as the second.
+    """
+    assert module.GATE_QUALIFIED is True
+    comment = flag_comment(module)
+    assert DETERMINATION in comment, "the flag must name what flipped it, in the module"
+    determination = _REPO / "docs" / "preregistration" / DETERMINATION
+    assert determination.is_file(), f"{DETERMINATION} is cited by the module and is not on disk"
+    text = determination.read_text(encoding="utf-8")
+    assert "outcome C (CONTAINED)" in text
+    assert "Decided by the project owner on" in text, "the flip is the owner's call, not a session's"
+    for item in ("Required item 1", "Required item 2", "Required item 3", "Required item 4"):
+        assert item in text, f"V18 §3 outcome C requires {item} in the determination's own text"
+    for disclosure in FLIP_DISCLOSURES:
+        assert disclosure in comment, f"the flag stopped stating: {disclosure}"
+    assert "WHAT WOULD TAKE IT BACK" in comment, "a claim whose grounds are written down is takeable"
+    assert len(module.GATE_QUALIFICATION_DISCHARGED) == 7, "nothing may be deleted on the way"
+    return comment
+
+
+def test_it_claims_gate_qualification_only_on_the_grounds_it_names(loaded, monkeypatch):
+    """It claimed not to be a gate estimator until 2026-08-27 and now claims to be one. The half of
+    this test's name that never moved is the half that matters: **AND SAYS WHY.**
+
+    "Why" can no longer be answered by the value, so it is answered by the grounds — a project
+    owner's determination under `T40_RULE_V18` §3 outcome C, on disk at the path the module names,
+    with the three things it could NOT close still stated beside the flag. Those are exactly what a
+    session flipping this flag because it was in the way would not have, which is the failure this
+    test was written for and is still the failure it guards.
+
+    And the flag on its own qualifies NOTHING. ``measure_geom_tol.sam2_method`` conjoins it with the
+    declared checkpoints and the declared contract, so the last assertions here take the real
+    adapter — flag ``True`` — and show qualification still being withheld when either is missing.
+    """
     module, _ = loaded
-    assert module.GATE_QUALIFIED is False
+    comment = the_flip_is_on_the_record(module)
     record = on_the_record(module)
     assert "coverage" in record
-    # Both are still readable in full, and BOTH ARE NOW DISCHARGED — the first on 2026-08-26 by the
+    # Both are still readable in full, and BOTH ARE DISCHARGED — the first on 2026-08-26 by the
     # human look it named, the second on 2026-08-27 by T40_RULE_V14 (its Isaac/MuJoCo half, an
     # owner decision) and T40_RULE_V17 outcome N (its corpus half, a measurement whose criterion
     # was registered before the first capture was rendered).
     assert "NOBODY HAS LOOKED AT A MASK" in record
     assert "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION" in record
-    # THE TUPLE IS EMPTY AND THE FLAG IS STILL FALSE, which is the whole point of this test now.
-    # An empty blocker tuple is one of GATE_QUALIFIED's two preconditions and not the flag; the
-    # module has to keep saying what the other one is, or "why" becomes unanswerable from the code.
+    # The tuple is empty and the flag is True, and the module still has to say that the first did
+    # not cause the second: an empty blocker tuple is ONE of GATE_QUALIFIED's two preconditions,
+    # and the other one is the determination named above. Drop that and "why" becomes unanswerable
+    # from the code, which is the state this test exists to prevent in either direction.
     assert module.GATE_QUALIFICATION_BLOCKERS == ()
     source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
     assert "EMPTY IS NOT PERMISSION" in source
     assert "TWO preconditions" in source
-    assert "residue" in source
+    assert "residue" in comment
+    # THE FLAG IS ONE INPUT OF THREE, exercised rather than quoted: the same module, flag unchanged,
+    # is refused qualification the moment it stops declaring the segmenter it ran.
+    import measure_geom_tol as mgt
+
+    monkeypatch.setattr(mgt, "_import_sam2_adapter", lambda: module)
+    assert mgt.sam2_method(1).gate_qualified is True
+    monkeypatch.setattr(module, "SEGMENTER_CONTRACT", None)
+    withheld = mgt.sam2_method(1)
+    assert withheld.gate_qualified is False, "the flag alone may not qualify an artifact"
+    assert "SEGMENTER_CONTRACT" in withheld.params["gate_qualification_withheld_reason"]
 
 
 def test_the_stale_never_executed_blocker_is_withdrawn_by_evidence_and_not_by_deletion(loaded):
@@ -1084,21 +1191,122 @@ def test_the_pilot_job_the_withdrawal_rests_on_is_labelled_as_an_untracked_claim
     assert "0.35" in blocker, "and it must say the pilot ran at the superseded operating point"
 
 
-def test_measure_est_drift_reads_the_flag_as_false(loaded):
-    """The claim has to survive the harness that consumes it, not just the module that makes it."""
+#: A minimal estimator module, written per branch, whose only interesting property is what it says
+#: about ``GATE_QUALIFIED``. The red-channel mask is meaningless and deliberately so: every
+#: assertion the branches carry is about the DISQUALIFICATION, never about the number.
+_BRANCH_STUB = (
+    "import numpy as np\n"
+    "GATE_QUALIFIED = {flag}\n"
+    "ESTIMATOR_NAME = 'gate-flag-branch-stub'\n"
+    "ESTIMATOR_VERSION = '0'\n"
+    "\n"
+    "def segment(rgb):\n"
+    "    return np.asarray(rgb)[:, :, 0] > 0\n"
+    "\n"
+    "def estimate_depth(rgb):\n"
+    "    return np.zeros(np.asarray(rgb).shape[:2], dtype='float32')\n"
+)
+
+
+def _est_drift_branch(tmp_path, name: str, flag: str) -> tuple[int, list[str]]:
+    """Run the whole measure path over a fake capture with an estimator that declares ``flag``.
+
+    Returns the exit code and the artifact's ``gate_disqualified_reasons``, which is where the
+    stamp this test is about lands.
+    """
     import measure_est_drift as ed
 
-    estimators = ed.Estimators(loaded[0], MODULE)
-    assert estimators.gate_qualified is False
-    assert estimators.name == loaded[0].ESTIMATOR_NAME
-    assert estimators.version == loaded[0].ESTIMATOR_VERSION
+    from wam.robot.isaac_binding import FakeIsaacBinding
+
+    (tmp_path / f"{name}.py").write_text(_BRANCH_STUB.format(flag=flag), encoding="utf-8")
+    sys.path.insert(0, str(tmp_path))
+    capture = tmp_path / f"capture_{name}"
+    ed.capture_frames(
+        FakeIsaacBinding(cameras=("persp",), ground_truth=("depth", "segmentation")),
+        "persp",
+        4,
+        capture,
+        steps_per_frame=1,
+    )
+    out = tmp_path / f"{name}.json"
+    code = ed.main([
+        "measure", "--capture", str(capture), "--estimators", name,
+        "--object-class", "apple", "--min-coverage", "0.0", "--out", str(out),
+    ])
+    return code, json.loads(out.read_text(encoding="utf-8"))["gate_disqualified_reasons"]
+
+
+def test_measure_est_drift_reads_the_flag_off_the_module_on_both_branches(loaded, tmp_path):
+    """The claim has to survive the harness that consumes it, not just the module that makes it.
+
+    This asserted ``estimators.gate_qualified is False`` until 2026-08-27. The harness behaviour was
+    always the subject, so the harness behaviour is what is pinned now, on BOTH branches rather than
+    on the one the adapter currently takes: the flag is read OFF the module (never decided by the
+    harness, never defaulted to true by omission), the ``False`` branch stamps
+    ``estimator_not_gate_qualified`` into the artifact and exits 3, and the ``True`` branch stops
+    stamping it **without the run becoming gate-qualified** — every other disqualifier is untouched
+    by the flag, which is the shape of the mistake a flip is most likely to be read as making.
+
+    The ``is False`` this test used to open with also did a second job — it failed the moment
+    anybody moved the flag — and that job does not lapse just because the value moved once
+    legitimately. So the value the harness is asked to carry is first checked to be accounted for:
+    a named owner determination on disk, and the three things it could not close still stated in
+    the module. **A harness that faithfully reports an unaccounted-for flag is not what this test
+    is willing to pass.**
+    """
+    import measure_est_drift as ed
+
+    module, _ = loaded
+    the_flip_is_on_the_record(module)
+    estimators = ed.Estimators(module, MODULE)
+    # Read off the module, so the two move together: a harness that hard-coded either branch, or an
+    # adapter whose flag and whose consumer disagreed, fails here.
+    assert estimators.gate_qualified is module.GATE_QUALIFIED is True
+    assert estimators.name == module.ESTIMATOR_NAME
+    assert estimators.version == module.ESTIMATOR_VERSION
+    # The opt-in survives the flip: a module that says nothing is still not a gate. This is the
+    # property the flip is most easily mistaken for having relaxed, and it has not.
+    silent = types.SimpleNamespace(segment=lambda rgb: rgb, estimate_depth=lambda rgb: rgb)
+    assert ed.Estimators(silent, "silent").gate_qualified is False
+    # And the stamp itself, end to end, on both branches.
+    off_code, off_reasons = _est_drift_branch(tmp_path, "gate_flag_off_stub", "False")
+    on_code, on_reasons = _est_drift_branch(tmp_path, "gate_flag_on_stub", "True")
+    assert "estimator_not_gate_qualified" in off_reasons
+    assert off_code == 3
+    assert "estimator_not_gate_qualified" not in on_reasons
+    assert on_code == 3, "the flag is not a pass: this run is disqualified for other reasons"
+    assert "capture_is_not_from_isaac_sim" in on_reasons
 
 
 def test_stats_carries_what_the_artifact_would_need(loaded):
+    """Everything a reader of a produced artifact needs in order to re-derive the claim, INCLUDING
+    the claim and what it survived.
+
+    ``gate_qualified`` was pinned to ``False`` here until 2026-08-27. Pinning a literal was always
+    the weaker guard: what the artifact owes its reader is that it carries the module's own answer,
+    the remainder AND the shrinking. An artifact showing an empty blocker tuple and no discharged
+    list would read as "nothing was ever wrong with this adapter", which is the opposite of what an
+    empty tuple here means — seven accusations, seven discharges, all still quotable.
+
+    But an artifact carrying ``gate_qualified: true`` is a claim made to somebody who will never
+    read this module, so the claim is only allowed here while it is accounted for: the flip's
+    grounds are checked before the record is allowed to repeat it. That is the half of the old
+    ``is False`` that was never about stats() — it failed on ANY movement of the flag — and it is
+    kept, because a stats record is exactly where an unaccounted-for flip would travel.
+    """
     module, _ = loaded
+    the_flip_is_on_the_record(module)
     module.segment(_frame())
     record = module.stats()
-    assert record["gate_qualified"] is False
+    assert record["gate_qualified"] is module.GATE_QUALIFIED is True
+    # The remainder...
+    assert record["gate_qualification_blockers"] == list(module.GATE_QUALIFICATION_BLOCKERS) == []
+    # ...and the shrinking, in full, so the artifact answers "what was this ever accused of".
+    assert record["gate_qualification_discharged"] == list(module.GATE_QUALIFICATION_DISCHARGED)
+    assert len(record["gate_qualification_discharged"]) == 7
+    for wording in ("NOBODY HAS LOOKED AT A MASK",
+                    "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION"):
+        assert any(wording in d for d in record["gate_qualification_discharged"]), wording
     assert record["n_segment_calls"] == 1
     assert record["depth_checkpoint"] == module.DEPTH_MODEL_CHECKPOINT
     assert record["depth_revision"] == module.DEPTH_MODEL_REVISION
@@ -1644,13 +1852,15 @@ def test_recording_the_scores_did_not_qualify_the_gate(loaded):
     """Producing evidence and accepting it are two different acts.
 
     Until 2026-08-26 this asserted the blocker was still OPEN, which was the right assertion while
-    nobody had read the numbers. On that date a person did, and the entry moved. **The act the test
-    exists to forbid is unchanged and still forbidden**: recording a distribution into an artifact
-    may not by itself qualify the gate. So what is checked now is that the discharge rests on a
-    READ of the full pass and on the human look — named, dated and cited — rather than on the
-    module having emitted the numbers, and that ``GATE_QUALIFIED`` did not move with it."""
+    nobody had read the numbers. On that date a person did, and the entry moved; on 2026-08-27 the
+    flag moved too. **The act the test exists to forbid is unchanged and still forbidden**:
+    recording a distribution into an artifact may not by itself qualify the gate, and it did not.
+    So what is checked is that the discharge rests on a READ of the full pass and on the human look
+    — named, dated and cited — rather than on the module having emitted the numbers, and that the
+    flag's own account of what moved it is an owner determination and NOT this entry's subject.
+    ``GATE_QUALIFIED is False`` stood in this test as shorthand for that attribution; the
+    attribution is now asserted directly, because the shorthand has run out."""
     module, _ = loaded
-    assert module.GATE_QUALIFIED is False
     entry = next(
         d for d in module.GATE_QUALIFICATION_DISCHARGED
         if "detection-score distribution and retry counts" in d
@@ -1658,6 +1868,15 @@ def test_recording_the_scores_did_not_qualify_the_gate(loaded):
     assert "n_frames_retry_fired = 0" in entry, "the discharge must quote the number that closed it"
     assert "SAME EVIDENCE AS BLOCKER 1" in entry, "and it must rest on the human look, not on itself"
     assert "runs/pr08-geom-tol/pr08_geom_tol.json" in entry, "and it must cite the artifact read"
+    # The entry does not reach for the flag, and the flag does not reach for the entry: what the
+    # module credits the flip to is a registered decision rule and a person's call under it.
+    assert "GATE_QUALIFIED" not in entry, "recording evidence may not narrate the flag"
+    comment = the_flip_is_on_the_record(module)
+    assert "T40_RULE_V18" in comment
+    assert "project owner decided outcome C" in comment
+    assert "detection-score" not in comment, (
+        "emitting a distribution is evidence; the flag may not rest on having emitted it"
+    )
 
 
 # -- PR-08 V6: the mask-validity filter --------------------------------------------------------------
@@ -2023,10 +2242,19 @@ def test_measure_geom_tol_differences_the_new_counters_as_this_runs_numbers(load
 
 def test_producing_the_fix_did_not_accept_it(loaded):
     """Blocker 1 is discharged by a person looking at the evidence and editing the tuple, not by an
-    adapter that has stopped producing the masks the evidence was about. Nothing here may flip it,
-    and blocker 3 — per-frame segmentation vs upstream's propagation — is untouched by any of it."""
+    adapter that has stopped producing the masks the evidence was about. That is still the forbidden
+    route, and the validity filter is still not allowed to be the ground of any discharge.
+
+    The flag flipped on 2026-08-27, so this test no longer reads ``GATE_QUALIFIED is False`` as its
+    proxy for "the filter did not buy this". It reads the flip's stated ground instead: a named
+    owner determination, which says in the module's own text that NOBODY HAS LOOKED and that
+    blocker 1 is untouched by it. A filter-shaped discharge would have neither."""
     module, _ = loaded
-    assert module.GATE_QUALIFIED is False
+    comment = the_flip_is_on_the_record(module)
+    assert DETERMINATION in comment
+    assert "NOBODY HAS LOOKED" in comment, (
+        "the flip may not absorb blocker 1: the module must still say the look has not happened"
+    )
     # The propagation entry was discharged on 2026-08-27, and the guard moves WITH it rather than
     # lapsing: what this test forbids is the validity filter being the ground of a discharge, and
     # that is checkable against the discharged text exactly as it was against the open one.
@@ -2523,9 +2751,14 @@ def test_v9s_robot_masker_still_gets_everything_it_refuses_to_run_without(loaded
 
 
 def test_v10_discharged_nothing(loaded):
-    """Producing a fix and accepting it are different acts, and V10 is UNSIGNED besides."""
+    """Producing a fix and accepting it are different acts, and V10 is UNSIGNED besides.
+
+    Still true after 2026-08-27, and the flag moving is the reason to say so more precisely rather
+    than less: V10 did not discharge a blocker, and it is not among the grounds the flag names for
+    having flipped. What flipped it is a decision rule registered blind (T40_RULE_V18) and an
+    owner's call under it — neither of which is V10, and neither of which V10 could become by being
+    merged."""
     module, _ = loaded
-    assert module.GATE_QUALIFIED is False
     # ``len(...) == 3`` stood here until 2026-08-26 and was the wrong guard: a count has to be
     # edited by every legitimate discharge, so it stops guarding the moment one happens. What V10
     # may not do is be the GROUND of a discharge, and that is what is checked — against the whole
@@ -2538,6 +2771,10 @@ def test_v10_discharged_nothing(loaded):
     assert not any(
         "DISCHARGED BY" in d and "reference" in d.lower() and "scope" in d.lower()
         for d in module.GATE_QUALIFICATION_DISCHARGED
+    )
+    # And not a ground of the flag either.
+    assert "V10" not in the_flip_is_on_the_record(module), (
+        "V10 produced a fix; it may not appear among the grounds GATE_QUALIFIED rests on"
     )
 
 
@@ -2598,14 +2835,36 @@ def test_the_discharge_carries_every_disclosure_v17_required_of_it(loaded):
     assert "THIRTEEN consecutive frames" in entry
 
 
-def test_an_empty_blocker_tuple_did_not_flip_the_flag(loaded):
+def test_what_flipped_the_flag_was_a_named_determination_and_not_the_empty_tuple(loaded):
     """The one thing `GATE_QUALIFIED`'s committed comment forbids in as many words: *A SHORTER
     BLOCKER TUPLE DOES NOT FLIP THIS FLAG, AND NO EDIT THAT SHORTENS THE TUPLE MAY FLIP IT IN THE
-    SAME COMMIT.* The tuple reached zero on 2026-08-27 and the flag did not move."""
+    SAME COMMIT.* That sentence is still in the module and it still binds; it is the subject of
+    this test and it always was.
+
+    The tuple reached zero on 2026-08-27 and the flag did not move in that commit. It moved in a
+    LATER commit that did nothing else, on the second precondition: a project owner's determination
+    under `T40_RULE_V18` §3, outcome C. So the guard is on the sentence and on what a legitimate
+    flip leaves behind, not on the value — the tuple is still empty, the flag is True, the
+    determination is a file on disk at the path the module cites, it carries V18 §3 outcome C's
+    four required disclosures in its own text, and the module still states the three things that
+    determination could NOT close: five unexplained frames with the decode hypothesis refuted,
+    nobody has looked, and one episode of 402 bounding nothing corpus-wide.
+
+    **NONE OF THAT IS PRODUCED BY SHORTENING A TUPLE**, which is why this still has teeth against
+    the edit it was written against. The gate is not open here: this asserts that the flag's move is
+    accounted for, and nothing about what may now be trained, measured or committed."""
     module, _ = loaded
+    comment = the_flip_is_on_the_record(module)
     assert module.GATE_QUALIFICATION_BLOCKERS == ()
-    assert module.GATE_QUALIFIED is False
+    assert module.GATE_QUALIFIED is True
+    assert (
+        "A SHORTER BLOCKER TUPLE DOES NOT FLIP THIS FLAG, AND NO EDIT THAT SHORTENS THE TUPLE "
+        "MAY FLIP IT IN THE SAME COMMIT." in comment
+    ), "the sentence this test is about must stay in the module, in these words"
     assert len(module.GATE_QUALIFICATION_DISCHARGED) == 7
+    # The flip licenses no clip on its own, and the module says so where the flag is read.
+    assert "gate_qualified = declared_gate and bool(checkpoints)" in comment
+    assert "T40_RULE_V1" in comment and "PR-08 §8 items 3 and 4" in comment
 
 
 def test_nothing_was_deleted_on_the_way_to_an_empty_tuple(loaded):

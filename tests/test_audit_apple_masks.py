@@ -736,8 +736,28 @@ def test_this_script_can_never_flip_the_gate_or_edit_the_blockers():
 
 
 def test_the_adapter_itself_still_declares_the_blockers_this_audit_addresses():
-    """If blocker 1's wording moves, this artifact's `addresses` line is stale and must move too."""
+    """If blocker 1's wording moves, this artifact's `addresses` line is stale and must move too.
+
+    ``GATE_QUALIFIED = False`` was asserted here as the cheapest sign that the adapter had not been
+    quietly opened up underneath this audit. On 2026-08-27 a project owner's determination flipped
+    it, so the sign is gone and the thing it stood for is asserted instead: the flip did NOT touch
+    this audit's subject. The determination says so in its own text and the adapter repeats it
+    beside the flag — blocker 1 is untouched, nobody has looked, the area test is a proxy for a
+    wrong-object mask and not an observation of one. An adapter whose flag had absorbed blocker 1
+    would leave the script's ``ADDRESSES`` claiming to serve a blocker no reader could find.
+    """
     src = (_REPO_ROOT / "scripts" / "estimators" / "apple_sam2.py").read_text()
-    assert "GATE_QUALIFIED = False" in src
     assert "NOBODY HAS LOOKED AT A MASK" in src
     assert "n_frames_retry_fired / n_frames_retry_recovered" in src
+    # The flag moved, and it moved on a determination this repository holds — never on a script run,
+    # and never on this one: nothing in `audit_apple_masks.py` may assign the flag (the test above).
+    assert "GATE_QUALIFIED = True" in src
+    determination = (
+        _REPO_ROOT / "docs" / "preregistration"
+        / "PR-08-RESULT-2026-08-27-residue-i-is-contained-and-the-flag-flips.md"
+    )
+    assert determination.name in src, "the flag must cite the determination that moved it"
+    assert determination.is_file(), "and that citation must be a file, not a filename"
+    # ...and what the determination could not close is still declared where the flag is read.
+    assert "(b) **NOBODY HAS LOOKED.**" in src
+    assert "this determination did not touch it" in src

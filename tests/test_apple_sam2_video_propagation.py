@@ -12,7 +12,8 @@ no GPU is touched: the assertions are about pixels going in, which is the half t
 the two p95s are comparable at all.
 
 Nothing here discharges anything. `GATE_QUALIFIED` and `GATE_QUALIFICATION_BLOCKERS` are read, not
-written, and the last test asserts exactly that.
+written, and the last test asserts exactly that — including now that the flag has moved: it flipped
+on 2026-08-27 on a project owner's determination, and this module is not among the grounds it names.
 """
 
 from __future__ import annotations
@@ -141,24 +142,59 @@ def test_the_source_contains_no_encode_path_at_all():
         assert banned not in src, f"{banned!r} in the propagation module's source"
 
 
+#: The determination that flipped ``apple_sam2.GATE_QUALIFIED`` on 2026-08-27, by file name.
+_DETERMINATION = "PR-08-RESULT-2026-08-27-residue-i-is-contained-and-the-flag-flips.md"
+
+
+def _adapter_flag_comment() -> str:
+    """The comment block committed immediately above the adapter's ``GATE_QUALIFIED``, as text.
+
+    That block is where the adapter states what its flag rests on, so it is the only place a test
+    can check that THIS module is not among those grounds.
+    """
+    lines = (_REPO / "scripts" / "estimators" / "apple_sam2.py").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    at = [n for n, line in enumerate(lines) if line.startswith("GATE_QUALIFIED = ")]
+    assert len(at) == 1, "exactly one module-level assignment to GATE_QUALIFIED"
+    end = at[0]
+    start = end
+    while start > 0 and lines[start - 1].startswith("#:"):
+        start -= 1
+    assert start < end, "GATE_QUALIFIED must keep the comment block that states its grounds"
+    return " ".join(line[2:].strip() for line in lines[start:end])
+
+
 def test_this_module_discharges_nothing():
     """The blockers are a person's to close. A propagation arm existing is evidence, and evidence
     is not a verdict.
 
     This asserted ``len(...) == 3`` until 2026-08-26, when blockers 1 and 2 were discharged on
     their own evidence and the count went stale. It then asserted the propagation blocker was still
-    OPEN, and that went stale on 2026-08-27 when it was discharged. Both were the wrong tripwire
-    for the same reason: they track the blocker's STATE, which every legitimate discharge changes,
-    rather than the invariant this test is about — **whatever closes that blocker, it may not be
-    the mere existence of this module.** Producing the evidence a blocker asks for and accepting it
-    are different acts, and only the second may shorten the tuple.
+    OPEN, and that went stale on 2026-08-27 when it was discharged. It also asserted
+    ``GATE_QUALIFIED is False``, and that went stale later the same day when a project owner's
+    determination flipped it. All three were the wrong tripwire for the same reason: they track
+    STATE, which every legitimate decision changes, rather than the invariant this test is about —
+    **whatever closes that blocker or moves that flag, it may not be the mere existence of this
+    module.** Producing the evidence a blocker asks for and accepting it are different acts, and
+    only the second may shorten a tuple or move a flag.
 
-    So the guard now reads the DISCHARGE and checks what it rests on: the owner's decision
-    (T40_RULE_V14) and a measurement whose criterion was registered before the first capture was
-    rendered (T40_RULE_V17), and NOT "a propagation arm was written". That invariant does not
-    decay, because it is about the discharge's grounds rather than its date.
+    So the guard reads the DISCHARGE and the FLAG'S GROUNDS and checks what each rests on: the
+    owner's decision (T40_RULE_V14) and a measurement whose criterion was registered before the
+    first capture was rendered (T40_RULE_V17) for the discharge; a named owner determination on
+    disk for the flag — and in neither case "a propagation arm was written". That invariant does
+    not decay, because it is about grounds rather than dates.
     """
-    assert apple_sam2.GATE_QUALIFIED is False
+    # The flag is True since 2026-08-27, and this file is nowhere in the reasons it gives.
+    assert apple_sam2.GATE_QUALIFIED is True
+    grounds = _adapter_flag_comment()
+    assert _DETERMINATION in grounds, "the flag must name what flipped it"
+    assert (_REPO / "docs" / "preregistration" / _DETERMINATION).is_file(), (
+        "and the thing it names must be a document somebody can read, not a filename"
+    )
+    assert "apple_sam2_video" not in grounds, (
+        "the propagation arm is evidence; it may not appear as a ground of the flag"
+    )
     discharged = [
         d
         for d in apple_sam2.GATE_QUALIFICATION_DISCHARGED
