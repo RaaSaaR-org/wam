@@ -1042,4 +1042,87 @@ onto the critical path as a **production** instrument, not only a measurement on
 a new V-document or pre-registration (`docs/handoff.md` §3), not a quiet sbatch edit. Findings,
 sources and the three costed options: **`docs/cosmos3-vs-transfer25.md`**.
 
+### 2026-08-27 — the blocker's second reason got a criterion, and GEOM_TOL turned out uncommittable
+
+**The 16-shard GEOM_TOL measurement can never be committed, and that was not known.** `GEOM_TOL =
+0.47857992441961017 px` over 402 episodes and 171 625 frames is measured and sitting in
+`runs/pr08-geom-tol/pr08_geom_tol.json`. Commit `e518a84` added
+`mask_validity_reference_max_frame_fraction` to `SEGMENTER_CONTRACT` and to the committed config
+**37 minutes after that merge was written**, and `contract_disagreements` counts an absent field as
+a disagreement by design. Verified by calling the repo's own function:
+
+```
+{'field': 'mask_validity_reference_max_frame_fraction', 'geom_tol': 0.1, 'this_run': None}
+```
+
+So `merge_committed_contract` would refuse the re-merge outright, exit 2, nothing written. **The
+corpus must be re-measured at HEAD** — and, because `gate_qualified` is baked into every shard at
+measurement time, **only after `GATE_QUALIFIED` flips**. A re-measurement before the flip produces
+another unusable artifact at the same cost. That ordering is now the critical path to §8 item 4 and
+it was written down nowhere.
+
+**The propagation blocker names two independent sufficient reasons and only the first had ever been
+addressed.** V14 (owner-signed, 2026-08-27) closed *"the capture is MuJoCo and this blocker says
+Isaac"*. The second — *"480 frames of ONE trajectory is not a corpus"* — had **no registered
+criterion at all**, so no measurement could have closed it. `T40_RULE_V17` registers one, blind,
+before the first capture was rendered.
+
+**Its load-bearing decision: no amount of MuJoCo answers "is not a corpus".** So two arms.
+**Arm A** — eight trajectories, 3 840 frames, drift against known ground truth in the simulator,
+answering *"one trajectory"*. **Arm B** — the real corpus: 40 whole episodes under
+`sample_seed = 40017`, 16 846 frames, both arms run over the same episode and contiguous runs of
+**disagreement between them** counted. Arm B has no ground truth and measures agreement rather than
+correctness; the inference that a long run belongs to the propagation arm rests on the per-frame
+arm's *measured* independence and is stated in the open so it can be refused.
+
+**`low_iou_runs` has never been observed to fire.** It was computed once in this project, reported
+`n_runs: 0`, and that is its only observed value — so a pooled zero from it is not evidence of
+absence but a statistic of unknown sensitivity reporting the only thing it has ever reported. V17 §5
+makes a positive control the FIRST thing the outcome table reads: C1 is the committed lattice
+capture already on disk (object teleports a median 65.3 px between neighbours), and if it does not
+fire the outcome is **VOID** and nothing else is evaluated. A `turns` ladder (C2, 20/40/80) gives the
+dose-response curve; it is reported and never pooled.
+
+**All eleven captures rendered (17 GB).** Measured coherence, against V17 §2's 25 px bound:
+
+| | A1 | A2 | A3 | A4 | A5 | A6 | A7 | A8 | C2-t20 | C2-t40 | C2-t80 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| median px | 1.317 | 1.291 | 2.644 | 2.674 | 3.985 | 4.078 | 5.295 | 6.650 | 27.37 | 54.02 | 110.64 |
+
+**None of A1–A8 is excluded, and A1 reproduces `capture-mujoco-trajectory-f480` to the digit** —
+median 1.3170 px, max 43.6546 px, the numbers the 2026-08-26 result quotes. That turns V17 §2's
+claim about the existing capture's parameter triple from an inference off the function defaults into
+a measurement.
+
+**A provenance defect closed on the way.** `turns`, `yaw_turns` and `arm_cycles` were recorded in no
+capture header, no artifact and no document; the existing capture's triple was recoverable only by
+reading the defaults at its commit. They are now CLI flags whose values and source land in the
+header, with the defaults read off the function signature rather than restated, and a tripwire
+pinning them so V17 §2's A1 row cannot go stale about a capture already on disk. Exposing them
+touches no registered rule: V5 §4.5 governs the **envelope** — centre, radii, arm amplitude, the
+cube, the occluding hands — and a test drives four triples including `turns=80` through the schedule
+and checks every visited pose against the lattice's own bounding box.
+
+**`GATE_QUALIFIED` has TWO preconditions, not one.** The second is a recorded decision on blocker
+2's residue (i): the failure that blocker predicted, arriving by a route it did not predict, on 92 of
+171 625 frames, 52 of them in `episode_000094`. `T40_RULE_V18` registers that decision rule blind.
+Its test is **area**, because the filter's own criterion is validity IoU ≥ 0.10 and re-testing that
+would be vacuous — the escape route is a mask covering the fruit **and** something else. 3× the
+episode's median non-refused area, read off a measured gap (correct apple masks 1.1–1.2×, the audit's
+plate masks ~4.3×). `scripts/census_operating_point_episode.py` closes limit 2 of the
+operating-point result (*"the exact 36 are not recorded"*) and turns limit 1 (two decodes) from a
+caveat into a count. Limit 3 — the correlated observer — is not closed and cannot be here.
+
+**Blocked on the GPU, and CPU is not a fallback.** Measured on this workstation: **8.28 s/frame** on
+CPU with 20 threads, i.e. ~77 h for Arm B alone; on the GPU the whole protocol is ~1.5 h. The card is
+held by an unrelated UnifoLM-VLA training run (31.2 of 32.6 GB). `scripts/run_v17_arms.sh` waits for
+headroom and never touches another process's memory. Operational trap recorded there: SAM 2's
+`PositionEmbeddingSine` warms a cache on CUDA whenever `torch.cuda.is_available()` is true, **before**
+`build_sam2` moves the model, so `WAM_PR08_DEVICE=cpu` alone still dies with a CUDA OOM on a full
+card — a CPU run needs `CUDA_VISIBLE_DEVICES=""` too.
+
+**Nothing is discharged.** `GATE_QUALIFIED` is `False`, `GATE_QUALIFICATION_BLOCKERS` still has its
+one entry, §8 items 3 and 4 are OPEN, §1 binds in full, and no outcome of V17 or V18 flips the flag
+on its own. Nothing was submitted to the cluster: `docs/handoff.md` reserves that to the owner.
+
 %% mc-links: [[T-39]] [[T-34]] [[T-36]] [[T-37]] [[T-041]] %%
