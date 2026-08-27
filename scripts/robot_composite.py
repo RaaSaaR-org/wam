@@ -595,6 +595,11 @@ class Sam2RobotMasker:
         "frames_with_a_dropped_detection",
         "frames_emptied_by_the_filter",
         "frames_with_no_object_reference",
+        # PR-08 V10, and it is a RECORD rather than a decision — see object_grounding_iou. The other
+        # end of frames_with_no_object_reference's distribution: not "the reference found nothing"
+        # but "the reference found the scene", which is what this filter's colour predicate does on
+        # a restyle whose committed prompt warms the table.
+        "frames_with_reference_not_object_scale",
     )
 
     def __init__(self) -> None:
@@ -612,8 +617,44 @@ class Sam2RobotMasker:
                 "the mask is empty and check_mask refuses the clip"
             ),
             "max_iou": float(ROBOT_MASK_OBJECT_MAX_IOU),
-            "reference": self._object_reference_name(),
+            # Carries "reference" — the name of the second opinion — and, beside it, the fraction
+            # frames_with_reference_not_object_scale was counted against. Beside rather than
+            # elsewhere: a count whose bound lives in another file is a number the reader of this
+            # block cannot interpret without leaving it, which is V6 §6's rule about zeros.
+            **self.object_reference_applicability(),
             **{name: int(self.filter_counters[name]) for name in self._COUNTERS},
+        }
+
+    def object_reference_applicability(self) -> dict:
+        """The constants ``frames_with_reference_not_object_scale`` must be read beside. PR-08 V10.
+
+        Reached from the pinned adapter rather than restated, for the same reason every other
+        constant in this class is: two copies of a bound drift, and this one would drift silently,
+        because the two callers never compare their answers. A record that quoted a stale 0.10 while
+        the adapter had moved would be worse than no record — it would be a wrong one.
+
+        THE KEY IS ``reference_max_frame_fraction`` AND NOT ``max_frame_fraction``, deliberately.
+        That second name is already taken, in these same records, by the committed ROBOT-MASK AREA
+        bound — a different number, measured over a different quantity, carrying a gate. Two bounds
+        under one key in one artifact is a reader confusing them, and ``robot_composite_shards``'s
+        ``test_the_module_suggests_no_number_anywhere`` refuses the collision outright: it treats a
+        non-null value written by this module under the bare name as a coined area bound.
+        """
+        module = self._estimator()
+        bound = getattr(module, "MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION", None)
+        if bound is None:
+            raise CompositeError(
+                "scripts/estimators/apple_sam2.py no longer declares "
+                "MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION, which is the fraction of a frame above "
+                "which its colour reference describes the SCENE rather than an object. This module "
+                "runs that reference over GENERATED pixels for the robot-mask IoU diagnostic, where "
+                "PR-08's own committed prompts make it describe the table; without the bound the "
+                "record cannot say what the count of inapplicable frames was counted against."
+            )
+        return {
+            "reference": self._object_reference_name(),
+            "reference_max_frame_fraction": float(bound),
+            "predicate": "estimators.apple_sam2.reference_is_object_scale (T40_RULE_V10)",
         }
 
     def _object_reference_name(self) -> str:
@@ -836,9 +877,38 @@ class Sam2RobotMasker:
                     "no PR-08 gate can see. Re-read the adapter and update "
                     "Sam2RobotMasker.object_grounding_iou()."
                 )
+        # PR-08 V10's predicate, required here rather than probed for. This module drives the colour
+        # reference over GENERATED pixels too — ``composite_clip``'s IoU diagnostic masks them — and
+        # T40_RULE_V10 exported ``reference_is_object_scale`` naming that call site: "``robot_composite``
+        # (PR-08 V9) drives this module's reference over generated pixels too and is exposed to the
+        # same defect by its own §5.1." An adapter that stopped declaring it would leave every one of
+        # those diagnostics with no record of whether the instrument applied, which is the same
+        # unverifiable-sentence-in-10-050-records trade ``_object_reference_name`` already refuses.
+        applicable = getattr(module, "reference_is_object_scale", None)
+        if applicable is None:
+            raise CompositeError(
+                "scripts/estimators/apple_sam2.py no longer declares reference_is_object_scale(), "
+                "which is the one definition of whether that colour reference is the size of an "
+                "OBJECT or the size of a SCENE (T40_RULE_V10). This module runs the reference over "
+                "GENERATED frames for the robot-mask IoU diagnostic, and PR-08's committed prompts "
+                "change the table and the fruit's colour on purpose — measured on job 189926's "
+                "train-01-oak-tungsten the reference comes back as 37.18-56.40 % of the frame, all "
+                "of it warm oak table, against a 0.10 bound. Re-read the adapter and update "
+                "Sam2RobotMasker.object_grounding_iou()."
+            )
         reference = module.object_color_reference(frame)
         if not reference.any():
             self.filter_counters["frames_with_no_object_reference"] += 1
+        # COUNTED AND DELIBERATELY NOT ACTED ON. PR-08 §6 forbids a gate on this number, and a
+        # refusal here would be exactly that: it would change which clips G0c rejects, on a fraction
+        # nobody committed, arriving as a repair. So the keep decision stays exactly V9's one
+        # comparison in :meth:`object_grounding_keep`, and this line only makes the artifact say that
+        # the second opinion consulted on this frame was describing the scene. Without it a
+        # ``robot_mask_iou_source_vs_generated`` block produced with a working reference and one
+        # produced with a reference that had moved to the table are the same bytes, and the reader
+        # who has to decide what the diagnostic means cannot tell them apart.
+        if not applicable(reference):
+            self.filter_counters["frames_with_reference_not_object_scale"] += 1
         return np.asarray(
             [float(module.mask_validity_iou(m, reference)) for m in masks], dtype=np.float64
         )
@@ -1625,10 +1695,27 @@ def composite_clip(
     # answers neither.
     after_filter = dict(getattr(context.masker, "filter_counters", {}) or {})
 
+    # PR-08 V10, resolved BEFORE the loop so that an adapter that can no longer say what the count
+    # below was counted against refuses here rather than after the composited clip has replaced the
+    # generator's output on disk. ``getattr`` because the argument is the same one that guards
+    # ``filter_counters`` above: a test double masker has no colour reference and therefore nothing
+    # that can be inapplicable, while the only masker ``build_context`` can build is the real one.
+    applicability = getattr(context.masker, "object_reference_applicability", None)
+    reference_constants = (
+        applicability()
+        if applicability is not None
+        else {"reference": None, "reference_max_frame_fraction": None, "predicate": None}
+    )
     fractions: list[float] = []
     ious: list[float] = []
     iou_frames: list[int] = []
     out = np.empty_like(gen)
+    # The second bracket, around the GENERATED frames only. The source-pass delta closed above; this
+    # one opens here because the loop's one masker call is the IoU diagnostic's, and the filter's
+    # behaviour on generated pixels is a different question from its behaviour on source pixels.
+    # Until this existed the generated pass moved the cumulative counters and NOTHING read them:
+    # every frame the colour reference described the oak table instead of the fruit was invisible.
+    before_generated = dict(getattr(context.masker, "filter_counters", {}) or {})
     for index in range(src.shape[0]):
         mask = masks[index]
         fractions.append(
@@ -1641,6 +1728,8 @@ def composite_clip(
         if index % context.iou_stride == 0:
             ious.append(mask_iou(mask, np.asarray(context.masker.mask(gen[index]), dtype=bool)))
             iou_frames.append(index)
+
+    after_generated = dict(getattr(context.masker, "filter_counters", {}) or {})
 
     if len(fractions) != src.shape[0]:
         raise CompositeError(
@@ -1713,6 +1802,42 @@ def composite_clip(
             "mean": float(np.mean(ious)) if ious else None,
             "min": float(np.min(ious)) if ious else None,
             "max": float(np.max(ious)) if ious else None,
+            # WAS THE INSTRUMENT APPLICABLE TO THE PIXELS IT RAN ON? PR-08 V10, and it is a RECORD
+            # rather than a gate — §6 forbids a threshold on the robot-mask IoU and this block
+            # changes no refusal outcome, no keep decision and no mask. It exists because the
+            # numbers above were produced by a masker that consults ``object_color_reference``, a
+            # predicate whose own docstring justifies itself with "the only saturated warm thing in
+            # any of these frames is the fruit" — a claim about AppleToPlate's REAL pixels, which
+            # PR-08's committed prompts falsify on purpose. Measured on job 189926's
+            # train-01-oak-tungsten: 37.18-56.40 % of the generated frame comes back warm, all of it
+            # oak table, against a 0.10 bound. On such a frame the second opinion cannot arbitrate
+            # anything in either direction, and until this block existed a diagnostic produced with a
+            # working reference and one produced with a reference that had moved to the table were
+            # the same bytes in the artifact. Counted over the SAMPLED generated frames only — the
+            # stride above says how many that is — and deliberately not pooled with the source-frame
+            # counts in robot_mask_object_filter, which answer a different question about different
+            # pixels.
+            "object_reference_applicability": {
+                "note": (
+                    "PR-08 V10. Counted over the GENERATED frames this diagnostic sampled, and it "
+                    "gates NOTHING: no clip is refused, no detection is dropped and no mask is "
+                    "altered by these counts. frames_with_reference_not_object_scale > 0 means the "
+                    "colour reference covered more than reference_max_frame_fraction of the frame, "
+                    "i.e. it "
+                    "was describing the scene rather than an object, and the IoU numbers above were "
+                    "produced with an instrument that does not apply to those pixels. THE "
+                    "REFERENCE IS ONLY CONSULTED ON A FRAME THE DETECTOR GROUNDED SOMETHING ON, so "
+                    "read this count against detections_segmented, not against frames_masked: zero "
+                    "with detections_segmented 0 means the question was never asked, NOT that the "
+                    "reference was applicable. A null reference means this masker has no colour "
+                    "reference at all, and build_context() cannot produce such a masker."
+                ),
+                **reference_constants,
+                **{
+                    name: int(after_generated.get(name, 0) - before_generated.get(name, 0))
+                    for name in sorted(set(after_generated) | set(before_generated))
+                },
+            },
         },
     }
 

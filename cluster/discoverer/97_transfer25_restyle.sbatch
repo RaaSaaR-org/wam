@@ -1465,6 +1465,214 @@ if (( TIMING_MODE )); then
   fi
   TIMING_UNIT=$(head -1 "${WORK_LIST}")
   [[ -n "${TIMING_UNIT}" ]] || { echo "FATAL: empty work list — nothing to time."; exit 1; }
+  # -- THE TIMED UNIT IS SCREENED BEFORE THE GPU IS ASKED FOR --------------------------------------
+  # `head -1` is a DETERMINISTIC choice and, on this corpus, it is a choice this job cannot finish.
+  # The work list is the manifest's episodes sorted by id crossed with the staged styles, so its
+  # first row is always the lowest-numbered episode under the first style of the set — job 189644's
+  # log records which unit that was. The robot mask of that episode is EMPTY on 254 of its 590
+  # SOURCE frames (runs/pr08-robot-mask-area/POOLED.json), and robot_composite.check_mask refuses a
+  # clip on ONE empty frame ("zero is zero", :1388). So the deterministic choice is refused on
+  # every submission that has ever been made and on every one that ever will be. 189644 itself died
+  # earlier still, on an area bound that had not been committed yet; the bound exists now, and what
+  # the same submission buys today ends in the refusal below and no THROUGHPUT.json — the artifact
+  # PR-08 §8 item 3 cannot close without.
+  #
+  # BE PRECISE ABOUT WHAT THIS SCREEN SAVES, because this file's older prose is not. The header
+  # carries `--gres=gpu:1` (:260) and the file contains no `srun` at all, so by the time any line of
+  # it executes the H200 is ALREADY ALLOCATED: nothing here can save a queue slot, and the
+  # allocation's wall clock is billed either way. The Cosmos checkpoint is not saved either — the
+  # driver's own preflight_source_masks (restyle_transfer25.py:775) already refuses ahead of
+  # _transfer25_backend (:778), so this path never reached a checkpoint load even before the screen
+  # existed. What IS saved is the driver's process start, the torch/cosmos imports, the
+  # GroundingDINO + SAM 2 masker load and a segmentation pass over every source frame of the
+  # episode: single-digit minutes inside an allocation that is paid for regardless.
+  #
+  # The minutes are not the reason. The reason is that the verdict is then reached from committed
+  # evidence, written down as an artifact, and needs neither a GPU nor a working masker to reach —
+  # so it is reproducible off the cluster and quotable in the record.
+  #
+  # NO EPISODE IS NAMED IN THIS FILE, here or anywhere: the id above is deliberately left to the
+  # log and to the evidence artifact, because writing one into the job is how "which episode does
+  # §8 item 3 time" gets answered by an sbatch line instead of by a registered rule.
+  #
+  # The refusal is not the defect — the refusal is correct and G0c stays exactly as it is. The
+  # defect is asking Slurm for a GPU to discover something that was measured on 2026-08-25 and has
+  # been sitting on disk ever since. check_mask's verdict on an episode is a function of that
+  # episode's SOURCE masks, the pooled measurement is those masks' area fractions at stride 1 over
+  # every frame, and the committed bound is the same number the composite loads: the verdict is
+  # therefore computable here, for free, in the seconds before the job would otherwise start
+  # loading a checkpoint.
+  #
+  # THIS SCREEN ONLY EVER REFUSES. It cannot make a unit PASS — the driver's own preflight
+  # (restyle_transfer25.preflight_source_masks) still runs the real masker over the real frames and
+  # is still what decides, and admitting a unit here only means that nothing on disk predicts a
+  # refusal. Nor may it pick a different unit: which episode PR-08 §8 item 3's "one timed episode"
+  # is remains the project owner's decision under a registered rule, exactly as the failure block
+  # below already says, and a silent re-pick here would be this job answering that question by
+  # choosing the first episode that survives — a selection made after seeing the data. So it
+  # refuses, it names the episode and the evidence it read, and it stops.
+  MASK_AREA_EVIDENCE=${MASK_AREA_EVIDENCE:-${PROJ}/runs/pr08-robot-mask-area/POOLED.json}
+  # The same artifact robot_composite.load_area_bound reads by default (AREA_BOUND_ARTIFACT), named
+  # here rather than imported: this screen must not need torch, transformers or a GPU to run.
+  AREA_BOUND_ARTIFACT=${AREA_BOUND_ARTIFACT:-${WAM}/configs/transfer25/pr08_robot_mask_area.json}
+  TIMING_ADMISSIBILITY=${CHUNK_DIR}/timing_unit_admissibility.json
+  rm -f "${TIMING_ADMISSIBILITY}"
+  python - "${TIMING_UNIT}" "${MASK_AREA_EVIDENCE}" "${SOURCE}/manifest.json" \
+           "${AREA_BOUND_ARTIFACT}" "${TIMING_ADMISSIBILITY}" <<'PY' || exit 1
+import hashlib, json, pathlib, sys
+
+unit_json, pooled_p, manifest_p, bound_p, out_p = sys.argv[1:6]
+u = json.loads(unit_json)
+episode, frames = str(u["episode"]), int(u["frames"])
+SELECTION_RULE = ("head -1 of the work list, which is the manifest's episodes sorted by id, "
+                  "expanded over the staged styles and their repeat span (T40_RULE_V11 §2). "
+                  "Deterministic: the same partition and the same manifest name the same unit.")
+
+
+def refuse(headline, *lines):
+    """Every refusal on this path is free, and every one of them names what it read."""
+    print(f"FATAL: {headline}")
+    for line in lines:
+        print(f"       {line}")
+    print("       Decided from evidence already on disk, before the driver started and before the")
+    print(f"       masker was loaded: {pooled_p}")
+    print("       The H200 is ALREADY allocated here (this file's own --gres, no srun), so no queue")
+    print("       slot is saved. Nothing was generated and no frame was segmented.")
+    sys.exit(1)
+
+
+# The evidence itself, before anything is asked of it. Absent or unqualified is a REFUSAL and not a
+# skip: this screen costs nothing, so there is no case in which proceeding without it is the
+# cheaper option, and "we could not check" is not a reason to run a masker over every source frame
+# of a unit whose G0c verdict is already written down somewhere.
+try:
+    pooled = json.loads(pathlib.Path(pooled_p).read_text())
+except (OSError, ValueError) as exc:
+    refuse(f"the source-mask evidence {pooled_p} could not be read ({exc}).",
+           "PR-08 §8 item 3's timed episode has to be one G0c will let through, and G0c's verdict",
+           "on an episode is a function of its SOURCE masks. That distribution is measured by",
+           "cluster/discoverer/106_measure_robot_mask_area.sbatch (MERGE=1 writes POOLED.json).",
+           "Point MASK_AREA_EVIDENCE at it, or run 106 first. This job does not time an episode",
+           "whose refusal it cannot rule out in advance.")
+if not isinstance(pooled, dict) or not isinstance(pooled.get("per_episode"), list):
+    refuse(f"{pooled_p} is not a pooled robot-mask-area measurement.",
+           "It carries no per_episode list, so it cannot say anything about one episode.")
+if pooled.get("measurement_qualified") is not True:
+    refuse(f"{pooled_p} says measurement_qualified={pooled.get('measurement_qualified')!r}.",
+           "Its own merge refused to vouch for it — see measurement_disqualified_reasons:",
+           f"{pooled.get('measurement_disqualified_reasons')!r}.",
+           "A screen built on a disqualified distribution is a screen that proves nothing.")
+# A distribution is a claim ABOUT a corpus, which is why load_area_bound cross-checks the same
+# sha256 before it will composite. Applied to other episodes these fractions are numbers with no
+# frames behind them, and the episode ids would silently line up anyway.
+try:
+    want_sha = hashlib.sha256(pathlib.Path(manifest_p).read_bytes()).hexdigest()
+except OSError as exc:
+    refuse(f"the source manifest {manifest_p} could not be read ({exc}).",
+           "Without it the evidence cannot be tied to the corpus this run would restyle.")
+got_sha = str(pooled.get("source_manifest_sha256"))
+if got_sha != want_sha:
+    refuse("the source-mask evidence measured a DIFFERENT corpus.",
+           f"evidence source_manifest_sha256: {got_sha}",
+           f"{manifest_p}: {want_sha}",
+           "Episode ids are reused across trees (the AV1 and the H.264 corpora share them), so",
+           "this cannot be waved through on the ids matching.")
+
+by_id = {str(e.get("episode")): e for e in pooled["per_episode"] if isinstance(e, dict)}
+ep = by_id.get(episode)
+if ep is None:
+    refuse(f"{episode} is not in {pooled_p}.",
+           f"The measurement covers {len(by_id)} episodes and this is not one of them, so there is",
+           "no basis on which to predict G0c's verdict for the unit this job is about to time.")
+n_frames = int(ep.get("n_frames", -1))
+if n_frames != frames:
+    refuse(f"{episode} is {frames} frames in the manifest and {n_frames} in the evidence.",
+           "The two are about different footage. G0c refuses on ONE bad frame, so a screen over a",
+           "different frame count is not a screen over the frames this job would generate.")
+fractions = ep.get("area_fractions")
+if not isinstance(fractions, list) or len(fractions) != n_frames:
+    refuse(f"{episode}'s entry carries {len(fractions) if isinstance(fractions, list) else 'no'} "
+           f"area fractions for {n_frames} frames.",
+           "Every frame's fraction, or the maximum below is a maximum over an unknown subset.")
+
+# THE EMPTY HALF, which is the one that fires here. check_mask raises on covered == 0 with no
+# threshold in it, so any zero in this list is a clip-fatal refusal waiting to be paid for.
+empty = [i for i, f in enumerate(fractions) if not float(f) > 0.0]
+declared_empty = ep.get("empty_frames")
+if isinstance(declared_empty, int) and declared_empty != len(empty):
+    refuse(f"{episode}'s entry says empty_frames={declared_empty} but {len(empty)} of its "
+           f"{n_frames} fractions are zero.",
+           "The artifact contradicts itself about the one property this screen turns on.")
+if empty:
+    refuse(f"the timed unit {u['unit']} WILL be refused by PR-08 §6 G0c, before it produces a clip.",
+           f"{episode}'s robot mask is EMPTY on {len(empty)} of its {n_frames} source frames, "
+           f"first at frame {empty[0]}.",
+           "robot_composite.check_mask refuses a clip on one empty frame and there is no number in",
+           "it to loosen: an empty mask means the GENERATED manipulator went into the corpus.",
+           "",
+           "THIS IS NOT A RETRY AND THIS JOB DOES NOT PICK ANOTHER EPISODE. The mask is a property",
+           "of the SOURCE frame, so this unit refuses identically on every resubmission; and",
+           "choosing a different one because it survives G0c is a selection made after seeing the",
+           "data. Two questions are open and both are the project owner's:",
+           "  * whether an empty robot mask is acceptable for a timed measurement at all",
+           "  * which episode PR-08 §8 item 3's 'one timed episode' is",
+           "Both need a registered rule version. CHUNK_INDEX/CHUNK_TOTAL already reach any episode",
+           "without a code change, which is exactly why the choice has to be written down rather",
+           "than typed on a submit line.",
+           "",
+           f"For that decision, and as evidence rather than as a shortlist: {len(by_id)} episodes "
+           f"were measured, {sum(1 for e in by_id.values() if e.get('empty_frames') == 0)} of them",
+           "have no empty frame at all.")
+
+# THE AREA HALF. It needs the committed bound, and a bound that has not been decided is not a
+# looser screen, it is no screen — so this refuses rather than checking one half. The driver would
+# refuse on the same missing bound anyway, later, with a GPU already allocated.
+try:
+    bound_doc = json.loads(pathlib.Path(bound_p).read_text())
+    bound = bound_doc.get("max_frame_fraction")
+except (OSError, ValueError) as exc:
+    refuse(f"the committed area bound {bound_p} could not be read ({exc}).",
+           "PR-08 §6 G0c has two halves and this screen may not run only one of them.")
+if not isinstance(bound, (int, float)) or isinstance(bound, bool):
+    refuse(f"{bound_p} has max_frame_fraction={bound!r}.",
+           "The artifact's own bound_note: it measures the distribution, it does not choose the",
+           "bound. Until a number is committed there with a rationale, G0c's area half is unarmed",
+           "and this job cannot tell whether the unit it would time is admissible.")
+worst = max(float(f) for f in fractions)
+if worst > float(bound):
+    refuse(f"the timed unit {u['unit']} WILL be refused by PR-08 §6 G0c's area half.",
+           f"{episode}'s largest robot-mask fraction is {worst!r}, above the committed bound "
+           f"{bound!r} ({bound_p}).",
+           "A mask that large has grounded on the table or the whole scene; compositing it copies",
+           "the source back over the frame and the restyle becomes a no-op.",
+           "As above: this job refuses and does not choose another episode.")
+
+record = {
+    "schema": "wam.transfer25_timing_unit_admissibility/1",
+    "unit": u["unit"], "episode": episode, "style": u.get("style"), "n_frames": n_frames,
+    "empty_frames": 0, "max_area_fraction": worst, "max_frame_fraction_bound": float(bound),
+    "evidence": str(pooled_p),
+    "evidence_sha256": hashlib.sha256(pathlib.Path(pooled_p).read_bytes()).hexdigest(),
+    "evidence_source_manifest_sha256": want_sha,
+    "bound_artifact": str(bound_p),
+    "bound_artifact_sha256": hashlib.sha256(pathlib.Path(bound_p).read_bytes()).hexdigest(),
+    "selection_rule": SELECTION_RULE,
+    "screen": ("PR-08 §6 G0c evaluated over this episode's SOURCE mask area fractions before the "
+               "generator ran. It PREDICTS that G0c will not refuse this unit; it does not "
+               "replace the driver's own preflight, which recomputes the masks and decides."),
+    "not_a_pass": ("Admissible is not passed. This is a PREDICTION, from an earlier run of the "
+                   "same masker over the same source frames, and the bound's own rationale "
+                   "records that per-frame classification near the bound is hardware-dependent "
+                   "for one narrow band. So this screen and the driver's preflight can disagree "
+                   "in either direction; where they do, this one refuses before the driver "
+                   "starts and before the masker is loaded — the allocation is already held by "
+                   "then, so what it saves is a segmentation pass, not a queue slot — and the "
+                   "preflight is what decides after."),
+}
+pathlib.Path(out_p).write_text(json.dumps(record, indent=2) + "\n")
+print(f"=== timed unit screened against {pooled_p}: {episode} has 0 empty source frames and a "
+      f"largest mask fraction of {worst:.6f} <= {bound}. G0c is not expected to refuse it.")
+PY
   TIMING_LIST=${CHUNK_DIR}/timing.jsonl
   printf '%s\n' "${TIMING_UNIT}" > "${TIMING_LIST}"
   TROOT=${CHUNK_DIR}/timing_raw
@@ -1562,9 +1770,15 @@ PY
 
   python - "${TIMING_UNIT}" "${TIMING_WALL}" "${THROUGHPUT}" "${TRANSFER_MODEL_ID}" \
            "${TRANSFER_MODEL_REVISION}" "${CEILING_GPU_H}" "${CONTROL}" \
-           "${CORPUS_FRAMES}" "${TROOT}" <<'PY'
+           "${CORPUS_FRAMES}" "${TROOT}" "${TIMING_ADMISSIBILITY}" <<'PY'
 import json, pathlib, sys
 unit, wall, out, model, rev, ceiling, control, corpus_frames, troot = sys.argv[1:10]
+# The pre-GPU screen's record, tenth and optional. Optional because of WHERE this block sits: the
+# GPU-hours are already spent by the time it runs, and refusing to write the artifact here would
+# throw away a paid measurement to punish a missing note about it. The place to refuse is the
+# screen itself, which runs before the driver starts and exits 1. So this records what the
+# screen found, or records that it found nothing — either way the artifact says which.
+admissibility = sys.argv[10] if len(sys.argv) > 10 else ""
 u = json.loads(unit)
 wall = float(wall)
 # The ceiling is EXEMPT on this path (header (c)): PR-08 §8 item 3 says no budget line exists
@@ -1617,6 +1831,23 @@ if FRAMES_PER_VARIANT <= 0:
     sys.exit("FATAL: partition_facts.json reports corpus_frames <= 0. The projection below is a "
              "rate times a frame count; without the count there is no projection.")
 gpu_h_per_variant = sec_per_frame * FRAMES_PER_VARIANT / 3600.0
+# WHICH UNIT THIS IS A MEASUREMENT OF, AND WHY THAT UNIT. The screen above wrote this record before
+# the generator ran; it names the episode, the selection rule that reached it, and the two hashes
+# (the pooled source-mask evidence and the committed area bound) that said G0c would not refuse it.
+# It travels INTO the artifact because a seconds-per-frame prices 4.29M frames, and a reader who
+# can say which episode produced the number but not how that episode came to be the one cannot
+# tell a registered selection from a lucky one. `null` here is therefore not a shrug: it says the
+# screen left no record, which on this path means it was removed or its output was deleted.
+admitted, admitted_note = None, None
+try:
+    admitted = json.loads(pathlib.Path(admissibility).read_text())
+except (OSError, ValueError) as exc:
+    admitted_note = (f"NOT RECORDED: {admissibility or '(no path supplied)'} could not be read "
+                     f"({exc}). The pre-GPU screen at the top of the TIMING branch writes it and "
+                     "exits 1 when the timed unit is one PR-08 §6 G0c will refuse, so a missing "
+                     "record means that screen did not run for this measurement — the number "
+                     "below is still a measured wall clock, but nothing says the unit it timed "
+                     "was screened.")
 report = {
     # Named so a reader — and the reuse check at the top of this branch — can tell an artifact that
     # records whether a clip was produced from one that predates the question.
@@ -1625,6 +1856,9 @@ report = {
     "units_timed": len(records),
     "units_succeeded": len(succeeded),
     "episode": u["episode"], "style": u["style"], "frames": frames,
+    "timed_unit": u["unit"],
+    "timed_unit_admissibility": admitted,
+    "timed_unit_admissibility_note": admitted_note,
     "wall_seconds": round(wall, 1),
     "seconds_per_frame": round(sec_per_frame, 4),
     "gpu_seconds_per_frame": round(sec_per_frame, 4),

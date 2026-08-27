@@ -2879,3 +2879,215 @@ def test_nothing_was_deleted_on_the_way_to_an_empty_tuple(loaded):
         "PER-FRAME SEGMENTATION IS NOT UPSTREAM'S PROPAGATION",
     ):
         assert wording in discharged, wording
+
+
+# -- §6's plate half: object_text_prompt is ONE value, and that is the second lock ------------------
+#
+# PR-08 §6 gates the object AND the plate. `run_g0_gates.side_from_clips` documents the plate as a
+# SECOND INVOCATION with `WAM_PR08_OBJECT_PROMPT="plate."` (its own docstring: "the shared adapter
+# takes its object prompt from WAM_PR08_OBJECT_PROMPT at import time, so the plate is a second
+# invocation with that variable set, not a second call here"). That is the whole mechanism, and it
+# collides head-on with the pre-commitment: `object_text_prompt` is a SEGMENTER_CONTRACT field, the
+# contract is copied VERBATIM into configs/transfer25/pr08_geom_tol.json before any number is
+# measured, and every comparator in this repository reads the two and reports the difference.
+#
+# So the V10 refusal above is not the only thing standing between this module and §6's plate half.
+# Even with a plate reference registered — the thing V10's comment routes to the owner — a plate
+# pass would be DISQUALIFIED BY ITS OWN LABEL: `run_g0_gates.instrument_disagreements` puts the row
+# in `disqualified` after the GPU has been spent on every frame, and `measure_geom_tol
+# .merge_committed_contract` refuses a plate pass pointed at the committed document before a byte is
+# written. Two different costs, both paid for a run that could never have qualified.
+#
+# THESE TESTS DO NOT FIX THAT AND MUST NOT BE READ AS FIXING IT. The fix is a change to the SHAPE of
+# a pre-committed field, which is a pre-registration and the project owner's call, not a session's:
+# the contract is committed in a tracked file with a sha256 sidecar,
+# `measure_geom_tol.contract_disagreements` counts a field present on one side and ABSENT on the
+# other as a disagreement, and the sixteen GEOM_TOL shards already on disk carry the contract as it
+# stood when they were measured — so a field added or renamed here disqualifies artifacts that have
+# already been paid for. What is pinned below is the behaviour AS IT STANDS, so that the consequence
+# is a checked fact discovered before an array is submitted rather than a surprise found in the
+# cross-check afterwards. Unnamed in T40_RULE_V6, V9 and V10 and in T-040 — which is why it is here.
+
+
+def _plate_module(monkeypatch):
+    """The adapter as a plate pass imports it: same module, `WAM_PR08_OBJECT_PROMPT="plate."`."""
+    monkeypatch.setenv("WAM_PR08_ALLOW_DOWNLOAD", "1")
+    monkeypatch.setenv("WAM_PR08_DEVICE", "cpu")
+    monkeypatch.setenv("WAM_PR08_OBJECT_PROMPT", "plate.")
+    _install(monkeypatch, detections=[[(0.76, [34.0, 4.0, 60.0, 44.0])]])
+    return _fresh_import(monkeypatch)
+
+
+def test_the_plate_pass_states_plate_in_a_contract_that_was_committed_as_apple(monkeypatch):
+    """The contract is a snapshot of an env var, and the env var is how §6's second label is asked
+    for. Importing does not refuse — `MaskValidityReferenceUndefined` is raised by `segment()`, not
+    at import — so the module hands out a plate contract to anything that reads SEGMENTER_CONTRACT
+    without ever calling it, which is precisely what `run_g0_gates.adapter_segmenter_contract` does
+    (it exec's this file and reads the dict)."""
+    module = _plate_module(monkeypatch)
+    assert module.OBJECT_TEXT_PROMPT == "plate."
+    assert module.SEGMENTER_CONTRACT["object_text_prompt"] == "plate."
+    # ONE STRING, not a set, a list or a per-label mapping. This is the defect in one assertion:
+    # there is nowhere in this shape for "the apple AND the plate", and §6 gates both.
+    assert isinstance(module.SEGMENTER_CONTRACT["object_text_prompt"], str)
+    assert _contract_doc()["segmenter"]["object_text_prompt"] == "apple."
+
+
+def test_the_plate_pass_is_refused_at_the_g0b_cross_check_by_its_label_alone(monkeypatch):
+    """The expensive failure, through the real comparator G0b uses.
+
+    `run_g0_gates.instrument_disagreements` calls `contract_disagreements(side.segmenter["contract"],
+    tolerance_contract)` for BOTH sides. BE EXACT ABOUT WHAT HAPPENS TO ITS ROWS, because the softer
+    reading is the tempting one: there is exactly one call site, `run_g0_gates.py:2005`, and the next
+    statement is `raise GateRefusal`. A disagreeing row does NOT land in a written artifact's
+    `disqualified` list — run_g0b aborts and writes NOTHING. (The row pinned below is also the bare
+    comparator output; what a reader would see is the prefixed form from :1515, "the <side> segmenter
+    contract disagrees with the tolerance's: ...".)
+
+    The spend is real and survives that correction, for a different reason than "it is recorded":
+    `resolve_side` at :2004 runs `side_from_clips`, which spends the GPU, and only THEN does :2005
+    refuse. The plate pass therefore measures the whole corpus and is then refused for the one thing
+    that was true before the first frame decoded.
+
+    The count matters as much as the row: EXACTLY ONE field disagrees. A plate pass is not a
+    different segmenter — same weights, same thresholds, same retry, same box rule, same filter —
+    so this is not the cross-check catching a drifted instrument. It is the pre-commitment having no
+    way to say "and the plate", and that is a rule-level repair rather than a code one."""
+    import run_g0_gates as g0
+
+    module = _plate_module(monkeypatch)
+    committed = _contract_doc()["segmenter"]
+    rows = g0.contract_disagreements(module.SEGMENTER_CONTRACT, committed, "contract")
+    assert rows == ["contract.object_text_prompt: 'plate.' vs 'apple.'"]
+
+
+def test_the_plate_pass_cannot_land_on_the_committed_document_at_all(monkeypatch, tmp_path):
+    """The other cost, and it is the one that writes nothing: `measure_geom_tol.py`'s default
+    `--out` and its `--merge` target are the committed contract, so a plate GEOM_TOL run aimed
+    there raises `MethodUnavailable` — exit 2 — naming the field. Correct behaviour for the
+    machinery and a dead end for §6's plate half, which is the finding."""
+    import shutil
+
+    import measure_geom_tol as mgt
+
+    module = _plate_module(monkeypatch)
+    target = tmp_path / "pr08_geom_tol.json"
+    shutil.copy(GEOM_TOL_CONTRACT, target)
+    record = {
+        "resolution_hw": [480, 640],
+        "GEOM_TOL_px": 3.4,
+        "mask_method": {
+            "name": module.ESTIMATOR_NAME,
+            "params": {"segmenter": dict(module.SEGMENTER_CONTRACT)},
+        },
+    }
+    with pytest.raises(mgt.MethodUnavailable) as excinfo:
+        mgt.merge_committed_contract(target, record)
+    message = str(excinfo.value)
+    assert "object_text_prompt" in message
+    assert "committed 'apple.', this run 'plate.'" in message
+    assert "Nothing is written" in message
+
+
+def test_the_apple_pass_is_the_matched_control_and_disagrees_about_nothing(loaded):
+    """Without this the three tests above would be evidence that the contract has drifted, which is
+    a different and much worse finding. Under the default label both comparators — the union one
+    that refuses the write and the one G0b raises GateRefusal on — return empty."""
+    import run_g0_gates as g0
+    import measure_geom_tol as mgt
+
+    module, _ = loaded
+    committed = _contract_doc()["segmenter"]
+    assert module.OBJECT_TEXT_PROMPT == "apple."
+    assert mgt.contract_disagreements(module.SEGMENTER_CONTRACT, committed) == []
+    assert g0.contract_disagreements(module.SEGMENTER_CONTRACT, committed, "contract") == []
+
+
+def test_the_contract_has_no_second_place_to_put_a_label(loaded):
+    """The shape, pinned, because the repair everyone will reach for first is to add a field.
+
+    ADDING OR RENAMING A KEY IN THIS DICT IS NOT A CODE CHANGE. `contract_disagreements` in
+    `measure_geom_tol` compares the UNION of the two key sets and counts an absent field as a
+    disagreement — deliberately, and its docstring says why: "a contract that has grown a field the
+    committed one never had is, precisely, a segmenter the committed one did not describe". So a new
+    key disagrees with every artifact measured before it existed, including artifacts that cost GPU
+    hours and cannot be re-measured cheaply. This is not hypothetical: `mask_validity_reference_max_
+    frame_fraction` joined the contract on 2026-08-24, after the GEOM_TOL shards were measured, and
+    those shards' recorded contract is fifteen of the sixteen keys below — every one except that.
+
+    The list is spelled out rather than derived, so that a key appearing or disappearing fails HERE,
+    in a test whose docstring says what it costs, instead of in a cross-check on a cluster."""
+    module, _ = loaded
+    assert set(module.SEGMENTER_CONTRACT) == {
+        "method_name",
+        "detector",
+        "segmenter",
+        "depth",
+        "object_text_prompt",
+        "box_threshold",
+        "text_threshold",
+        "retry_box_threshold",
+        "retry_text_threshold",
+        "box_selection",
+        "mask_validity_min_iou",
+        "mask_validity_reference",
+        "mask_validity_reference_max_frame_fraction",
+        "propagation",
+        "upstream_propagation",
+        "pixel_grid_hw",
+    }
+    # No SEQUENCE in it could carry a second label. `detector`, `segmenter` and `depth` are dicts
+    # (a checkpoint and its revision), so this assertion does not screen them; what closes the hole
+    # for the field that matters is the `isinstance(..., str)` check above, which pins
+    # `object_text_prompt` as single-valued by shape rather than by convention. That is why the
+    # two-label question cannot be answered inside this module.
+    assert [k for k, v in module.SEGMENTER_CONTRACT.items() if isinstance(v, (list, set, tuple))] \
+        == ["pixel_grid_hw"]
+
+
+def test_the_artifact_does_not_carry_a_quotation_embargo_v10_has_since_lifted(loaded):
+    """`stats()` is stamped verbatim into every artifact this module produces — including
+    `runs/pr08-operating-point/EPISODE_094_CENSUS.json`, whose `estimator_stats
+    .mask_validity_reference_scope` is where this string was found — so a stale sentence here is a
+    stale sentence in the measurement record, and the reader who checks whether a number may be
+    quoted reads the artifact, not the rule.
+
+    T40_RULE_V10 was drafted UNSIGNED on 2026-08-23 and this text was written then. §8 now reads
+    "ADOPTED 2026-08-24. In force", and the document carries an adoption banner saying so. An
+    embargo that outlives its rule suppresses evidence that is licensed, which is the same class of
+    error as quoting evidence that is not — and it is the cheaper one to get wrong by inaction.
+
+    What this does NOT assert is that anything may be generated: V10's own banner says adoption
+    "does not license generation", `T40_RULE_V1` §1 binds in full, and the module's other refusals
+    are untouched."""
+    module, _ = loaded
+    scope = module.stats()["mask_validity_reference_scope"]
+    assert "UNSIGNED" not in scope
+    assert "may be quoted" not in scope
+    # The status is stated rather than merely dropped: an artifact that says nothing about the
+    # rule's standing is not an improvement on one that says the wrong thing.
+    assert "ADOPTED 2026-08-24" in scope
+    assert "T40_RULE_V10" in scope
+    # And the claim is checked against the document that licenses it, not merely spelled
+    # consistently with itself. V10's adoption banner says the determination is REVERSIBLE ("the
+    # owner delegated without having seen the recommendation"), and an artifact asserting a rule is
+    # in force after it was reverted is the same defect this test exists to close, pointing the
+    # other way — the expensive direction. So the module may only say "adopted" while the rule
+    # still says it, and this goes red on the revert instead of after it.
+    assert "PR-08-V10-mask-validity-reference-scope.md" in scope
+    rule = (
+        _REPO / "docs" / "preregistration" / "PR-08-V10-mask-validity-reference-scope.md"
+    ).read_text(encoding="utf-8")
+    assert "**ADOPTED 2026-08-24.** In force" in rule
+    # Adoption is not a licence, in the rule's words and therefore in the artifact's.
+    assert "It does not license generation" in rule
+    assert "does not license generation" in scope
+    # THE PROSE, NOT ONLY THE STAMPED FIELD. The identical sentence stood in the module docstring
+    # and in the V10 section comment, and `stats()` reads neither — so a screen on the returned
+    # string alone leaves two places a later edit can restore the withdrawn embargo from while this
+    # test stays green, in a module whose comments are load-bearing. The screen is on the CLAIM, not
+    # on the word "unsigned": both passages still use that word, correctly, to say what V10 was on
+    # 2026-08-23.
+    source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
+    assert "may be quoted until the project owner signs it" not in source
+    assert "may be quoted" not in source

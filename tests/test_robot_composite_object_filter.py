@@ -653,3 +653,185 @@ def _method_body(name: str) -> list[str]:
         len(source),
     )
     return [line.strip() for line in source[start:end]]
+
+
+# -- V10: the colour reference over GENERATED pixels, recorded rather than assumed ------------------
+#
+# ``object_grounding_iou`` runs ``apple_sam2.object_color_reference`` on whatever frame it is given,
+# and ``composite_clip``'s IoU diagnostic gives it GENERATED frames. There the predicate's own
+# justification — "the only saturated warm thing in any of these frames is the fruit" — is false by
+# construction, because PR-08's committed prompts change the table and the fruit's colour on purpose.
+# Measured on job 189926's ``train-01-oak-tungsten``: 37.18-56.40 % of the frame comes back warm, all
+# of it oak table, against ``MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION`` = 0.10.
+#
+# PR-08 §6 FORBIDS gating on that number, and nothing below turns it into a gate. What the tests
+# require is that the artifact SAYS the instrument was inapplicable to the pixels it ran on, so that
+# a reader of one clip's record can tell a diagnostic produced by a working reference from one
+# produced by a reference that had moved to the table.
+
+OAK_TABLE = (150, 90, 45)
+
+
+def _paint_oak_table(frame: np.ndarray) -> np.ndarray:
+    """Warm, saturated and covering the frame: r=150>90, r-b=105>50, sat=0.70>0.35.
+
+    The shape of ``train-01-oak-tungsten``'s generated frames, painted at 100 % rather than the 37-56
+    % that was measured, because the bound this is read against is 0.10 and the point is the side of
+    it, not the exact value.
+    """
+    frame[:, :] = OAK_TABLE
+    return frame
+
+
+def test_a_scene_scale_reference_on_a_generated_frame_is_counted(masker, monkeypatch):
+    """The record that does not exist yet: the reference covered the scene and nothing said so."""
+    frame = _paint_robot(_paint_oak_table(_blank()), ROBOT_BOX)
+    adapter = masker._module
+    fraction = adapter.reference_frame_fraction(adapter.object_color_reference(frame))
+    assert fraction > adapter.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION, (
+        "the fixture must reproduce the measured failure, not merely a warm pixel")
+
+    _boxes(masker, monkeypatch, [ROBOT_BOX])
+    mask = masker.mask(frame)
+
+    expected = np.zeros((CANVAS, CANVAS), dtype=bool)
+    expected[ROBOT_BOX[1]:ROBOT_BOX[3], ROBOT_BOX[0]:ROBOT_BOX[2]] = True
+    assert np.array_equal(mask, expected), (
+        "PR-08 §6 forbids gating on this number: the mask must be exactly what V9's comparison "
+        "returned, with or without the applicability record")
+    assert masker.filter_counters["frames_with_reference_not_object_scale"] == 1
+
+
+def test_the_applicability_record_decides_nothing_and_v9_still_decides_everything(masker):
+    """Not a gate, asserted against V9's own comparison rather than against a hand-written answer.
+
+    ``object_grounding_keep`` must remain exactly ``iou <= ROBOT_MASK_OBJECT_MAX_IOU``, elementwise,
+    on a frame whose reference has moved to the table. A V10 predicate that short-circuited the keep
+    vector here would be the coined threshold §6 refuses, arriving as a repair.
+    """
+    frame = _paint_robot(_paint_apple(_paint_oak_table(_blank()), APPLE_BOX), ROBOT_BOX)
+    stacked = np.zeros((2, CANVAS, CANVAS), dtype=bool)
+    stacked[0, APPLE_BOX[1]:APPLE_BOX[3], APPLE_BOX[0]:APPLE_BOX[2]] = True
+    stacked[1, ROBOT_BOX[1]:ROBOT_BOX[3], ROBOT_BOX[0]:ROBOT_BOX[2]] = True
+
+    overlaps = masker.object_grounding_iou(frame, stacked)
+    keep = masker.object_grounding_keep(frame, stacked)
+
+    assert keep.tolist() == (overlaps <= rc.ROBOT_MASK_OBJECT_MAX_IOU).tolist()
+    assert masker.filter_counters["frames_with_reference_not_object_scale"] == 2, (
+        "the filter was asked twice about a scene-scale reference and both askings are facts")
+
+
+def test_an_adapter_that_stops_declaring_the_applicability_predicate_is_a_refusal(
+    masker, monkeypatch
+):
+    """T40_RULE_V10 exported it for this call site. Losing it must not silently lose the record."""
+    monkeypatch.delattr(masker._module, "reference_is_object_scale")
+    _boxes(masker, monkeypatch, [ROBOT_BOX])
+    with pytest.raises(rc.CompositeError, match="no longer declares reference_is_object_scale"):
+        masker.mask(_paint_robot(_paint_oak_table(_blank()), ROBOT_BOX))
+
+
+def _composite_context(masker, tmp_path, *, iou_stride: int) -> "rc.CompositeContext":
+    bound = rc.AreaBound(
+        max_frame_fraction=0.9,
+        artifact=tmp_path / "bound.json",
+        artifact_sha256="0" * 64,
+        rationale="a test bound; this test is about the diagnostic's record, not about the bound",
+        cross_checked=True,
+        cross_checked_against={"test": True},
+    )
+    return rc.CompositeContext(masker=masker, bound=bound, iou_stride=iou_stride, cache=None)
+
+
+def test_the_iou_diagnostic_records_that_its_own_instrument_was_inapplicable(
+    masker, monkeypatch, tmp_path
+):
+    """The artifact, which is the thing that has to say it.
+
+    The IoU block already carries its stride, its measurand and its never-a-gate flag. What it does
+    not carry is whether the colour reference the masker consulted on those generated frames was the
+    size of an object or the size of the scene — and on arms B/C/D it is the scene. A reader holding
+    one ``sample_outputs.json`` cannot otherwise tell the two apart.
+    """
+    frames = 4
+    src = np.stack([_paint_robot(_blank(), ROBOT_BOX) for _ in range(frames)])
+    gen = np.stack([_paint_robot(_paint_oak_table(_blank()), ROBOT_BOX) for _ in range(frames)])
+    source_video = tmp_path / "source.mp4"
+    generated_video = tmp_path / "vision.mp4"
+    source_video.write_bytes(b"source")
+    generated_video.write_bytes(b"generated")
+
+    masks = np.zeros((frames, CANVAS, CANVAS), dtype=bool)
+    masks[:, ROBOT_BOX[1]:ROBOT_BOX[3], ROBOT_BOX[0]:ROBOT_BOX[2]] = True
+
+    monkeypatch.setattr(rc, "decode_clip", lambda path: src if path == source_video else gen)
+    monkeypatch.setattr(rc, "source_masks", lambda video, frames_, context: (masks, False))
+    monkeypatch.setattr(rc, "container_fps", lambda path: 30.0)
+    monkeypatch.setattr(rc, "encode_clip", lambda arr, path, fps: path.write_bytes(b"composited"))
+    _boxes(masker, monkeypatch, [ROBOT_BOX])
+
+    record = rc.composite_clip(
+        source_video=source_video,
+        generated_video=generated_video,
+        context=_composite_context(masker, tmp_path, iou_stride=2),
+        expected_frames=frames,
+    )
+
+    assert record["composited"] is True, "nothing here may change a refusal outcome"
+    diagnostic = record["robot_mask_iou_source_vs_generated"]
+    assert diagnostic["frames_sampled"] == 2
+    applicability = diagnostic["object_reference_applicability"]
+    assert applicability["frames_masked"] == 2, "counted over the sampled GENERATED frames only"
+    assert applicability["frames_with_reference_not_object_scale"] == 2
+    assert applicability["reference_max_frame_fraction"] == pytest.approx(
+        masker._module.MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION
+    )
+    assert applicability["reference"] == masker._module.MASK_VALIDITY_REFERENCE
+    assert "THIS_IS_A_DIAGNOSTIC_ON_THE_GENERATOR_AND_NEVER_A_GATE" in diagnostic
+
+    # And the source-pass block is not polluted by the generated frames' counts, which is the
+    # property test_the_recorded_counts_are_the_source_pass_and_say_so pins one level up.
+    assert record["robot_mask_object_filter"]["frames_masked"] == 0
+
+
+def test_the_applicability_record_says_when_it_was_never_asked(masker, monkeypatch, tmp_path):
+    """The honest hole in the count, pinned so the note keeps matching the arithmetic.
+
+    The colour reference is consulted inside ``object_grounding_iou``, which ``mask`` only reaches
+    when the detector grounded at least one box. On a generated frame it grounded nothing on, the
+    reference is never built and ``frames_with_reference_not_object_scale`` cannot move — which
+    would read as "the instrument applied" to anyone who did not also look at
+    ``detections_segmented``. So the count is emitted beside that one, and the block's note points
+    at it rather than at frames_masked.
+    """
+    frames = 2
+    src = np.stack([_paint_robot(_blank(), ROBOT_BOX) for _ in range(frames)])
+    gen = np.stack([_paint_oak_table(_blank()) for _ in range(frames)])
+    source_video = tmp_path / "source.mp4"
+    generated_video = tmp_path / "vision.mp4"
+    source_video.write_bytes(b"source")
+    generated_video.write_bytes(b"generated")
+
+    masks = np.zeros((frames, CANVAS, CANVAS), dtype=bool)
+    masks[:, ROBOT_BOX[1]:ROBOT_BOX[3], ROBOT_BOX[0]:ROBOT_BOX[2]] = True
+
+    monkeypatch.setattr(rc, "decode_clip", lambda path: src if path == source_video else gen)
+    monkeypatch.setattr(rc, "source_masks", lambda video, frames_, context: (masks, False))
+    monkeypatch.setattr(rc, "container_fps", lambda path: 30.0)
+    monkeypatch.setattr(rc, "encode_clip", lambda arr, path, fps: path.write_bytes(b"composited"))
+    _boxes(masker, monkeypatch, np.zeros((0, 4)))
+
+    record = rc.composite_clip(
+        source_video=source_video,
+        generated_video=generated_video,
+        context=_composite_context(masker, tmp_path, iou_stride=1),
+        expected_frames=frames,
+    )
+
+    applicability = record["robot_mask_iou_source_vs_generated"]["object_reference_applicability"]
+    assert applicability["frames_masked"] == frames
+    assert applicability["detections_segmented"] == 0
+    assert applicability["frames_with_reference_not_object_scale"] == 0
+    assert "detections_segmented" in applicability["note"], (
+        "a zero that means 'never asked' must be readable as such from this block alone")

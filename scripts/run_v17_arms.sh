@@ -313,9 +313,64 @@ esac
 # advice is the fix. Harmless when the card is empty.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+# WHICH FILES THE OPERATOR'S DECISION IS ABOUT, frozen here where the pre-flight's answer is still
+# the current one. The pre-flight asks "what is on disk" ONCE and before the wait, which is right:
+# a refusal found after twelve hours of waiting is found at the worst possible moment. But the skip
+# below asks `-f` again at the FAR END of that wait, and the two questions have different answers
+# whenever a file appears in between — a neighbouring operator's run, or a second copy of this
+# script, on a workstation several sessions share. Such a file was never listed, never compared
+# against ${EST}.GATE_QUALIFIED, and never decided about, and the skip would have kept it in the
+# DEFAULT mode too (`!= remeasure` is true for `refuse`), printing `--reuse-existing` over a flag
+# nobody passed. That is the same failure this whole pre-flight exists to stop, arriving through a
+# twelve-hour window instead of through the directory's initial state, and it is invisible
+# downstream: `pool_est_drift_arms`' instrument key is the segmenter contract, the resolution, the
+# object class, the propagator spec and the IoU threshold — the gate flag is not in it.
+#
+# WHAT THIS IS NOT, so nobody reads a stronger guarantee out of it than it gives: this is not the
+# pre-flight's own answer handed forward. It is a SECOND `-f` pass over the same candidate names,
+# taken a few lines after the pre-flight returned and still before the wait. The two share the
+# LIST, not the existence answer, so a file appearing in the sub-second gap between them is still
+# admitted as "seen". Closing that would mean the pre-flight emitting its own listing for this loop
+# to read; the gap is milliseconds against a window that can be twelve hours, so it is named here
+# rather than engineered away. Existence, not content, either: a listed file REWRITTEN during the
+# wait is still kept under `reuse`.
+PREFLIGHT_SEEN=$'\n'
+for entry in "${ARTIFACTS[@]}"; do
+  if [[ -f "${entry#*|}" ]]; then PREFLIGHT_SEEN+="${entry#*|}"$'\n'; fi
+done
+
 # Only reached with a decision recorded: either nothing was on disk, or the operator named one.
 already_measured() {  # <artifact path> -- true when this step may be skipped
-  [[ "${ON_EXISTING}" != "remeasure" && -f "$1" ]]
+  local out="$1"
+  [[ -f "${out}" ]] || return 1
+  # --remeasure is the one mode that KEEPS nothing, so a file that turned up in the window is a file
+  # about to be overwritten and there is no decision left to make about it. The window bites only on
+  # the keep path, and refusing here as well would refuse the mode's whole purpose after a wait that
+  # can be twelve hours long.
+  if [[ "${ON_EXISTING}" == "remeasure" ]]; then return 1; fi
+  if [[ "${PREFLIGHT_SEEN}" != *$'\n'"${out}"$'\n'* ]]; then
+    echo "REFUSING: ${out} was not on disk when the pre-flight ran, and it is now." >&2
+    echo "  It appeared while this run was waiting for the GPU, so nothing here has compared it" >&2
+    echo "  against ${EST}.GATE_QUALIFIED and no decision on this command line is about it. The" >&2
+    echo "  modes below are answers to the pre-flight's listing; keeping a file that was not in" >&2
+    echo "  that listing would extend one of them to a measurement nobody looked at, and pooling" >&2
+    echo "  it is silent — the pool's instrument key does not carry the gate flag." >&2
+    echo "  Nothing further was measured. Re-run: the pre-flight will list it, say whether it" >&2
+    echo "  agrees with the adapter, and ask for a decision that is actually about it." >&2
+    exit 5
+  fi
+  case "${ON_EXISTING}" in
+    reuse)     return 0 ;;
+    # Unreachable today and refusing anyway: `refuse` is the default, and with a file the pre-flight
+    # LISTED it exits 5 up there before this function is defined. Returning false here instead would
+    # silently overwrite that file, which is the one thing the default mode was written not to do,
+    # so if the ordering above ever changes this fails closed rather than measuring over it.
+    *)
+      echo "REFUSING: ${out} exists and no mode was recorded for it (ON_EXISTING=${ON_EXISTING})." >&2
+      echo "  The pre-flight must have asked for a decision before this point. Nothing was" >&2
+      echo "  measured and nothing was overwritten." >&2
+      exit 5 ;;
+  esac
 }
 
 wait_for_gpu

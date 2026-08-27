@@ -138,7 +138,10 @@ and a frame whose reference covers more than
 :data:`MASK_VALIDITY_REFERENCE_MAX_FRAME_FRACTION` of the picture is refused as undecidable and
 counted in :data:`MASK_REFUSED_REFERENCE_NOT_OBJECT_SCALE_FRAMES`, because on a warm-table restyle
 the predicate stops describing the fruit and starts describing the table. PR-08 V10
-(``docs/preregistration/PR-08-V10-mask-validity-reference-scope.md``), **UNSIGNED**.
+(``docs/preregistration/PR-08-V10-mask-validity-reference-scope.md``), **ADOPTED 2026-08-24 and in
+force** — drafted unsigned, and the "unsigned" here and in ``stats()`` outlived the signature.
+Adoption puts the rule in force and licenses nothing else: V10's own banner says so, and
+``T40_RULE_V1`` §1 binds in full.
 
 **It will not rescale a float image.** ``rgb`` must be ``uint8``. A float array in [0, 1] and a
 float array in [0, 255] are indistinguishable from the array alone and rescale to different
@@ -433,9 +436,12 @@ MASK_VALIDITY_REFERENCE = "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)"
 # -- WHERE THAT REFERENCE IS DEFINED, WHICH V6 DID NOT SAY AND THIS MODULE ASSUMED ------------------
 #
 # Registered as PR-08 V10 (T40_RULE_V10), docs/preregistration/PR-08-V10-mask-validity-reference-
-# scope.md. UNSIGNED as this lands: nothing measured under it may be quoted until the project owner
-# signs it. V6 is NOT edited, weakened or superseded — every threshold, counter and frame decision
-# it registered still applies wherever its reference is defined. V10 only makes "wherever" explicit,
+# scope.md. It landed UNSIGNED and carried an embargo saying nothing measured under it could be
+# quoted until the project owner signed it; §8 of that document now reads "ADOPTED 2026-08-24. In
+# force", so the embargo is spent and is withdrawn here and in stats(). ADOPTION IS NOT A LICENCE
+# TO GENERATE — V10's own adoption banner says exactly that, T40_RULE_V1 §1 binds in full, and not
+# one refusal below is loosened by this note. V6 is NOT edited, weakened or superseded — every
+# threshold, counter and frame decision it registered still applies wherever its reference is defined. V10 only makes "wherever" explicit,
 # because the module was treating a predicate about ONE object under ONE lighting as a predicate
 # about any object under any lighting, and failing in two measured ways when it was not.
 #
@@ -1288,8 +1294,11 @@ def stats() -> dict[str, Any]:
         "mask_validity_reference_fraction_attr": "MASK_VALIDITY_REFERENCE_FRACTION",
         "mask_validity_reference_scope": (
             "PR-08 V10 (T40_RULE_V10, docs/preregistration/PR-08-V10-mask-validity-reference-"
-            "scope.md, UNSIGNED as this is recorded — nothing measured under it may be quoted "
-            "until the project owner signs it). The reference named in mask_validity_reference is "
+            "scope.md, ADOPTED 2026-08-24 and in force — its §8 says so, and the quotation embargo "
+            "this field used to carry was written on 2026-08-23 while the rule was still a draft "
+            "and is withdrawn. Adoption does not license generation: T40_RULE_V1 §1 binds in full "
+            "and every refusal described below is unchanged). The reference named in "
+            "mask_validity_reference is "
             "a predicate for ONE object under ONE appearance, and this module used to apply it to "
             "any label on any pixels. Two consequences were MEASURED rather than supposed. (1) A "
             "label outside mask_validity_reference_labels now refuses the RUN — "

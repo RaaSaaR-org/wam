@@ -53,8 +53,11 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import pathlib
+import signal
 import subprocess
+import time
 
 import pytest
 
@@ -574,3 +577,215 @@ def test_the_pool_is_recomputed_every_run_rather_than_reused(tmp_path):
     assert "is NOT kept" in done.stdout, (
         "the reuse message must not claim POOLED.json is kept when the pooling step rewrites it"
     )
+
+
+# -- and the window between the pre-flight and the step, which is up to twelve hours wide ----------
+#
+# The pre-flight above answers "what is on disk" ONCE, before `wait_for_gpu`, and that placement is
+# deliberate and right: a refusal found after a twelve-hour wait is found at the worst possible
+# moment. But the skip inside each step asks `-f` again at the moment the step runs, and between the
+# two answers sits the wait. Whatever appears in that window was never compared against anything.
+
+
+def _card_that_frees_up(out_dir: pathlib.Path, stale: pathlib.Path | None) -> dict[str, str]:
+    """The environment for a run whose GPU wait is satisfied and whose artifacts appear DURING it.
+
+    The fake `nvidia-smi` is how the window is made deterministic rather than raced: `wait_for_gpu`
+    runs after the pre-flight and before the first step, it is the only thing that runs there, and
+    it samples the card by name through `PATH`. So the fake drops the thirteen artifacts on disk on
+    its first call and then reports a free card, which places their appearance exactly inside the
+    window — the same position a neighbouring operator's run, or a second copy of this script,
+    would occupy on a workstation several sessions share. `sleep` is faked for time only; the three
+    samples still happen and the script's logic is untouched.
+
+    The files it drops are from the OTHER side of the flip: the exact thirteen
+    `gate_qualified: false` artifacts the re-run exists to replace, and the ones `--reuse-existing`
+    refuses when the pre-flight does see them.
+    """
+    fake = out_dir / "fakebin"
+    fake.mkdir(exist_ok=True)
+    (fake / "nvidia-smi").write_text(
+        "#!/bin/bash\n"
+        'if [ -n "$STALE" ] && [ ! -e "$V17/.appeared" ]; then\n'
+        '  : > "$V17/.appeared"\n'
+        "  for n in C1-lattice A1 A2 A3 A4 A5 A6 A7 A8 C2-t20 C2-t40 C2-t80 C3-wrongseed; do\n"
+        '    cp "$STALE" "$V17/EST_DRIFT-$n.json"\n'
+        "  done\n"
+        '  cp "$STALE" "$V17/ARM_DIVERGENCE.json"\n'
+        '  cp "$STALE" "$CENSUS_OUT"\n'
+        "fi\n"
+        "echo 999999\n"
+    )
+    (fake / "sleep").write_text("#!/bin/bash\nexit 0\n")
+    for f in (fake / "nvidia-smi", fake / "sleep"):
+        f.chmod(0o755)
+    env = {
+        "PATH": f"{fake}:/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(out_dir),
+        "V17": str(out_dir),
+        "CENSUS_OUT": str(out_dir / "CENSUS.json"),
+        # No STALE means a card that frees up and drops nothing: the artifacts, if any, were on
+        # disk before the run and the pre-flight therefore saw them.
+        "STALE": str(stale) if stale is not None else "",
+    }
+    return env
+
+
+#: The flags that make `wait_for_gpu` return on its first three samples against the fake card above.
+_CARD_IS_FREE = ["--min-free-mib", "0", "--wait-minutes", "0"]
+
+
+def _run_with_a_card_that_frees_up(out_dir: pathlib.Path, stale: pathlib.Path | None, *args: str):
+    """Run to completion. Safe only where the script refuses before its first measurement."""
+    return subprocess.run(
+        ["bash", str(_SCRIPT), *args, *_CARD_IS_FREE],
+        capture_output=True, text=True, timeout=600,
+        env=_card_that_frees_up(out_dir, stale), cwd=str(_REPO),
+    )
+
+
+def _start_with_a_card_that_frees_up(out_dir: pathlib.Path, stale: pathlib.Path | None, *args: str):
+    """Start it in its own process group, for the one case that must be stopped rather than waited
+    on: a run that gets past the skip is a run that has started a GPU measurement, and the caller
+    kills the group as soon as the line it needs has been printed."""
+    return subprocess.Popen(
+        ["bash", str(_SCRIPT), *args, *_CARD_IS_FREE],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        env=_card_that_frees_up(out_dir, stale), cwd=str(_REPO), start_new_session=True,
+    )
+
+
+def test_an_artifact_that_appeared_after_the_pre_flight_is_refused_not_kept(tmp_path):
+    """THE HOLE THE PRE-FLIGHT LEAVES OPEN, and it re-opens the defect this file is about.
+
+    The pre-flight ran on an EMPTY directory here, so it found nothing, made no comparison, and —
+    correctly — asked the operator for no decision: `ON_EXISTING` stays at its default `refuse`.
+    The thirteen artifacts then appear during `wait_for_gpu`. `already_measured` used to read
+    `[[ "${ON_EXISTING}" != "remeasure" && -f "$1" ]]`, which is true in the default mode as well
+    as under `--reuse-existing`, so every step skipped, each printing `(--reuse-existing; NOT
+    measured by this run)` — naming a flag nobody passed, about a decision nobody made, over files
+    nothing checked. The pool then pools them and the run reports ALL V17 MEASUREMENTS DONE.
+
+    That is defect 9 exactly, arriving through a twelve-hour window instead of through the file
+    system's initial state: thirteen `gate_qualified: false` files kept in silence, and
+    `pool_est_drift_arms` cannot see it — its instrument key is the segmenter contract, the
+    resolution, the object class, the propagator spec and the IoU threshold, and the gate flag is
+    not in it.
+
+    So the skip is now allowed only for a file the pre-flight actually SAW. Anything else refuses
+    with the same exit 5 the pre-flight uses, because it is the same refusal: an artifact on disk
+    that nobody decided about.
+    """
+    out = _captures(tmp_path)
+    stale = tmp_path / "stale.json"
+    _artifact_from_before_the_flip(stale)
+
+    done = _run_with_a_card_that_frees_up(out, stale)
+    combined = done.stdout + done.stderr
+
+    # The pre-flight really did see an empty directory: no decision was asked for, so none was made.
+    assert "0 of 16 already exist" in done.stdout, combined
+    assert "REFUSING TO SKIP" not in done.stderr, combined
+    # And the files really did appear before the first step.
+    assert (out / "EST_DRIFT-C1-lattice.json").exists(), combined
+
+    assert "--reuse-existing; NOT measured by this run" not in done.stdout, (
+        "the default mode may not act on a flag the operator never passed:\n" + combined
+    )
+    assert done.returncode == 5, combined
+    assert "was not on disk when the pre-flight ran" in done.stderr, combined
+    assert not (out / "POOLED.json").exists(), (
+        "an artifact nothing compared must not reach the pool:\n" + combined
+    )
+
+
+def test_a_late_artifact_is_refused_under_reuse_existing_too(tmp_path):
+    """`--reuse-existing` is a decision about the files the pre-flight LISTED, not a standing one.
+
+    Its message says the artifacts above "agree with ${EST}.GATE_QUALIFIED, which is what makes
+    reusing them defensible" — a sentence about files that were compared. A file that appears
+    afterwards was compared against nothing, so the sentence is false about it, and keeping it would
+    hand the pool a measurement whose instrument is unestablished under a flag that promised the
+    opposite. The stale fixture here is what `--reuse-existing` refuses BY NAME when the pre-flight
+    sees it; appearing later must not be the way around that refusal.
+    """
+    out = _captures(tmp_path)
+    stale = tmp_path / "stale.json"
+    _artifact_from_before_the_flip(stale)
+
+    done = _run_with_a_card_that_frees_up(out, stale, "--reuse-existing")
+    combined = done.stdout + done.stderr
+    assert done.returncode == 5, combined
+    assert "was not on disk when the pre-flight ran" in done.stderr, combined
+    assert not (out / "POOLED.json").exists(), combined
+
+
+def test_remeasure_still_overwrites_a_late_artifact_rather_than_refusing(tmp_path):
+    """The one mode for which a late arrival is not a question, and it must stay unaffected.
+
+    `--remeasure` says every step is measured again and overwritten, so a file appearing in the
+    window is a file about to be replaced — refusing there would refuse the mode's whole purpose.
+
+    THIS ONE CANNOT BE RUN TO COMPLETION AND IS NOT. Getting past the skip IS starting the first
+    real measurement, which is a GPU job over the control capture, so the run is stopped at the line
+    that proves the skip did not fire: the step announces itself before `run_step` launches
+    anything, and the whole process group is killed as soon as that line appears. What is asserted
+    is only the negative the fix could plausibly have broken — that a late artifact does not turn
+    `--remeasure` into a refusal.
+    """
+    out = _captures(tmp_path)
+    stale = tmp_path / "stale.json"
+    _artifact_from_before_the_flip(stale)
+
+    proc = _start_with_a_card_that_frees_up(out, stale, "--remeasure")
+    seen = []
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            seen.append(line)
+            if "measuring C1-lattice" in line or "not on disk when the pre-flight ran" in line:
+                break
+    finally:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait(timeout=30)
+    combined = "".join(seen)
+    assert "was not on disk when the pre-flight ran" not in combined, combined
+    assert "measuring C1-lattice" in combined, (
+        "--remeasure must reach the measurement it promised:\n" + combined
+    )
+
+
+def test_the_ordinary_skip_still_keeps_what_the_pre_flight_listed(tmp_path):
+    """THE OTHER HALF OF THE REFUSAL ABOVE, and the half nothing else here can see.
+
+    Every other test in this file stops at the GPU wait, so none of them ever reaches the skip with
+    a file the pre-flight DID list — which means a check placed on that path could refuse every
+    artifact in the directory and the suite would stay green while `--reuse-existing` became a
+    twelve-hour way of reaching an exit 5. The card is free here, nothing appears in the window, and
+    the thirteen artifacts were on disk before the run: this is `--reuse-existing` working, and it
+    has to keep working exactly as it did.
+
+    The run is allowed to die afterwards at the pooling step — these fixtures carry no
+    `arm_comparison` and `pool_est_drift_arms` refuses them, which is its own correct behaviour and
+    is not what is under test. What is under test is everything before it.
+    """
+    out = _captures(tmp_path)
+    for stem in ("C1-lattice", *(f"A{i}" for i in range(1, 9)),
+                 "C2-t20", "C2-t40", "C2-t80", "C3-wrongseed"):
+        _artifact_agreeing_with_the_adapter(out / f"EST_DRIFT-{stem}.json")
+    _artifact_agreeing_with_the_adapter(out / "ARM_DIVERGENCE.json")
+    _artifact_agreeing_with_the_adapter(out / "CENSUS.json")
+
+    done = _run_with_a_card_that_frees_up(out, None, "--reuse-existing")
+    combined = done.stdout + done.stderr
+    assert "15 of 16 already exist" in done.stdout, combined
+    assert "was not on disk when the pre-flight ran" not in combined, combined
+    assert done.returncode != 5, combined
+    for stem in ("C1-lattice", "A1", "A8", "C2-t80", "C3-wrongseed"):
+        assert f"KEEPING existing {stem} (--reuse-existing; NOT measured by this run)" in (
+            done.stdout
+        ), combined
+    assert "KEEPING existing ARM_DIVERGENCE" in done.stdout, combined
