@@ -2630,6 +2630,15 @@ def main(argv: list[str] | None = None) -> int:
             # answer to "was it recorded".
             "scene_schedule": header.get("scene_schedule"),
             "scene_schedule_source": header.get("scene_schedule_source"),
+            # AND WHICH PATH THAT SCHEDULE DREW. The name `trajectory` is shared by every capture
+            # V17 §2 pools and by the three of §5's ladder that must never be pooled with them, and
+            # the only thing that tells them apart is these three cycle counts. Copying them here
+            # is not decoration: `pool_est_drift_arms.py` prints them per capture, and an artifact
+            # that records the schedule's NAME and not its PARAMETERS says a capture was smooth
+            # without saying how smooth. `null` on every capture made before the flags existed —
+            # which is itself the answer to "was it recorded", and the answer is no.
+            "scene_schedule_params": header.get("scene_schedule_params"),
+            "scene_schedule_params_source": header.get("scene_schedule_params_source"),
             "temporal_coherence": header.get("temporal_coherence"),
             "render_hw_requested": header.get("render_hw_requested"),
             "render_hw_source": header.get("render_hw_source"),

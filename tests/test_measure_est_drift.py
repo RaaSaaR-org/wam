@@ -745,6 +745,15 @@ def test_recording_the_estimator_stats_changed_no_number_this_script_already_pro
         "n_scene_states_visited",
         "scene_schedule",
         "scene_schedule_source",
+        # T40_RULE_V17 §7. `trajectory` is the schedule name of the eight captures Arm A pools AND
+        # of the three ladder captures §5 forbids pooling with them; the three cycle counts are the
+        # only thing that tells them apart, and until they were flags they were recorded in no
+        # header, no artifact and no document. Additive in the same sense as the five before them:
+        # null over a fake capture, read by `pool_est_drift_arms.py` and by nothing that gates, and
+        # they cannot change a number because the schedule that produced the frames has already
+        # run by the time they are copied.
+        "scene_schedule_params",
+        "scene_schedule_params_source",
         "temporal_coherence",
     }
     # Every one of them null over a fake capture EXCEPT the coherence block, which is written by
@@ -1764,3 +1773,21 @@ def test_more_turns_is_a_faster_pass_over_the_same_path_not_a_wider_one():
 
     one, twenty = median_step(1), median_step(20)
     assert twenty > one * 15, f"{twenty} vs {one}"
+
+
+def test_the_measurement_artifact_carries_the_schedule_parameters_not_only_its_name(tmp_path):
+    """V17 §7. `trajectory` is the schedule name of the eight captures Arm A pools AND of the
+    three ladder captures §5 forbids pooling with them; the cycle counts are the only thing in the
+    header that tells them apart. An artifact that records the name and not the parameters says a
+    capture was smooth without saying how smooth — and `pool_est_drift_arms.py` prints them per
+    capture, so a null there is a table with a hole in it.
+
+    Caught the hard way: A1 was measured before this landed and its artifact records
+    `scene_schedule_params: null` for a capture whose header has them.
+    """
+    src = pathlib.Path(ed.__file__).read_text()
+    block = src.split('"capture": {')[-1].split("},")[0]
+    assert '"scene_schedule_params": header.get("scene_schedule_params")' in block
+    assert (
+        '"scene_schedule_params_source": header.get("scene_schedule_params_source")' in block
+    )
