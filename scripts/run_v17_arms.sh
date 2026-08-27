@@ -100,6 +100,18 @@ fi
   --divergence "${V17}/ARM_DIVERGENCE.json" \
   --out "${V17}/POOLED.json"
 
+# --- T40_RULE_V18: the other precondition on GATE_QUALIFIED, and it is not this blocker's. -------
+# Runs here because it needs the same GPU and the same adapter; it decides nothing, and V17
+# outcome N would not flip the flag without it any more than this would without V17.
+if [[ ! -f runs/pr08-operating-point/EPISODE_094_CENSUS.json ]]; then
+  echo "--- V18: every frame of episode_000094, both decodes, which ones the filter refuses"
+  .venv/bin/python scripts/census_operating_point_episode.py \
+    --episode episode_000094 \
+    --corpus "${CORPUS}" \
+    --corpus /home/humanoid/wam-t041/pr08-apple-640x480 \
+    --out runs/pr08-operating-point/EPISODE_094_CENSUS.json
+fi
+
 echo
 echo "=== the C2 ladder, reported and not pooled (V17 §5) ==="
 .venv/bin/python - <<'PY'
