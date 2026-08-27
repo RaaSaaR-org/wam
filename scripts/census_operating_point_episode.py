@@ -60,7 +60,13 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from measure_geom_tol import centroid_of_mask as _centroid_of_mask  # noqa: E402
 from robot_composite import _decode_frames  # noqa: E402
+
+#: The harness's own floor, imported in spirit rather than re-chosen: `measure_est_drift measure`
+#: and `measure_geom_tol` both default to 40, and the corpus pass that produced the 473 above ran
+#: at that default.
+MIN_AREA_PX = 40
 
 SCHEMA = "wam.operating_point_census/1"
 WRITEUP = "docs/preregistration/PR-08-V18-residue-i-decision-rule.md"
@@ -75,6 +81,12 @@ EVENT_COUNTERS = (
     "n_frames_mask_refused_no_reference",
     "n_frames_mask_refused_reference_not_object_scale",
 )
+
+
+def _centroid(mask: np.ndarray) -> list[float] | None:
+    """``centroid_of_mask`` at the harness's own defaults, called rather than re-derived."""
+    got = _centroid_of_mask(mask, largest_component=True, min_area=MIN_AREA_PX)
+    return None if got is None else [float(got[0]), float(got[1])]
 
 
 def census(episode: str, corpus: pathlib.Path, est: Any) -> dict[str, Any]:
@@ -103,8 +115,18 @@ def census(episode: str, corpus: pathlib.Path, est: Any) -> dict[str, Any]:
                 "mask_validity_iou": (
                     float(est.mask_validity_iou(mask, reference)) if mask.any() else None
                 ),
+                # THE QUANTITY THE CORPUS PASS ACTUALLY RECORDED, computed with the harness's own
+                # function rather than approximated here. shard-7 reports episode_000094 as
+                # `n_frames: 509, n_frames_with_centroid: 473`, i.e. 36 frames with no centroid —
+                # and "no centroid" is NOT the same event as "mask refused": `centroid_of_mask`
+                # also returns None when the mask's LARGEST CONNECTED COMPONENT is under
+                # min_area_px, which a mask of adequate total area split into fragments can be.
+                # Comparing 31 refusals against 36 missing centroids would be comparing two
+                # different quantities and calling the difference a discrepancy.
+                "centroid": _centroid(mask),
             }
         )
+    no_centroid = [r["frame"] for r in rows if r["centroid"] is None]
     refused = [r["frame"] for r in rows if "n_frames_mask_refused" in r["events"]]
     no_detection = [r["frame"] for r in rows if "n_frames_without_detection" in r["events"]]
     empty = [r["frame"] for r in rows if "n_frames_with_empty_mask" in r["events"]]
@@ -113,6 +135,13 @@ def census(episode: str, corpus: pathlib.Path, est: Any) -> dict[str, Any]:
         "episode": episode,
         "n_frames": len(rows),
         "n_frames_with_mask": sum(1 for r in rows if r["has_mask"]),
+        # Directly comparable to the corpus pass's per-episode n_frames_with_centroid.
+        "n_frames_with_centroid": sum(1 for r in rows if r["centroid"] is not None),
+        "no_centroid_frames": no_centroid,
+        "n_no_centroid": len(no_centroid),
+        "n_no_centroid_that_are_not_refusals": len(
+            [f for f in no_centroid if f not in set(refused)]
+        ),
         "refused_frames": refused,
         "n_refused": len(refused),
         "refused_span": [min(refused), max(refused)] if refused else None,
