@@ -1,0 +1,122 @@
+{
+  "schema": "wam.transfer25_throughput/1",
+  "measured_on": "1 x H200, 640x480, one episode",
+  "units_timed": 1,
+  "units_succeeded": 1,
+  "episode": "episode_000371",
+  "style": "train-01-oak-tungsten",
+  "frames": 422,
+  "timed_unit": "episode_000371__train-01-oak-tungsten__r00",
+  "timed_unit_admissibility": {
+    "schema": "wam.transfer25_timing_unit_admissibility/1",
+    "unit": "episode_000371__train-01-oak-tungsten__r00",
+    "episode": "episode_000371",
+    "style": "train-01-oak-tungsten",
+    "n_frames": 422,
+    "empty_frames": 0,
+    "max_area_fraction": 0.22714192708333333,
+    "max_frame_fraction_bound": 0.6409114583333333,
+    "evidence": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards",
+    "evidence_sha256": "a4ec9a44ceadd3a6c548d824f449c8936511e09458a1b9bb93563b959f1bcb03",
+    "evidence_shards": [
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-0.json",
+        "index": 0,
+        "sha256": "9f47ed351ea50cfe9eca845a2fe1686bbc027c8294ed8ecc95d9ba9774e7a167"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-1.json",
+        "index": 1,
+        "sha256": "e0218f4b734a717558b20d8bcc85ae1943502c4f65231a7504d315aee27c7eb9"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-2.json",
+        "index": 2,
+        "sha256": "0d2d8cfb3d56739fafd0e2bdfa6eccae7313171263db23ad36dea7380528b1f5"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-3.json",
+        "index": 3,
+        "sha256": "69c15d7773239795ed07f2572da911e35059e82c61a70b77d41c11a2bf35ace7"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-4.json",
+        "index": 4,
+        "sha256": "cb5b49b976987889751d09f7bb70d2cbd1cd6f67a1e66f7f9e1cb72bac3dc0aa"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-5.json",
+        "index": 5,
+        "sha256": "f3c1e7b8fc9f985a24e98e482f044a4b9183df97995fd598f5736645b9f2632b"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-6.json",
+        "index": 6,
+        "sha256": "63ec7ca95d000f51082320dff30b0cfde67cde9da8d731d4aba263ede0b5ce4e"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-7.json",
+        "index": 7,
+        "sha256": "e261fa7ee767ee3f54ac836684917d63e80a24e8ca6a07cf8e89edc66b06d00f"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-8.json",
+        "index": 8,
+        "sha256": "a8dd23a38b6a8fce6cc58f3ce0224df478323b728fd24f839b04b09fcd46358b"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-9.json",
+        "index": 9,
+        "sha256": "930f668eb3542e4aadafea9f73678fc4ea62feb5d178bd3764d889c8877c1116"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-10.json",
+        "index": 10,
+        "sha256": "69229aba02c42dc7860e62ffb0b566d9387690704985879f5c8df4503ffa6a9d"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-11.json",
+        "index": 11,
+        "sha256": "079253b8419af76c612fed7762b5eb0609ab60c8814faa6bb466a83fe5adf0c2"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-12.json",
+        "index": 12,
+        "sha256": "84d965ae1f15f509ad2226f3ea9432418d8150eff8fdff49399d55f233202126"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-13.json",
+        "index": 13,
+        "sha256": "1f02bde555c176c11897b10a19639738306f994c9fcc6df5e03f58ca7c91105b"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-14.json",
+        "index": 14,
+        "sha256": "18f30d40e8287235a1e28bcf033be2f8b34e0414eee0d1a956fe9b7f5261b891"
+      },
+      {
+        "path": "/valhalla/projects/ehpc-aif-2026pg01-905/runs/pr08-robot-mask-area/shards/shard-15.json",
+        "index": 15,
+        "sha256": "509f6c7e058fbc9948310c986afb7d65cb562fa24bf41f3000ec12991ca05339"
+      }
+    ],
+    "evidence_source_manifest_sha256": "a988dd60db6ba8abec719dd9ec73ee74ca849465f1fa36666c8564f853bf91be",
+    "bound_artifact": "/valhalla/projects/ehpc-aif-2026pg01-905/wam/configs/transfer25/pr08_robot_mask_area.json",
+    "bound_artifact_sha256": "ce6f6e05df665eb9db68636b34bf032a767c98d34ac265e3adfccea0e7102d21",
+    "selection_rule": "head -1 of the work list, which is the manifest's episodes sorted by id, expanded over the staged styles and their repeat span (T40_RULE_V11 \u00a72). Deterministic: the same partition and the same manifest name the same unit.",
+    "screen": "PR-08 \u00a76 G0c evaluated over this episode's SOURCE mask area fractions before the generator ran. It PREDICTS that G0c will not refuse this unit; it does not replace the driver's own preflight, which recomputes the masks and decides.",
+    "not_a_pass": "Admissible is not passed. This is a PREDICTION, from an earlier run of the same masker over the same source frames, and the bound's own rationale records that per-frame classification near the bound is hardware-dependent for one narrow band. So this screen and the driver's preflight can disagree in either direction; where they do, this one refuses before the driver starts and before the masker is loaded \u2014 the allocation is already held by then, so what it saves is a segmentation pass, not a queue slot \u2014 and the preflight is what decides after."
+  },
+  "timed_unit_admissibility_note": null,
+  "wall_seconds": 713.0,
+  "seconds_per_frame": 1.6896,
+  "gpu_seconds_per_frame": 1.6896,
+  "frames_per_variant": 171625,
+  "frames_per_variant_source": "partition_facts.json corpus_frames \u2014 summed over this manifest's episodes at expansion time. Not an estimate and not a round number.",
+  "gpu_hours_per_variant": 80.55,
+  "gpu_hours_per_variant_is_lower_bound_above_1_gpu": true,
+  "generator": "nvidia/Cosmos-Transfer2.5-2B@ce8440327c632d8313c3bde69db13b627ba5cae1",
+  "control": "depth:0.5,seg:0.5",
+  "ceiling_gpu_hours_supplied_at_measurement_time": null,
+  "ceiling_gpu_hours_supplied_at_measurement_time_note": "null is the expected value. PR-08 \u00a78 item 3: no budget line exists until this measurement does, so TIMING=1 asks for no ceiling and ignores one if supplied."
+}
