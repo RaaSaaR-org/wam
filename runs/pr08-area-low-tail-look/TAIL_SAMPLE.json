@@ -1,0 +1,762 @@
+{
+  "schema": "pr08-area-tail-look/1",
+  "produced_by": "scripts/render_area_tail_sheet.py",
+  "produced_at": "2026-08-28T00:05:22+00:00",
+  "rule": "T40_RULE_V13 \u00a73.2 \u2014 'whether those frames were looked at, and what they were'",
+  "writes_a_bound": false,
+  "not_a_discharge": "This artifact is EVIDENCE and not a decision. It discharges no blocker and no gate: not PR-08 \u00a76 G0c, not \u00a74's blockers, not T40_RULE_V13, which stays an UNSIGNED DRAFT that only the project owner may sign. It writes no bound and proposes none, and it records no confirmation that a person has reviewed these sheets \u2014 a model reading overlays produced by an instrument built by models of the same family is a correlated observer, and what it writes down is a finding, not the check.",
+  "what_this_is_for": "T40_RULE_V13 \u00a73.2 requires a bound_rationale to state 'whether those frames were looked at, and what they were'. Nothing existed for a person to look at. These sheets are that and only that.",
+  "the_distinction": "V13 \u00a72: the bound exists for a robot mask that has grounded on the table, the background or the whole scene, and it must NOT fire on a legitimately near-camera arm at the grasp, which is not a defect. The area fraction cannot tell those two apart; that is why the tail is looked at instead of percentiled. No number in this artifact adjudicates a tile.",
+  "records_no_reviewer_confirmation": "There is no field here in which any reviewer confirmation could be recorded, and this process is not a reviewer.",
+  "hardware_caveat": "THE DISTRIBUTION WAS MEASURED ON THE CLUSTER'S H200; THESE MASKS ARE RE-RENDERED ON THIS WORKSTATION'S RTX 5090, so they are not the same execution that produced the numbers. docs/preregistration/PR-08-RESULT-2026-08-25-detector-noise-floor.md section 3.3 documents cross-hardware disagreement between exactly these two machines on exactly this masker (13 of 1603 frames, 0.81 %, on the empty-mask count), attributed as a consistent mechanism rather than a proven cause to a detection threshold ~0.001 above the detector's noise floor. That concerns frames within ~0.001 of the threshold and these tail frames are not those. The per-frame recorded-vs-recomputed comparison below is what makes each tile evidence about the mask that produced the number, and the mismatch count belongs in any rationale that quotes these sheets.",
+  "band": {
+    "lower_inclusive": 0.0001,
+    "upper_inclusive": 0.005,
+    "open_at_the_top": false,
+    "selection": "0.000100 <= fraction <= 0.005000",
+    "note": "threshold and max_fraction together are a BAND, threshold <= f <= max_fraction, and the band is a SELECTION WINDOW OVER THE MEASURED DISTRIBUTION and nothing else: it says which frames get rendered so a person can look at them. A null upper edge leaves the band open at the top, which is the upper tail and the default. Both edges are measured features of a measured distribution \u2014 the edges of the widest measured gap are the obvious ones to quote, because that is where the distribution itself separates. NEITHER EDGE IS A BOUND AND NEITHER IS A CANDIDATE BOUND. Rendering a band does not propose its edges, and nothing in this artifact may be read as proposing either of them as one.",
+    "why_a_band": "T40_RULE_V13 \u00a73.1 asks for a bound that separates TWO populations, and a sheet of the open upper tail is a look at one of them. A LOOK BELOW THE GAP IS THE CONTROL FOR A LOOK ABOVE IT: a population that is separable only when read from above has not been shown to be separable. If the frames immediately below the gap look like the frames immediately above it, the gap is a gap in the statistic and not a line between two kinds of frame, and no sheet of the tail alone can show that. The band makes that control renderable with the same instrument, the same decode path, the same masker and the same recorded-vs-recomputed comparison, which is the only thing that makes the two looks comparable.",
+    "neither_edge_is_a_bound": "Neither the lower edge nor the upper edge is a bound, and neither is a candidate bound. They select which frames were rendered and nothing else."
+  },
+  "threshold": {
+    "value": 0.0001,
+    "default": 0.6802766927083334,
+    "source": "runs/pr08-robot-mask-area/AREA_GAP_ANALYSIS.json candidate_gaps[widest].tail_edge_above",
+    "note": "The default threshold is AREA_GAP_ANALYSIS.json's widest-gap tail_edge_above: the smallest measured fraction above the widest measured gap, i.e. a measured edge of the tail population. It selects which frames are rendered. IT IS NOT A BOUND AND NOT A CANDIDATE BOUND, and nothing here may be read as proposing it as one.",
+    "max_fraction": 0.005,
+    "max_fraction_default": null,
+    "max_fraction_note": "threshold and max_fraction together are a BAND, threshold <= f <= max_fraction, and the band is a SELECTION WINDOW OVER THE MEASURED DISTRIBUTION and nothing else: it says which frames get rendered so a person can look at them. A null upper edge leaves the band open at the top, which is the upper tail and the default. Both edges are measured features of a measured distribution \u2014 the edges of the widest measured gap are the obvious ones to quote, because that is where the distribution itself separates. NEITHER EDGE IS A BOUND AND NEITHER IS A CANDIDATE BOUND. Rendering a band does not propose its edges, and nothing in this artifact may be read as proposing either of them as one."
+  },
+  "episode_population": {
+    "rule": "the episodes both halves of robot_composite.check_mask accept: empty_frames == 0 AND max(area_fractions) <= 0.6409114583333333 from configs/transfer25/pr08_robot_mask_area.json. DERIVED from the pooled artifact and the committed bound, not typed.",
+    "episodes": [
+      "episode_000093",
+      "episode_000098",
+      "episode_000114",
+      "episode_000115",
+      "episode_000116",
+      "episode_000117",
+      "episode_000118",
+      "episode_000120",
+      "episode_000121",
+      "episode_000136",
+      "episode_000137",
+      "episode_000243",
+      "episode_000244",
+      "episode_000245",
+      "episode_000371",
+      "episode_000373",
+      "episode_000375"
+    ],
+    "n_episodes": 17,
+    "note": "The band selects FRAMES; this selects the EPISODES the band is applied within. A band read over the whole corpus and a band read over the episodes a corpus run would actually produce are different measurements, and total_candidates below counts within this population.",
+    "not_a_bound": "Restricting the population writes no bound, moves no bound and discharges nothing. It records which episodes were looked at."
+  },
+  "selection_rule": {
+    "rule": "Deterministic, no RNG. (1) Every (episode, frame_index, recorded_fraction) in the pooled artifact with recorded_fraction >= threshold, and (when max_fraction is not null) recorded_fraction <= max_fraction, is a candidate; area_fractions is indexed by frame index. (2) Candidates are grouped by episode and the episodes sorted by id. (3) The budget max_frames is handed out one frame at a time, cycling through those sorted episodes, until the budget is spent or every candidate is taken; an exhausted episode is skipped on later passes. (4) Within an episode its quota is taken from its own candidate list at an even stride with both endpoints included, index floor(i * (m - 1) / (k - 1) + 0.5) for i in 0..k-1 (ties go up, deduplicated, sorted); a quota of 1 takes that episode's first tail frame, because one sample cannot include two endpoints.",
+    "population": "the episodes both halves of robot_composite.check_mask accept: empty_frames == 0 AND max(area_fractions) <= 0.6409114583333333 from configs/transfer25/pr08_robot_mask_area.json. DERIVED from the pooled artifact and the committed bound, not typed.",
+    "bias": "When max_frames is smaller than the number of episodes carrying tail frames (48 against 175 at the default threshold), step 3's first pass ends before the later episodes are reached, so the sample spans the first N episode ids in sorted order rather than the whole corpus. It is deliberately even ACROSS episodes so that one pathological episode cannot fill the sheets, and it is NOT a random sample of the tail. See population.episodes_not_sampled.",
+    "rng": "none. No RNG, no clock, no hash and no filesystem order enters the selection; it is a pure function of the pooled artifact, the threshold and max_frames.",
+    "max_frames": 48,
+    "band": "0.000100 <= fraction <= 0.005000",
+    "reproduce": "load_pooled -> tail_candidates(pooled, threshold, max_fraction) -> select_frames(candidates, max_frames) in scripts/render_area_tail_sheet.py. The frames[] list below is the output of that composition."
+  },
+  "source": {
+    "pooled_artifact": "runs/pr08-robot-mask-area/POOLED.json",
+    "git_commit": "8b710d0119b65fd3c4eff0e968e3d92edc84d2ae",
+    "source_manifest_sha256": "a988dd60db6ba8abec719dd9ec73ee74ca849465f1fa36666c8564f853bf91be",
+    "prompt": "robot arm. robotic hand. robotic gripper.",
+    "estimator": {
+      "adapter": "estimators.apple_sam2",
+      "adapter_version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;depth=depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf@d2fc6a93601aabb1139a3bf0ebfcb4e89c67817f;prompt='apple.';box_thr=0.15;text_thr=0.25;retry_box_thr=0.1;retry_text_thr=0.1;box_sel=highest_score;prop=per_frame;mask_val_min_iou=0.1;mask_val_ref_max_frac=0.1",
+      "adapter_version_note": "the adapter's own version string, whose prompt= field is its APPLE prompt because that is what GEOM_TOL and EST_DRIFT_P95 segment. The robot mask's prompt is the 'prompt' field above.",
+      "box_rule": "union of every detection above threshold (see robot_composite docstring)",
+      "box_threshold": 0.15,
+      "name": "grounding-dino+sam2 (estimators.apple_sam2 pins, robot prompt)",
+      "object_grounding_filter": "a detection whose SAM 2 mask has IoU > 0.7 against warm_saturated_rgb(r>90, r-b>50, saturation>0.35) is the OBJECT, not the robot, and is dropped before the union; if that empties the mask, check_mask refuses the clip. PR-08 V9. The detection operating point, the prompt and the union rule are unchanged and no mask is altered.",
+      "prompt": "robot arm. robotic hand. robotic gripper.",
+      "text_threshold": 0.25,
+      "upstream_retry_not_run": "upstream retries once at (0.1, 0.1) when the first pass grounds nothing; THIS masker does not. apple_sam2's callers DROP an ungrounded frame, so the retry recovers data there; G0c REFUSES the clip, so here it would only suppress a refusal by accepting a weak box that can land on something other than the robot \u2014 a confident wrong mask in place of a loud refusal.",
+      "version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;prompt='robot arm. robotic hand. robotic gripper.';box_thr=0.15;text_thr=0.25;retry=none(upstream=0.1/0.1)"
+    },
+    "corpus": "/home/humanoid/wam-t041/pr08-apple-640x480-h264-lossless",
+    "corpus_manifest": "/home/humanoid/wam-t041/pr08-apple-640x480-h264-lossless/manifest.json"
+  },
+  "render": {
+    "git_commit": "9d6dd896b0de0713560aee55437ae4eec0f4b61b",
+    "git_commit_note": "the commit THIS RENDER ran from, recorded beside the pooled artifact's own commit and never merged with it",
+    "runtime": {
+      "torch": "2.13.0+cu130",
+      "cuda_available": true,
+      "gpu": "NVIDIA GeForce RTX 5090",
+      "cuda": "13.0"
+    },
+    "masker": {
+      "class": "scripts/robot_composite.py Sam2RobotMasker (unmodified, committed operating point, committed ROBOT_TEXT_PROMPT)",
+      "provenance": {
+        "name": "grounding-dino+sam2 (estimators.apple_sam2 pins, robot prompt)",
+        "version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;prompt='robot arm. robotic hand. robotic gripper.';box_thr=0.15;text_thr=0.25;retry=none(upstream=0.1/0.1)",
+        "adapter": "estimators.apple_sam2",
+        "adapter_version": "det=IDEA-Research/grounding-dino-base@12bdfa3120f3e7ec7b434d90674b3396eccf88eb;seg=facebook/sam2-hiera-large@e6a8e8809b8f1bfa2238b6d080f3d05cc76bd251;depth=depth-anything/Depth-Anything-V2-Metric-Indoor-Large-hf@d2fc6a93601aabb1139a3bf0ebfcb4e89c67817f;prompt='apple.';box_thr=0.15;text_thr=0.25;retry_box_thr=0.1;retry_text_thr=0.1;box_sel=highest_score;prop=per_frame;mask_val_min_iou=0.1;mask_val_ref_max_frac=0.1",
+        "adapter_version_note": "the adapter's own version string, whose prompt= field is its APPLE prompt because that is what GEOM_TOL and EST_DRIFT_P95 segment. The robot mask's prompt is the 'prompt' field above.",
+        "prompt": "robot arm. robotic hand. robotic gripper.",
+        "box_threshold": 0.15,
+        "text_threshold": 0.25,
+        "box_rule": "union of every detection above threshold (see robot_composite docstring)",
+        "upstream_retry_not_run": "upstream retries once at (0.1, 0.1) when the first pass grounds nothing; THIS masker does not. apple_sam2's callers DROP an ungrounded frame, so the retry recovers data there; G0c REFUSES the clip, so here it would only suppress a refusal by accepting a weak box that can land on something other than the robot \u2014 a confident wrong mask in place of a loud refusal.",
+        "object_grounding_filter": "a detection whose SAM 2 mask has IoU > 0.7 against warm_saturated_rgb(r>90, r-b>50, saturation>0.35) is the OBJECT, not the robot, and is dropped before the union; if that empties the mask, check_mask refuses the clip. PR-08 V9. The detection operating point, the prompt and the union rule are unchanged and no mask is altered."
+      },
+      "filter_record": {
+        "rule": "a detection whose SAM 2 mask has IoU > max_iou against the frame's own colour reference IS that object and is dropped before the union; if that leaves nothing, the mask is empty and check_mask refuses the clip",
+        "max_iou": 0.7,
+        "reference": "warm_saturated_rgb(r>90, r-b>50, saturation>0.35)",
+        "reference_max_frame_fraction": 0.1,
+        "predicate": "estimators.apple_sam2.reference_is_object_scale (T40_RULE_V10)",
+        "frames_masked": 48,
+        "detections_segmented": 148,
+        "detections_dropped_as_object": 37,
+        "frames_with_a_dropped_detection": 37,
+        "frames_emptied_by_the_filter": 0,
+        "frames_with_no_object_reference": 0,
+        "frames_with_reference_not_object_scale": 0
+      }
+    },
+    "decode_path": "robot_composite.decode_clip \u2014 the same function measure_source_mask_area used, per cluster/discoverer/106_measure_robot_mask_area.sbatch"
+  },
+  "population": {
+    "threshold": 0.0001,
+    "max_fraction": 0.005,
+    "band": "0.000100 <= fraction <= 0.005000",
+    "frames_in_band": 1039,
+    "frames_at_or_above_threshold": 7309,
+    "counted_within": "the episodes both halves of robot_composite.check_mask accept: empty_frames == 0 AND max(area_fractions) <= 0.6409114583333333 from configs/transfer25/pr08_robot_mask_area.json. DERIVED from the pooled artifact and the committed bound, not typed.",
+    "episodes_with_tail_frames": 8,
+    "episodes_sampled": 8,
+    "episodes_not_sampled": 0,
+    "frames_rendered": 48
+  },
+  "mismatch": {
+    "tolerance": 0.01,
+    "definition": "abs(recorded_fraction - recomputed_fraction) > tolerance",
+    "count": 11,
+    "frames": [
+      {
+        "episode": "episode_000093",
+        "frame_index": 46,
+        "recorded_fraction": 0.00291015625,
+        "recomputed_fraction": 0.101611328125,
+        "delta": 0.098701171875
+      },
+      {
+        "episode": "episode_000093",
+        "frame_index": 307,
+        "recorded_fraction": 0.002529296875,
+        "recomputed_fraction": 0.09980794270833333,
+        "delta": 0.09727864583333333
+      },
+      {
+        "episode": "episode_000093",
+        "frame_index": 353,
+        "recorded_fraction": 0.0028092447916666665,
+        "recomputed_fraction": 0.082373046875,
+        "delta": 0.07956380208333333
+      },
+      {
+        "episode": "episode_000098",
+        "frame_index": 331,
+        "recorded_fraction": 0.0027701822916666665,
+        "recomputed_fraction": 0.07686197916666666,
+        "delta": 0.07409179687499999
+      },
+      {
+        "episode": "episode_000120",
+        "frame_index": 346,
+        "recorded_fraction": 0.0026236979166666665,
+        "recomputed_fraction": 0.07096354166666667,
+        "delta": 0.06833984375
+      },
+      {
+        "episode": "episode_000120",
+        "frame_index": 463,
+        "recorded_fraction": 0.0025944010416666667,
+        "recomputed_fraction": 0.07013020833333333,
+        "delta": 0.06753580729166667
+      },
+      {
+        "episode": "episode_000371",
+        "frame_index": 348,
+        "recorded_fraction": 0.003056640625,
+        "recomputed_fraction": 0.9393489583333333,
+        "delta": 0.9362923177083333
+      },
+      {
+        "episode": "episode_000371",
+        "frame_index": 365,
+        "recorded_fraction": 0.002763671875,
+        "recomputed_fraction": 0.07416666666666667,
+        "delta": 0.07140299479166667
+      },
+      {
+        "episode": "episode_000371",
+        "frame_index": 409,
+        "recorded_fraction": 0.002919921875,
+        "recomputed_fraction": 0.8704459635416667,
+        "delta": 0.8675260416666667
+      },
+      {
+        "episode": "episode_000373",
+        "frame_index": 283,
+        "recorded_fraction": 0.0039453125,
+        "recomputed_fraction": 0.07700520833333334,
+        "delta": 0.07305989583333333
+      },
+      {
+        "episode": "episode_000375",
+        "frame_index": 0,
+        "recorded_fraction": 0.003603515625,
+        "recomputed_fraction": 0.09122721354166667,
+        "delta": 0.08762369791666667
+      }
+    ],
+    "note": "This count belongs in any rationale that quotes these sheets. It is what makes a tile evidence about the mask that produced the number rather than about a differently-executed mask from the same frame index."
+  },
+  "sheets": [
+    "sheets/area-tail-00.png",
+    "sheets/area-tail-01.png",
+    "sheets/area-tail-02.png",
+    "sheets/area-tail-03.png"
+  ],
+  "legend": "magenta = robot mask, RE-RENDERED on this machine (tint + outline) | red border = re-render disagrees with the measured fraction by more than the tolerance",
+  "sheet_header_legend": "magenta = re-rendered robot mask | red border = mismatch",
+  "full_frames": "frames/",
+  "frames": [
+    {
+      "episode": "episode_000093",
+      "frame_index": 0,
+      "recorded_fraction": 0.0028678385416666665,
+      "recomputed_fraction": 0.002880859375,
+      "delta": 1.3020833333333634e-05,
+      "mismatch": false,
+      "episode_index": 93,
+      "full_frame": "episode_000093-00000.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000093",
+      "frame_index": 46,
+      "recorded_fraction": 0.00291015625,
+      "recomputed_fraction": 0.101611328125,
+      "delta": 0.098701171875,
+      "mismatch": true,
+      "episode_index": 93,
+      "full_frame": "episode_000093-00046.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000093",
+      "frame_index": 307,
+      "recorded_fraction": 0.002529296875,
+      "recomputed_fraction": 0.09980794270833333,
+      "delta": 0.09727864583333333,
+      "mismatch": true,
+      "episode_index": 93,
+      "full_frame": "episode_000093-00307.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000093",
+      "frame_index": 353,
+      "recorded_fraction": 0.0028092447916666665,
+      "recomputed_fraction": 0.082373046875,
+      "delta": 0.07956380208333333,
+      "mismatch": true,
+      "episode_index": 93,
+      "full_frame": "episode_000093-00353.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000093",
+      "frame_index": 401,
+      "recorded_fraction": 0.0029459635416666666,
+      "recomputed_fraction": 0.00294921875,
+      "delta": 3.2552083333334085e-06,
+      "mismatch": false,
+      "episode_index": 93,
+      "full_frame": "episode_000093-00401.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000093",
+      "frame_index": 447,
+      "recorded_fraction": 0.0028743489583333334,
+      "recomputed_fraction": 0.0028938802083333334,
+      "delta": 1.9531250000000017e-05,
+      "mismatch": false,
+      "episode_index": 93,
+      "full_frame": "episode_000093-00447.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000098",
+      "frame_index": 0,
+      "recorded_fraction": 0.0028287760416666665,
+      "recomputed_fraction": 0.002861328125,
+      "delta": 3.255208333333365e-05,
+      "mismatch": false,
+      "episode_index": 98,
+      "full_frame": "episode_000098-00000.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000098",
+      "frame_index": 65,
+      "recorded_fraction": 0.0035904947916666667,
+      "recomputed_fraction": 0.002939453125,
+      "delta": -0.000651041666666667,
+      "mismatch": false,
+      "episode_index": 98,
+      "full_frame": "episode_000098-00065.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000098",
+      "frame_index": 331,
+      "recorded_fraction": 0.0027701822916666665,
+      "recomputed_fraction": 0.07686197916666666,
+      "delta": 0.07409179687499999,
+      "mismatch": true,
+      "episode_index": 98,
+      "full_frame": "episode_000098-00331.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000098",
+      "frame_index": 365,
+      "recorded_fraction": 0.0028483072916666665,
+      "recomputed_fraction": 0.002744140625,
+      "delta": -0.00010416666666666647,
+      "mismatch": false,
+      "episode_index": 98,
+      "full_frame": "episode_000098-00365.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000098",
+      "frame_index": 402,
+      "recorded_fraction": 0.002734375,
+      "recomputed_fraction": 0.002734375,
+      "delta": 0.0,
+      "mismatch": false,
+      "episode_index": 98,
+      "full_frame": "episode_000098-00402.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000098",
+      "frame_index": 437,
+      "recorded_fraction": 0.0029329427083333334,
+      "recomputed_fraction": 0.0027669270833333335,
+      "delta": -0.00016601562499999993,
+      "mismatch": false,
+      "episode_index": 98,
+      "full_frame": "episode_000098-00437.png",
+      "sheet": "area-tail-00.png"
+    },
+    {
+      "episode": "episode_000120",
+      "frame_index": 0,
+      "recorded_fraction": 0.0028515625,
+      "recomputed_fraction": 0.002861328125,
+      "delta": 9.765625000000226e-06,
+      "mismatch": false,
+      "episode_index": 120,
+      "full_frame": "episode_000120-00000.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000120",
+      "frame_index": 48,
+      "recorded_fraction": 0.0028125,
+      "recomputed_fraction": 0.002763671875,
+      "delta": -4.8828124999999827e-05,
+      "mismatch": false,
+      "episode_index": 120,
+      "full_frame": "episode_000120-00048.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000120",
+      "frame_index": 92,
+      "recorded_fraction": 0.002958984375,
+      "recomputed_fraction": 0.0029069010416666666,
+      "delta": -5.2083333333333235e-05,
+      "mismatch": false,
+      "episode_index": 120,
+      "full_frame": "episode_000120-00092.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000120",
+      "frame_index": 346,
+      "recorded_fraction": 0.0026236979166666665,
+      "recomputed_fraction": 0.07096354166666667,
+      "delta": 0.06833984375,
+      "mismatch": true,
+      "episode_index": 120,
+      "full_frame": "episode_000120-00346.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000120",
+      "frame_index": 407,
+      "recorded_fraction": 0.0025748697916666667,
+      "recomputed_fraction": 0.002578125,
+      "delta": 3.2552083333334085e-06,
+      "mismatch": false,
+      "episode_index": 120,
+      "full_frame": "episode_000120-00407.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000120",
+      "frame_index": 463,
+      "recorded_fraction": 0.0025944010416666667,
+      "recomputed_fraction": 0.07013020833333333,
+      "delta": 0.06753580729166667,
+      "mismatch": true,
+      "episode_index": 120,
+      "full_frame": "episode_000120-00463.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000121",
+      "frame_index": 0,
+      "recorded_fraction": 0.0016959635416666666,
+      "recomputed_fraction": 0.0017057291666666666,
+      "delta": 9.765625000000009e-06,
+      "mismatch": false,
+      "episode_index": 121,
+      "full_frame": "episode_000121-00000.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000121",
+      "frame_index": 40,
+      "recorded_fraction": 0.0017545572916666666,
+      "recomputed_fraction": 0.0017513020833333332,
+      "delta": -3.2552083333334085e-06,
+      "mismatch": false,
+      "episode_index": 121,
+      "full_frame": "episode_000121-00040.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000121",
+      "frame_index": 325,
+      "recorded_fraction": 0.0016048177083333333,
+      "recomputed_fraction": 0.001611328125,
+      "delta": 6.5104166666666e-06,
+      "mismatch": false,
+      "episode_index": 121,
+      "full_frame": "episode_000121-00325.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000121",
+      "frame_index": 366,
+      "recorded_fraction": 0.0016178385416666667,
+      "recomputed_fraction": 0.001630859375,
+      "delta": 1.30208333333332e-05,
+      "mismatch": false,
+      "episode_index": 121,
+      "full_frame": "episode_000121-00366.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000121",
+      "frame_index": 407,
+      "recorded_fraction": 0.001630859375,
+      "recomputed_fraction": 0.0016341145833333333,
+      "delta": 3.2552083333334085e-06,
+      "mismatch": false,
+      "episode_index": 121,
+      "full_frame": "episode_000121-00407.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000121",
+      "frame_index": 447,
+      "recorded_fraction": 0.00162109375,
+      "recomputed_fraction": 0.0016341145833333333,
+      "delta": 1.3020833333333417e-05,
+      "mismatch": false,
+      "episode_index": 121,
+      "full_frame": "episode_000121-00447.png",
+      "sheet": "area-tail-01.png"
+    },
+    {
+      "episode": "episode_000243",
+      "frame_index": 42,
+      "recorded_fraction": 0.004973958333333334,
+      "recomputed_fraction": 0.00498046875,
+      "delta": 6.51041666666595e-06,
+      "mismatch": false,
+      "episode_index": 243,
+      "full_frame": "episode_000243-00042.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000243",
+      "frame_index": 43,
+      "recorded_fraction": 0.004973958333333334,
+      "recomputed_fraction": 0.00498046875,
+      "delta": 6.51041666666595e-06,
+      "mismatch": false,
+      "episode_index": 243,
+      "full_frame": "episode_000243-00043.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000243",
+      "frame_index": 282,
+      "recorded_fraction": 0.004866536458333333,
+      "recomputed_fraction": 0.004869791666666666,
+      "delta": 3.255208333332975e-06,
+      "mismatch": false,
+      "episode_index": 243,
+      "full_frame": "episode_000243-00282.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000243",
+      "frame_index": 284,
+      "recorded_fraction": 0.0048828125,
+      "recomputed_fraction": 0.00564453125,
+      "delta": 0.0007617187500000002,
+      "mismatch": false,
+      "episode_index": 243,
+      "full_frame": "episode_000243-00284.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000243",
+      "frame_index": 285,
+      "recorded_fraction": 0.004892578125,
+      "recomputed_fraction": 0.004899088541666667,
+      "delta": 6.510416666666817e-06,
+      "mismatch": false,
+      "episode_index": 243,
+      "full_frame": "episode_000243-00285.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000243",
+      "frame_index": 291,
+      "recorded_fraction": 0.00494140625,
+      "recomputed_fraction": 0.004954427083333333,
+      "delta": 1.3020833333333634e-05,
+      "mismatch": false,
+      "episode_index": 243,
+      "full_frame": "episode_000243-00291.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000371",
+      "frame_index": 0,
+      "recorded_fraction": 0.004124348958333334,
+      "recomputed_fraction": 0.0038736979166666668,
+      "delta": -0.0002506510416666668,
+      "mismatch": false,
+      "episode_index": 371,
+      "full_frame": "episode_000371-00000.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000371",
+      "frame_index": 16,
+      "recorded_fraction": 0.003912760416666667,
+      "recomputed_fraction": 0.004296875,
+      "delta": 0.00038411458333333353,
+      "mismatch": false,
+      "episode_index": 371,
+      "full_frame": "episode_000371-00016.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000371",
+      "frame_index": 348,
+      "recorded_fraction": 0.003056640625,
+      "recomputed_fraction": 0.9393489583333333,
+      "delta": 0.9362923177083333,
+      "mismatch": true,
+      "episode_index": 371,
+      "full_frame": "episode_000371-00348.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000371",
+      "frame_index": 365,
+      "recorded_fraction": 0.002763671875,
+      "recomputed_fraction": 0.07416666666666667,
+      "delta": 0.07140299479166667,
+      "mismatch": true,
+      "episode_index": 371,
+      "full_frame": "episode_000371-00365.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000371",
+      "frame_index": 387,
+      "recorded_fraction": 0.0025325520833333333,
+      "recomputed_fraction": 0.0025455729166666665,
+      "delta": 1.30208333333332e-05,
+      "mismatch": false,
+      "episode_index": 371,
+      "full_frame": "episode_000371-00387.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000371",
+      "frame_index": 409,
+      "recorded_fraction": 0.002919921875,
+      "recomputed_fraction": 0.8704459635416667,
+      "delta": 0.8675260416666667,
+      "mismatch": true,
+      "episode_index": 371,
+      "full_frame": "episode_000371-00409.png",
+      "sheet": "area-tail-02.png"
+    },
+    {
+      "episode": "episode_000373",
+      "frame_index": 0,
+      "recorded_fraction": 0.004482421875,
+      "recomputed_fraction": 0.0039453125,
+      "delta": -0.0005371093749999998,
+      "mismatch": false,
+      "episode_index": 373,
+      "full_frame": "episode_000373-00000.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000373",
+      "frame_index": 283,
+      "recorded_fraction": 0.0039453125,
+      "recomputed_fraction": 0.07700520833333334,
+      "delta": 0.07305989583333333,
+      "mismatch": true,
+      "episode_index": 373,
+      "full_frame": "episode_000373-00283.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000373",
+      "frame_index": 305,
+      "recorded_fraction": 0.0038053385416666665,
+      "recomputed_fraction": 0.0037174479166666666,
+      "delta": -8.789062499999986e-05,
+      "mismatch": false,
+      "episode_index": 373,
+      "full_frame": "episode_000373-00305.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000373",
+      "frame_index": 325,
+      "recorded_fraction": 0.0037858072916666665,
+      "recomputed_fraction": 0.0036263020833333334,
+      "delta": -0.00015950520833333311,
+      "mismatch": false,
+      "episode_index": 373,
+      "full_frame": "episode_000373-00325.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000373",
+      "frame_index": 345,
+      "recorded_fraction": 0.0038118489583333333,
+      "recomputed_fraction": 0.003649088541666667,
+      "delta": -0.00016276041666666652,
+      "mismatch": false,
+      "episode_index": 373,
+      "full_frame": "episode_000373-00345.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000373",
+      "frame_index": 365,
+      "recorded_fraction": 0.004137369791666666,
+      "recomputed_fraction": 0.003948567708333333,
+      "delta": -0.00018880208333333336,
+      "mismatch": false,
+      "episode_index": 373,
+      "full_frame": "episode_000373-00365.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000375",
+      "frame_index": 0,
+      "recorded_fraction": 0.003603515625,
+      "recomputed_fraction": 0.09122721354166667,
+      "delta": 0.08762369791666667,
+      "mismatch": true,
+      "episode_index": 375,
+      "full_frame": "episode_000375-00000.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000375",
+      "frame_index": 9,
+      "recorded_fraction": 0.003515625,
+      "recomputed_fraction": 0.00353515625,
+      "delta": 1.9531250000000017e-05,
+      "mismatch": false,
+      "episode_index": 375,
+      "full_frame": "episode_000375-00009.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000375",
+      "frame_index": 19,
+      "recorded_fraction": 0.0035904947916666667,
+      "recomputed_fraction": 0.0035904947916666667,
+      "delta": 0.0,
+      "mismatch": false,
+      "episode_index": 375,
+      "full_frame": "episode_000375-00019.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000375",
+      "frame_index": 28,
+      "recorded_fraction": 0.00349609375,
+      "recomputed_fraction": 0.003515625,
+      "delta": 1.9531250000000017e-05,
+      "mismatch": false,
+      "episode_index": 375,
+      "full_frame": "episode_000375-00028.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000375",
+      "frame_index": 38,
+      "recorded_fraction": 0.0035188802083333335,
+      "recomputed_fraction": 0.0035286458333333333,
+      "delta": 9.765624999999792e-06,
+      "mismatch": false,
+      "episode_index": 375,
+      "full_frame": "episode_000375-00038.png",
+      "sheet": "area-tail-03.png"
+    },
+    {
+      "episode": "episode_000375",
+      "frame_index": 47,
+      "recorded_fraction": 0.0035611979166666665,
+      "recomputed_fraction": 0.0035611979166666665,
+      "delta": 0.0,
+      "mismatch": false,
+      "episode_index": 375,
+      "full_frame": "episode_000375-00047.png",
+      "sheet": "area-tail-03.png"
+    }
+  ]
+}

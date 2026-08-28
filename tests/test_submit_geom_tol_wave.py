@@ -132,16 +132,33 @@ def test_the_walltime_is_the_one_the_runbook_argued_for(wrapper: str, runbook: s
     assert "--time=00:20:00" in runbook
 
 
-def test_the_submit_ceiling_matches_the_measured_qos_limit(wrapper: str, runbook: str) -> None:
-    """MaxSubmitJobsPU=8, confirmed from sacctmgr on 2026-08-27, and EVERY array task counts as
-    one submission -- %4 throttles running jobs only. A peer session shares this ceiling, so the
-    check must be against the whole user's queue, not against this run's jobs."""
-    assert re.search(r"PENDING \+ NEED > 8", wrapper), "the ceiling is not 8"
+def test_the_submit_ceiling_is_per_qos_because_the_two_branches_differ(
+    wrapper: str, runbook: str
+) -> None:
+    """MaxSubmitJobsPU is a per-QoS association limit, and this file submits to TWO QoS. Measured
+    2026-08-27 via sacctmgr: `ehpc-aif-2026pg01-905` allows 8, `2cpu-single-host` allows 4.
+
+    A single ceiling of 8 -- which this file shipped until it was corrected -- was wrong for the
+    merge and wrong in the UNSAFE direction: five jobs already on the free QoS pass `5 + 1 <= 8`
+    and are then rejected by sbatch. EVERY array task counts as one submission; %4 throttles
+    running jobs, not submitted ones.
+    """
+    assert re.search(r"PENDING \+ NEED > CEILING", wrapper), "the ceiling is not per-branch"
+    # The wave branch and the merge branch must carry DIFFERENT ceilings, each beside its QoS.
+    assert re.search(r"NEED=4;\s*CEILING=8;\s*QOS_NAME=ehpc-aif-2026pg01-905", wrapper)
+    assert re.search(r"NEED=1;\s*CEILING=4;\s*QOS_NAME=2cpu-single-host", wrapper)
+    # And the QoS each ceiling is named for must be the one that branch actually submits to.
+    cmds = _assembled_commands(wrapper)
+    assert "--qos=ehpc-aif-2026pg01-905" in cmds["wave"]
+    assert "--qos=2cpu-single-host" in cmds["merge"]
     assert "MaxSubmitJobsPU" in runbook
     # It must ask the cluster for the count rather than assuming an empty queue.
     assert re.search(r"squeue -u \\\$USER -r -h -o '%i' \| wc -l", wrapper)
-    # A wave needs four slots, the merge one.
-    assert "NEED=4" in wrapper and "NEED=1" in wrapper
+    # Counting the WHOLE queue against a per-QoS ceiling over-refuses and never under-refuses,
+    # because the whole queue is a superset of any one QoS's share of it. That direction is the
+    # safe one and the file must say so rather than leaving it to be re-derived.
+    prose = " ".join(wrapper.replace("#", " ").split())  # the comment wraps; the claim does not
+    assert "over-refuses and never under-refuses" in prose
 
 
 def test_it_refuses_to_submit_against_a_stale_adapter(wrapper: str) -> None:

@@ -317,10 +317,63 @@ def load_pooled(path: pathlib.Path) -> dict:
     return payload
 
 
+#: The committed area bound, read rather than restated. ``robot_composite.check_mask`` refuses a
+#: clip on ONE frame above it, and refuses one on ONE empty mask, and ``--episodes-surviving-
+#: composite`` below is those two halves and nothing else.
+AREA_BOUND_ARTIFACT = pathlib.Path("configs/transfer25/pr08_robot_mask_area.json")
+
+
+def composite_survivors(pooled: dict, bound: float) -> list[str]:
+    """The episodes BOTH halves of ``robot_composite.check_mask`` accept, as a criterion.
+
+    Seventeen of this corpus's 402 episodes survive, and they are the entire population a corpus
+    run would produce today — so "what is in the low tail" is a different question when asked of
+    them than when asked of the corpus. Answering it of the corpus mixes in 385 episodes that will
+    never be generated.
+
+    THE POPULATION IS DERIVED, NOT TYPED, for the reason ``T40_RULE_V20`` §3 gives about a
+    different selection: *"The rule is a criterion, not a name, so that it can be checked rather
+    than trusted."* Seventeen ids in a list is a name; this is the two conditions the composite
+    actually applies, read off the same pooled artifact and the same committed bound the composite
+    reads. If either moves, this moves with it, and the artifact records what it resolved to.
+
+    **This selects nothing about masks being right.** It selects the episodes whose masks the
+    composite does not refuse, which is exactly the question — an episode survives on the BOTTOM of
+    its distribution (``check_mask`` refuses on ``covered == 0``), so survivorship is decided by the
+    smallest mask in it, and nobody has looked at those.
+    """
+    out: list[str] = []
+    for record in pooled.get("per_episode") or ():
+        fractions = record.get("area_fractions") or ()
+        if not fractions:
+            continue
+        if int(record.get("empty_frames", 0)) != 0:
+            continue
+        if max(float(f) for f in fractions) > float(bound):
+            continue
+        out.append(str(record.get("episode")))
+    return sorted(out)
+
+
+def load_area_bound(path: pathlib.Path) -> float:
+    """``max_frame_fraction`` off the committed artifact. Absent is a refusal, never a default."""
+    try:
+        doc = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise TailLookError(f"cannot read the committed area bound at {path}: {exc}") from exc
+    if not isinstance(doc, dict) or "max_frame_fraction" not in doc:
+        raise TailLookError(
+            f"{path} records no max_frame_fraction. The surviving-composite population is that "
+            "bound plus the empty-mask half; without it there is no population to select."
+        )
+    return float(doc["max_frame_fraction"])
+
+
 def tail_candidates(
     pooled: dict,
     threshold: float,
     max_fraction: float | None = DEFAULT_MAX_FRACTION,
+    episodes: Sequence[str] | None = None,
 ) -> "OrderedDict[str, list[tuple[int, float]]]":
     """``{episode_id: [(frame_index, recorded_fraction), ...]}`` for every frame inside the band.
 
@@ -342,9 +395,20 @@ def tail_candidates(
             "       Neither number is a bound, but a band that cannot contain a frame is a typo "
             "rather than a selection."
         )
+    # The population, when one is given, is applied BEFORE the band, so `total_candidates` in the
+    # artifact counts the band within the population rather than within the corpus. Restricting
+    # afterwards would leave a number that reads as corpus-wide and is not.
+    keep = None if episodes is None else set(episodes)
+    if keep is not None and not keep:
+        raise TailLookError(
+            "an empty episode population was given. A selection over no episodes is a typo "
+            "rather than a selection; omit the flag to look at the whole corpus."
+        )
     grouped: dict[str, list[tuple[int, float]]] = {}
     for record in pooled.get("per_episode") or ():
         episode = str(record.get("episode"))
+        if keep is not None and episode not in keep:
+            continue
         fractions = record.get("area_fractions") or ()
         hits = [(int(i), float(f)) for i, f in enumerate(fractions)
                 if float(f) >= threshold and (upper is None or float(f) <= upper)]
@@ -637,6 +701,19 @@ def build_argparser() -> argparse.ArgumentParser:
                         help="upper edge of the band, INCLUSIVE. Default: none, leaving the band "
                              "open at the top, which is the upper tail. A measured edge; not a "
                              "bound and not a candidate bound.")
+    population = parser.add_mutually_exclusive_group()
+    population.add_argument(
+        "--episodes", default=None,
+        help="comma-separated episode ids to restrict the selection to. A NAME, so prefer "
+             "--episodes-surviving-composite where the population is a criterion.")
+    population.add_argument(
+        "--episodes-surviving-composite", action="store_true",
+        help="restrict to the episodes BOTH halves of robot_composite.check_mask accept — no "
+             "empty robot mask on any frame, and no frame above the committed area bound. That "
+             "is the entire population a corpus run would produce today, derived from the pooled "
+             "artifact and configs/transfer25/pr08_robot_mask_area.json rather than typed.")
+    parser.add_argument("--area-bound", type=pathlib.Path, default=AREA_BOUND_ARTIFACT,
+                        help="the committed artifact --episodes-surviving-composite reads.")
     parser.add_argument("--max-frames", type=int, default=48)
     parser.add_argument("--sheet-tiles", type=int, default=12)
     parser.add_argument("--sheet-cols", type=int, default=4)
@@ -656,7 +733,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not manifest.is_file():
             raise TailLookError(f"no such corpus manifest: {manifest}")
 
-        candidates = tail_candidates(pooled, args.threshold, args.max_fraction)
+        population: list[str] | None = None
+        population_rule = "none — the whole corpus"
+        if args.episodes_surviving_composite:
+            bound = load_area_bound(args.area_bound)
+            population = composite_survivors(pooled, bound)
+            population_rule = (
+                "the episodes both halves of robot_composite.check_mask accept: empty_frames == 0 "
+                f"AND max(area_fractions) <= {bound!r} from {args.area_bound}. DERIVED from the "
+                "pooled artifact and the committed bound, not typed."
+            )
+            if not population:
+                raise TailLookError(
+                    "no episode in this corpus survives both halves of check_mask, so there is "
+                    "no population to look at. That is a finding about the corpus, not an error "
+                    "in this selection."
+                )
+        elif args.episodes:
+            population = sorted({e.strip() for e in args.episodes.split(",") if e.strip()})
+            population_rule = f"named on the command line: {len(population)} episode(s)"
+            known = {str(r.get("episode")) for r in pooled.get("per_episode") or ()}
+            missing = [e for e in population if e not in known]
+            if missing:
+                raise TailLookError(
+                    f"{len(missing)} named episode(s) are not in {args.pooled}: "
+                    f"{', '.join(missing[:5])}{' ...' if len(missing) > 5 else ''}"
+                )
+
+        candidates = tail_candidates(pooled, args.threshold, args.max_fraction, population)
         if not candidates:
             raise TailLookError(
                 f"no frame in {args.pooled} is inside the band "
@@ -701,6 +805,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         at_or_above = sum(
             1
             for record in pooled.get("per_episode") or ()
+            if population is None or str(record.get("episode")) in set(population)
             for f in (record.get("area_fractions") or ())
             if float(f) >= float(args.threshold)
         )
@@ -743,8 +848,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "max_fraction_default": DEFAULT_MAX_FRACTION,
                 "max_fraction_note": BAND_NOTE,
             },
+            "episode_population": {
+                "rule": population_rule,
+                "episodes": population,
+                "n_episodes": (None if population is None else len(population)),
+                "note": (
+                    "The band selects FRAMES; this selects the EPISODES the band is applied "
+                    "within. A band read over the whole corpus and a band read over the episodes "
+                    "a corpus run would actually produce are different measurements, and "
+                    "total_candidates below counts within this population."
+                ),
+                "not_a_bound": (
+                    "Restricting the population writes no bound, moves no bound and discharges "
+                    "nothing. It records which episodes were looked at."
+                ),
+            },
             "selection_rule": {
                 "rule": SELECTION_RULE_TEXT,
+                "population": population_rule,
                 "bias": SELECTION_BIAS_TEXT,
                 "rng": "none. No RNG, no clock, no hash and no filesystem order enters the "
                        "selection; it is a pure function of the pooled artifact, the threshold and "
@@ -788,6 +909,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "band": band_text(args.threshold, args.max_fraction),
                 "frames_in_band": int(total_candidates),
                 "frames_at_or_above_threshold": int(at_or_above),
+                "counted_within": population_rule,
                 "episodes_with_tail_frames": len(candidates),
                 "episodes_sampled": len({r["episode"] for r in frames_block}),
                 "episodes_not_sampled": len(candidates) - len({r["episode"]

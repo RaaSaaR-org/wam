@@ -41,23 +41,33 @@ esac
 # Preflight. Both of these have already cost this project a submission once.
 # ---------------------------------------------------------------------------
 
-# MaxSubmitJobsPU=8 on the project QoS (verified 2026-08-27 via sacctmgr), and EVERY array
-# task counts as one submission. A peer session shares this allocation and its jobs count
-# against the same per-user ceiling, so "my queue is empty" is not the question -- "is there
-# room for four more" is. Refusing here is free; being rejected by sbatch after the wave is
-# assembled is not, and a partial array is worse than none.
-echo "==> checking submit-slot budget on ${HOST}"
-PENDING=$(ssh "${HOST}" "squeue -u \$USER -r -h -o '%i' | wc -l")
-echo "    ${PENDING} job(s) submitted by this user right now (ceiling 8)"
+# MaxSubmitJobsPU IS PER QoS, AND THE TWO BRANCHES DO NOT SUBMIT TO THE SAME ONE. Verified
+# 2026-08-27 via sacctmgr (MaxWall|MaxJobsPU|MaxSubmitJobsPU):
+#     ehpc-aif-2026pg01-905  04:00:00 | 4 | 8      <- the waves
+#     2cpu-single-host       04:00:00 | 2 | 4      <- the merge
+# A single ceiling of 8 was wrong for the merge and wrong in the UNSAFE direction: five jobs
+# already on the free QoS would pass 5 + 1 <= 8 here and then be rejected by sbatch. EVERY array
+# task counts as one submission (%4 throttles running jobs, not submitted ones), and a peer
+# session shares this allocation, so "my queue is empty" is not the question -- "is there room for
+# four more" is.
+#
+# The count is the WHOLE user's queue rather than that QoS's share of it, which over-refuses and
+# never under-refuses: the whole queue is a superset of any one QoS's jobs, so a pass here is a
+# pass there. squeue's %q would give the exact per-QoS count; the superset is deliberate, because
+# being refused a wave costs a re-run and being rejected mid-array costs a partial array.
 if [[ -z "${ARRAY}" ]]; then
-  NEED=1
+  NEED=1; CEILING=4; QOS_NAME=2cpu-single-host
 else
-  NEED=4
+  NEED=4; CEILING=8; QOS_NAME=ehpc-aif-2026pg01-905
 fi
-if (( PENDING + NEED > 8 )); then
-  echo "REFUSING: ${PENDING} + ${NEED} > 8 = MaxSubmitJobsPU." >&2
-  echo "  Someone else is using the allocation. Wait for their jobs, then re-run." >&2
-  ssh "${HOST}" "squeue -u \$USER -r -o '%.14i %.20j %.8T %.10M %.10l'" >&2
+echo "==> checking submit-slot budget on ${HOST} (${QOS_NAME}, MaxSubmitJobsPU=${CEILING})"
+PENDING=$(ssh "${HOST}" "squeue -u \$USER -r -h -o '%i' | wc -l")
+echo "    ${PENDING} job(s) submitted by this user right now, and this needs ${NEED} more"
+if (( PENDING + NEED > CEILING )); then
+  echo "REFUSING: ${PENDING} + ${NEED} > ${CEILING} = MaxSubmitJobsPU on ${QOS_NAME}." >&2
+  echo "  This counts the whole queue, so some of those jobs may be on another QoS and this may" >&2
+  echo "  be refusing you conservatively. Wait for them, then re-run." >&2
+  ssh "${HOST}" "squeue -u \$USER -r -o '%.14i %.20j %.8T %.10M %.10l %.22q'" >&2
   exit 75
 fi
 

@@ -666,3 +666,102 @@ def test_the_band_still_writes_no_bound(tmp_path, monkeypatch):
         assert key != "max_frame_fraction"
         if isinstance(value, str):
             assert not re.search(r"max_frame_fraction\s*[=:]\s*[-+0-9]", value), value
+
+
+# --------------------------------------------------------------------------------------------
+# the episode population — restricting the band to the episodes a corpus run would produce
+# --------------------------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. check_mask refuses a clip on ONE empty robot mask and on ONE frame above the
+# committed area bound, so 17 of this corpus's 402 episodes survive both halves. The band is a
+# window over FRAMES; without an episode population it is read over 402 episodes, 385 of which
+# will never be generated. Asked of the survivors it is a different measurement, and the survivors
+# are where the answer matters — an episode is in the seventeen because its SMALLEST mask was not
+# empty, so the lower tail is what decided every one of them.
+
+
+def test_the_survivor_population_is_both_halves_of_check_mask_and_nothing_else():
+    """Not "no empty frames" and not "under the bound" — both, because check_mask applies both."""
+    pooled = _pooled({
+        "ep_clean": [0.10, 0.20, 0.30],          # neither half refuses -> survives
+        "ep_empty": [0.10, 0.00, 0.30],          # one empty frame -> refused
+        "ep_over": [0.10, 0.90, 0.30],           # one frame above the bound -> refused
+        "ep_both": [0.00, 0.95],                 # both -> refused
+        "ep_edge": [0.10, 0.64, 0.30],           # exactly at the bound is NOT above it
+    })
+    assert rats.composite_survivors(pooled, 0.64) == ["ep_clean", "ep_edge"]
+
+
+def test_the_population_is_derived_from_the_committed_bound_not_typed(tmp_path):
+    """T40_RULE_V20 §3's reason, applied to a different selection: a criterion can be checked, a
+    list of ids can only be trusted. Move the bound and the population must move with it."""
+    pooled = _pooled({"a": [0.10, 0.50], "b": [0.10, 0.70]})
+    assert rats.composite_survivors(pooled, 0.64) == ["a"]
+    assert rats.composite_survivors(pooled, 0.80) == ["a", "b"]
+
+    doc = tmp_path / "bound.json"
+    doc.write_text(json.dumps({"max_frame_fraction": 0.8}), encoding="utf-8")
+    assert rats.load_area_bound(doc) == 0.8
+
+
+def test_a_bound_artifact_without_the_field_is_refused_rather_than_defaulted(tmp_path):
+    """A default here would silently select a population nobody committed."""
+    doc = tmp_path / "bound.json"
+    doc.write_text(json.dumps({"note": "no bound in here"}), encoding="utf-8")
+    with pytest.raises(rats.TailLookError) as excinfo:
+        rats.load_area_bound(doc)
+    assert "max_frame_fraction" in str(excinfo.value)
+    with pytest.raises(rats.TailLookError):
+        rats.load_area_bound(tmp_path / "does-not-exist.json")
+
+
+def test_the_population_is_applied_before_the_band_not_after():
+    """`total_candidates` in the artifact counts within the population. Restricting afterwards
+    would leave a number that reads as corpus-wide and is not."""
+    pooled = _pooled({
+        "keep": [0.002, 0.003, 0.90],
+        "drop": [0.002, 0.002, 0.002],
+    })
+    everything = rats.tail_candidates(pooled, 0.0001, 0.005)
+    assert set(everything) == {"keep", "drop"}
+    assert sum(len(v) for v in everything.values()) == 5
+
+    restricted = rats.tail_candidates(pooled, 0.0001, 0.005, ["keep"])
+    assert set(restricted) == {"keep"}
+    assert sum(len(v) for v in restricted.values()) == 2
+
+
+def test_an_empty_population_is_a_typo_and_is_refused():
+    """`--episodes ,,,` must not silently mean "the whole corpus"."""
+    pooled = _pooled({"a": [0.002, 0.90]})
+    with pytest.raises(rats.TailLookError) as excinfo:
+        rats.tail_candidates(pooled, 0.0001, 0.005, [])
+    assert "typo" in str(excinfo.value)
+
+
+def test_no_population_leaves_the_previous_behaviour_byte_for_byte():
+    """The flag is additive. Omitting it must select exactly what it selected before it existed."""
+    pooled = _pooled({"a": [0.002, 0.90], "b": [0.003, 0.004]})
+    assert rats.tail_candidates(pooled, 0.0001, 0.005) == rats.tail_candidates(
+        pooled, 0.0001, 0.005, None
+    )
+
+
+def test_the_two_population_flags_are_mutually_exclusive():
+    """A criterion and a name cannot both be the population; naming one after deriving the other
+    is how a derived selection quietly becomes a typed one."""
+    parser = rats.build_argparser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--episodes", "ep_a", "--episodes-surviving-composite"])
+    assert parser.parse_args([]).episodes is None
+    assert parser.parse_args([]).episodes_surviving_composite is False
+
+
+def test_the_committed_bound_artifact_is_the_default_the_composite_also_reads():
+    """If these two ever point at different files, the population is not the composite's."""
+    assert rats.AREA_BOUND_ARTIFACT == Path("configs/transfer25/pr08_robot_mask_area.json")
+    assert rats.build_argparser().parse_args([]).area_bound == rats.AREA_BOUND_ARTIFACT
+    composite = (Path(__file__).resolve().parents[1] / "scripts/robot_composite.py").read_text(
+        encoding="utf-8"
+    )
+    assert "pr08_robot_mask_area.json" in composite
