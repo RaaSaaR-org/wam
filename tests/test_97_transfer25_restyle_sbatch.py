@@ -386,3 +386,132 @@ def test_frames_per_variant_is_read_from_the_partition_facts_not_coined(tmp_path
                    encoding="utf-8")
     rc, out, payload = _throughput(tmp_path, admissibility=adm, corpus_frames="0")
     assert rc != 0 and "corpus_frames" in out, out
+
+
+# ------------------------------------------------------------------------------------------------
+# The harvest, and the distinction that decides whether a chunk can ever finish.
+# ------------------------------------------------------------------------------------------------
+HARVEST_ANCHOR = 'python - "$1" "$2" "$3" "$4" "$5"'
+
+
+def _unit_record(tmp_path, unit: str, *, frames: int, status: str, detail=None, composited=True):
+    d = tmp_path / "raw" / unit
+    d.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status, "unit": unit, "episode": unit.split("__")[0],
+        "style": "s", "repeat": 0, "seed": 7001, "frames": frames,
+        "detail": detail, "backend": "transfer25", "stage": "1",
+    }
+    if status == "success":
+        payload["g0c"] = {
+            "composited": composited, "frames_composited": frames, "frames_total": frames,
+            "area_bound": {"cross_checked": True, "artifact_sha256": "ab" * 32},
+        }
+        (d / "vision.mp4").write_bytes(b"\x00" * 16)
+    elif detail and detail.startswith("SourceMaskRefusal:"):
+        payload["g0c"] = {"source_mask_preflight": {"refusal": "frame 0: covered == 0"}}
+        # what the driver actually leaves behind: the bytes under a name nothing looks for
+        (d / "vision.uncomposited.mp4").write_bytes(b"\x00" * 16)
+    (d / "sample_outputs.json").write_text(json.dumps(payload), encoding="utf-8")
+    return d
+
+
+def _run_harvest(tmp_path, rows: list[dict]):
+    script = tmp_path / "harvest_from_97.py"
+    script.write_text(_heredoc(HARVEST_ANCHOR), encoding="utf-8")
+    work = tmp_path / "work.jsonl"
+    work.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    clips = tmp_path / "clips"
+    clips.mkdir(exist_ok=True)
+    missing = tmp_path / "missing"
+    refused = tmp_path / "refused.json"
+    proc = subprocess.run(
+        [sys.executable, str(script), str(work), str(tmp_path / "raw"), str(clips),
+         str(missing), str(refused)],
+        capture_output=True, text=True)
+    return proc, missing, refused, clips
+
+
+def test_a_g0c_source_mask_refusal_is_decided_not_missing(tmp_path) -> None:
+    """THE BUG THIS PINS, and it is certain rather than hypothetical on this corpus.
+
+    A unit the source-mask preflight refuses never produces vision.mp4 — the driver quarantines the
+    bytes as vision.uncomposited.mp4 — so the harvest used to put it on the MISSING list, which is
+    what the chunk requeues on. Pass 1 files the survivors, pass 2 files nothing, MISSING_AFTER ==
+    MISSING_BEFORE, and the chunk exits 1 at the no-op guard WITHOUT reaching `touch DONE`. So
+    chunk_metadata.json and the whole PR-08 §6 record are never written: the clips are produced and
+    filed, and the record saying so is not. At 385 of 402 episodes refused it fires on the first
+    chunk of the first real run.
+    """
+    _unit_record(tmp_path, "ep_a__s__r00", frames=4, status="success")
+    _unit_record(tmp_path, "ep_b__s__r00", frames=4, status="error",
+                 detail="SourceMaskRefusal: frame 0 of the SOURCE has an empty robot mask.")
+    # a genuinely absent unit: no record at all, which must stay MISSING and stay retried
+    rows = [{"unit": "ep_a__s__r00", "frames": 4},
+            {"unit": "ep_b__s__r00", "frames": 4},
+            {"unit": "ep_c__s__r00", "frames": 4}]
+
+    proc, missing, refused, clips = _run_harvest(tmp_path, rows)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert (clips / "ep_a__s__r00.mp4").is_file(), "the passing unit was not filed"
+    assert missing.read_text().strip().count("ep_c") == 1
+    assert "ep_b" not in missing.read_text(), (
+        "a permanent G0c refusal is back on the missing list, which is the unbounded loop"
+    )
+    entries = json.loads(refused.read_text())
+    assert [e["unit"] for e in entries] == ["ep_b__s__r00"]
+    assert entries[0]["detail"].startswith("SourceMaskRefusal:")
+    assert entries[0]["reason"] == "frame 0: covered == 0"
+
+
+def test_a_refused_unit_is_still_never_filed(tmp_path) -> None:
+    """The change is accounting only. It must not be able to make a unit pass."""
+    _unit_record(tmp_path, "ep_b__s__r00", frames=4, status="error",
+                 detail="SourceMaskRefusal: frame 0 of the SOURCE has an empty robot mask.")
+    proc, missing, refused, clips = _run_harvest(tmp_path, [{"unit": "ep_b__s__r00", "frames": 4}])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert list(clips.glob("*.mp4")) == [], "a refused unit was filed as a clip"
+    assert list(clips.glob("*.g0c.json")) == [], "a refused unit got a G0c evidence sidecar"
+    assert missing.read_text().strip() == ""
+
+
+@pytest.mark.parametrize(
+    "detail",
+    ["DriverError: vision.mp4 missing or empty after the backend ran.",
+     "RuntimeError: CUDA out of memory.",
+     "CompositeError: frame 12 of the GENERATED clip exceeds the bound."],
+)
+def test_every_other_failure_stays_missing_and_stays_retried(tmp_path, detail: str) -> None:
+    """The no-op guard exists to stop an unbounded requeue on a crash, and it must still fire. Only
+    a SourceMaskRefusal is permanent — every other error is a unit that a later pass may complete."""
+    _unit_record(tmp_path, "ep_x__s__r00", frames=4, status="error", detail=detail)
+    proc, missing, refused, _ = _run_harvest(tmp_path, [{"unit": "ep_x__s__r00", "frames": 4}])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "ep_x" in missing.read_text()
+    assert json.loads(refused.read_text()) == []
+
+
+def test_an_unreadable_record_is_missing_rather_than_refused(tmp_path) -> None:
+    """"We cannot account for this unit" must never resolve to "the gate decided it". Missing is the
+    conservative reading: it retries, and the no-op guard bounds the retrying."""
+    d = tmp_path / "raw" / "ep_y__s__r00"
+    d.mkdir(parents=True)
+    (d / "sample_outputs.json").write_text("{not json", encoding="utf-8")
+    proc, missing, refused, _ = _run_harvest(tmp_path, [{"unit": "ep_y__s__r00", "frames": 4}])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "ep_y" in missing.read_text()
+    assert json.loads(refused.read_text()) == []
+
+
+def test_the_refusals_reach_the_record_and_the_log(tmp_path) -> None:
+    """A chunk may now reach DONE with most of its work list refused. That must never be silent."""
+    text = SBATCH_97.read_text(encoding="utf-8")
+    assert 'REFUSED=${CHUNK_DIR}/refused.json' in text
+    assert text.count('harvest "${WORK_LIST}" "${RAW}" "${CLIPS}" "${MISSING}" "${REFUSED}"') == 2, (
+        "both the normal path and the DONE re-entry must pass the refused list"
+    )
+    assert '"units_refused_by_g0c_on_source_masks": len(refused),' in text
+    assert "REFUSED BY G0c ON THEIR SOURCE MASKS" in text
+    # And the missing list, which the chunk requeues on, never receives them.
+    assert 'refused.append(decided)' in text and 'missing.append(line)' in text

@@ -1402,8 +1402,13 @@ def _run_harvest(tmp_path: pathlib.Path, units: list[dict]) -> "subprocess.Compl
 
     script = tmp_path / "harvest_from_97.py"
     script.write_text(_harvest_source(), encoding="utf-8")
+    # argv[5] is the REFUSED list, added 2026-08-28. The harvest now tells a unit G0c refused on its
+    # source masks (permanent, never retried, never filed) apart from one that is simply absent
+    # (retried, and bounded by the no-op guard). Before that split a refused unit sat on the missing
+    # list forever and the chunk exited 1 without ever writing its PR-08 §6 record.
     return subprocess.run(
-        [sys.executable, str(script), str(work), str(raw), str(dest), str(tmp_path / "missing")],
+        [sys.executable, str(script), str(work), str(raw), str(dest), str(tmp_path / "missing"),
+         str(tmp_path / "refused.json")],
         capture_output=True, text=True,
     )
 

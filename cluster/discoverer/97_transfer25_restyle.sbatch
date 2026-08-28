@@ -614,6 +614,11 @@ CLIPS=${OUT}/clips/${STYLE_SET}
 RAW=${CHUNK_DIR}/_raw
 PAYLOADS=${CHUNK_DIR}/payloads
 MISSING=${CHUNK_DIR}/missing
+# The units G0c refused on their SOURCE masks, which are DECIDED rather than outstanding. Kept in
+# its own file beside the missing list and never merged into it: the missing list is what the chunk
+# requeues on, and a permanent refusal on it is an unbounded loop. See permanently_refused() in the
+# harvest for the whole argument, and for why this cannot let a unit pass.
+REFUSED=${CHUNK_DIR}/refused.json
 PASSES_LOG=${CHUNK_DIR}/passes.jsonl
 PREREG=${WAM}/docs/preregistration/PR-08-photoreal-augmentation.md
 
@@ -2497,9 +2502,63 @@ PY
   # the new claim. It cannot now — it has no sidecar, and the raw record it came from may be long
   # gone, so the sidecar is the only durable per-clip proof and its absence is the refusal.
   harvest() {  # work-list  raw-dir  dest-dir  missing-list-to-write
-  python - "$1" "$2" "$3" "$4" <<'PY'
+  python - "$1" "$2" "$3" "$4" "$5" <<'PY'
 import json, pathlib, shutil, sys
-work, raw, dest, out = (pathlib.Path(a) for a in sys.argv[1:5])
+work, raw, dest, out, refused_out = (pathlib.Path(a) for a in sys.argv[1:6])
+
+
+def permanently_refused(unit):
+    """Did G0c refuse this unit on its SOURCE masks, before the generator ran?
+
+    THE BUG THIS EXISTS TO FIX, and it is certain rather than hypothetical on this corpus. A unit
+    the source-mask preflight refuses never produces a ``vision.mp4``: the driver quarantines
+    whatever the backend wrote as ``vision.uncomposited.mp4``, under a name nothing looks for. The
+    loop below then puts it on the MISSING list, and the missing list is what the chunk requeues on.
+    So pass 1 files the survivors, pass 2 files nothing, ``MISSING_AFTER == MISSING_BEFORE``, and
+    the chunk exits 1 at the no-op guard without ever reaching ``touch DONE`` — which means
+    ``chunk_metadata.json`` and the whole PR-08 §6 record are never written. The clips are produced
+    and filed; the record that says so is not. At 385 of 402 episodes refused, that fires on the
+    first chunk of the first real run.
+
+    WHY THIS IS AN ACCOUNTING FIX AND NOT A WEAKENING OF ANYTHING. It cannot make a unit pass: a
+    refused unit is still not filed, still has no clip in ``dest``, still has no sidecar, and is
+    still counted nowhere as a success. What changes is only whether the chunk RETRIES it. And
+    retrying it cannot ever succeed: ``check_mask``'s verdict is a function of the source bytes, the
+    segmenter and the bound — ``robot_composite.MaskCache.key`` hashes the first two and the third
+    is the frozen bound object — and all three are fixed for the life of a run. A permanent refusal
+    on the missing list is not work outstanding, it is a decision already taken.
+
+    IT IS READ OFF THE NAME THE DRIVER PUTS THERE FOR EXACTLY THIS. ``SourceMaskRefusal`` is a
+    subclass rather than a flag, and ``restyle_transfer25.py:493-501`` says why: *"What the subclass
+    buys is a NAME in the per-unit record — ``detail`` reads ``SourceMaskRefusal: …``"*. Nothing
+    read it until now.
+
+    EVERY OTHER FAILURE STAYS MISSING. A crash, a truncated video, an OOM, a licence error: all of
+    those are retried exactly as before, and if they repeat, the no-op guard still fires. The
+    unbounded-loop protection is preserved precisely where it belongs — this narrows what counts as
+    outstanding work, it does not remove the check.
+    """
+    record = raw / unit / "sample_outputs.json"
+    try:
+        payload = json.loads(record.read_text())
+    except (OSError, ValueError):
+        # No record, or an unreadable one, is NOT a refusal. It is a unit nobody can account for,
+        # and the safe reading of that is "missing" — which retries, and which the no-op guard
+        # bounds.
+        return None
+    if payload.get("status") != "error":
+        return None
+    detail = str(payload.get("detail") or "")
+    if not detail.startswith("SourceMaskRefusal:"):
+        return None
+    g0c = payload.get("g0c")
+    reason = None
+    if isinstance(g0c, dict):
+        preflight = g0c.get("source_mask_preflight")
+        if isinstance(preflight, dict):
+            reason = preflight.get("refusal") or preflight.get("detail")
+    return {"unit": unit, "detail": detail, "reason": reason,
+            "episode": payload.get("episode"), "style": payload.get("style")}
 
 def sidecar(unit):
     return dest / f"{unit}.g0c.json"
@@ -2591,6 +2650,7 @@ def evidence(unit, row):
                          "area_bound.cross_checked"]}, None
 
 missing = []
+refused = []
 for line in work.read_text().splitlines():
     if not line.strip():
         continue
@@ -2626,8 +2686,15 @@ for line in work.read_text().splitlines():
         continue
     src = raw / unit / "vision.mp4"
     if not src.is_file():
-        # No output at all, or the driver quarantined an uncomposited one as vision.uncomposited.mp4.
-        missing.append(line)
+        # No output at all, or the driver quarantined an uncomposited one as
+        # vision.uncomposited.mp4. Those two are not the same thing and this used to treat them as
+        # one: see permanently_refused() for what that cost. A G0c source-mask refusal is a
+        # decision, and a decision is not outstanding work.
+        decided = permanently_refused(unit)
+        if decided is not None:
+            refused.append(decided)
+        else:
+            missing.append(line)
         continue
     proof, why = evidence(unit, row)
     if proof is None:
@@ -2641,6 +2708,10 @@ for line in work.read_text().splitlines():
     shutil.move(str(src), str(dest / f"{unit}.mp4"))
 
 out.write_text("".join(f"{u}\n" for u in missing))
+# WRITTEN, NOT SWALLOWED. This is the whole risk of the change above: a chunk that now reaches DONE
+# while most of its units produced nothing must SAY so, or the record lies by omission. It is a file
+# the shell reads back into chunk_metadata.json, and it is printed here in full count.
+refused_out.write_text(json.dumps(refused, indent=2, sort_keys=True) + "\n")
 # The invariant this function maintains, re-checked over the WHOLE directory rather than over the
 # units this pass touched: every clip in it has its own evidence file. A unit absent from this
 # chunk's work list cannot be checked above, and it is exactly the case a wrong claim would hide in.
@@ -2677,11 +2748,17 @@ if orphans:
         "and let the chunk regenerate them."
     )
 print(f"harvest: {len(filed)} clips filed, each with its own G0c evidence file; "
-      f"{len(missing)} to generate")
+      f"{len(missing)} to generate; {len(refused)} refused by G0c on their SOURCE masks")
+if refused:
+    print("harvest: those refusals are FINAL for this run — check_mask's verdict is a function of "
+          "the source bytes, the segmenter and the bound, and all three are fixed here. They are "
+          "not retried and they are not filed. First few:")
+    for entry in refused[:3]:
+        print(f"           {entry['unit']}: {entry['detail'][:110]}")
 PY
   }
 
-  harvest "${WORK_LIST}" "${RAW}" "${CLIPS}" "${MISSING}"
+  harvest "${WORK_LIST}" "${RAW}" "${CLIPS}" "${MISSING}" "${REFUSED}"
   MISSING_BEFORE=$(wc -l < "${MISSING}")
 
   RC=0
@@ -2753,7 +2830,7 @@ PY
     done
     ELAPSED=$((SECONDS - START))
     echo "driver pid ${CHILD} exited ${RC} after ${ELAPSED}s at $(date -Is) (usr1=${GOT_USR1})"
-    harvest "${WORK_LIST}" "${RAW}" "${CLIPS}" "${MISSING}"
+    harvest "${WORK_LIST}" "${RAW}" "${CLIPS}" "${MISSING}" "${REFUSED}"
   else
     ELAPSED=$((SECONDS - START))
     echo "=== every unit in this chunk is already on disk — no checkpoint load"
@@ -2793,6 +2870,19 @@ PY
     scontrol requeue "${SLURM_JOB_ID}"
     exit 0
   fi
+  # A chunk can now legitimately reach DONE with most of its work list refused, which is new and
+  # must never be silent. On this corpus 385 of 402 episodes are refused by one half of check_mask
+  # or the other, so this line is the normal case rather than an exception.
+  if [[ -s "${REFUSED}" ]]; then
+    REFUSED_N=$(python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "${REFUSED}")
+    if (( REFUSED_N > 0 )); then
+      echo "=== ${REFUSED_N} unit(s) in ${CHUNK_TAG} were REFUSED BY G0c ON THEIR SOURCE MASKS and"
+      echo "===   produced no clip. They are decided, not outstanding: check_mask-s verdict is a"
+      echo "===   function of the source bytes, the segmenter and the bound, all fixed for this"
+      echo "===   run, so retrying them cannot change the answer. Nothing was filed for them."
+      echo "===   Per-unit reasons: ${REFUSED}"
+    fi
+  fi
   touch "${CHUNK_DIR}/DONE"
 fi
 
@@ -2823,6 +2913,22 @@ geom = json.loads(pathlib.Path(geom_p).read_text())
 tp = json.loads(pathlib.Path(tp_p).read_text())
 facts = json.loads(pathlib.Path(facts_p).read_text())
 n_clips = len(list(pathlib.Path(clips).glob("*.mp4")))
+# THE UNITS THAT PRODUCED NOTHING, AND WHY, COUNTED FROM THE SAME FILE THE HARVEST WROTE. Without
+# this the record states how many clips a chunk filed and is silent about how many its own gate
+# refused — and on this corpus the second number is the larger one by an order of magnitude. A §6
+# record that says "136 clips" over a work list of 3216 without saying what happened to the other
+# 3080 is a record a later reader cannot interpret. Read from the chunk directory rather than passed
+# as a nineteenth positional argument, because it is written by the harvest a few lines above and
+# argv is already long enough to be its own hazard.
+refused_p = pathlib.Path(chunk_dir) / "refused.json"
+refused = []
+if refused_p.is_file():
+    try:
+        refused = json.loads(refused_p.read_text())
+    except ValueError:
+        sys.exit(f"FATAL: {refused_p} is unreadable. It is the harvest's own account of which units "
+                 "G0c refused, and a record that cannot read it would undercount the refusals "
+                 "rather than report none.")
 # The G0c claim below is COUNTED, not asserted. harvest() writes <unit>.g0c.json beside each clip it
 # files, only after reading that unit's own compositor record, and refuses to file one without it.
 # Recomputing the two counts here means the record cannot claim what the directory does not show —
@@ -2904,6 +3010,17 @@ rec = {
     "unit_id_format": "<episode>__<style id>__r<NN>, NN = repeat index into that style's seeds",
     "whole_partition_clips": facts["whole_partition_clips"],
     "whole_partition_frames": facts["whole_partition_frames"],
+    # PR-08 §6 "Recorded regardless of verdict" applies to the refusals as much as to the clips.
+    # These units reached the source-mask preflight and were refused before the generator ran, so
+    # they produced no clip and cost a segmentation pass rather than a generation.
+    "units_refused_by_g0c_on_source_masks": len(refused),
+    "units_refused_detail": refused,
+    "units_refused_note": (
+        "Refused BEFORE the backend by restyle_transfer25.preflight_source_masks, which runs "
+        "robot_composite.check_mask over the SOURCE masks. The verdict is a function of the source "
+        "bytes, the segmenter and the bound, all fixed for this run, so these are decisions and not "
+        "outstanding work: they are not retried, not filed, and counted in no success total."
+    ),
     "geom_tol_px": geom.get("GEOM_TOL_px", geom.get("GEOM_TOL")),
     "est_drift_p95_px": geom.get("est_drift_p95_px", geom.get("EST_DRIFT_P95")),
     "geom_constants_source": geom_p,
