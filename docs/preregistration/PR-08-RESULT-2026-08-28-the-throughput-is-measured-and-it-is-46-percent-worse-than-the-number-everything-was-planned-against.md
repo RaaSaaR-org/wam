@@ -139,3 +139,81 @@ The artifact is `runs/t040-transfer25-restyle-timing-2026-08-28/THROUGHPUT.json`
 admitted the episode is `runs/pr08-robot-mask-area/shards/`, sixteen artifacts, each named and
 hashed inside the artifact's own `timed_unit_admissibility` block — so the selection is checkable
 rather than trusted, which is the property `T40_RULE_V20` §3 exists to keep.
+
+---
+
+## 8. CORRECTION, 2026-08-28, APPENDED AND NOT REWRITTEN — §4's waste figure is wrong
+
+**§4 above says "1 928.6 GPU-h buy clips that are then quarantined." That is false at HEAD, and the
+error is mine.** It assumes a refused episode pays for a generation. It does not, and has not since
+2026-08-27.
+
+`scripts/restyle_transfer25.py:775-779`: `preflight_source_masks` runs as the **first** thing inside
+the per-unit guard, and `_transfer25_backend` is reached only if it did not raise. `T40_RULE_V20` §1
+says the same thing in words and I quoted that document elsewhere in this session without applying
+it here:
+
+> **Since 2026-08-27 the refusal is cheap**: a source-mask preflight runs `check_mask` over the
+> source masks *before* the backend, so the unit is refused in seconds rather than after ~0.3–0.5
+> GPU-h.
+
+`F5-yield-empty-mask.md` §5's *"423.7 of the 442.4 buy clips that are then quarantined"* was written
+against the tree **before** that preflight landed. Carrying its shape forward to today's measured
+rate carried an assumption that had already been repaired.
+
+**What a refused episode actually costs.** A decode plus one segmentation pass over its source
+frames. Measured, from the sixteen `wam-robot-mask-area` array tasks that produced the area
+distribution — the same masker at the same committed operating point over the same 171 625 frames:
+
+| | |
+|---|---:|
+| sixteen shards, summed elapsed | 41 119 s = **11.42 GPU-h** |
+| frames | 171 625 |
+| **segmentation pass** | **0.2396 s/frame** |
+
+against **1.6896 s/frame** for a unit that passes and is generated — a factor of **7.05**.
+
+### The corrected picture
+
+| | GPU-h |
+|---|---:|
+| generating the 17 survivors, × 25 style-instances | **85.2** |
+| preflight over the other 385, if every unit pays a full pass | 273.5 |
+| preflight over the other 385, if each episode pays one pass | 10.9 |
+| **corrected total** | **≈ 96 – 359** |
+| ~~§4's figure~~ | ~~2 013.7~~ |
+
+**Between five and twenty-one times cheaper than §4 says.**
+
+### Where in that range, and why the range is honest
+
+`SourceMaskMemo` (`restyle_transfer25.py:507-540`) states its own scope, and it is narrower than
+"once per episode": *"This memo's lifetime is one process, and one invocation of this driver
+generates exactly one `--style-set` … a per-run memo cannot save anything across two submissions and
+a docstring that implied it could would be describing a cache this class is not."* Within the full
+25-instance rendering it saves **ten repeats per episode per set**.
+
+Across processes the saving is `robot_composite.MaskCache`, which is a path on disk and which the
+driver always constructs. The same docstring is careful about it: *"The mask cache makes the second
+discovery cheap; it does not make it free, and it cannot make it zero"* — a cache hit still re-decodes
+the source, reads ~16 MB of packed masks and re-walks every frame through `check_mask`.
+
+**So the low end assumes a warm `MaskCache` across every chunk and the high end assumes none. Which
+one holds depends on how generation is chunked and on whether that cache is shared with the run that
+produced the area distribution. This document does not claim to know, and states the range instead
+of picking a point.**
+
+### What the correction does and does not change
+
+* **It does not change the measurement.** 1.6896 s/frame stands. §1, §2 and §3 are untouched, and so
+  is the +45.7 % gap in §4's first half — the assumed rate really was 1.16.
+* **It does not close item 3.** The ceiling is still owed and is still a signature.
+* **It substantially changes §5.2's decision.** "Is 2 013.7 GPU-h spendable" was the wrong question.
+  The real figure is on the order of a hundred GPU-h, which is a different kind of decision.
+* **It substantially weakens §5.3's.** The case for changing the work unit to the seventeen rested on
+  95.8 % of the spend being wasted. At HEAD the wasted part is between 11 % and 76 % of a much
+  smaller total, and the generation half — 85.2 GPU-h — is identical either way. **What restricting
+  the corpus would save is the preflight, not the generation.**
+* **The yield finding itself is untouched.** 17 of 402 episodes survive, and a corpus of seventeen is
+  still what a generation run produces today. That question is about the dataset, not about its
+  price, and `PR-08-RESULT-2026-08-28-the-seventeen-survive-…` §6 still owes it to the owner.
