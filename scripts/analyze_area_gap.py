@@ -36,6 +36,10 @@ import sys
 
 import numpy as np
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import pool_robot_mask_area  # noqa: E402  (stdlib-only; rebuilds the pool from its shards)
+
 #: Gaps narrower than this are not discontinuities, they are the spacing of a continuum. Fixed
 #: here rather than chosen later; it exists so "the largest gap" cannot be reported as a finding
 #: when the largest gap is 1e-4 wide.
@@ -191,12 +195,23 @@ def analyze(payload: dict) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("artifact", type=pathlib.Path, help="merged ROBOT_MASK_AREA artifact")
+    # NOT the merged artifact, which is what this help string used to say. _pool() below reads
+    # payload["per_episode"], and robot_composite's merge DROPS per_episode — it writes the five
+    # summary numbers and the bound. So the merged artifact raises KeyError here, and what this
+    # actually takes is a pooled per-episode record: the shard directory pooled by
+    # scripts/pool_robot_mask_area.py, or a file carrying per_episode.
+    ap.add_argument("artifact", type=pathlib.Path,
+                    help="pooled per-episode robot-mask-area record, or a directory of shard "
+                         "artifacts (see scripts/pool_robot_mask_area.py) — NOT the merged artifact, "
+                         "which carries no per_episode")
     ap.add_argument("--out", type=pathlib.Path, default=None)
     args = ap.parse_args(argv)
 
-    payload = json.loads(args.artifact.read_text())
-    if payload.get("measurement_qualified") is False:
+    payload = pool_robot_mask_area.load_area_evidence(args.artifact)
+    # `is not True`, not `is False`. This is the instrument T40_RULE_V13 §3.1 specifies and the one
+    # that produced the edges in the committed bound_rationale, and an artifact with the key ABSENT
+    # passed the old test — which is exactly the shape of the file this was most often pointed at.
+    if payload.get("measurement_qualified") is not True:
         # load_area_bound refuses such an artifact by name; analysing it would produce a bound
         # rationale citing a distribution nothing may sit above. V13 §3.4's last bullet.
         print(

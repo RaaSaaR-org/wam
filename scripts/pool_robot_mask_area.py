@@ -12,10 +12,12 @@ It carries exactly six top-level keys — `git_commit`, `source_manifest_sha256`
 merge-condition verdicts, so it is not the `wam.robot_mask_area/1` artifact either.
 `robot_composite.py measure --merge` does pool the same shards, but its output DROPS `per_episode`
 entirely (it writes the five summary numbers and the bound), so re-running the merge does not
-produce this file and cannot answer the question `T40_RULE_V20` asks of it. The file lives under
-gitignored `runs/`, exists on exactly one workstation, and four separate consumers — the pre-GPU
-screen in `97_transfer25_restyle.sbatch`, `submit_timing_episode.sh`, `render_area_tail_sheet.py`
-and the empty-mask scripts — read it as if it were evidence with provenance.
+produce this file and cannot answer the question `T40_RULE_V20` asks of it. Until commit `0c2b1eb`
+force-added it, the file lived under gitignored `runs/` on exactly one workstation — and four
+separate consumers — the pre-GPU screen in `97_transfer25_restyle.sbatch`,
+`submit_timing_episode.sh`, `render_area_tail_sheet.py` and the empty-mask scripts — read it as if
+it were evidence with provenance. Force-adding it fixed where it lives. It did not give it a
+producer, which is why the shards and not this file are what everything now derives from.
 
 `docs/investigations/2026-08-27-pr08-fronts/F5-yield-empty-mask.md` §A.7 found this first, and its
 conclusion is the one implemented here: a pre-flight that authorises GPU time must not validate a

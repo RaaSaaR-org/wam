@@ -56,9 +56,12 @@ WALL=${WALL:-01:30:00}
 # ---------------------------------------------------------------------------
 # THE EVIDENCE IS THE SHARDS. V20 §2 computed its population from
 # runs/pr08-robot-mask-area/POOLED.json and registered that file by sha256
-# (631103a8a97010c4804ac039aecc7fd8425c226c750294335fad5938c35233db). That file is untracked, lives
-# under gitignored runs/, and no committed script writes it — which is how job 190981 came to ask
-# for an H200 and die six seconds later when the cluster-side screen could not find it.
+# (631103a8a97010c4804ac039aecc7fd8425c226c750294335fad5938c35233db). NO COMMITTED SCRIPT WRITES
+# THAT FILE, and until 0c2b1eb it was untracked under gitignored runs/ on one workstation — which is
+# how job 190981 came to ask for an H200 and die six seconds later when the cluster-side screen
+# could not find it. It and the sixteen shards were force-added in that commit, so the file is now
+# in git; being in git is not the same as having a producer, and the derivation below still runs off
+# the shards, which do.
 #
 # The sixteen shard artifacts it was pooled from are on both machines and carry a schema, the
 # partition and the raw per-frame fractions. scripts/pool_robot_mask_area.py rebuilds the pool from

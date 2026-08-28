@@ -1514,8 +1514,9 @@ if (( TIMING_MODE )); then
   # THE EVIDENCE IS THE SHARDS, NOT A POOLED FILE, and that is the fix for job 190981.
   # 190981 asked for an H200 and died six seconds later because POOLED.json is not on the cluster.
   # It is not on the cluster because NO COMMITTED SCRIPT IN THIS REPOSITORY WRITES IT: it is a
-  # hand-built file with six keys, no schema and no merge verdicts, living under gitignored runs/ on
-  # exactly one workstation. `106 MERGE=1` does not write it either — that merge DROPS per_episode
+  # hand-built file with six keys, no schema and no merge verdicts, which until 0c2b1eb existed on
+  # exactly one workstation under gitignored runs/. `106 MERGE=1` does not write it either — that
+  # merge DROPS per_episode
   # and emits the five summary numbers and the bound, which cannot answer a question about one
   # episode. So the old default named a file whose producer did not exist.
   #

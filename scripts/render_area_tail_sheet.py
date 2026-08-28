@@ -299,9 +299,9 @@ def load_pooled(path: pathlib.Path) -> dict:
     a truthiness test, because ``1`` and ``"true"`` are not the stamp.
 
     A DIRECTORY OF SHARD ARTIFACTS IS ALSO ACCEPTED, and is now the honest default. The file this
-    used to require — ``runs/pr08-robot-mask-area/POOLED.json`` — is untracked, gitignored and
-    written by no committed script, so a determination citing it cites something no reader can
-    reproduce. ``pool_robot_mask_area`` rebuilds the same pool from the sixteen shard artifacts it
+    used to require — ``runs/pr08-robot-mask-area/POOLED.json`` — is written by no committed script,
+    and until 0c2b1eb force-added it past ``.gitignore`` it was untracked as well, so a determination
+    citing it cited something no reader could reproduce. ``pool_robot_mask_area`` rebuilds the same pool from the sixteen shard artifacts it
     came from; measured 2026-08-28 the rebuild is identical field for field, every float included.
     """
     path = pathlib.Path(path)
