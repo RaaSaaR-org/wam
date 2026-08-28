@@ -161,6 +161,7 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import audit_apple_masks as aam  # noqa: E402  (captioned/contact_sheet/boundary conventions)
+import pool_robot_mask_area  # noqa: E402  (stdlib-only; rebuilds the pool from its shards)
 
 
 class TailLookError(RuntimeError):
@@ -296,11 +297,20 @@ def load_pooled(path: pathlib.Path) -> dict:
     refuses such an artifact by name; rendering sheets from one would put a picture of a shakedown
     in front of the person deciding the bound, labelled as the corpus. ``is not True`` rather than
     a truthiness test, because ``1`` and ``"true"`` are not the stamp.
+
+    A DIRECTORY OF SHARD ARTIFACTS IS ALSO ACCEPTED, and is now the honest default. The file this
+    used to require — ``runs/pr08-robot-mask-area/POOLED.json`` — is untracked, gitignored and
+    written by no committed script, so a determination citing it cites something no reader can
+    reproduce. ``pool_robot_mask_area`` rebuilds the same pool from the sixteen shard artifacts it
+    came from; measured 2026-08-28 the rebuild is identical field for field, every float included.
     """
     path = pathlib.Path(path)
-    if not path.is_file():
+    if path.is_dir():
+        payload = pool_robot_mask_area.pool_shard_dir(path)
+    elif path.is_file():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    else:
         raise TailLookError(f"no such pooled artifact: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
     qualified = payload.get("measurement_qualified")
     if qualified is not True:
         raise TailLookError(

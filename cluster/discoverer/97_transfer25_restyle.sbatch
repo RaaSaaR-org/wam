@@ -1511,17 +1511,38 @@ if (( TIMING_MODE )); then
   # below already says, and a silent re-pick here would be this job answering that question by
   # choosing the first episode that survives — a selection made after seeing the data. So it
   # refuses, it names the episode and the evidence it read, and it stops.
-  MASK_AREA_EVIDENCE=${MASK_AREA_EVIDENCE:-${PROJ}/runs/pr08-robot-mask-area/POOLED.json}
+  # THE EVIDENCE IS THE SHARDS, NOT A POOLED FILE, and that is the fix for job 190981.
+  # 190981 asked for an H200 and died six seconds later because POOLED.json is not on the cluster.
+  # It is not on the cluster because NO COMMITTED SCRIPT IN THIS REPOSITORY WRITES IT: it is a
+  # hand-built file with six keys, no schema and no merge verdicts, living under gitignored runs/ on
+  # exactly one workstation. `106 MERGE=1` does not write it either — that merge DROPS per_episode
+  # and emits the five summary numbers and the bound, which cannot answer a question about one
+  # episode. So the old default named a file whose producer did not exist.
+  #
+  # The sixteen wam.robot_mask_area_shard/1 artifacts it was pooled from ARE on the cluster, carry a
+  # schema, their own measurement_qualified, the partition and the raw per-frame fractions, and
+  # scripts/pool_robot_mask_area.py rebuilds the pool from them. Measured 2026-08-28: that rebuild
+  # is IDENTICAL to POOLED.json field for field, every float included, and POOLED.json hashes to the
+  # sha256 T40_RULE_V20 §2 registered. Reading the shards is therefore the registered evidence
+  # reconstructed from its own inputs, not a different measurement and not a rule change.
+  #
+  # A pooled FILE is still accepted, so pointing this at POOLED.json keeps working unchanged.
+  MASK_AREA_EVIDENCE=${MASK_AREA_EVIDENCE:-${PROJ}/runs/pr08-robot-mask-area/shards}
   # The same artifact robot_composite.load_area_bound reads by default (AREA_BOUND_ARTIFACT), named
   # here rather than imported: this screen must not need torch, transformers or a GPU to run.
   AREA_BOUND_ARTIFACT=${AREA_BOUND_ARTIFACT:-${WAM}/configs/transfer25/pr08_robot_mask_area.json}
   TIMING_ADMISSIBILITY=${CHUNK_DIR}/timing_unit_admissibility.json
   rm -f "${TIMING_ADMISSIBILITY}"
   python - "${TIMING_UNIT}" "${MASK_AREA_EVIDENCE}" "${SOURCE}/manifest.json" \
-           "${AREA_BOUND_ARTIFACT}" "${TIMING_ADMISSIBILITY}" <<'PY' || exit 1
+           "${AREA_BOUND_ARTIFACT}" "${TIMING_ADMISSIBILITY}" "${WAM}" <<'PY' || exit 1
 import hashlib, json, pathlib, sys
 
-unit_json, pooled_p, manifest_p, bound_p, out_p = sys.argv[1:6]
+unit_json, pooled_p, manifest_p, bound_p, out_p, wam = sys.argv[1:7]
+# STDLIB ONLY, still. pool_robot_mask_area imports nothing this screen could not already import;
+# it is a separate module rather than inlined here so that the sbatch, the submit wrapper and the
+# tail-sheet renderer answer "which evidence said so" with one implementation instead of three.
+sys.path.insert(0, str(pathlib.Path(wam) / "scripts"))
+from pool_robot_mask_area import PoolError, load_area_evidence
 u = json.loads(unit_json)
 episode, frames = str(u["episode"]), int(u["frames"])
 SELECTION_RULE = ("head -1 of the work list, which is the manifest's episodes sorted by id, "
@@ -1546,17 +1567,17 @@ def refuse(headline, *lines):
 # cheaper option, and "we could not check" is not a reason to run a masker over every source frame
 # of a unit whose G0c verdict is already written down somewhere.
 try:
-    pooled = json.loads(pathlib.Path(pooled_p).read_text())
-except (OSError, ValueError) as exc:
-    refuse(f"the source-mask evidence {pooled_p} could not be read ({exc}).",
+    pooled = load_area_evidence(pooled_p)
+except PoolError as exc:
+    refuse(f"the source-mask evidence {pooled_p} could not be read or pooled.",
+           *str(exc).splitlines(),
            "PR-08 §8 item 3's timed episode has to be one G0c will let through, and G0c's verdict",
            "on an episode is a function of its SOURCE masks. That distribution is measured by",
-           "cluster/discoverer/106_measure_robot_mask_area.sbatch (MERGE=1 writes POOLED.json).",
-           "Point MASK_AREA_EVIDENCE at it, or run 106 first. This job does not time an episode",
-           "whose refusal it cannot rule out in advance.")
-if not isinstance(pooled, dict) or not isinstance(pooled.get("per_episode"), list):
-    refuse(f"{pooled_p} is not a pooled robot-mask-area measurement.",
-           "It carries no per_episode list, so it cannot say anything about one episode.")
+           "cluster/discoverer/106_measure_robot_mask_area.sbatch, whose ARRAY writes the sixteen",
+           "shard artifacts this reads. NOTE: MERGE=1 does NOT write a per-episode pool — it drops",
+           "per_episode and emits the summary and the bound — so re-running the merge does not fix",
+           "this. Point MASK_AREA_EVIDENCE at the shards directory, or run the 106 array first.",
+           "This job does not time an episode whose refusal it cannot rule out in advance.")
 if pooled.get("measurement_qualified") is not True:
     refuse(f"{pooled_p} says measurement_qualified={pooled.get('measurement_qualified')!r}.",
            "Its own merge refused to vouch for it — see measurement_disqualified_reasons:",
@@ -1647,12 +1668,29 @@ if worst > float(bound):
            "the source back over the frame and the restyle becomes a no-op.",
            "As above: this job refuses and does not choose another episode.")
 
+if pathlib.Path(pooled_p).is_dir():
+    _evidence_shards = [
+        {"path": part["path"], "index": part["index"], "sha256": part["sha256"]}
+        for part in pooled.get("pooled_from") or ()
+    ]
+    _evidence_digest = hashlib.sha256(
+        "".join(part["sha256"] for part in _evidence_shards).encode("utf-8")
+    ).hexdigest()
+else:
+    _evidence_shards = None
+    _evidence_digest = hashlib.sha256(pathlib.Path(pooled_p).read_bytes()).hexdigest()
+
 record = {
     "schema": "wam.transfer25_timing_unit_admissibility/1",
     "unit": u["unit"], "episode": episode, "style": u.get("style"), "n_frames": n_frames,
     "empty_frames": 0, "max_area_fraction": worst, "max_frame_fraction_bound": float(bound),
     "evidence": str(pooled_p),
-    "evidence_sha256": hashlib.sha256(pathlib.Path(pooled_p).read_bytes()).hexdigest(),
+    # A DIRECTORY HAS NO BYTES, and hashing one raises IsADirectoryError. When the evidence is the
+    # shards, what identifies it is the sixteen shard artifacts by name and hash, and the digest
+    # below is taken over those hashes in index order — so the field still answers "exactly which
+    # evidence said so" and still changes if any shard does. `evidence_shards` carries the parts.
+    "evidence_sha256": _evidence_digest,
+    "evidence_shards": _evidence_shards,
     "evidence_source_manifest_sha256": want_sha,
     "bound_artifact": str(bound_p),
     "bound_artifact_sha256": hashlib.sha256(pathlib.Path(bound_p).read_bytes()).hexdigest(),

@@ -54,15 +54,45 @@ WALL=${WALL:-01:30:00}
 # ---------------------------------------------------------------------------
 # 1. Re-derive V20's criterion from the committed evidence, here, before anything is submitted.
 # ---------------------------------------------------------------------------
-echo "==> re-deriving T40_RULE_V20 §3 from runs/pr08-robot-mask-area/POOLED.json"
+# THE EVIDENCE IS THE SHARDS. V20 §2 computed its population from
+# runs/pr08-robot-mask-area/POOLED.json and registered that file by sha256
+# (631103a8a97010c4804ac039aecc7fd8425c226c750294335fad5938c35233db). That file is untracked, lives
+# under gitignored runs/, and no committed script writes it — which is how job 190981 came to ask
+# for an H200 and die six seconds later when the cluster-side screen could not find it.
+#
+# The sixteen shard artifacts it was pooled from are on both machines and carry a schema, the
+# partition and the raw per-frame fractions. scripts/pool_robot_mask_area.py rebuilds the pool from
+# them, and the rebuild is IDENTICAL to the registered file field for field, every float included —
+# checked here by --assert-equivalent whenever the registered file is present, and pinned in
+# tests/test_pool_robot_mask_area.py against the registered hash. So this reads the same evidence
+# V20 §2 read; it does not read a different measurement, and the rule is untouched.
+EVIDENCE=${EVIDENCE:-runs/pr08-robot-mask-area/shards}
+echo "==> re-deriving T40_RULE_V20 §3 from ${EVIDENCE}"
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-DERIVED=$(python3 - "${REPO}" <<'PY'
+DERIVED=$(python3 - "${REPO}" "${EVIDENCE}" <<'PY'
 import json, pathlib, statistics, sys
 
 repo = pathlib.Path(sys.argv[1])
-pooled = json.loads((repo / "runs/pr08-robot-mask-area/POOLED.json").read_text())
+sys.path.insert(0, str(repo / "scripts"))
+from pool_robot_mask_area import PoolError, equivalent, load_area_evidence
+
+try:
+    pooled = load_area_evidence(repo / sys.argv[2])
+except PoolError as exc:
+    sys.exit(f"the area evidence could not be read or pooled:\n{exc}")
 if not pooled.get("measurement_qualified"):
-    sys.exit("POOLED.json is not measurement_qualified — V20 §2 computes its population from it.")
+    sys.exit(
+        "the area evidence is not measurement_qualified — V20 §2 computes its population from a\n"
+        f"measurement over the whole corpus: {pooled.get('measurement_disqualified_reasons')!r}"
+    )
+# Belt, and free: if the file V20 §2 registered is on this machine, the rebuild must reproduce it.
+# Absent (as it is on the cluster) this is skipped rather than failed — the shards are the evidence,
+# and the registered file is a second copy of it, not its authority.
+registered = repo / "runs/pr08-robot-mask-area/POOLED.json"
+if registered.exists():
+    ok, why = equivalent(pooled, json.loads(registered.read_text()))
+    if not ok:
+        sys.exit(f"the rebuild does not reproduce the pooled evidence V20 §2 registered: {why}")
 bound = json.loads(
     (repo / "configs/transfer25/pr08_robot_mask_area.json").read_text()
 )["max_frame_fraction"]
