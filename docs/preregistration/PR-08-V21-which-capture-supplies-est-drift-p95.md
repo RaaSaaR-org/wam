@@ -1,13 +1,16 @@
 # PR-08 V21 — which capture supplies `EST_DRIFT_P95`, fixed before the number is visible
 
-**Rule `T40_RULE_V21`. DRAFT, UNSIGNED. §§0–4 prepared by a session; §5 is empty and is the project
-owner's.** `T40_RULE_V13` §5, in its own words and applied here: *"A session may prepare the
-rationale and name the edges; it may not sign this."* V13 itself was written in exactly this shape —
-§§0–4 on 2026-08-24, §5 and the provenance rows added on signing two days later.
+**Rule `T40_RULE_V21`. SIGNED 2026-09-01 by the project owner. §§0–4 were prepared by a session and
+are unchanged since; §5 carries the determination and is the owner's.** `T40_RULE_V13` §5, in its own
+words and applied here: *"A session may prepare the rationale and name the edges; it may not sign
+this."* V13 itself was written in exactly this shape — §§0–4 on 2026-08-24, §5 and the provenance
+rows added on signing two days later.
 
-**This document must be signed BEFORE the `pr08-geom-tol-v2` merge lands, or it stops being a
-pre-registration.** Waves 0–3 were submitted 2026-08-28 as job 191143. The carry step that needs
-this answer runs after the merge, and only after it — so the window is open now and closes then.
+**It was signed BEFORE the `pr08-geom-tol-v2` merge landed, which is the whole point of it.** The
+corpus pass ran as jobs 191143 / 191283 / 191346 / 191395 in four waves and all sixteen shards were
+on disk at signing; **no merge had been run, and `configs/transfer25/pr08_geom_tol.json` held
+`geom_tol_px = null`.** The carry step that needs this answer runs after the merge, and only after
+it — so the window was open at signing and closes when the merge lands.
 
 ---
 
@@ -132,20 +135,76 @@ soften it:** *"Whoever signs D-D is choosing a number, not choosing safety."*
 largest Arm-A value is the conservative choice *among the available candidates*, and that is a
 narrower claim than safety.
 
-*Empty. A session may prepare the rationale and name the edges; it may not sign this.*
+```
+determination:  §3 AS WRITTEN. EST_DRIFT_P95 is supplied by the gate-qualified Arm-A
+                capture with the LARGEST est_drift_p95_px.
 
-*To sign: state the outcome, the date, and the ground. If the outcome is anything other than the
-rule in §3, that alternative is the rule and §3 is superseded by this section rather than edited.*
+                A criterion, not a name. On the artifacts of 2026-09-01 it resolves to
+                A6, est_drift_p95_px = 0.36010037281174667. That resolution is recorded
+                to be checked against, never carried in place of the criterion.
+
+decided by:     the project owner, 2026-09-01, by the instruction
+
+                    "klingt gut, lass das so machen!"
+
+                given in direct answer to "was würdest du empfehlen?", after the three
+                available outcomes and their trade-offs had been put in front of them in
+                writing: §3 as written; the largest value across all thirteen captures
+                including the controls (C2-t40, 0.6716 px); and the pooled per-frame
+                number (0.31208 px). The owner chose among named alternatives; the
+                recommendation was the session's.
+
+                The instruction that opened the sequence, also verbatim, because it is
+                what the owner was trying to achieve and a reader auditing this should
+                see it:
+
+                    "was, lass nun alles lösen, damit wir den datensatz (oder zumindest
+                     mal 1 video + action)."
+
+                PREPARED BY a Claude Code session, which is what the paragraph below
+                permits and no more. The signature is the owner's instruction, recorded
+                verbatim rather than paraphrased.
+
+date:           2026-09-01
+```
+
+**The ground, stated so it can be disagreed with.** The largest Arm-A value is subtracted from
+`GEOM_TOL`, so it yields the smallest margin and the strictest gate; it is the one choice among the
+thirteen that cannot be accused of having been made to produce a positive margin. The two rejected
+alternatives were rejected for stated reasons, not overlooked: the largest value across *all*
+captures is `C2-t40`, a deliberately degraded control, and taking a control's degradation as the
+budget for estimator error measures the wrong thing — strictness that measures the wrong quantity is
+not strictness, which is what clause (c) exists to prevent. The pooled number is **looser** than
+`A6` (0.31208 against 0.36010) and would additionally require a new schema acceptance, new carry
+plumbing and its own rule version — work spent to widen the gate.
+
+**§3.1 is unchanged and governs from here.** If re-measurement after the merge resolves the criterion
+to a capture other than `A6`, the carry does **not** proceed and this rule is re-evaluated against
+the artifacts that exist. It is **not** retargeted at the runner-up. If no Arm-A capture is
+`gate_qualified` after the merge, the carry does not proceed either.
+
+**This determination does not produce a positive margin and does not license a clip.** §4 stands
+in full: whether a re-measured `GEOM_TOL` clears `0.36010` is unknown at the moment of signing, by
+construction, and if the margin comes out `≤ 0` then PR-08 §6 applies — *the estimator is not good
+enough and generation does not start.*
+
+A session may prepare the rationale and name the edges; it may not sign this.
 
 ## 6. Provenance
 
 | | |
 |---|---|
-| rule | `T40_RULE_V21` — **DRAFT, UNSIGNED** |
+| rule | `T40_RULE_V21` |
+| status | **SIGNED 2026-09-01.** In force |
+| decided by | the project owner, 2026-09-01, on the instruction quoted verbatim in §5; prepared by a Claude Code session, which §5 permits |
+| outcome | §3 as written — largest gate-qualified Arm-A capture. Resolves on 2026-09-01 to `A6`, `0.36010037281174667` px |
+| §§0–4 on signing | **unchanged since preparation.** Only §5 and these rows were added |
 | answers | decision **D-D** of `docs/PR-08-DECISION-SHEET-2026-08-27.md`, left open by `T40_RULE_V17` §4 |
 | amends | nothing. It fills a hole `T40_RULE_V17` registered as a hole. |
 | changes | **no gate, no threshold, no verdict, no clip count, no style, no seed, no ceiling, and no committed artifact** |
-| must be signed before | the `pr08-geom-tol-v2` merge lands (job 191143 submitted 2026-08-28) |
+| signed before | the `pr08-geom-tol-v2` merge landed — all 16 shards were on disk and **no merge had been run**; `configs/transfer25/pr08_geom_tol.json` held `geom_tol_px = null` at signing |
+| generation licensed | **no** |
+| training licensed | **no** |
 | evidence | `runs/pr08-est-drift/v17/EST_DRIFT-{A1..A8,C1-lattice,C2-t20,C2-t40,C2-t80,C3-wrongseed}.json` |
 | resolves today to | `A6`, `0.36010037281174667` px — **a value to check the criterion against, not a name to carry** |
 | implemented by | nothing new. `scripts/measure_geom_tol.py --carry-est-drift … --est-drift-arm per_frame` already exists and already refuses the pooled schema. |
