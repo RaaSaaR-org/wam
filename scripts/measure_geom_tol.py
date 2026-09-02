@@ -375,11 +375,27 @@ CONTRACT_SECTION_FIELDS: tuple[str, ...] = (
 #: as blocking as a wrong one. The slot exists so the name is carried BESIDE the number instead of
 #: living in the memory of whoever merged the two artifacts, and
 #: :func:`refuse_unnamed_est_drift` makes writing the number without it impossible.
+#:
+#: ``source_manifest_sha256`` is the CORPUS IDENTITY and was added 2026-09-02 (spec 1.2.0). Until
+#: then this document stated a tolerance and named no corpus it was a tolerance FOR, which
+#: ``docs/investigations/2026-08-28-two-generate-path-gaps-recorded-not-fixed.md`` §1 recorded as a
+#: gap and deliberately left open: ``robot_composite.load_area_bound`` refuses an area bound whose
+#: ``source_manifest_sha256`` is not this run's, on the ground that *a bound is a statement about a
+#: corpus*, and the geometry block checked only its own ``.sha256`` sidecar — which proves the file
+#: has not changed, not that the file is about this corpus. Episode ids are reused across trees (the
+#: AV1 and the H.264 corpora share them), so the ids matching is not the check; the manifest's bytes
+#: are. Written by ``--bind-source-manifest`` and by nothing else.
 CONTRACT_MEASUREMENT_FIELDS: tuple[str, ...] = (
     "geom_tol_px", "geom_tol_source",
     "est_drift_p95_px", "est_drift_source", "est_drift_estimator_name",
     "gate_margin_px",
+    "source_manifest_sha256", "source_manifest_binding",
 )
+
+#: The one spelling this producer writes for the corpus identity, and the spelling
+#: ``97_transfer25_restyle.sbatch`` already reads on the AREA-BOUND path — same name on both paths
+#: on purpose, so an operator reading either refusal is reading about the same property.
+SOURCE_MANIFEST_SHA_FIELD = "source_manifest_sha256"
 
 #: The one spelling this producer writes for the EST_DRIFT_P95 half's segmenter name, and the first
 #: spelling ``run_g0_gates._ca_mask_method_name`` looks for.
@@ -3133,6 +3149,21 @@ def _check_mode_flags(args: argparse.Namespace) -> None:
     merging = args.merge is not None
     sharding = args.shard is not None or args.num_shards is not None
     carrying = args.carry_est_drift is not None
+    binding = getattr(args, "bind_source_manifest", None) is not None
+
+    # --bind-source-manifest MEASURES NOTHING and fills one slot of an already-merged document.
+    # Combined with a measuring or merging command line it would look like the measurement had
+    # read the manifest, which is the one thing this mode exists to be honest about.
+    if binding and (merging or sharding or carrying):
+        raise MethodUnavailable(
+            "FATAL: --bind-source-manifest names a different job from "
+            "--merge/--shard/--carry-est-drift.\n"
+            "       It MEASURES NOTHING: it records which corpus an already-measured GEOM_TOL is a "
+            "tolerance FOR,\n       after checking that the manifest and the measurement "
+            "enumerate the same episodes. Run it on\n       its own, after the merge."
+        )
+    if binding:
+        return
 
     if carrying and (merging or sharding):
         raise MethodUnavailable(
@@ -3307,6 +3338,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                          "Refuses a disqualified or null measurement, a different segmenter name, "
                          "a segmenter whose parameters disagree field for field, and a different "
                          "pixel grid. Measures nothing and needs no corpus")
+    ap.add_argument("--bind-source-manifest", type=Path, default=None, metavar="MANIFEST_JSON",
+                    help="bind the committed GEOM_TOL at --out to the SOURCE corpus it was "
+                         "measured over, by recording that manifest's sha256 "
+                         f"({SOURCE_MANIFEST_SHA_FIELD}) after CHECKING that the two describe the "
+                         "same episodes. A tolerance is a statement about a corpus; without this "
+                         "the document states a number and names no corpus, and the generate path "
+                         "can only prove the file has not changed since it was committed — not "
+                         "that it is about the tree being restyled. Refuses on any episode the "
+                         "manifest has and the measurement does not (or the reverse), on any "
+                         "per-episode frame count that disagrees, and on a different pixel grid or "
+                         "fps. Measures nothing and needs no corpus"
+                    )
     ap.add_argument("--est-drift-arm", choices=EST_DRIFT_ARM_CHOICES, default=None,
                     metavar="ARM",
                     help="which segmenter topology's p95 --carry-est-drift takes out of an "
@@ -4163,6 +4206,219 @@ def carry_est_drift_main(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def bind_source_manifest_main(args: argparse.Namespace) -> int:
+    """``--bind-source-manifest``: tie the committed GEOM_TOL to the corpus it measured, or refuse.
+
+    WHY THIS EXISTS. ``docs/investigations/2026-08-28-two-generate-path-gaps-recorded-not-fixed.md``
+    §1 recorded the gap and said when to close it — *"when pr08-geom-tol-v2 has merged and before
+    any generation submission"* — because closing it mid-array is how a merge comes to refuse its
+    own shards. The gap in one sentence: ``robot_composite.load_area_bound`` refuses an area bound
+    whose ``source_manifest_sha256`` is not this run's, and the geometry block next to it checked
+    only that the artifact matched its own ``.sha256`` sidecar. That proves the file has not been
+    edited. It does not prove the file is about the tree being restyled, and holding corpus A's
+    tolerance over corpus B is the same drift by another route.
+
+    WHAT IT REFUSES, AND WHY THE DIGEST IS NOT THE CHECK. The digest is what the SBATCH compares,
+    because bytes are the only identity that survives an id collision — the AV1 and the H.264 apple
+    trees enumerate the same ``episode_000000``. But a digest recorded without looking would just
+    move the assumption into a hex string, so nothing is written until the manifest and the
+    measurement are shown to describe the same corpus: the same episode ids exactly, the same
+    per-episode frame counts, the same pixel grid, the same fps. Any one of those refuses and
+    nothing is written.
+
+    THIS BINDING IS POST HOC AND SAYS SO. The measurement ran over a clip-dir tree and never opened
+    ``manifest.json``; this mode is what lets an already-merged artifact be bound without paying for
+    a re-measurement, and ``source_manifest_binding`` records that it was bound after the fact
+    rather than during. The checks above are what make that honest: a manifest that had drifted
+    from the measured tree could not pass them.
+    """
+    out: Path = args.out
+    manifest_p: Path = args.bind_source_manifest
+
+    if not out.is_file():
+        raise MethodUnavailable(
+            f"FATAL: {out} does not exist. --bind-source-manifest fills a slot in the COMMITTED "
+            "GEOM_TOL document;\n       it does not create one. A corpus identity beside no "
+            "tolerance names nothing."
+        )
+    refuse_default_out_without_contract(out)
+    try:
+        doc = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MethodUnavailable(f"FATAL: {out} is not readable JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise MethodUnavailable(f"FATAL: {out} is not a JSON object.")
+
+    # The same fail-closed pair the carry asks, for the same reason: binding a corpus to a document
+    # that states no measured tolerance, or one its own merge refused to vouch for, produces a file
+    # that reads as a finished, corpus-bound gate and is neither.
+    tol = doc.get("geom_tol_px")
+    if not isinstance(tol, (int, float)):
+        raise MethodUnavailable(
+            f"FATAL: {out} states no measured GEOM_TOL (geom_tol_px is {tol!r}).\n"
+            "       There is nothing for a corpus identity to be the identity OF. Merge a "
+            "measurement first.\n       Nothing was written."
+        )
+    if not doc.get("gate_qualified"):
+        raise MethodUnavailable(
+            f"FATAL: {out} records gate_qualified = {doc.get('gate_qualified')!r}.\n"
+            "       reasons: "
+            + "; ".join(doc.get("gate_disqualified_reasons") or ["(none recorded)"])
+            + "\n       Binding a disqualified tolerance to a corpus makes it look like a "
+            "tolerance for that corpus.\n       An ABSENT flag refuses exactly as a false one "
+            "does. Nothing was written."
+        )
+
+    try:
+        manifest_bytes = manifest_p.read_bytes()
+    except OSError as exc:
+        raise MethodUnavailable(
+            f"FATAL: the source manifest {manifest_p} could not be read ({exc}).\n"
+            "       Without its bytes there is no identity to record — and the digest is the only "
+            "thing that\n       survives an episode-id collision between two trees. Nothing was "
+            "written."
+        ) from exc
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MethodUnavailable(
+            f"FATAL: {manifest_p} is not readable JSON: {exc}. Nothing was written."
+        ) from exc
+    episodes = manifest.get("episodes") if isinstance(manifest, Mapping) else None
+    if not isinstance(episodes, list) or not episodes:
+        raise MethodUnavailable(
+            f"FATAL: {manifest_p} carries no non-empty 'episodes' list, so it enumerates no "
+            "corpus.\n       Nothing was written."
+        )
+
+    # -- THE TWO ENUMERATIONS HAVE TO BE THE SAME ONE ---------------------------------------------
+    man_frames: dict[str, Any] = {}
+    for entry in episodes:
+        if not isinstance(entry, Mapping) or "id" not in entry:
+            raise MethodUnavailable(
+                f"FATAL: {manifest_p} has an episode entry with no 'id': {entry!r}.\n"
+                "       Nothing was written."
+            )
+        man_frames[str(entry["id"])] = entry.get("frames")
+    per_ep = doc.get("per_episode")
+    if not isinstance(per_ep, list) or not per_ep:
+        raise MethodUnavailable(
+            f"FATAL: {out} carries no per_episode block, so there is no enumeration to compare "
+            "the manifest\n       against. A merged artifact carries one; a shard's does too. "
+            "Nothing was written."
+        )
+    ours_frames: dict[str, Any] = {
+        str(e.get("episode")): e.get("n_frames") for e in per_ep if isinstance(e, Mapping)
+    }
+
+    only_manifest = sorted(set(man_frames) - set(ours_frames))
+    only_measured = sorted(set(ours_frames) - set(man_frames))
+    if only_manifest or only_measured:
+        lines = [
+            "FATAL: the manifest and the measurement enumerate DIFFERENT corpora.\n",
+            f"         manifest    {manifest_p}: {len(man_frames)} episodes\n",
+            f"         measurement {out}: {len(ours_frames)} episodes\n",
+        ]
+        if only_manifest:
+            lines.append(f"         in the manifest only: {only_manifest[:8]}"
+                         f"{' …' if len(only_manifest) > 8 else ''} ({len(only_manifest)})\n")
+        if only_measured:
+            lines.append(f"         measured only:        {only_measured[:8]}"
+                         f"{' …' if len(only_measured) > 8 else ''} ({len(only_measured)})\n")
+        lines.append(
+            "       A tolerance measured over one set of episodes, recorded as the tolerance for "
+            "another, is\n       the failure this mode exists to make impossible. Nothing was "
+            "written."
+        )
+        raise MethodUnavailable("".join(lines))
+
+    frame_mismatches = [
+        (key, man_frames[key], ours_frames[key])
+        for key in sorted(man_frames)
+        if isinstance(man_frames[key], int) and isinstance(ours_frames[key], int)
+        and man_frames[key] != ours_frames[key]
+    ]
+    if frame_mismatches:
+        lines = ["FATAL: the two enumerations share every episode id and disagree about their "
+                 "LENGTHS:\n"]
+        for key, want, got in frame_mismatches[:8]:
+            lines.append(f"         {key}: manifest {want} frames, measurement {got}\n")
+        if len(frame_mismatches) > 8:
+            lines.append(f"         … and {len(frame_mismatches) - 8} more\n")
+        lines.append(
+            "       Ids are reused across trees; frame counts are what distinguishes two "
+            "encodings of 'the\n       same' corpus. This is the collision the digest is "
+            "recorded against, caught before it is\n       recorded. Nothing was written."
+        )
+        raise MethodUnavailable("".join(lines))
+
+    # -- AND THE SAME PIXEL GRID, because GEOM_TOL's unit is pixels on one grid ---------------------
+    res = manifest.get("resolution")
+    ours_grid = [doc.get("frame_width"), doc.get("frame_height")]
+    if isinstance(res, (list, tuple)) and all(isinstance(v, int) for v in ours_grid):
+        if [int(v) for v in res] != [int(v) for v in ours_grid]:
+            raise MethodUnavailable(
+                f"FATAL: {manifest_p} declares resolution {list(res)} and {out} measured on "
+                f"{ours_grid}.\n       GEOM_TOL is in pixels, so a tolerance measured on one grid "
+                "is not a tolerance on another.\n       Nothing was written."
+            )
+    man_fps, our_fps = manifest.get("fps"), doc.get("fps")
+    if isinstance(man_fps, (int, float)) and isinstance(our_fps, (int, float)):
+        if abs(float(man_fps) - float(our_fps)) > 1e-9:
+            raise MethodUnavailable(
+                f"FATAL: {manifest_p} declares fps {man_fps} and {out} measured at {our_fps}.\n"
+                "       A per-STEP displacement is per-frame-interval, so the tolerance's unit "
+                "moves with fps.\n       Nothing was written."
+            )
+
+    record = dict(doc)
+    record[SOURCE_MANIFEST_SHA_FIELD] = digest
+    record["source_manifest_binding"] = {
+        "manifest": str(manifest_p),
+        "sha256": digest,
+        "bound_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "bound_after_measurement": True,
+        "checked": {
+            "episode_ids_identical": True,
+            "n_episodes": len(man_frames),
+            "per_episode_frames_identical": True,
+            "n_frames_total_manifest": sum(
+                v for v in man_frames.values() if isinstance(v, int)
+            ),
+            "resolution": list(res) if isinstance(res, (list, tuple)) else None,
+            "fps": man_fps,
+        },
+        "meaning": (
+            "WHICH CORPUS THIS TOLERANCE IS A TOLERANCE FOR. The generate path recomputes this "
+            "digest over the SOURCE manifest it is about to restyle and refuses on a mismatch — "
+            "the same check robot_composite.load_area_bound already made for the mask-area bound, "
+            "which this document went without until 2026-09-02 "
+            "(docs/investigations/2026-08-28-two-generate-path-gaps-recorded-not-fixed.md §1). "
+            "bound_after_measurement is true and is not a disclaimer to read past: the measurement "
+            "ran over a clip-dir tree and never opened this manifest, so the binding was made "
+            "afterwards. What makes it a fact rather than an assertion is the `checked` block — "
+            "the manifest and the measurement were required to enumerate the same episode ids, "
+            "with the same per-episode frame counts, on the same pixel grid at the same fps, and "
+            "any disagreement refuses without writing."
+        ),
+    }
+    declared = record.get("measurement_fields")
+    record["measurement_fields"] = list(
+        dict.fromkeys([*(declared or ()), *CONTRACT_MEASUREMENT_FIELDS])
+    )
+
+    side, art_digest = write_artifact(out, record)
+    print(f"bound       {out}", file=sys.stderr)
+    print(f"manifest    {manifest_p}", file=sys.stderr)
+    print(f"{SOURCE_MANIFEST_SHA_FIELD}  {digest}", file=sys.stderr)
+    print(f"checked     {len(man_frames)} episode ids identical, per-episode frame counts "
+          f"identical, grid {list(res) if isinstance(res, (list, tuple)) else '?'} @ {man_fps} fps",
+          file=sys.stderr)
+    print(f"sha256      {art_digest}  ({side})", file=sys.stderr)
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
@@ -4175,6 +4431,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.carry_est_drift is not None:
         try:
             return carry_est_drift_main(args)
+        except MethodUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_FATAL
+
+    if args.bind_source_manifest is not None:
+        try:
+            return bind_source_manifest_main(args)
         except MethodUnavailable as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_FATAL

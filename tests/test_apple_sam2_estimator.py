@@ -1512,10 +1512,13 @@ def test_the_committed_document_is_a_contract_plus_a_measurement_and_never_only_
     A test that only asserted the nulls would go red on the commit that lands the number, and the
     obvious fix for a red test is to delete it."""
     doc = _contract_doc()
-    # 1.1.0 (2026-08-22) added the `est_drift_estimator_name` measurement slot. The contract
-    # section is otherwise untouched — same segmenter block, byte for byte — and the bump is here
-    # so that a slot cannot be added to this document without the change being reviewed.
-    assert doc["spec_version"] == "1.1.0"
+    # 1.1.0 (2026-08-22) added the `est_drift_estimator_name` measurement slot. 1.2.0 (2026-09-02)
+    # added `source_manifest_sha256` and `source_manifest_binding` — the corpus identity, which
+    # this document went without until then, so the generate path could prove the file had not
+    # been edited and could not prove it was about the tree being restyled. The contract section
+    # is otherwise untouched — same segmenter block, byte for byte — and the pin is here so that a
+    # slot cannot be added to this document without the change being reviewed.
+    assert doc["spec_version"] == "1.2.0"
     assert "§4 step 2" in doc["what_this_is"]
 
     # The contract section names itself, and names what may be filled in. Both lists are what
@@ -1531,6 +1534,14 @@ def test_the_committed_document_is_a_contract_plus_a_measurement_and_never_only_
         # the claim if the name arrives with the number.
         "est_drift_estimator_name",
         "gate_margin_px",
+        # THE CORPUS IDENTITY. A tolerance is a statement ABOUT a corpus, and holding corpus A's
+        # tolerance over corpus B is drift by another route — the same reason
+        # robot_composite.load_area_bound refuses an area bound whose source_manifest_sha256 is
+        # not this run's. Written only by measure_geom_tol.py --bind-source-manifest, which
+        # refuses unless the manifest and the measurement agree on every episode id, every
+        # per-episode frame count, the pixel grid and the fps.
+        "source_manifest_sha256",
+        "source_manifest_binding",
     }
     for key in doc["contract_fields"]:
         assert key in doc, f"the contract section is missing {key}"
@@ -1608,6 +1619,18 @@ def _contract_at(tmp_path, monkeypatch, **overrides):
     import measure_est_drift as ed
 
     doc = _contract_doc()
+    # `_mask_method_name` reaches the MEASUREMENT's own copy of the name rather than the committed
+    # contract's. A measured document states the segmenter twice by design — the pre-commitment at
+    # `segmenter`, what actually ran at `mask_method` — and cross_check_geom_tol reads both, so a
+    # fixture that moves only one of them tests only one of the two refusals.
+    mask_method_name = overrides.pop("_mask_method_name", None)
+    if mask_method_name is not None:
+        mask_method = copy.deepcopy(doc.get("mask_method") or {})
+        mask_method["name"] = mask_method_name
+        params = mask_method.get("params")
+        if isinstance(params, dict) and isinstance(params.get("segmenter"), dict):
+            params["segmenter"]["method_name"] = mask_method_name
+        doc["mask_method"] = mask_method
     block = copy.deepcopy(doc["segmenter"])
     block.update(overrides)
     doc["segmenter"] = block
@@ -1618,9 +1641,14 @@ def _contract_at(tmp_path, monkeypatch, **overrides):
 
 
 def test_the_cross_check_agrees_with_the_real_committed_contract(loaded, tmp_path, monkeypatch):
-    """The baseline the two refusals below are refusals FROM. GEOM_TOL itself is not measured yet,
-    so the run is still disqualified — on the gate flag, which is the honest reason — and not on
-    the segmenter."""
+    """The baseline the two refusals below are refusals FROM: the real contract, unperturbed, must
+    not be refused on the SEGMENTER.
+
+    Until the 2026-09-02 merge this also asserted `geom_tol_is_not_gate_qualified` — GEOM_TOL was
+    not measured, so the run was disqualified on the gate flag, which was then the honest reason.
+    The merge measured it and the flag is now true, so that reason is correctly gone. It is
+    replaced by its negation plus the fact that produced it, rather than deleted, because a
+    vanishing reason must not quietly turn a baseline into a weaker one."""
     module, _ = loaded
     ed = _contract_at(tmp_path, monkeypatch)
     reasons, compare = ed.cross_check_geom_tol(
@@ -1631,13 +1659,20 @@ def test_the_cross_check_agrees_with_the_real_committed_contract(loaded, tmp_pat
     assert "resolution_disagrees_with_geom_tol" not in reasons
     assert compare["segmenter_param_disagreements"] == []
     assert compare["geom_tol_segmenter_contract_at"] == "segmenter"
-    assert "geom_tol_is_not_gate_qualified" in reasons
+    assert "geom_tol_is_not_gate_qualified" not in reasons
+    assert _contract_doc()["gate_qualified"] is True
 
 
 def test_the_cross_check_refuses_a_method_name_mismatch(loaded, tmp_path, monkeypatch):
-    """§4 step 2 says the SAME segmenter. Two names is two quantities, and §6 subtracts them."""
+    """§4 step 2 says the SAME segmenter. Two names is two quantities, and §6 subtracts them.
+
+    The name lives in TWO places in a measured document — the committed `segmenter` block and the
+    measurement's own `mask_method` — and the reader checks both. Perturbing only the first stopped
+    reproducing `mask_method_disagrees_with_estimator` once the merge landed a real `mask_method`,
+    which would have silently narrowed this test to the parameter check. It perturbs both."""
     module, _ = loaded
-    ed = _contract_at(tmp_path, monkeypatch, method_name="hsv-red-diagnostic")
+    ed = _contract_at(tmp_path, monkeypatch, method_name="hsv-red-diagnostic",
+                      _mask_method_name="hsv-red-diagnostic")
     reasons, compare = ed.cross_check_geom_tol(
         [480, 640], module.ESTIMATOR_NAME, module.SEGMENTER_CONTRACT
     )

@@ -281,10 +281,16 @@ def test_the_geom_tol_cross_check_refuses_a_stub_against_the_really_committed_co
 
     This runs against the REAL ``configs/transfer25/pr08_geom_tol.json`` — the segmenter contract
     committed 2026-08-22, before either number was measured — rather than a fixture, which is the
-    only way to catch the contract and the reader drifting apart. Its earlier form asserted
-    ``geom_tol_not_committed``; that file now exists, so the assertion that means the same thing is
-    that a 64x64 fake capture segmented by a red-channel stub is refused for every reason it should
-    be: wrong grid, wrong (unnamed) segmenter, and a GEOM_TOL that is not measured yet.
+    only way to catch the contract and the reader drifting apart. It has been rewritten twice as
+    that file filled up, and each rewrite kept the same claim: a 64x64 fake capture segmented by a
+    red-channel stub is refused for every reason it should be.
+
+    Its first form asserted ``geom_tol_not_committed``; the file then existed, so that became
+    ``geom_tol_is_not_gate_qualified``. On 2026-09-02 the pr08-geom-tol-v2 merge landed and the
+    committed document became gate-qualified, so that reason is correctly absent now. It is
+    replaced here by the assertion it used to imply — that the real document IS qualified — rather
+    than dropped, because a disappearing reason must not be able to make this test easier to pass:
+    the stub is still refused on the grid, on the unnamed segmenter, and on the mask method.
     """
     out = tmp_path / "d.json"
     ed.main(
@@ -295,7 +301,15 @@ def test_the_geom_tol_cross_check_refuses_a_stub_against_the_really_committed_co
     reasons = doc["gate_disqualified_reasons"]
     assert "resolution_disagrees_with_geom_tol" in reasons
     assert "mask_method_disagrees_with_estimator" in reasons
-    assert "geom_tol_is_not_gate_qualified" in reasons
+    # NOT a reason any more, and asserted from the other side so the change is deliberate rather
+    # than silent: the committed GEOM_TOL is measured and qualified as of the 2026-09-02 merge.
+    assert "geom_tol_is_not_gate_qualified" not in reasons
+    committed = json.loads(
+        (pathlib.Path(__file__).resolve().parents[1]
+         / "configs/transfer25/pr08_geom_tol.json").read_text()
+    )
+    assert committed["gate_qualified"] is True
+    assert isinstance(committed["geom_tol_px"], float)
     assert "estimator_does_not_declare_segmenter_contract" in reasons
     assert doc["geom_tol_cross_check"]["this_resolution_hw"] == [64, 64]
     # The committed grid is the corpus's 640x480, read out of the contract's pixel_grid_hw because

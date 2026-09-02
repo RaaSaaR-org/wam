@@ -2014,10 +2014,11 @@ GEOM_SHA=$(sha256sum "${GEOM_CONSTANTS}" | cut -d' ' -f1)
   echo "       GEOM_TOL is a pre-commitment; an artifact edited after it was committed is not"
   echo "       one. Re-measure, do not re-hash."
   exit 1; }
-python - "${GEOM_CONSTANTS}" "${GEOM_STEP_FRAMES}" <<'PY'
-import json, pathlib, sys
+python - "${GEOM_CONSTANTS}" "${GEOM_STEP_FRAMES}" "${SOURCE}/manifest.json" <<'PY'
+import hashlib, json, pathlib, sys
 g = json.loads(pathlib.Path(sys.argv[1]).read_text())
 want_step = int(sys.argv[2])
+manifest_p = pathlib.Path(sys.argv[3])
 tol = g.get("GEOM_TOL_px", g.get("GEOM_TOL"))
 drift = g.get("est_drift_p95_px", g.get("EST_DRIFT_P95"))
 if tol is None:
@@ -2039,6 +2040,49 @@ if g.get("gate_qualified") is not True:
              + "\n         ".join(g.get("gate_disqualified_reasons")
                                   or ["(none recorded — an older artifact)"])
              + "\n       Fix the measurement first.")
+# THE TOLERANCE HAS TO BE A TOLERANCE FOR *THIS* CORPUS, and until 2026-09-02 nothing here asked.
+# The two checks above prove the artifact is the committed one and that its own merge vouched for
+# it. Neither says it was measured over the tree this job is about to restyle. That gap was found
+# by the 2026-08-28 audit and recorded, deliberately unfixed, in
+# docs/investigations/2026-08-28-two-generate-path-gaps-recorded-not-fixed.md §1 — the fix had to
+# wait until pr08-geom-tol-v2 had merged, because adding a field to a shard shape mid-array is how
+# a merge comes to refuse its own shards.
+#
+# WHY THE DIGEST AND NOT THE EPISODE IDS. This is the identical check
+# robot_composite.load_area_bound already makes for the mask-area bound, in its own words: "a bound
+# is a statement about a corpus, and holding corpus A's distribution over corpus B is the same
+# drift by another route." The AV1 and the H.264 apple trees enumerate the SAME episode ids from
+# zero, so matching ids prove nothing; the manifest's bytes are the identity. measure_geom_tol.py
+# --bind-source-manifest is what writes the field, and it refuses to write it unless the manifest
+# and the measurement agree on every episode id, every per-episode frame count, the pixel grid and
+# the fps — so a digest that reaches this line was checked when it was recorded, not asserted.
+#
+# ABSENT REFUSES, for the same reason gate_qualified absent refuses: an artifact that never named a
+# corpus is not an artifact that named this one.
+want_corpus = g.get("source_manifest_sha256")
+if not want_corpus:
+    sys.exit(f"FATAL: {sys.argv[1]} names no corpus (source_manifest_sha256 is "
+             f"{want_corpus!r}), so nothing can say whether its GEOM_TOL was measured over the "
+             f"tree this job restyles.\n       A tolerance is a statement ABOUT a corpus. Bind it:"
+             "\n         .venv/bin/python scripts/measure_geom_tol.py --bind-source-manifest "
+             "<SOURCE>/manifest.json\n       That mode checks the episode ids, the per-episode "
+             "frame counts, the pixel grid and the fps before it\n       records anything, and "
+             "refuses if they disagree. An unstated claim is not a claim.")
+try:
+    got_corpus = hashlib.sha256(manifest_p.read_bytes()).hexdigest()
+except OSError as exc:
+    sys.exit(f"FATAL: the SOURCE manifest {manifest_p} could not be read ({exc}), so the committed "
+             "GEOM_TOL cannot be tied to the corpus this job would restyle.")
+if got_corpus != want_corpus:
+    sys.exit(f"FATAL: the committed GEOM_TOL measured a DIFFERENT corpus.\n"
+             f"         {sys.argv[1]} source_manifest_sha256: {want_corpus}\n"
+             f"         {manifest_p}: {got_corpus}\n"
+             "       Episode ids are reused across trees (the AV1 and the H.264 corpora share "
+             "them), so this cannot\n       be waved through on the ids matching — that is why "
+             "the digest is what is compared. Either point\n       SOURCE at the tree GEOM_TOL "
+             "was measured over, or re-measure over this one. Do not re-bind an\n       "
+             "unchanged measurement to a new manifest.")
+print(f"=== G0b corpus: source_manifest_sha256 {want_corpus[:16]}… matches {manifest_p}")
 # A PARTIAL measurement scores coverage over the steps it DECODED, so --limit/--max-frames leave
 # coverage at 1.000 and every other field looking finished. Checked explicitly, and belt-and-braces
 # against the episode counts, so an artifact from an older script cannot slip through on the flag
