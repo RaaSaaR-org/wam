@@ -2073,16 +2073,66 @@ try:
 except OSError as exc:
     sys.exit(f"FATAL: the SOURCE manifest {manifest_p} could not be read ({exc}), so the committed "
              "GEOM_TOL cannot be tied to the corpus this job would restyle.")
-if got_corpus != want_corpus:
+# AND THE TREE THIS JOB READS IS NOT THE TREE GEOM_TOL WAS MEASURED OVER. Every one of the sixteen
+# GEOM_TOL shards records `corpus: .../data/pr08-apple-640x480` — the AV1 tree — while SOURCE here
+# defaults to the H.264 transcode, because Cosmos-Transfer2.5 opens clips with cv2.VideoCapture and
+# the generation venv's cv2 4.11.0 cannot decode AV1 (jobs 186357, 189584, 189585). So the digests
+# genuinely differ, and the first submission after this check was added was refused by it. That
+# refusal was CORRECT: two trees, two digests, and no line of prose closes the gap.
+#
+# WHAT CLOSES IT IS A PROOF, AND THE PROOF IS RE-CHECKED HERE RATHER THAN CITED. The committed
+# artifact may carry accepted_equivalent_manifests, each entry naming a second digest AND the
+# frame-by-frame comparison that earned it. measure_geom_tol.py --accept-equivalent-manifest wrote
+# that entry only after re-verifying the whole proof — every clip present and ok, stride 1, both
+# sides' frame counts equal, max_abs_delta exactly 0 in every colour space, and the compared frames
+# summing to the corpus total. This line re-checks the one thing that can still have changed since:
+# that the proof sitting beside THIS SOURCE is byte-identical to the file that was verified. A
+# second digest without its proof beside it is a waiver, and is refused as one.
+accepted = {}
+for entry in (g.get("accepted_equivalent_manifests") or ()):
+    if isinstance(entry, dict) and entry.get("sha256"):
+        accepted[str(entry["sha256"])] = entry
+if got_corpus != want_corpus and got_corpus not in accepted:
     sys.exit(f"FATAL: the committed GEOM_TOL measured a DIFFERENT corpus.\n"
              f"         {sys.argv[1]} source_manifest_sha256: {want_corpus}\n"
              f"         {manifest_p}: {got_corpus}\n"
+             f"         accepted equivalents: {sorted(accepted) or 'none'}\n"
              "       Episode ids are reused across trees (the AV1 and the H.264 corpora share "
              "them), so this cannot\n       be waved through on the ids matching — that is why "
              "the digest is what is compared. Either point\n       SOURCE at the tree GEOM_TOL "
-             "was measured over, or re-measure over this one. Do not re-bind an\n       "
-             "unchanged measurement to a new manifest.")
-print(f"=== G0b corpus: source_manifest_sha256 {want_corpus[:16]}… matches {manifest_p}")
+             "was measured over, or record this tree as a proven-equivalent one:\n"
+             "         scripts/measure_geom_tol.py --bind-source-manifest <measured>/manifest.json "
+             "\\\n           --accept-equivalent-manifest <this>/manifest.json --equivalence-proof "
+             "<this>/TRANSCODE_PROOF.json\n       Do not re-bind an unchanged measurement to a new "
+             "manifest.")
+if got_corpus != want_corpus:
+    entry = accepted[got_corpus]
+    proof_name = pathlib.Path(str((entry.get("proof") or {}).get("file") or "")).name
+    want_proof = str((entry.get("proof") or {}).get("sha256") or "")
+    if not proof_name or not want_proof:
+        sys.exit(f"FATAL: {sys.argv[1]} accepts {got_corpus[:16]}… as equivalent but records no "
+                 "proof file or no proof digest.\n       An equivalence without its evidence is a "
+                 "waiver. Re-record it with --accept-equivalent-manifest.")
+    proof_p = manifest_p.parent / proof_name
+    try:
+        got_proof = hashlib.sha256(proof_p.read_bytes()).hexdigest()
+    except OSError as exc:
+        sys.exit(f"FATAL: {sys.argv[1]} accepts this corpus only on the evidence in {proof_name}, "
+                 f"and that file could not be read beside\n       the SOURCE manifest ({exc}). "
+                 "The tolerance transfers to this tree ONLY because the two decode to the same\n"
+                 "       pixels; without the proof present that is an unbacked claim.")
+    if got_proof != want_proof:
+        sys.exit(f"FATAL: the equivalence proof beside SOURCE is NOT the file that was verified.\n"
+                 f"         {sys.argv[1]} proof sha256: {want_proof}\n"
+                 f"         {proof_p}: {got_proof}\n"
+                 "       Re-verify it: scripts/measure_geom_tol.py --accept-equivalent-manifest … "
+                 "--equivalence-proof …")
+    print(f"=== G0b corpus: {got_corpus[:16]}… is not the measured corpus "
+          f"({want_corpus[:16]}…) and is ACCEPTED as")
+    print(f"===             {entry.get('relation')}, on {proof_name} "
+          f"({got_proof[:16]}…), re-verified in full when it was recorded")
+else:
+    print(f"=== G0b corpus: source_manifest_sha256 {want_corpus[:16]}… matches {manifest_p}")
 # A PARTIAL measurement scores coverage over the steps it DECODED, so --limit/--max-frames leave
 # coverage at 1.000 and every other field looking finished. Checked explicitly, and belt-and-braces
 # against the episode counts, so an artifact from an older script cannot slip through on the flag

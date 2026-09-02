@@ -6396,7 +6396,7 @@
       "how": "Per shard: every measured episode is one the shard was assigned, and measured + skipped == assigned. Across shards: the assigned sets partition the corpus exactly once. Together those give measured + skipped == the corpus, which is the claim GEOM_TOL's definition over the whole source corpus needs. skipped_no_masks > 0 means the median is over less than the corpus and is the same caveat an un-sharded run carries in the same field."
     }
   },
-  "spec_version": "1.2.0",
+  "spec_version": "1.3.0",
   "what_this_is": "The PR-08 gate document for GEOM_TOL, in TWO SECTIONS. \n\nSECTION 1, THE CONTRACT, is the keys named in `contract_fields`. It is committed BEFORE the measurement and no measurement may alter it. PR-08 \u00a74 step 2 requires GEOM_TOL and EST_DRIFT_P95 to be measured with THE SAME segmenter, and \u00a76 subtracts them \u2014 GEOM_TOL - EST_DRIFT_P95 is the tolerance the restyled corpus is held to \u2014 so the subtraction is arithmetic only if both sides ran the same detector, the same segmenter, the same prompt, the same thresholds and the same box rule on the same pixel grid. Until this file existed the only thing either artifact recorded about the segmenter was a NAME, and two runs can share a name while disagreeing about every number below. It is written before the measurement on purpose: a mask method chosen (or quietly adjusted) after seeing the number it produces is the failure the committed style partition exists to prevent, and 'we used the same segmenter' is not a checkable claim unless the claim was written down first. The `segmenter` block is a verbatim copy of scripts/estimators/apple_sam2.py's SEGMENTER_CONTRACT, which is itself Cosmos-Transfer2.5's own operating point read off cosmos_transfer2/_src/transfer2/auxiliary/sam2/sam2_model.py (cluster copy, 2026-08-22) \u2014 these are the GENERATOR's numbers, not ours, which is the entire point of \u00a74 step 2.\n\nSECTION 2, THE MEASUREMENT, is the keys named in `measurement_fields`. They are null here because NEITHER NUMBER HAS BEEN MEASURED YET: this file commits the method, not the result, and in this state it does not license generation. scripts/measure_geom_tol.py writes its full artifact over this document when GEOM_TOL is measured (this path is its default --out and its --merge target) and fills `geom_tol_px` / `geom_tol_source`; scripts/measure_est_drift.py measures EST_DRIFT_P95 into configs/transfer25/pr08_est_drift.json and `est_drift_p95_px` / `est_drift_source` / `est_drift_estimator_name` / `gate_margin_px` stay null until it is carried across. CARRY IT WITH `measure_geom_tol.py --carry-est-drift configs/transfer25/pr08_est_drift.json`, NOT WITH A TEXT EDITOR. `est_drift_estimator_name` is the JOIN KEY: PR-08 \u00a74 step 2 requires both halves to come from the SAME segmenter, run_g0_gates._ca_mask_method_name is the consumer that checks it, and a number carried across without the name leaves that assertion permanently unanswerable \u2014 which costs every G0b run its gate qualification, so the gate can never say yes. The two are therefore written together or neither is written (measure_geom_tol.refuse_unnamed_est_drift), and --carry-est-drift additionally refuses a disqualified or null measurement, a segmenter name that disagrees with this document's mask_method, a segmenter whose parameters disagree field for field, and a different pixel grid. `geom_tol_px` and measure_geom_tol's own `GEOM_TOL_px` are written to the SAME value on purpose: scripts/run_g0_gates.py `_first_present` refuses a document that states one quantity under two spellings that disagree, and a null left beside a measured number is exactly that disagreement.\n\nHOW SECTION 1 SURVIVES SECTION 2 BEING WRITTEN. measure_geom_tol.merge_committed_contract() runs before anything is written to this path: it compares the `segmenter` block on disk field for field against the SEGMENTER_CONTRACT of the adapter it just ran, REFUSES the whole run (exit 2, nothing written, no sidecar) on any disagreement, and otherwise copies every key in `contract_fields` forward verbatim into the artifact it writes. It also refuses to write this tracked path at all when no contract is found here \u2014 restore it from git rather than letting a measurement invent one. measure_est_drift.cross_check_geom_tol() then finds the same block on both sides (top-level `segmenter`, or mask_method.params.segmenter, which records what the adapter actually ran with) and disqualifies its own run on any disagreement.\n\nTHREE FIELDS IN THE `segmenter` BLOCK ARE OURS AND NOT THE GENERATOR'S, AND THEY SAY SO. `mask_validity_min_iou` and `mask_validity_reference` were added on 2026-08-22 and registered as PR-08 V6 (T40_RULE_V6, docs/preregistration/PR-08-V6-mask-validity.md) BEFORE either number below was measured. They are not a detection parameter: the detector still runs at Cosmos-Transfer2.5's own threshold=0.15 / text_threshold=0.25 with its single (0.10, 0.10) retry and its highest-score box rule, and no mask the generator's segmenter draws is altered. They record a validity check on the OUTPUT \u2014 a mask containing essentially none of the object it claims to be is refused, and scripts/estimators/apple_sam2.py returns an all-False mask for that frame, which both harnesses already drop and count. What they therefore pin down is WHICH FRAMES each side of the subtraction was measured on. That belongs in the contract for exactly the reason the thresholds do: a GEOM_TOL measured with the filter minus an EST_DRIFT_P95 measured without it is a subtraction across two different frame populations, and it would still look like arithmetic. contract_disagreements() counts an absent field as a disagreement, so an artifact produced before V6 now fails the cross-check instead of pooling silently. The evidence the filter rests on is job 189637's MASK_AUDIT.json (382 frames, 24 episodes): 12 frames carried a confident, well-formed mask of THE PLATE, every one of them at IoU 0.0000 against the colour reference while every correct mask scored >= 0.7492 \u2014 so any cut in (0.0, 0.7492) partitions those frames identically and 0.10 is a value read off a gap. `mask_validity_reference_max_frame_fraction` joined them on 2026-08-24 under T40_RULE_V10. V10 \u00a76 deliberately left it out of this file at the time, because the 16-shard GEOM_TOL array was in flight and contract_disagreements() counts an absent field as a disagreement, so adding it mid-run would have disqualified every landed shard. That array has since merged and the sequencing reason is spent. It refuses frames, so like the two before it, it is a statement about WHICH FRAMES were measured and belongs in the contract rather than beside it.",
   "contract_fields": [
     "spec_version",
@@ -6413,7 +6413,8 @@
     "est_drift_estimator_name",
     "gate_margin_px",
     "source_manifest_sha256",
-    "source_manifest_binding"
+    "source_manifest_binding",
+    "accepted_equivalent_manifests"
   ],
   "segmenter": {
     "method_name": "grounding-dino+sam2+depth-anything-v2",
@@ -6489,5 +6490,51 @@
       "fps": 30
     },
     "meaning": "WHICH CORPUS THIS TOLERANCE IS A TOLERANCE FOR. The generate path recomputes this digest over the SOURCE manifest it is about to restyle and refuses on a mismatch \u2014 the same check robot_composite.load_area_bound already made for the mask-area bound, which this document went without until 2026-09-02 (docs/investigations/2026-08-28-two-generate-path-gaps-recorded-not-fixed.md \u00a71). bound_after_measurement is true and is not a disclaimer to read past: the measurement ran over a clip-dir tree and never opened this manifest, so the binding was made afterwards. What makes it a fact rather than an assertion is the `checked` block \u2014 the manifest and the measurement were required to enumerate the same episode ids, with the same per-episode frame counts, on the same pixel grid at the same fps, and any disagreement refuses without writing."
-  }
+  },
+  "accepted_equivalent_manifests": [
+    {
+      "manifest": "runs/pr08-source-manifest/pr08-apple-640x480-h264-lossless.manifest.json",
+      "sha256": "a988dd60db6ba8abec719dd9ec73ee74ca849465f1fa36666c8564f853bf91be",
+      "relation": "bit-exact lossless transcode of the bound corpus",
+      "accepted_utc": "2026-09-02T08:56:19+00:00",
+      "why_a_second_digest_exists": "The generate path does not read the tree GEOM_TOL was measured over. 97_transfer25_restyle.sbatch restyles the H.264 corpus because Cosmos-Transfer2.5 opens clips with cv2.VideoCapture and the generation venv's cv2 4.11.0 cannot decode AV1 (jobs 186357, 189584, 189585). The tolerance is still a statement about the AV1 tree's pixels; it transfers only because those are, frame for frame, the pixels the H.264 tree decodes to.",
+      "proof": {
+        "file": "runs/pr08-source-manifest/TRANSCODE_PROOF.json",
+        "sha256": "953f3514744d47c32da9e502229306b720267f4af1ce2aaf3f5556556529fa90",
+        "schema": "1.0.0",
+        "generated_at": "2026-08-22T17:04:03+0200",
+        "decoder": "pyav",
+        "encoder": {
+          "codec": "libx264",
+          "crf": "0",
+          "preset": "medium",
+          "threads": 1
+        },
+        "verified_here": {
+          "clips": 402,
+          "frames_compared": 171625,
+          "compare_stride": 1,
+          "colour_spaces": [
+            "rgb24",
+            "yuv420p"
+          ],
+          "max_abs_delta_over_every_clip_and_space": 0,
+          "episode_ids_cover_the_corpus": true
+        }
+      },
+      "proof_source_manifest": {
+        "manifest": "runs/pr08-source-manifest/pr08-apple-640x480.workstation.manifest.json",
+        "sha256": "95489c79e262beb54bc704a103e839e446ef0eae78bf9f6fab6e9b87999e57ef",
+        "equals_bound_manifest": false,
+        "differs_from_bound_manifest_in": {
+          "source.materialized": [
+            "copy",
+            "symlink"
+          ]
+        },
+        "same_enumeration_as_the_measurement": true,
+        "note": "The proof ran on the workstation, against the workstation's copy of the same AV1 tree. Its manifest is not byte-identical to the one this document is bound to, so the digests cannot be equated; what IS established is that it enumerates the same episode ids with the same frame counts on the same grid at the same fps, and that the fields listed above are the complete set by which the two files differ. THIS IS THE ONE LINK IN THE CHAIN ESTABLISHED BY INSPECTION RATHER THAN BY A DIGEST, and it is named here rather than left for a reader to discover."
+      }
+    }
+  ]
 }

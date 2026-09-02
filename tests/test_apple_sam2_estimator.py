@@ -1515,10 +1515,13 @@ def test_the_committed_document_is_a_contract_plus_a_measurement_and_never_only_
     # 1.1.0 (2026-08-22) added the `est_drift_estimator_name` measurement slot. 1.2.0 (2026-09-02)
     # added `source_manifest_sha256` and `source_manifest_binding` — the corpus identity, which
     # this document went without until then, so the generate path could prove the file had not
-    # been edited and could not prove it was about the tree being restyled. The contract section
+    # been edited and could not prove it was about the tree being restyled. 1.3.0 (2026-09-02,
+    # hours later) added `accepted_equivalent_manifests`, because 1.2.0's binding named the AV1
+    # tree the tolerance was measured over and the generate path reads the H.264 transcode — so
+    # the check added to protect the first submission refused it, correctly. The contract section
     # is otherwise untouched — same segmenter block, byte for byte — and the pin is here so that a
     # slot cannot be added to this document without the change being reviewed.
-    assert doc["spec_version"] == "1.2.0"
+    assert doc["spec_version"] == "1.3.0"
     assert "§4 step 2" in doc["what_this_is"]
 
     # The contract section names itself, and names what may be filled in. Both lists are what
@@ -1542,6 +1545,13 @@ def test_the_committed_document_is_a_contract_plus_a_measurement_and_never_only_
         # per-episode frame count, the pixel grid and the fps.
         "source_manifest_sha256",
         "source_manifest_binding",
+        # AND THE TREE THE GENERATOR ACTUALLY READS, which is a different tree. Every GEOM_TOL
+        # shard records the AV1 corpus; 97_transfer25_restyle.sbatch restyles the H.264 transcode,
+        # because the generation venv's cv2 cannot decode AV1. The digests therefore differ on
+        # purpose, and the first submission after the binding landed was refused by the very check
+        # the binding added. What reconciles them is not prose but a frame-by-frame proof, whose
+        # own digest lives in this slot and is re-checked beside SOURCE at submit time.
+        "accepted_equivalent_manifests",
     }
     for key in doc["contract_fields"]:
         assert key in doc, f"the contract section is missing {key}"

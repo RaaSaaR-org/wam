@@ -390,6 +390,7 @@ CONTRACT_MEASUREMENT_FIELDS: tuple[str, ...] = (
     "est_drift_p95_px", "est_drift_source", "est_drift_estimator_name",
     "gate_margin_px",
     "source_manifest_sha256", "source_manifest_binding",
+    "accepted_equivalent_manifests",
 )
 
 #: The one spelling this producer writes for the corpus identity, and the spelling
@@ -3150,10 +3151,24 @@ def _check_mode_flags(args: argparse.Namespace) -> None:
     sharding = args.shard is not None or args.num_shards is not None
     carrying = args.carry_est_drift is not None
     binding = getattr(args, "bind_source_manifest", None) is not None
+    accepting = getattr(args, "accept_equivalent_manifest", None) is not None
 
     # --bind-source-manifest MEASURES NOTHING and fills one slot of an already-merged document.
     # Combined with a measuring or merging command line it would look like the measurement had
     # read the manifest, which is the one thing this mode exists to be honest about.
+    # --accept-equivalent-manifest re-uses --bind-source-manifest as the name of the manifest the
+    # document is ALREADY bound to, so the two together are one job and not a combination. It is
+    # refused beside anything that measures, for the same reason binding is.
+    if accepting and (merging or sharding or carrying):
+        raise MethodUnavailable(
+            "FATAL: --accept-equivalent-manifest names a different job from "
+            "--merge/--shard/--carry-est-drift.\n"
+            "       It MEASURES NOTHING: it records a second corpus digest and re-verifies the "
+            "frame-by-frame proof\n       that makes it the same pixels. Run it on its own."
+        )
+    if accepting:
+        return
+
     if binding and (merging or sharding or carrying):
         raise MethodUnavailable(
             "FATAL: --bind-source-manifest names a different job from "
@@ -3349,6 +3364,36 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                          "manifest has and the measurement does not (or the reverse), on any "
                          "per-episode frame count that disagrees, and on a different pixel grid or "
                          "fps. Measures nothing and needs no corpus"
+                    )
+    ap.add_argument("--accept-equivalent-manifest", type=Path, default=None,
+                    metavar="MANIFEST_JSON",
+                    help="record a SECOND manifest digest the generate path may present instead of "
+                         "the bound one, and the frame-by-frame proof that makes the two the same "
+                         "pixels. This exists because the tree the generator READS is not the tree "
+                         "GEOM_TOL was measured over: every GEOM_TOL shard records the AV1 corpus "
+                         "as its corpus, and 97_transfer25_restyle.sbatch restyles the H.264 "
+                         "transcode, because the generation venv's cv2 cannot decode AV1. Requires "
+                         "--bind-source-manifest (re-verified against the recorded digest) and "
+                         "--equivalence-proof, and re-checks that proof in full rather than citing "
+                         "it: every clip present and ok, stride 1, both sides' frame counts equal, "
+                         "max_abs_delta exactly 0 in every colour space, and the compared frames "
+                         "summing to the corpus total. One non-zero delta refuses. It writes no "
+                         "waiver: an accepted digest is accepted only with its proof beside it"
+                    )
+    ap.add_argument("--equivalence-proof", type=Path, default=None, metavar="PROOF_JSON",
+                    help="the transcode proof --accept-equivalent-manifest re-verifies. Its own "
+                         "sha256 is recorded, so the sbatch can check at submit time that the file "
+                         "beside the corpus is the file that was verified here"
+                    )
+    ap.add_argument("--equivalence-proof-source", type=Path, default=None,
+                    metavar="MANIFEST_JSON",
+                    help="the manifest the proof names as ITS source, required when that digest is "
+                         "not the bound one — which is the case here, because the proof ran on the "
+                         "workstation against the workstation's copy of the AV1 tree. Its digest is "
+                         "checked against the proof, it goes through the same enumeration checks, "
+                         "and the exact set of fields by which it differs from the bound manifest "
+                         "is recorded. That is the one link in the chain established by inspection "
+                         "rather than by a digest, and it is named rather than smoothed over"
                     )
     ap.add_argument("--est-drift-arm", choices=EST_DRIFT_ARM_CHOICES, default=None,
                     metavar="ARM",
@@ -4419,6 +4464,378 @@ def bind_source_manifest_main(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _enumeration_checks(
+    manifest_p: Path, manifest: Mapping[str, Any], doc: Mapping[str, Any], what: str
+) -> dict[str, Any]:
+    """The four equalities that make two files statements about ONE corpus, or refuse.
+
+    Factored out of ``bind_source_manifest_main`` unchanged in behaviour so that
+    ``--accept-equivalent-manifest`` asks a candidate manifest exactly what the bound one was
+    asked. A weaker check on the second manifest would be the whole defect again: the tolerance
+    would carry an identity for a tree nobody compared.
+    """
+    episodes = manifest.get("episodes")
+    if not isinstance(episodes, list) or not episodes:
+        raise MethodUnavailable(
+            f"FATAL: {manifest_p} carries no non-empty 'episodes' list, so it enumerates no "
+            "corpus.\n       Nothing was written."
+        )
+    man_frames: dict[str, Any] = {}
+    for entry in episodes:
+        if not isinstance(entry, Mapping) or "id" not in entry:
+            raise MethodUnavailable(
+                f"FATAL: {manifest_p} has an episode entry with no 'id': {entry!r}.\n"
+                "       Nothing was written."
+            )
+        man_frames[str(entry["id"])] = entry.get("frames")
+    per_ep = doc.get("per_episode")
+    if not isinstance(per_ep, list) or not per_ep:
+        raise MethodUnavailable(
+            "FATAL: the committed document carries no per_episode block, so there is no "
+            "enumeration to compare\n       the manifest against. Nothing was written."
+        )
+    ours_frames = {
+        str(e.get("episode")): e.get("n_frames") for e in per_ep if isinstance(e, Mapping)
+    }
+    only_manifest = sorted(set(man_frames) - set(ours_frames))
+    only_measured = sorted(set(ours_frames) - set(man_frames))
+    if only_manifest or only_measured:
+        raise MethodUnavailable(
+            f"FATAL: {what} {manifest_p} and the measurement enumerate DIFFERENT corpora "
+            f"({len(man_frames)} vs {len(ours_frames)} episodes).\n"
+            f"         in the manifest only: {only_manifest[:8]}\n"
+            f"         measured only:        {only_measured[:8]}\n"
+            "       Nothing was written."
+        )
+    bad = [
+        (k, man_frames[k], ours_frames[k])
+        for k in sorted(man_frames)
+        if isinstance(man_frames[k], int) and isinstance(ours_frames[k], int)
+        and man_frames[k] != ours_frames[k]
+    ]
+    if bad:
+        raise MethodUnavailable(
+            f"FATAL: {what} {manifest_p} shares every episode id with the measurement and "
+            f"disagrees about {len(bad)} LENGTHS,\n         e.g. {bad[:4]}.\n"
+            "       Nothing was written."
+        )
+    res = manifest.get("resolution")
+    ours_grid = [doc.get("frame_width"), doc.get("frame_height")]
+    if isinstance(res, (list, tuple)) and all(isinstance(v, int) for v in ours_grid):
+        if [int(v) for v in res] != [int(v) for v in ours_grid]:
+            raise MethodUnavailable(
+                f"FATAL: {what} {manifest_p} declares resolution {list(res)}; the measurement ran "
+                f"on {ours_grid}.\n       GEOM_TOL is in pixels. Nothing was written."
+            )
+    man_fps, our_fps = manifest.get("fps"), doc.get("fps")
+    if isinstance(man_fps, (int, float)) and isinstance(our_fps, (int, float)):
+        if abs(float(man_fps) - float(our_fps)) > 1e-9:
+            raise MethodUnavailable(
+                f"FATAL: {what} {manifest_p} declares fps {man_fps}; the measurement ran at "
+                f"{our_fps}.\n       Nothing was written."
+            )
+    return {
+        "episode_ids_identical": True,
+        "n_episodes": len(man_frames),
+        "per_episode_frames_identical": True,
+        "n_frames_total_manifest": sum(v for v in man_frames.values() if isinstance(v, int)),
+        "resolution": list(res) if isinstance(res, (list, tuple)) else None,
+        "fps": man_fps,
+    }
+
+
+def accept_equivalent_manifest_main(args: argparse.Namespace) -> int:
+    """``--accept-equivalent-manifest``: the tree the generator READS is not the tree GEOM_TOL was measured over.
+
+    THE DEFECT THIS REPAIRS IS ONE THIS SCRIPT SHIPPED. ``--bind-source-manifest`` bound
+    ``configs/transfer25/pr08_geom_tol.json`` to ``data/pr08-apple-640x480/manifest.json`` — the AV1
+    tree, which is genuinely the tree every one of the sixteen GEOM_TOL shards records as its
+    ``corpus``. But ``97_transfer25_restyle.sbatch`` restyles
+    ``data/pr08-apple-640x480-h264-lossless``, because the generation venv's cv2 4.11.0 cannot
+    decode AV1 (jobs 186357, 189584, 189585). So the digest the sbatch recomputes could never match
+    the digest the artifact carried, and the very first submission would have been refused by the
+    gate added to protect it. **The gate was right and the binding was wrong**, and that is the
+    order in which this was discovered rather than the order anybody would choose.
+
+    WHAT MAKES A SECOND DIGEST ACCEPTABLE, AND WHAT WOULD NOT. Not that the two trees "are the same
+    corpus" in prose, and not that one manifest says ``lossless: true`` about itself — a tree
+    vouching for its own equivalence is the assumption moved into a JSON field. What is accepted
+    here is a PROOF FILE that was produced by comparing the two trees frame by frame, re-verified in
+    full by this mode: every clip present, every clip ``ok``, stride 1, ``max_abs_delta`` exactly 0
+    in every colour space it reports, both sides' frame counts equal, and the compared frames
+    summing to the corpus's own total. Anything less refuses and writes nothing.
+
+    THE ONE LINK THAT IS INSPECTION AND NOT ARITHMETIC is named in the record rather than smoothed
+    over: the proof was produced on the workstation and names its source by a digest of the
+    workstation's copy of the AV1 manifest, which is not byte-identical to the cluster's copy. This
+    mode requires that file too (``--equivalence-proof-source``), checks its digest against the one
+    the proof names, puts it through the same four enumeration checks, and records the exact set of
+    fields by which it differs from the bound manifest. If that difference is anything that touches
+    the corpus — episodes, grid, fps — the checks above have already refused; if it is provenance
+    (``materialized``), it is recorded verbatim so a reader sees what was compared rather than
+    being told it was fine.
+    """
+    out: Path = args.out
+    cand_p: Path = args.accept_equivalent_manifest
+    proof_p: Path | None = args.equivalence_proof
+    bound_p: Path | None = args.bind_source_manifest
+    proof_src_p: Path | None = args.equivalence_proof_source
+
+    if proof_p is None:
+        raise MethodUnavailable(
+            "FATAL: --accept-equivalent-manifest needs --equivalence-proof.\n"
+            "       A second corpus digest accepted without the frame-by-frame comparison that "
+            "justifies it is a\n       waiver written in hex. Nothing was written."
+        )
+    if bound_p is None:
+        raise MethodUnavailable(
+            "FATAL: --accept-equivalent-manifest needs --bind-source-manifest, the manifest this "
+            "document is\n       already bound to, so it can be re-verified against the recorded "
+            "digest rather than trusted.\n       Nothing was written."
+        )
+    if not out.is_file():
+        raise MethodUnavailable(f"FATAL: {out} does not exist. Nothing was written.")
+    refuse_default_out_without_contract(out)
+    try:
+        doc = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MethodUnavailable(f"FATAL: {out} is not readable JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise MethodUnavailable(f"FATAL: {out} is not a JSON object.")
+
+    bound_digest = doc.get(SOURCE_MANIFEST_SHA_FIELD)
+    if not isinstance(bound_digest, str) or not bound_digest:
+        raise MethodUnavailable(
+            f"FATAL: {out} names no corpus ({SOURCE_MANIFEST_SHA_FIELD} is "
+            f"{bound_digest!r}).\n       An EQUIVALENT is equivalent to something; bind the "
+            "measured corpus first with\n       --bind-source-manifest. Nothing was written."
+        )
+    if not isinstance(doc.get("geom_tol_px"), (int, float)) or not doc.get("gate_qualified"):
+        raise MethodUnavailable(
+            f"FATAL: {out} states no gate-qualified measured tolerance "
+            f"(geom_tol_px={doc.get('geom_tol_px')!r}, gate_qualified="
+            f"{doc.get('gate_qualified')!r}).\n       Nothing was written."
+        )
+
+    def _read(path: Path, what: str) -> tuple[bytes, Any]:
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise MethodUnavailable(
+                f"FATAL: {what} {path} could not be read ({exc}). Nothing was written."
+            ) from exc
+        try:
+            return raw, json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MethodUnavailable(
+                f"FATAL: {what} {path} is not readable JSON: {exc}. Nothing was written."
+            ) from exc
+
+    bound_raw, bound_man = _read(bound_p, "the bound manifest")
+    if hashlib.sha256(bound_raw).hexdigest() != bound_digest:
+        raise MethodUnavailable(
+            f"FATAL: {bound_p} hashes to {hashlib.sha256(bound_raw).hexdigest()} but {out} is "
+            f"bound to\n       {bound_digest}. Either the file moved under the document or the "
+            "wrong one was passed.\n       Nothing was written."
+        )
+    cand_raw, cand_man = _read(cand_p, "the candidate manifest")
+    cand_digest = hashlib.sha256(cand_raw).hexdigest()
+    if cand_digest == bound_digest:
+        raise MethodUnavailable(
+            f"FATAL: {cand_p} IS the bound manifest ({cand_digest}). There is nothing to accept "
+            "as equivalent;\n       the existing binding already matches. Nothing was written."
+        )
+    if not isinstance(cand_man, Mapping):
+        raise MethodUnavailable(f"FATAL: {cand_p} is not a JSON object. Nothing was written.")
+    cand_checked = _enumeration_checks(cand_p, cand_man, doc, "the candidate manifest")
+
+    # -- THE PROOF, RE-VERIFIED RATHER THAN CITED --------------------------------------------------
+    proof_raw, proof = _read(proof_p, "the equivalence proof")
+    proof_digest = hashlib.sha256(proof_raw).hexdigest()
+    if not isinstance(proof, Mapping):
+        raise MethodUnavailable(f"FATAL: {proof_p} is not a JSON object. Nothing was written.")
+    if proof.get("complete") is not True:
+        raise MethodUnavailable(
+            f"FATAL: {proof_p} records complete={proof.get('complete')!r}. A partial comparison "
+            "proves the clips it\n       reached and says nothing about the rest. Nothing was "
+            "written."
+        )
+    clips = proof.get("clips")
+    if not isinstance(clips, list) or not clips:
+        raise MethodUnavailable(
+            f"FATAL: {proof_p} lists no clips. The summary counters are not the evidence; the "
+            "per-clip deltas are.\n       Nothing was written."
+        )
+    n_eps = cand_checked["n_episodes"]
+    if len(clips) != n_eps:
+        raise MethodUnavailable(
+            f"FATAL: {proof_p} compares {len(clips)} clips; the corpus has {n_eps} episodes.\n"
+            "       A proof that skips episodes is not a proof about this corpus. Nothing was "
+            "written."
+        )
+    ids_seen: set[str] = set()
+    frames_compared = 0
+    for clip in clips:
+        if not isinstance(clip, Mapping):
+            raise MethodUnavailable(f"FATAL: {proof_p} has a non-object clip entry. Nothing was written.")
+        cid = str(clip.get("id"))
+        ids_seen.add(cid)
+        if clip.get("ok") is not True:
+            raise MethodUnavailable(
+                f"FATAL: {proof_p} records ok={clip.get('ok')!r} for {cid} "
+                f"({clip.get('error')!r}). Nothing was written."
+            )
+        if clip.get("compare_stride") != 1:
+            raise MethodUnavailable(
+                f"FATAL: {proof_p} compared {cid} at stride {clip.get('compare_stride')!r}, not 1. "
+                "A sampled\n       comparison bounds nothing between the samples. Nothing was "
+                "written."
+            )
+        fs, fo, fc = clip.get("frames_source"), clip.get("frames_output"), clip.get("frames_compared")
+        if not (isinstance(fs, int) and fs == fo == fc):
+            raise MethodUnavailable(
+                f"FATAL: {proof_p} records frames_source={fs!r}, frames_output={fo!r}, "
+                f"frames_compared={fc!r} for {cid}.\n       Nothing was written."
+            )
+        frames_compared += fc
+        deltas = clip.get("max_abs_delta")
+        if not isinstance(deltas, Mapping) or not deltas:
+            raise MethodUnavailable(
+                f"FATAL: {proof_p} records no max_abs_delta for {cid}. Nothing was written."
+            )
+        nonzero = {k: v for k, v in deltas.items() if v != 0}
+        if nonzero:
+            raise MethodUnavailable(
+                f"FATAL: {proof_p} records a NON-ZERO pixel difference for {cid}: {nonzero}.\n"
+                "       Then the generator does not see the pixels GEOM_TOL was measured on, and "
+                "the tolerance does\n       not transfer. This is the finding, not a rounding "
+                "error. Nothing was written."
+            )
+    missing = sorted({str(e["id"]) for e in cand_man["episodes"]} - ids_seen)
+    if missing:
+        raise MethodUnavailable(
+            f"FATAL: {proof_p} compares {len(ids_seen)} ids that do not cover the corpus; "
+            f"missing e.g. {missing[:8]}.\n       Nothing was written."
+        )
+    want_frames = cand_checked["n_frames_total_manifest"]
+    if frames_compared != want_frames:
+        raise MethodUnavailable(
+            f"FATAL: {proof_p} compared {frames_compared} frames; the corpus has {want_frames}.\n"
+            "       Nothing was written."
+        )
+
+    # -- THE PROOF'S OWN SOURCE, WHICH IS THE LINK THAT IS NOT ARITHMETIC --------------------------
+    proof_src_sha = proof.get("source_manifest_sha256")
+    differs_in: list[str] = []
+    proof_src_record: dict[str, Any]
+    if proof_src_sha == bound_digest:
+        proof_src_record = {
+            "manifest": None,
+            "sha256": proof_src_sha,
+            "equals_bound_manifest": True,
+            "note": "the proof was produced against the very bytes this document is bound to.",
+        }
+    else:
+        if proof_src_p is None:
+            raise MethodUnavailable(
+                f"FATAL: {proof_p} names its source manifest by sha256 {proof_src_sha!r}, which is "
+                f"NOT the digest\n       {out} is bound to ({bound_digest}). Pass that file as "
+                "--equivalence-proof-source so the\n       difference can be measured instead of "
+                "assumed. Nothing was written."
+            )
+        src_raw, src_man = _read(proof_src_p, "the proof's source manifest")
+        src_digest = hashlib.sha256(src_raw).hexdigest()
+        if src_digest != proof_src_sha:
+            raise MethodUnavailable(
+                f"FATAL: {proof_src_p} hashes to {src_digest}, but {proof_p} names "
+                f"{proof_src_sha!r} as its source.\n       Nothing was written."
+            )
+        if not isinstance(src_man, Mapping):
+            raise MethodUnavailable(f"FATAL: {proof_src_p} is not a JSON object. Nothing was written.")
+        _enumeration_checks(proof_src_p, src_man, doc, "the proof's source manifest")
+
+        def _flat(obj: Any, prefix: str = "") -> dict[str, Any]:
+            flat: dict[str, Any] = {}
+            if isinstance(obj, Mapping):
+                for k, v in obj.items():
+                    flat.update(_flat(v, f"{prefix}{k}."))
+            else:
+                flat[prefix.rstrip(".")] = obj
+            return flat
+
+        a = _flat({k: v for k, v in bound_man.items() if k != "episodes"})
+        b = _flat({k: v for k, v in src_man.items() if k != "episodes"})
+        differs_in = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+        proof_src_record = {
+            "manifest": str(proof_src_p),
+            "sha256": src_digest,
+            "equals_bound_manifest": False,
+            "differs_from_bound_manifest_in": {k: [a.get(k), b.get(k)] for k in differs_in},
+            "same_enumeration_as_the_measurement": True,
+            "note": (
+                "The proof ran on the workstation, against the workstation's copy of the same AV1 "
+                "tree. Its manifest is not byte-identical to the one this document is bound to, so "
+                "the digests cannot be equated; what IS established is that it enumerates the same "
+                "episode ids with the same frame counts on the same grid at the same fps, and that "
+                "the fields listed above are the complete set by which the two files differ. THIS "
+                "IS THE ONE LINK IN THE CHAIN ESTABLISHED BY INSPECTION RATHER THAN BY A DIGEST, "
+                "and it is named here rather than left for a reader to discover."
+            ),
+        }
+
+    record = dict(doc)
+    accepted = list(record.get("accepted_equivalent_manifests") or ())
+    accepted = [e for e in accepted if not (isinstance(e, Mapping) and e.get("sha256") == cand_digest)]
+    accepted.append({
+        "manifest": str(cand_p),
+        "sha256": cand_digest,
+        "relation": "bit-exact lossless transcode of the bound corpus",
+        "accepted_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "why_a_second_digest_exists": (
+            "The generate path does not read the tree GEOM_TOL was measured over. "
+            "97_transfer25_restyle.sbatch restyles the H.264 corpus because "
+            "Cosmos-Transfer2.5 opens clips with cv2.VideoCapture and the generation venv's "
+            "cv2 4.11.0 cannot decode AV1 (jobs 186357, 189584, 189585). The tolerance is "
+            "still a statement about the AV1 tree's pixels; it transfers only because those "
+            "are, frame for frame, the pixels the H.264 tree decodes to."
+        ),
+        "proof": {
+            "file": str(proof_p),
+            "sha256": proof_digest,
+            "schema": proof.get("schema"),
+            "generated_at": proof.get("generated_at"),
+            "decoder": (proof.get("decoder") or {}).get("name") if isinstance(proof.get("decoder"), Mapping) else None,
+            "encoder": proof.get("encoder"),
+            "verified_here": {
+                "clips": len(clips),
+                "frames_compared": frames_compared,
+                "compare_stride": 1,
+                "colour_spaces": sorted({k for c in clips for k in (c.get("max_abs_delta") or {})}),
+                "max_abs_delta_over_every_clip_and_space": 0,
+                "episode_ids_cover_the_corpus": True,
+            },
+        },
+        "proof_source_manifest": proof_src_record,
+    })
+    record["accepted_equivalent_manifests"] = accepted
+    declared = record.get("measurement_fields")
+    record["measurement_fields"] = list(
+        dict.fromkeys([*(declared or ()), *CONTRACT_MEASUREMENT_FIELDS])
+    )
+
+    side, art_digest = write_artifact(out, record)
+    print(f"accepted    {cand_p}", file=sys.stderr)
+    print(f"sha256      {cand_digest}   (bound: {bound_digest})", file=sys.stderr)
+    print(f"proof       {proof_p}  {proof_digest}", file=sys.stderr)
+    print(f"verified    {len(clips)} clips, {frames_compared} frames, stride 1, max|delta| 0 in "
+          f"{sorted({k for c in clips for k in (c.get('max_abs_delta') or {})})}", file=sys.stderr)
+    if differs_in:
+        print(f"inspected   proof source differs from the bound manifest only in {differs_in}",
+              file=sys.stderr)
+    print(f"artifact    {art_digest}  ({side})", file=sys.stderr)
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
@@ -4431,6 +4848,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.carry_est_drift is not None:
         try:
             return carry_est_drift_main(args)
+        except MethodUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_FATAL
+
+    if args.accept_equivalent_manifest is not None:
+        try:
+            return accept_equivalent_manifest_main(args)
         except MethodUnavailable as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_FATAL
