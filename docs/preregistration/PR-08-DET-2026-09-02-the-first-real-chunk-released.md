@@ -102,7 +102,37 @@ style-instances — which is the definition of not complete.
 | `PR08_T39_REPORTED` | the `N` of 2026-08-17 | `T-39` re-reported under `T39_RULE_V2`, job 188408, `docs/preregistration/PR-07-V2-RESULT.md` |
 | `PR08_T39_ARTIFACT` | `runs/t39-baseline-seed0/eval-t39-oracle-action/bench.json` | the committed T-39 result; cluster copy byte-identical to local |
 | `RUN_ID` | `t040-transfer25-restyle-2026-09-02` | explicit and dated, as `97:11-18` requires |
-| `--time` | an honest short walltime, overriding the 4 h `#SBATCH` | `97:20-28` — *"Ask for what the run needs"* |
+| `--time` | **not overridden — the file's own 4 h** | see the correction below |
+
+### Corrected before the job started: the `--time` row said the opposite of what was submitted
+
+**As first committed, the table above promised "an honest short walltime, overriding the 4 h
+`#SBATCH`".** That was written from the sbatch header's own advice — *"Ask for what the run needs.
+That is the honest number and Slurm rewards it"* (`97:20-28`) — and it is wrong here, which was
+found while assembling the submit line and before anything was submitted.
+
+`97:2231-2235` fixes a constant the header does not mention:
+
+```
+# WALL_H must match --time above. A pass costs AT MOST WALL_H * NPROC GPU-h ...
+WALL_H=4
+```
+
+`WALL_H` is **hardcoded, not overridable from the environment**, and it is the figure the GPU
+ledger reserves per pass, the figure `MAX_PASSES` is derived from, and one of the four values
+stamped into `${OUT}/run.env` — where a later submission that contradicts it is refused. Passing
+`--time=02:00:00` would therefore leave every record of this run stating a four-hour wall the run
+never had, while the ledger charged a pass that could not cost that much.
+
+**So the header's advice is about the TIMING path**, which is one episode against a `#SBATCH` line
+sized for a generation chunk. For a generation chunk the 4 h *is* what the run needs, and it is
+what the ledger is written against. **The submission passed no `--time`.**
+
+The cost is real and is not hidden: at submission the partition held 68 pending jobs on two
+occupied nodes, and Slurm's estimate for a 4 h request came back as **2026-09-03T17:11 on `dgx2`,
+about fifteen hours out** — the same 13-17 h the header measured in 2026-08-20. Waiting is the
+price of a record that matches the run. `scontrol update JobId=... TimeLimit=...` would shorten
+that wait while keeping the job's age, and it is deliberately **not** used, for the reason above.
 
 **On the T-39 verdict, because it is the item most likely to be misread.** The root `CLAUDE.md`
 still describes T-39 as having reported `VOID (labels)` and never mentions the 2026-08-17 re-report.
