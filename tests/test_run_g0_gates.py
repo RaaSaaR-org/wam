@@ -1416,8 +1416,13 @@ def test_explain_does_not_claim_that_nothing_generated_exists(
     out = capsys.readouterr().out
     assert code == g0.EXIT_REFUSED
     assert "NOTHING generated exists yet" not in out
-    assert "NO RESTYLED CORPUS EXISTS" in out
+    # The claim moved on 2026-09-03: licensed clips exist, an assembled LeRobot root does not.
+    assert "NO RESTYLED CORPUS EXISTS" not in out
+    assert "NO ASSEMBLED RESTYLED CORPUS EXISTS" in out
+    assert "assemble_restyled_lerobot.py" in out and "has not been run" in out
+    # Both standing refusals must survive the update.
     assert ".mp4.quarantined" in out and "V8 §4" in out
+    assert "NOT_TRAINING_DATA" in out
 
 
 def test_a_quarantined_clip_tree_is_not_readable_as_a_corpus(tmp_path: Path) -> None:

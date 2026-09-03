@@ -2378,13 +2378,20 @@ def inventory(args: argparse.Namespace, gates: list[str]) -> list[InputSpec]:
                 args.restyled_dataset,
                 "cluster/discoverer/97_transfer25_restyle.sbatch, then "
                 "scripts/assemble_restyled_lerobot.py + scripts/convert_lerobot_g1.py. NO "
-                "RESTYLED CORPUS EXISTS. Generated frames now DO exist — job 189926 produced 4 "
-                "clips / 384 frames on 2026-08-23 — but they are the V8 hallucination probe's "
-                "QUARANTINED output (every clip suffixed .mp4.quarantined), and PR-08 V8 §4 "
-                "forbids anything downstream from consuming them as a corpus, so they are not "
-                "this input and may not be assembled into it. PR-08 §1 forbids the licensed "
-                "generation run 'until every item in §8 is closed and T-39 has reported'; T-39 "
-                "reported on 2026-08-16 and §8 items 3 and 4 are open, so §1 still forbids it",
+                "ASSEMBLED RESTYLED CORPUS EXISTS. The state changed on 2026-09-03 and this "
+                "string is the place it is recorded: PR-08 §8 closed 7/7 on 2026-09-01, the "
+                "owner released ONE chunk on 2026-09-02 (STAGE=1 STYLE_SET=train CHUNK_INDEX=1 "
+                "CHUNK_TOTAL=4, PR-08-DET-2026-09-02), and job 192149 has been filing LICENSED, "
+                "NON-QUARANTINED clips under runs/<RUN_ID>/clips/train/ ever since. So generated "
+                "frames exist and are consumable IN PRINCIPLE — what does not exist is the thing "
+                "this flag wants, which is a LeRobot root: only scripts/assemble_restyled_lerobot.py "
+                "produces one and it has not been run. Two standing refusals are unaffected. "
+                "FIRST, the V8 hallucination probe's output (job 189926, 4 clips / 384 frames, "
+                "2026-08-23) is QUARANTINED — every clip suffixed .mp4.quarantined — and PR-08 V8 "
+                "§4 forbids anything downstream from consuming those as a corpus, whatever the "
+                "chunk's status. SECOND, every clip the licensed run files sits beside a "
+                "NOT_TRAINING_DATA marker, and clearing that marker is the project owner's "
+                "decision and not this runner's",
             )
         )
         if args.holdout is not None:
