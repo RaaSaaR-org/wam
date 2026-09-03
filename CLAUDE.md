@@ -47,8 +47,12 @@ and the robot HAL are contracts, and two drifting copies is the expensive failur
   own hand-maintained index, which is the accepted cost of the split. Existing `T-040`/`T-041`/
   `T-042` were deliberately **not** migrated: their pre-registrations, sbatch files and commit
   subjects all cite them where they are.
-- **T-39 reported `VOID (labels)` (2026-08-16), and PR-13 has since withdrawn that verdict's
-  premise by measurement.** The positive control asked whether this corpus's own action column
+- **T-39 first reported `VOID (labels)` (2026-08-16), PR-13 withdrew that verdict's premise by
+  measurement, and T-39 then RE-REPORTED `VERDICT N` on 2026-08-17** under `T39_RULE_V2`, job
+  188408 — `docs/preregistration/PR-07-V2-RESULT.md`. **`T40_RULE_V3` §5.3 registers that `N`
+  satisfies "T-39 has reported" while `VOID` does not**, and that is what closed PR-08 §8 item 7.
+  The record below is the route to that re-report and stands exactly as written.
+  The positive control asked whether this corpus's own action column
   clears L1 under our scorer, and got **−359.41 pp** (`docs/preregistration/PR-07-RESULT.md`).
   **That number was produced by a defective instrument, not by the labels.**
   `commanded_to_chunk` built the chunk's step 0 as `command − STATE` while every other step of both
@@ -66,9 +70,19 @@ and the robot HAL are contracts, and two drifting copies is the expensive failur
   training run before T-39 reports", T-39 reported, and its premise has now been withdrawn rather
   than satisfied. **Whether training may start, and against which label space, is the project
   owner's call**, and no session may edit this file to lift it. PR-07 §6 still **forbids any
-  statement about GR00T** (the policy arm never ran, job 187813 died at 108 s); PR-07 §7's second
+  statement about GR00T** (that clause was written when the V1 policy arm had never run — job
+  187813 died at 108 s; the V2 re-report's arm did run, and its figures live in
+  `PR-07-V2-RESULT.md`, not here); PR-07 §7's second
   model is licensed only on outcome N. What the corrected instrument means for `docs/benchmark.md`'s
   L4 gate is a separate open decision — the repaired cell is L4 under spec 0.1.0 and below spec
   0.2.0's two-sided floor, so the two specs disagree about it.
+- **T-040 generation is under way, and it licenses nothing about training.** PR-08 §8's
+  seven-item conjunctive gate closed **7/7 on 2026-09-01**; `PARTITION_CEILING_GPU_H = 2013.75`
+  (train share `805.50`) was signed the same day; and **one chunk** — `STAGE=1 STYLE_SET=train
+  CHUNK_INDEX=1 CHUNK_TOTAL=4`, one quarter of stage 1's train set — was released by the project
+  owner on 2026-09-02, `docs/preregistration/PR-08-DET-2026-09-02-the-first-real-chunk-released.md`.
+  **The other three chunks, stage 2, the eval set and the identity set are NOT released**; the
+  ceiling stays a cap over the whole partition. Everything the run writes carries a
+  `NOT_TRAINING_DATA` marker, and **clearing that marker is the owner's decision, not a session's.**
 - Every rollout must be traceable to checkpoint + dataset snapshot + config hash (AC-04).
 - Milestone order is strict: overfit a small task first (D1), only then scale (P6).

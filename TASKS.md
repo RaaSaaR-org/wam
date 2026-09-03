@@ -30,9 +30,11 @@ mc show T-16     # the whole T-16 record
 > the VOID premise above is superseded by measurement, not by argument. The policy arm then ran for
 > the first time and scored **−239.69 %** on the holdout and **−186.73 %** on episodes it *trained
 > on*: it never fit. **N is a verdict, so `T40_RULE_V3` §5.3's "T-39 has reported" is satisfied and
-> PR-08 §8 item 7 is closed — items 2, 3 and 4 are still open, so T-040 is not open.** (Item 2 has
-> since closed too, 2026-08-22, `T40_RULE_V7`; **as of 2026-08-27 only items 3 and 4 remain** —
-> [`docs/SPRINT-2026-08-27-cosmos3-dataset-generation.md`](docs/SPRINT-2026-08-27-cosmos3-dataset-generation.md).)
+> PR-08 §8 item 7 is closed.** (Items 2, 3 and 4 have since closed too — item 2 on 2026-08-22
+> under `T40_RULE_V7`, items 3 and 4 on 2026-09-01. **§8 stands at 7/7 as of 2026-09-01**, and the
+> first chunk was released by the owner on 2026-09-02 —
+> [`PR-08-DET-2026-09-02`](docs/preregistration/PR-08-DET-2026-09-02-the-first-real-chunk-released.md).
+> The 2026-08-27 sprint page is superseded and says so twice in its own header.)
 > N licenses
 > "the corpus is the finding, the next move is the *kind* of data", and forbids reading it as
 > refuting any WAM design. **It still does not license training: that remains the owner's call.**
@@ -436,12 +438,19 @@ layer via the arm64 container (T-25a). What is left genuinely needs the robot.
 - M5: FLUX 3 Dev integration (backbone swap, license check, benchmark vs. fallback — AC-05)
 - M6: generalization, video-only data, cross-embodiment, multiple future hypotheses (FR-11/12)
 - [ ] **[T-040](.mc/tasks/todo/T-040-cosmos-transfer-photoreal-augmentation.md)** Cosmos-Transfer2.5
-  photoreal augmentation *(**todo** — `docs/preregistration/PR-08-photoreal-augmentation.md` written
-  2026-08-06, rule `T40_RULE_V1`, 9 of 13 AC closed. Real-teleop path chosen; estimator calibrated
-  against Isaac rather than the unlicensed Humanoid Everyday. **Generation still waits on T-39** —
-  Transfer2.5 is not named in PR-07 §7's freeze, but PR-08 §1 binds itself to the reason behind it.
-  The 4 open AC need the cluster or a written contract: H200 throughput, the chunked sbatch, the
-  `emai/vla-training` consumer contract, and the measured `GEOM_TOL` / `EST_DRIFT_P95`)*
+  photoreal augmentation *(**GENERATING, one chunk** — `docs/preregistration/PR-08-photoreal-augmentation.md`
+  written 2026-08-06, rule `T40_RULE_V1`. Real-teleop path chosen; estimator calibrated against
+  Isaac rather than the unlicensed Humanoid Everyday. **PR-08 §8 closed 7/7 on 2026-09-01**: the
+  four that were open all landed — H200 throughput `1.6896 s/frame` (item 3), the measured
+  `GEOM_TOL = 0.47857992441961017 px` against `EST_DRIFT_P95 = 0.36010037281174667 px` leaving a
+  **`+0.1185 px`** G0b budget (item 4), the `emai/vla-training` consumer contract (item 2,
+  `T40_RULE_V7`), and T-39's `VERDICT N` re-report (item 7). `PARTITION_CEILING_GPU_H = 2013.75`
+  signed 2026-09-01; **one chunk released 2026-09-02**, `STAGE=1 STYLE_SET=train CHUNK_INDEX=1
+  CHUNK_TOTAL=4` — `PR-08-DET-2026-09-02`. **Not released:** the other three chunks, stage 2, the
+  eval set, the identity set. **Training remains unlicensed and is the owner's call**; every clip
+  carries `NOT_TRAINING_DATA`. Open on the generate path: G0a/G0b have not run on the produced
+  clips, and the clips' visual quality is under investigation —
+  [`docs/investigations/`](docs/investigations/))*
 - [ ] **[T-041](.mc/tasks/todo/T-041-cosmos-generator-finetune-on-g1.md)** Fine-tune a Cosmos
   generator on G1 data *(**RAN — verdict VOID on G0b, 2026-08-15.** Training completed to iteration
   500 with resume diffs and a non-empty export (G0c satisfied); the eval generated all 60 paired
